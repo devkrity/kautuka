@@ -73,7 +73,7 @@
     "eslint-plugin-secure-coding": "^5.4.4",
     "get-tsconfig": "^4.14.3",
     "jsdom": "^30.0.1",
-    "postcss": "^8.5.28",
+    "postcss": "^8.5.31",
     "prettier": "^3.3.3",
     "tailwindcss": "^4.2.4",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
