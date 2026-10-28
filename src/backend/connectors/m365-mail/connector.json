@@ -1,0 +1,27 @@
+{
+  "id": "kautuka-m365-mail",
+  "name": "Microsoft 365 mail",
+  "description": "Read, download attachments, draft, and send mail for the signed-in Microsoft 365 mailbox.",
+  "auth": {
+    "grant": "authorization_code",
+    "authorizeUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+    "tokenUrl": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    "scopes": "offline_access Mail.ReadWrite Mail.Send User.Read",
+    "redirectUri": "https://auth.kautuka.io/callback",
+    "startUrl": "https://auth.kautuka.io/start",
+    "clientIdFile": "client-id.txt",
+    "dpop": true,
+    "dpopHtu": "broker",
+    "dpopKeyCredentialKey": "KAUTUKA_M365_DPOP_KEY",
+    "refreshCredentialKey": "KAUTUKA_M365_REFRESH_TOKEN",
+    "accessTokenEnvironmentKey": "KAUTUKA_M365_ACCESS_TOKEN",
+    "revokeUrl": "https://myaccount.microsoft.com/permissions",
+    "signInLabel": "Sign in with Microsoft"
+  },
+  "askFirst": ["mail_send"],
+  "tools": ["mail_list", "mail_read", "mail_read_attachment", "mail_create_draft", "mail_update_draft", "mail_send"],
+  "server": {
+    "type": "binary",
+    "entryPoint": "kautuka-m365-mail"
+  }
+}

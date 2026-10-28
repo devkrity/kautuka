@@ -1,0 +1,945 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDQwIDQwIj48cmVjdCB4PSIxLjI1IiB5PSIxLjI1IiB3aWR0aD0iMzcuNSIgaGVpZ2h0PSIzNy41IiByeD0iMTAiIGZpbGw9IiNFMzQyMzQiIHN0cm9rZT0iI0UzQTAxOCIgc3Ryb2tlLXdpZHRoPSIyLjUiLz48cGF0aCB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMS41IC0uNSkiIGQ9Ik0xMyA4aDR2MTRsOC04aDVsLTggOCA4IDEwaC01bC02LTctMiAydjVoLTR6IiBmaWxsPSIjZmZmIi8+PC9zdmc+" />
+    <title>Kautuka Installer</title>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Sans+3:wght@400;600&family=Space+Grotesk:wght@300;400;500;600;700&display=swap");
+
+      :root {
+        --background: 36 38% 97%;
+        --foreground: 90 4% 11%;
+        --card: 0 0% 100%;
+        --primary: 98 6% 35%;
+        --primary-foreground: 0 0% 100%;
+        --secondary: 242 14% 42%;
+        --secondary-foreground: 0 0% 100%;
+        --muted: 36 20% 95%;
+        --muted-foreground: 90 4% 27%;
+        --accent: 36 11% 91%;
+        --destructive: 0 75% 42%;
+        --border: 77 6% 77%;
+        --shadow-card: 0 4px 24px -4px hsl(220 60% 50% / 0.06);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        min-height: 100%;
+        margin: 0;
+      }
+
+      body {
+        background:
+          radial-gradient(
+            circle at top left,
+            hsl(var(--secondary) / 0.08),
+            transparent 28%
+          ),
+          radial-gradient(
+            circle at bottom right,
+            hsl(var(--primary) / 0.08),
+            transparent 34%
+          ),
+          hsl(var(--background));
+        color: hsl(var(--foreground));
+        font-family: "Space Grotesk", "Inter", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .page-shell {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 24px;
+      }
+
+      .installer-app {
+        width: min(540px, 100%);
+        display: grid;
+        gap: 16px;
+      }
+
+      /* Header */
+      .app-header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .app-logo {
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+      .app-logo img {
+        display: block;
+        width: 40px;
+        height: 40px;
+      }
+      .app-header-copy h1 {
+        margin: 0;
+        background: linear-gradient(90deg, #E34234 0%, #E3A018 50%, #E34234 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        font-family: "Source Sans 3", Arial, sans-serif;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.045em;
+      }
+      .app-header-copy p {
+        margin: 0;
+        font-family: "Inter", sans-serif;
+        font-size: 0.81rem;
+        color: hsl(var(--muted-foreground));
+      }
+
+      /* Banner */
+      .banner {
+        display: none;
+        padding: 11px 15px;
+        border-radius: 0.8rem;
+        border: 1px solid hsl(var(--border) / 0.6);
+        font-family: "Inter", sans-serif;
+        font-size: 0.85rem;
+        line-height: 1.55;
+      }
+      .banner.show {
+        display: block;
+      }
+      .banner.warn {
+        background: hsl(36 80% 94%);
+        border-color: hsl(36 48% 72%);
+        color: hsl(28 70% 28%);
+      }
+      .banner.error {
+        background: hsl(var(--destructive) / 0.08);
+        border-color: hsl(var(--destructive) / 0.22);
+        color: hsl(var(--destructive));
+      }
+      .banner.ok {
+        background: hsl(var(--primary) / 0.07);
+        border-color: hsl(var(--primary) / 0.2);
+        color: hsl(var(--primary));
+      }
+      .banner.unsigned {
+        font-weight: 700;
+      }
+
+      /* Card */
+      .card {
+        border-radius: 1rem;
+        border: 1px solid hsl(var(--border) / 0.4);
+        background: linear-gradient(
+          180deg,
+          hsl(0 0% 100%),
+          hsl(var(--background))
+        );
+        box-shadow: var(--shadow-card);
+        overflow: hidden;
+      }
+      .card-header {
+        padding: 20px 22px 14px;
+        border-bottom: 1px solid hsl(var(--border) / 0.4);
+      }
+      .card-header h2 {
+        margin: 0;
+        font-size: 1.05rem;
+        letter-spacing: -0.02em;
+      }
+      .card-header p {
+        margin: 5px 0 0;
+        font-family: "Inter", sans-serif;
+        font-size: 0.83rem;
+        color: hsl(var(--muted-foreground));
+        line-height: 1.6;
+      }
+      .card-body {
+        padding: 20px 22px;
+      }
+
+      /* Form */
+      .form-grid {
+        display: grid;
+        gap: 14px;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+      .field label {
+        font-family: "Inter", sans-serif;
+        font-size: 0.83rem;
+        font-weight: 600;
+      }
+
+      .input {
+        width: 100%;
+        border: 1px solid hsl(var(--border) / 0.3);
+        border-radius: 0.75rem;
+        background: hsl(var(--muted));
+        padding: 11px 13px;
+        font-size: 0.93rem;
+        color: hsl(var(--foreground));
+        transition:
+          border-color 0.18s,
+          box-shadow 0.18s,
+          background 0.18s;
+      }
+      .input::placeholder {
+        color: hsl(var(--muted-foreground));
+      }
+      .input:focus {
+        outline: none;
+        border-color: hsl(var(--secondary) / 0.4);
+        box-shadow: 0 0 0 4px hsl(var(--secondary) / 0.16);
+        background: hsl(var(--card));
+      }
+
+      .input-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: stretch;
+      }
+
+      .btn-inline {
+        min-width: 96px;
+        white-space: nowrap;
+      }
+
+              .field-note {
+        margin: 0;
+        font-family: "Inter", sans-serif;
+        font-size: 0.78rem;
+        color: hsl(var(--muted-foreground));
+        line-height: 1.5;
+      }
+
+      .choice {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+      }
+      .choice input {
+        margin-top: 3px;
+      }
+      .choice span {
+        font-family: "Inter", sans-serif;
+        font-size: 0.83rem;
+        font-weight: 600;
+      }
+
+      /* Buttons */
+      .action-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 18px;
+      }
+      .action-row-end {
+        justify-content: flex-end;
+      }
+
+      .btn {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 42px;
+        border-radius: 0.75rem;
+        padding: 10px 16px;
+        border: 1px solid transparent;
+        font-size: 0.86rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          transform 0.08s,
+          opacity 0.16s,
+          background 0.16s;
+      }
+      .btn:active {
+        transform: scale(0.985);
+      }
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      .btn-primary {
+        background: hsl(var(--primary));
+        color: hsl(var(--primary-foreground));
+        box-shadow: 0 6px 22px -12px hsl(var(--primary));
+        flex: 1;
+      }
+      .btn-primary:hover:not(:disabled) {
+        opacity: 0.92;
+      }
+      .btn-secondary {
+        background: hsl(var(--secondary));
+        color: hsl(var(--secondary-foreground));
+      }
+      .btn-secondary:hover:not(:disabled) {
+        opacity: 0.92;
+      }
+      .btn-ghost {
+        background: transparent;
+        color: hsl(var(--muted-foreground));
+        border-color: hsl(var(--border) / 0.4);
+      }
+      .btn-ghost:hover:not(:disabled) {
+        background: hsl(var(--accent));
+      }
+      .btn-danger {
+        background: hsl(var(--destructive) / 0.08);
+        color: hsl(var(--destructive));
+        border-color: hsl(var(--destructive) / 0.18);
+      }
+      .btn-danger:hover:not(:disabled) {
+        background: hsl(var(--destructive) / 0.12);
+      }
+
+      /* Log */
+      .log-card {
+        display: none;
+      }
+      .log-card.show {
+        display: block;
+      }
+      .log-shell {
+        margin-top: 12px;
+        border-radius: 0.85rem;
+        border: 1px solid hsl(var(--border) / 0.5);
+        background: hsl(220 24% 12%);
+        overflow: hidden;
+      }
+      .log-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        padding: 9px 14px;
+        border-bottom: 1px solid hsl(216 24% 22%);
+        color: hsl(213 45% 87%);
+        font-family: "Inter", sans-serif;
+        font-size: 0.77rem;
+      }
+      .log {
+        margin: 0;
+        min-height: 160px;
+        max-height: 300px;
+        overflow: auto;
+        padding: 14px;
+        white-space: pre-wrap;
+        font:
+          0.77rem/1.6 Consolas,
+          "Courier New",
+          monospace;
+        color: hsl(213 45% 87%);
+      }
+
+      /* Done */
+      .done-box {
+        display: none;
+        padding: 15px 18px;
+        border-radius: 0.9rem;
+        border: 1px solid hsl(var(--primary) / 0.2);
+        background: hsl(var(--primary) / 0.08);
+        font-family: "Inter", sans-serif;
+      }
+      .done-box.show {
+        display: block;
+      }
+      .done-box h3 {
+        margin: 0 0 5px;
+        font-size: 0.95rem;
+      }
+      .done-copy {
+        margin: 0;
+        color: hsl(var(--muted-foreground));
+        line-height: 1.6;
+        font-size: 0.84rem;
+      }
+
+      @media (max-width: 580px) {
+        .page-shell {
+          padding: 16px 12px;
+          align-items: flex-start;
+        }
+        .card-header,
+        .card-body {
+          padding: 16px;
+        }
+        .action-row {
+          flex-direction: column;
+        }
+        .btn-primary {
+          flex: none;
+          width: 100%;
+        }
+        .input-row {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="installer-app">
+        <div class="app-header">
+          <div class="app-logo">
+            <img alt="" aria-hidden="true" width="40" height="40" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MCA0MCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJ0aHJlYWQiPjxzdG9wIG9mZnNldD0iMCIgc3RvcC1jb2xvcj0iI0UzNDIzNCIvPjxzdG9wIG9mZnNldD0iLjUiIHN0b3AtY29sb3I9IiNFM0EwMTgiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiNFMzQyMzQiLz48L2xpbmVhckdyYWRpZW50PjxmaWx0ZXIgaWQ9InNoYWRvdyIgeD0iLTMwJSIgeT0iLTMwJSIgd2lkdGg9IjE2MCUiIGhlaWdodD0iMTYwJSI+PGZlRHJvcFNoYWRvdyBkeD0iMCIgZHk9IjEiIHN0ZERldmlhdGlvbj0iMSIgZmxvb2QtY29sb3I9IiMwMDAiIGZsb29kLW9wYWNpdHk9Ii4zNSIvPjwvZmlsdGVyPjwvZGVmcz48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHJ4PSIxMC44IiBmaWxsPSJ1cmwoI3RocmVhZCkiLz48ZyBmaWx0ZXI9InVybCgjc2hhZG93KSI+PHBhdGggdHJhbnNmb3JtPSJ0cmFuc2xhdGUoLTEuNSAtLjUpIiBkPSJNMTMgOGg0djE0bDgtOGg1bC04IDggOCAxMGgtNWwtNi03LTIgMnY1aC00eiIgZmlsbD0iI2ZmZiIvPjwvZz48L3N2Zz4=" />
+          </div>
+          <div class="app-header-copy">
+            <h1>kautuka</h1>
+            <p>Windows installer</p>
+          </div>
+        </div>
+
+        <div class="banner warn show unsigned">
+          This Windows installer is not Authenticode-signed. SmartScreen will
+          warn.
+        </div>
+
+        <div id="messageBanner" class="banner"></div>
+
+        <section class="card">
+          <div class="card-header">
+            <h2>Setup</h2>
+            <p>
+              Pick the local folder and release channel. A GitHub token is only
+              needed for private GitHub releases.
+            </p>
+          </div>
+          <div class="card-body">
+            <div class="form-grid">
+              <div class="field">
+                <label for="kautukaRoot">WSL install directory</label>
+                <div class="input-row">
+                  <input
+                    id="kautukaRoot"
+                    class="input"
+                    type="text"
+                    placeholder="e.g. E:\Kautuka\WSL\kautuka"
+                    autocomplete="off"
+                  />
+                  <button
+                    id="browseKautukaRootBtn"
+                    class="btn btn-ghost btn-inline"
+                    type="button"
+                  >
+                    Browse
+                  </button>
+                </div>
+                <p class="field-note">
+                  Folder where WSL should store the imported distro. The
+                  appliance is self-contained inside its WSL filesystem; no
+                  Windows bind mount is created.
+                </p>
+              </div>
+
+              <div class="field">
+                <label for="releaseServerUrl">Release server URL</label>
+                <input
+                  id="releaseServerUrl"
+                  class="input"
+                  type="text"
+                  placeholder="http://127.0.0.1:20300"
+                  autocomplete="off"
+                />
+                <p class="field-note">
+                  Development profile: point this at the local or LAN release
+                  server. The installer will resolve the manifest from this base
+                  URL.
+                </p>
+              </div>
+
+              <div id="releaseChannelField" class="field">
+                <label for="releaseChannel">Update channel</label>
+                <select id="releaseChannel" class="input">
+                  <option value="stable">Stable</option>
+                  <option value="preview">Preview</option>
+                </select>
+                <p id="releaseChannelNote" class="field-note">
+                  Preview builds are for testing new features early and may have bugs.
+                </p>
+              </div>
+
+              <div class="field">
+                <label class="choice" for="allowLanAccess">
+                  <input id="allowLanAccess" type="checkbox" />
+                  <span>Allow other devices on this PC's local network to open Kautuka</span>
+                </label>
+                <p class="field-note">
+                  Off by default. The appliance only listens on localhost. Checking
+                  this adds a Windows Firewall rule for TCP 20229 on private
+                  networks and forwards that port to localhost. Public networks
+                  stay blocked, and the traffic is ordinary HTTP.
+                </p>
+              </div>
+            </div>
+
+            <div class="action-row">
+              <button id="refreshStatusBtn" class="btn btn-ghost" type="button">
+                Check readiness
+              </button>
+              <button
+                id="resumeBtn"
+                class="btn btn-secondary"
+                type="button"
+                style="display: none"
+              >
+                Resume
+              </button>
+              <button id="installBtn" class="btn btn-primary" type="button">
+                Install Kautuka
+              </button>
+            </div>
+
+            <div class="action-row action-row-end" style="margin-top: 10px">
+              <button id="uninstallBtn" class="btn btn-danger" type="button">
+                Uninstall
+              </button>
+              <button id="openWebBtn" class="btn btn-ghost" type="button">
+                Open Kautuka
+              </button>
+              <button id="exitBtn" class="btn btn-ghost" type="button">
+                Exit
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="logCard" class="card log-card">
+          <div class="card-header">
+            <h2>Activity</h2>
+          </div>
+          <div class="card-body" style="padding-top: 0">
+            <div class="log-shell">
+              <div class="log-head">
+                <span id="logTitle">Idle</span>
+                <span id="logHint">Waiting for the next action.</span>
+              </div>
+              <pre id="log" class="log"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="doneBox" class="done-box">
+          <h3>Done</h3>
+          <p id="doneMessage" class="done-copy">
+            The installer action completed successfully.
+          </p>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        status: null,
+        installDefaults: null,
+        uninstallDefaults: null,
+        actionToken: "",
+        running: false,
+      };
+      const $ = (id) => document.getElementById(id);
+
+      function actionHeaders(extra) {
+        return {
+          "X-Kautuka-Installer-Token": state.actionToken,
+          ...(extra || {}),
+        };
+      }
+
+      function nowStamp() {
+        return new Date().toLocaleTimeString();
+      }
+
+      function appendLog(message) {
+        const log = $("log");
+        log.textContent += `[${nowStamp()}] ${message}\n`;
+        log.scrollTop = log.scrollHeight;
+      }
+
+      function setBanner(message, kind = "warn") {
+        const banner = $("messageBanner");
+        if (!message) {
+          banner.className = "banner";
+          banner.textContent = "";
+          return;
+        }
+        banner.className = `banner show ${kind}`;
+        banner.textContent = message;
+      }
+
+      function normalizeWindowsPath(path) {
+        return (path || "").trim().replace(/[\\/]+$/, "");
+      }
+
+      function getEffectiveInstallDir() {
+        return (
+          normalizeWindowsPath($("kautukaRoot").value) ||
+          state.installDefaults?.installDir ||
+          state.status?.defaultInstallDir ||
+          ""
+        );
+      }
+
+      function getEffectiveChannel() {
+        return (
+          $("releaseChannel").value ||
+          state.installDefaults?.releaseChannel ||
+          "stable"
+        );
+      }
+
+      function isDevelopmentProfile() {
+        return Boolean(state.installDefaults?.releaseManifestUrl);
+      }
+
+      function toServerUrl(manifestUrl) {
+        const value = (manifestUrl || "").trim();
+        if (!value) return "";
+        if (value.endsWith("/kautuka-platform-release.json")) {
+          return value.slice(0, -"/kautuka-platform-release.json".length);
+        }
+        return value;
+      }
+
+      function toManifestUrl(serverUrl) {
+        const value = (serverUrl || "").trim().replace(/\/+$/, "");
+        if (!value) return null;
+        if (value.endsWith(".json")) return value;
+        return `${value}/kautuka-platform-release.json`;
+      }
+
+      function setRunning(active, title, hint) {
+        state.running = active;
+        $("installBtn").disabled = active || !state.status?.isWindows;
+        $("resumeBtn").disabled = active || !state.status?.hasResumeState;
+        $("uninstallBtn").disabled = active;
+        $("browseKautukaRootBtn").disabled = active || !state.status?.isWindows;
+        $("refreshStatusBtn").disabled = active;
+        $("exitBtn").disabled = active;
+        $("logCard").classList.toggle(
+          "show",
+          active || $("log").textContent.length > 0,
+        );
+        $("logTitle").textContent = title;
+        $("logHint").textContent = hint;
+      }
+
+      function renderStatus(status) {
+        state.status = status;
+        $("resumeBtn").style.display = status.hasResumeState
+          ? "inline-flex"
+          : "none";
+
+        if (!status.isWindows) {
+          setBanner("This installer targets Windows only.", "error");
+        } else if (!status.isAdministrator && !status.wslReady) {
+          setBanner(
+            "Run as administrator so the installer can enable WSL prerequisites.",
+            "warn",
+          );
+        } else if (!status.wslReady) {
+          setBanner(
+            "WSL is not ready yet — the installer will enable the required Windows features before importing the appliance.",
+            "warn",
+          );
+        } else {
+          setBanner(
+            isDevelopmentProfile()
+              ? "Host is ready. Enter the release server URL and click Install."
+              : "Host is ready. Fill in the fields below and click Install.",
+            "ok",
+          );
+        }
+
+        $("releaseServerUrl").closest(".field").style.display =
+          isDevelopmentProfile() ? "grid" : "none";
+        $("releaseChannelField").style.display = "grid";
+        $("releaseChannel").disabled = isDevelopmentProfile();
+        $("releaseChannelNote").textContent = isDevelopmentProfile()
+          ? "Ignored while a release server URL is provided. Clear the server URL to resolve by channel instead."
+          : $("releaseChannel").value === "preview"
+            ? "Preview builds are for testing new features early and may have bugs."
+            : "Stable releases are recommended for everyday use.";
+
+        $("installBtn").textContent = status.wslReady
+          ? "Install Kautuka"
+          : status.isAdministrator
+            ? "Enable WSL & continue"
+            : "Run as administrator to continue";
+        $("installBtn").disabled = !status.isWindows;
+      }
+
+      function readLaunchToken() {
+        const hash = globalThis.location.hash.startsWith("#")
+          ? globalThis.location.hash.slice(1)
+          : "";
+        const token = new URLSearchParams(hash).get("token") || "";
+        if (token && globalThis.history && globalThis.history.replaceState) {
+          globalThis.history.replaceState(
+            null,
+            "",
+            globalThis.location.pathname + globalThis.location.search,
+          );
+        }
+        return token;
+      }
+
+      const launchToken = readLaunchToken();
+
+      function applyBootstrap(bootstrap) {
+        state.actionToken = launchToken || bootstrap.actionToken || "";
+        state.installDefaults = bootstrap.installDefaults || {};
+        state.uninstallDefaults = bootstrap.uninstallDefaults || {};
+        if (state.installDefaults.releaseManifestUrl)
+          $("releaseServerUrl").value = toServerUrl(
+            state.installDefaults.releaseManifestUrl,
+          );
+        $("releaseChannel").value =
+          state.installDefaults.releaseChannel || "stable";
+        $("kautukaRoot").value =
+          state.installDefaults.installDir ||
+          bootstrap.status.defaultInstallDir ||
+          "";
+        $("allowLanAccess").checked = Boolean(
+          state.installDefaults.allowLanAccess,
+        );
+        renderStatus(bootstrap.status);
+      }
+
+      function readRequest() {
+        const d = state.installDefaults || {};
+        const installDir = getEffectiveInstallDir();
+        return {
+          releaseManifestUrl: isDevelopmentProfile()
+            ? toManifestUrl($("releaseServerUrl").value) ||
+              d.releaseManifestUrl ||
+              null
+            : d.releaseManifestUrl || null,
+          releaseChannel: getEffectiveChannel(),
+          repositoryOwner: d.repositoryOwner || "devkrity",
+          repositoryName: d.repositoryName || "kautuka",
+          distroName: d.distroName || "kautuka",
+          installDir,
+          allowLanAccess: $("allowLanAccess").checked,
+          resume: false,
+          force: false,
+          releaseId: null,
+          releaseTag: null,
+          rootfsPath: d.rootfsPath || null,
+          manifestPublicKeyPath: d.manifestPublicKeyPath || null,
+          managerArtifactPath: d.managerArtifactPath || null,
+        };
+      }
+
+      function buildUninstallRequest() {
+        return {
+          distroName:
+            state.uninstallDefaults?.distroName ||
+            state.installDefaults?.distroName ||
+            "kautuka",
+          installDir: getEffectiveInstallDir() || null,
+          deleteData: false,
+        };
+      }
+
+      async function loadBootstrap() {
+        const r = await fetch("/api/appliance/bootstrap");
+        if (!r.ok) throw new Error("Failed to load installer state.");
+        applyBootstrap(await r.json());
+      }
+
+      async function refreshStatus() {
+        const r = await fetch("/api/appliance/status");
+        if (!r.ok) throw new Error("Failed to query host status.");
+        renderStatus(await r.json());
+      }
+
+      async function pickKautukaRoot() {
+        const initialPath = getEffectiveInstallDir();
+        const url = `/api/appliance/pick-folder?initialPath=${encodeURIComponent(initialPath)}`;
+        const response = await fetch(url, { headers: actionHeaders() });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok)
+          throw new Error(
+            payload.detail || payload.title || "Folder picker failed.",
+          );
+        if (payload.path) {
+          $("kautukaRoot").value = payload.path;
+          appendLog(`Selected WSL install directory: ${payload.path}`);
+        }
+      }
+
+      function validateInstallRequest(req) {
+        if (!req.installDir)
+          throw new Error(
+            "Choose the local directory where WSL should store the Kautuka distro.",
+          );
+      }
+
+      async function streamInstall(request) {
+        validateInstallRequest(request);
+        setBanner("");
+        $("doneBox").classList.remove("show");
+        $("log").textContent = "";
+        const label = request.resume
+          ? "Resuming install"
+          : `Installing ${request.releaseChannel} release`;
+        setRunning(true, label, "Streaming appliance installer progress...");
+        appendLog(
+          request.resume
+            ? "Resuming from the previous checkpoint..."
+            : `Starting install from the ${request.releaseChannel} channel...`,
+        );
+
+        const response = await fetch("/api/appliance/run-install", {
+          method: "POST",
+          headers: actionHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(request),
+        });
+        if (!response.ok || !response.body)
+          throw new Error("Failed to start the installer stream.");
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+          for (const chunk of chunks) {
+            const line = chunk.split("\n").find((e) => e.startsWith("data: "));
+            if (!line) continue;
+            const payload = JSON.parse(line.slice(6));
+            if (payload === "__DONE__") continue;
+            appendLog(payload);
+            if (String(payload).startsWith("ERROR: "))
+              throw new Error(String(payload).slice(7));
+          }
+        }
+
+        $("doneBox").classList.add("show");
+        $("doneMessage").textContent =
+          "Installation complete. If a reboot was needed for WSL prerequisites, reopen the installer and click Resume.";
+        setRunning(false, "Done", "Idle.");
+        await refreshStatus();
+      }
+
+      async function runUninstall() {
+        setBanner("");
+        $("doneBox").classList.remove("show");
+        $("log").textContent = "";
+        setRunning(true, "Uninstalling", "Running appliance uninstall...");
+        appendLog("Starting uninstall...");
+
+        const response = await fetch("/api/appliance/uninstall", {
+          method: "POST",
+          headers: actionHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify(buildUninstallRequest()),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok)
+          throw new Error(
+            payload.detail || payload.title || "Uninstall failed.",
+          );
+
+        appendLog(payload.message || "Uninstall complete.");
+        $("doneBox").classList.add("show");
+        $("doneMessage").textContent = "The appliance has been uninstalled.";
+        setRunning(false, "Done", "Idle.");
+        await refreshStatus();
+      }
+
+      function wireEvents() {
+        $("releaseChannel").addEventListener("change", () => {
+          $("releaseChannelNote").textContent = $("releaseChannel").value === "preview"
+            ? "Preview builds are for testing new features early and may have bugs."
+            : "Stable releases are recommended for everyday use.";
+        });
+
+        $("refreshStatusBtn").addEventListener("click", async () => {
+          try {
+            await refreshStatus();
+            appendLog("Host readiness checked.");
+          } catch (err) {
+            setBanner(err.message || String(err), "error");
+          }
+        });
+        $("browseKautukaRootBtn").addEventListener("click", async () => {
+          try {
+            await pickKautukaRoot();
+          } catch (err) {
+            setBanner(err.message || String(err), "error");
+          }
+        });
+        $("resumeBtn").addEventListener("click", async () => {
+          try {
+            await streamInstall({ ...readRequest(), resume: true });
+          } catch (err) {
+            setRunning(false, "Resume failed", "Idle.");
+            setBanner(err.message || String(err), "error");
+            appendLog(`ERROR: ${err.message || String(err)}`);
+          }
+        });
+        $("installBtn").addEventListener("click", async () => {
+          try {
+            await streamInstall(readRequest());
+          } catch (err) {
+            setRunning(false, "Install failed", "Idle.");
+            setBanner(err.message || String(err), "error");
+            appendLog(`ERROR: ${err.message || String(err)}`);
+          }
+        });
+        $("uninstallBtn").addEventListener("click", async () => {
+          try {
+            await runUninstall();
+          } catch (err) {
+            setRunning(false, "Uninstall failed", "Idle.");
+            setBanner(err.message || String(err), "error");
+            appendLog(`ERROR: ${err.message || String(err)}`);
+          }
+        });
+        $("openWebBtn").addEventListener("click", () => {
+          window.open("http://localhost:20229", "_blank", "noopener");
+        });
+        $("exitBtn").addEventListener("click", async () => {
+          await fetch("/api/exit", { method: "POST", headers: actionHeaders() });
+        });
+      }
+
+      async function init() {
+        wireEvents();
+        setRunning(false, "Idle", "Waiting for the next action.");
+        try {
+          await loadBootstrap();
+        } catch (err) {
+          setBanner(err.message || String(err), "error");
+        }
+      }
+
+      init();
+    </script>
+  </body>
+</html>

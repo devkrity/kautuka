@@ -1,0 +1,92 @@
+{
+  "$schema": "https://alirezanet.github.io/Husky.Net/schema.json",
+  "tasks": [
+    {
+      "name": "Confirm docs updated",
+      "group": "pre-commit",
+      "command": "node",
+      "args": ["./scripts/confirm-docs-updated.mjs"]
+    },
+    {
+      "name": "Validate documentation",
+      "group": "pre-commit",
+      "command": "node",
+      "args": ["./scripts/validate-docs.mjs"]
+    },
+    {
+      "name": "Secret scan",
+      "group": "pre-commit",
+      "command": "node",
+      "args": ["./scripts/run-precommit-secret-scan.mjs"]
+    },
+    {
+      "name": "Restore solution",
+      "group": "pre-commit",
+      "command": "dotnet",
+      "args": ["restore", "src/Kautuka.slnx"]
+    },
+    {
+      "name": "Verify full dotnet format",
+      "group": "pre-commit",
+      "command": "dotnet",
+      "args": [
+        "format",
+        "src/Kautuka.slnx",
+        "--no-restore",
+        "--verify-no-changes",
+        "--verbosity",
+        "normal"
+      ]
+    },
+    {
+      "name": "Build solution",
+      "group": "pre-commit",
+      "command": "dotnet",
+      "args": ["build", "src/Kautuka.slnx", "--no-restore"]
+    },
+    {
+      "name": "Run backend tests",
+      "group": "pre-commit",
+      "command": "dotnet",
+      "args": [
+        "test",
+        "--solution",
+        "src/Kautuka.slnx",
+        "--no-build",
+        "--verbosity",
+        "minimal",
+        "--filter",
+        "FullyQualifiedName!~Kautuka.ApiFlowTests",
+        "--",
+        "--ignore-exit-code",
+        "8"
+      ]
+    },
+    {
+      "name": "Lint frontend",
+      "group": "pre-commit",
+      "command": "node",
+      "cwd": "src/frontend/web",
+      "args": [
+        "./node_modules/eslint/bin/eslint.js",
+        "src",
+        "--ext",
+        ".ts,.tsx"
+      ]
+    },
+    {
+      "name": "Run frontend tests",
+      "group": "pre-commit",
+      "command": "node",
+      "cwd": "src/frontend/web",
+      "args": ["./node_modules/vitest/vitest.mjs", "run"]
+    },
+    {
+      "name": "Build frontend",
+      "group": "pre-commit",
+      "command": "node",
+      "cwd": "src/frontend/web",
+      "args": ["./node_modules/vite/bin/vite.js", "build"]
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+option csharp_namespace = "Kautuka.UpdateService.Protos";
+
+package kautuka.updateservice.v1;
+
+service UpdateService {
+  rpc Ping                   (UpdateServicePingRequest) returns (UpdateServiceBoolResponse);
+  rpc GetCatalogSnapshot     (UpdateServicePingRequest) returns (CatalogSnapshotResponse);
+  rpc GetUpdateStatus        (UpdateServicePingRequest) returns (UpdateStatusResponse);
+  rpc SetUpdatePolicy        (UpdatePolicyRequest) returns (UpdateStatusResponse);
+  rpc RefreshUpdateDiscovery (UpdateServicePingRequest) returns (UpdateStatusResponse);
+  rpc ApplyUpdate            (UpdateServicePingRequest) returns (UpdateStatusResponse);
+  rpc RevertUpdate           (UpdateServicePingRequest) returns (UpdateStatusResponse);
+}
+
+message UpdateServicePingRequest {
+  string message = 1;
+}
+
+message UpdateServiceBoolResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message CatalogEntryMessage {
+  string id = 1;
+  string kind = 2;
+  string title = 3;
+  string summary = 4;
+  string publisher = 5;
+  string version = 6;
+  string artifact_url = 7;
+  string trust_kind = 8;
+  bool recommended = 9;
+  string artifact_sha256 = 10;
+}
+
+message CatalogSnapshotResponse {
+  bool ok = 1;
+  string message = 2;
+  string refreshed_at_utc = 3;
+  repeated CatalogEntryMessage entries = 4;
+  string source_manifest_url = 5;
+  string last_error = 6;
+}
+
+message UpdatePolicyRequest {
+  string release_channel = 1;
+}
+
+message UpdateReleaseReferenceMessage {
+  string release_id = 1;
+  string version = 2;
+  string channel = 3;
+  string release_fingerprint = 4;
+  string source_url = 5;
+  string published_at_utc = 6;
+  string tag = 7;
+}
+
+message UpdateStatusResponse {
+  bool ok = 1;
+  string message = 2;
+  string workflow_state = 3;
+  UpdateReleaseReferenceMessage current_release = 4;
+  UpdateReleaseReferenceMessage available_release = 5;
+  reserved 6;
+  reserved "staged_release";
+  UpdateReleaseReferenceMessage last_known_good_release = 7;
+  reserved 8;
+  reserved "deferred";
+  string last_discovery_attempt_utc = 9;
+  string last_discovery_success_utc = 10;
+  string manager_version = 11;
+  bool host_ready = 12;
+  int32 active_exec_count = 13;
+  string last_error = 14;
+  string effective_release_channel = 15;
+  string eligibility_state = 16;
+  string eligibility_reason = 17;
+}

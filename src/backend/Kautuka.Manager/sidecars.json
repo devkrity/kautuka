@@ -1,0 +1,62 @@
+{
+  "sidecars": [
+    {
+      "name": "kautuka-openobserve",
+      "image": "public.ecr.aws/zinclabs/openobserve@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "ports": [
+        {
+          "hostPort": 20215,
+          "containerPort": 5080,
+          "hostBindAddress": "127.0.0.1"
+        }
+      ],
+      "volumes": [
+        {
+          "hostPath": "/var/lib/kautuka/sidecars/openobserve/data",
+          "containerPath": "/data",
+          "readOnly": false
+        }
+      ],
+      "environment": {
+        "ZO_ROOT_USER_EMAIL": "kautuka-telemetry@kautuka.local",
+        "ZO_ROOT_USER_PASSWORD": "KautukaOo!telemetry-7f3a",
+        "ZO_DATA_DIR": "/data"
+      },
+      "command": [],
+      "buildContext": null,
+      "dockerfile": null,
+      "requiredForReady": false,
+      "managerInfrastructure": true,
+      "policy": "always",
+      "healthCheck": {
+        "url": "http://127.0.0.1:20215/healthz",
+        "timeoutSeconds": 45,
+        "intervalMilliseconds": 1000
+      }
+    },
+    {
+      "name": "kautuka-pkgs-proxy",
+      "image": "localhost/kautuka-pkgs-proxy:local",
+      "ports": [],
+      "volumes": [
+        {
+          "hostPath": "/var/lib/kautuka/proxy/pkgs/data",
+          "containerPath": "/data",
+          "readOnly": false
+        }
+      ],
+      "environment": {
+        "PROXY_LISTEN": ":20101",
+        "PROXY_BASE_URL": "http://kautuka-pkgs-proxy:20101",
+        "PROXY_CACHE_METADATA": "true"
+      },
+      "command": [],
+      "buildContext": "sidecar-assets/pkgs-proxy",
+      "dockerfile": null,
+      "requiredForReady": false,
+      "managerInfrastructure": true,
+      "policy": "always",
+      "healthCheck": null
+    }
+  ]
+}

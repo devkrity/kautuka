@@ -1,0 +1,1 @@
+{"provenance":"official:core.telegram.org/bots/api#getupdates","version":"bot-api-consumed-v1","ok":true,"result":[{"update_id":1,"message":{"message_id":2,"from":{"id":"user"},"chat":{"id":"chat"},"text":"<redacted>"}}]}

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "description": "Package-specific license texts absent from the installed npm tarball, recovered from pinned upstream source or marked for review when version provenance is incomplete.",
+  "supplements": [
+    {
+      "name": "agent-base",
+      "version": "6.0.2",
+      "licenseExpression": "MIT",
+      "npmIntegrity": "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==",
+      "sourceUrl": "https://github.com/TooTallNate/node-agent-base/blob/c4b8ea2e1a11bae023bb09b708050a50418204e9/README.md#L115-L140",
+      "sourceCommit": "c4b8ea2e1a11bae023bb09b708050a50418204e9",
+      "sourcePath": "README.md#License",
+      "licenseFile": "compliance/licenses/LICENSE-MIT-agent-base-6.0.2.txt",
+      "sha256": "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
+      "status": "reviewed",
+      "evidence": "The exact npm gitHead tag has no standalone LICENSE file; its README contains the complete MIT text and copyright line."
+    },
+    {
+      "name": "https-proxy-agent",
+      "version": "5.0.1",
+      "licenseExpression": "MIT",
+      "npmIntegrity": "sha512-dFcAjpTQFgoLMzC2VwU+C/CbS7uRL0lWmxDITmqm7C+7F0Odmj6s9l6alZc6AELXhrnggM2CeWSXHGOdX2YtwA==",
+      "sourceUrl": "https://github.com/TooTallNate/node-https-proxy-agent/blob/d0d80cc0482f20495aa8595f802e1a9f3b1b3409/README.md#L113-L137",
+      "sourceCommit": "d0d80cc0482f20495aa8595f802e1a9f3b1b3409",
+      "sourcePath": "README.md#License",
+      "licenseFile": "compliance/licenses/LICENSE-MIT-https-proxy-agent-5.0.1.txt",
+      "sha256": "71368fd0f5b4129191e9afcd1e1ef2dc89a9090d3e4d80bbab92dafd032b3bef",
+      "status": "reviewed",
+      "evidence": "The exact npm gitHead tag has no standalone LICENSE file; its README contains the complete MIT text and copyright line."
+    },
+    {
+      "name": "react-remove-scroll-bar",
+      "version": "2.3.8",
+      "licenseExpression": "MIT",
+      "npmIntegrity": "sha512-9r+yi9+mgU33AKcj6IbT9oRCO78WriSj6t/cF8DWBZJ9aOGPOTEDvdUDz1FwKim7QXWwmHqtdHnRJfhAxEG46Q==",
+      "sourceUrl": "https://github.com/theKashey/react-remove-scroll-bar/blob/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE",
+      "sourceCommit": "8ca9ba5ea52de03308fe8ced94f7b159a44d28ff",
+      "sourcePath": "LICENSE",
+      "licenseFile": "compliance/licenses/LICENSE-MIT-react-remove-scroll-bar-2.3.8.txt",
+      "sha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84",
+      "status": "reviewed",
+      "publishedGitHead": "b3b1287aad81def2e2ae707274b74531b61ddbaf",
+      "tarballComparison": {
+        "sourceVersion": "2.3.7",
+        "sourceIntegrity": "sha512-UzA0npskGFA2bUqwWsSRJscuQEt7zyfVtMpCtBl/lk+k/ky6lzYImEks9jwgxTDe/B0tb5hyrYgbQv/JQaHjDw==",
+        "publishedVersion": "2.3.8",
+        "publishedIntegrity": "sha512-9r+yi9+mgU33AKcj6IbT9oRCO78WriSj6t/cF8DWBZJ9aOGPOTEDvdUDz1FwKim7QXWwmHqtdHnRJfhAxEG46Q==",
+        "totalFiles": 27,
+        "identicalFiles": 26,
+        "readmeSha256": "486442209236ffa3893312e508694699a6b8834d30a2f9c083c1f3379983e4f9",
+        "onlyChangedFile": {
+          "path": "package/package.json",
+          "sourceSha256": "484ad46c8cc261e168d7e2602bbb70b80f8d10307b7de91d99485da28c350a03",
+          "publishedSha256": "e372f857ce05f266137c65293436b5380fec42ac311e6acb9378ed78b98d75d0",
+          "changedFields": ["version", "dependencies.react-style-singleton"]
+        },
+        "unresolvedPublishedGitHead": true
+      },
+      "evidence": "License text is sourced from the 2.3.7 upstream LICENSE at pinned commit 8ca9ba5ea52de03308fe8ced94f7b159a44d28ff. Registry-SRI-verified npm tarballs for 2.3.7 and 2.3.8 each contain 27 files; 26 files, including all shipped source/declarations and README, are byte-identical. The sole changed file is package/package.json, whose only differences are the version and react-style-singleton dependency range. Both registry records identify MIT and the same author; the identical README contains a MIT License section. Association of the 2.3.7 notice with published 2.3.8 is inferred from this tarball content identity. The registry-declared 2.3.8 gitHead remains unverified against public upstream history, and this evidence does not establish legal ownership or authorization."
+    }
+  ]
+}

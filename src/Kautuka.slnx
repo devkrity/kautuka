@@ -1,0 +1,41 @@
+<Solution>
+  <Folder Name="/installer/">
+    <Project Path="installer/Kautuka.Monitor.Core/Kautuka.Monitor.Core.csproj" />
+    <Project Path="installer/Kautuka.Monitor/Kautuka.Monitor.csproj" />
+    <Project Path="installer/Kautuka.Installer.Windows/Kautuka.Installer.Windows.csproj" />
+  </Folder>
+  <Folder Name="/backend/">
+    <Project Path="backend/Kautuka.Gateway/Kautuka.Gateway.csproj" />
+    <Project Path="backend/connectors/m365-mail/kautuka-m365-mail.csproj" />
+    <Project Path="backend/connectors/google-mail/kautuka-google-mail.csproj" />
+    <Project Path="backend/Kautuka.ChannelHost/Kautuka.ChannelHost.csproj" />
+    <Project Path="backend/Kautuka.Manager/Kautuka.Manager.csproj" />
+    <Project Path="backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj" />
+    <Project Path="backend/Kautuka.Manager.RuntimeContainer/Kautuka.Manager.RuntimeContainer.csproj" />
+    <Project Path="backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj" />
+    <Project Path="backend/Kautuka.WebHost/Kautuka.WebHost.csproj" />
+  </Folder>
+  <Folder Name="/shared/">
+    <Project Path="shared/Kautuka.Hosting/Kautuka.Hosting.csproj" />
+    <Project Path="shared/Kautuka.Security/Kautuka.Security.csproj" />
+    <Project Path="shared/Narad.Contracts/Narad.Contracts.csproj" />
+    <Project Path="shared/Kautuka.Contracts/Kautuka.Contracts.csproj" />
+    <Project Path="shared/Kautuka.Telemetry/Kautuka.Telemetry.csproj" />
+    <Project Path="shared/Kautuka.ChannelContracts/Kautuka.ChannelContracts.csproj" />
+    <Project Path="shared/Kautuka.ChannelHost.Protos/Kautuka.ChannelHost.Protos.csproj" />
+    <Project Path="shared/Kautuka.Manager.Protos/Kautuka.Manager.Protos.csproj" />
+    <Project Path="shared/Kautuka.UpdateService.Protos/Kautuka.UpdateService.Protos.csproj" />
+    <Project Path="shared/Kautuka.CredentialsHost.Protos/Kautuka.CredentialsHost.Protos.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Kautuka.ApiFlowTests/Kautuka.ApiFlowTests.csproj" />
+    <Project Path="tests/Kautuka.ContractTests/Kautuka.ContractTests.csproj" />
+    <Project Path="tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj" />
+    <Project Path="tests/Kautuka.SecurityTests/Kautuka.SecurityTests.csproj" />
+    <Project Path="tests/Kautuka.ChannelHost.Tests/Kautuka.ChannelHost.Tests.csproj" />
+    <Project Path="tests/Kautuka.ProviderSimulator.Tests/Kautuka.ProviderSimulator.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Kautuka.ProviderSimulator/Kautuka.ProviderSimulator.csproj" />
+  </Folder>
+</Solution>

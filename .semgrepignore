@@ -1,0 +1,4 @@
+# Vendor and generated assets that should not drive repository security failures
+
+src/backend/Kautuka.Gateway/wwwroot/docs/rapidoc-min.js
+src/frontend/web/src/lib/api/generated/

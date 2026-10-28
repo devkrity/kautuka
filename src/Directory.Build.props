@@ -1,0 +1,48 @@
+<Project>
+  <PropertyGroup>
+    <!-- Exclude generated validation artifacts from SDK default item globbing to avoid recursive file growth and slow copy targets. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
+    <AnalysisMode>All</AnalysisMode>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <PublishAot>true</PublishAot>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <KautukaDevVersion>0.1.20-dev</KautukaDevVersion>
+    <KautukaDevNumericVersion>0.1.20</KautukaDevNumericVersion>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Version Condition="'$(Version)' == ''">$(KautukaDevVersion)</Version>
+    <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(KautukaDevVersion)</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="ProjectDir" />
+    <CompilerVisibleProperty Include="RootNamespace" />
+  </ItemGroup>
+
+  <!-- RuntimeIdentifiers is only needed during publish, not during build/test.
+       Setting it globally causes MSBuild to derive Platform=x64 for the solution
+       metaproject, which breaks "Debug|Any CPU" solution configurations. -->
+  <PropertyGroup Condition="'$(PublishProtocol)' != ''">
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-arm64</RuntimeIdentifiers>
+  </PropertyGroup>
+
+  <Target Name="KautukaTrimReleasePublishArtifacts"
+      AfterTargets="_CopyAotSymbols"
+          Condition="'$(KautukaReleaseArtifactBuild)' == 'true' and '$(PublishSingleFile)' == 'true' and '$(PublishDir)' != ''">
+    <ItemGroup>
+      <_KautukaReleasePublishArtifacts Include="$(PublishDir)appsettings.Development.json" />
+      <_KautukaReleasePublishArtifacts Include="$(PublishDir)*.dbg" />
+      <_KautukaReleasePublishArtifacts Include="$(PublishDir)*.staticwebassets.endpoints.json" />
+      <_KautukaReleasePublishArtifacts Include="$(PublishDir)*.xml" />
+    </ItemGroup>
+
+    <Delete Files="@(_KautukaReleasePublishArtifacts)"
+            TreatErrorsAsWarnings="false" />
+  </Target>
+
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <NoWarn>$(NoWarn);CA1515</NoWarn>
+  </PropertyGroup>
+</Project>

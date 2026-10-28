@@ -1,0 +1,16 @@
+{
+  "name": "kautuka-mcp-diagnostics",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "Standalone MCP diagnostics server for Kautuka sandbox troubleshooting.",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "check": "node --check index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}

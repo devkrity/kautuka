@@ -1,0 +1,330 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Repository: Setup Dev Environment",
+      "type": "shell",
+      "command": "bash",
+      "args": ["./scripts/setup-dev.sh"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release: Build Local Feed (bash)",
+      "type": "shell",
+      "command": "bash",
+      "args": ["./scripts/local-release.sh", "--build-only", "--port", "20300"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Release: Serve Local Feed (bash)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "./scripts/local-release.sh",
+        "--listen-host",
+        "0.0.0.0",
+        "--port",
+        "20300"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "custom",
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*Local release build complete.*",
+          "endsPattern": ".*Public feed endpoint: .*:20300/kautuka-platform-release\\.json.*"
+        }
+      }
+    },
+    {
+      "label": "Frontend: Build Web Assets",
+      "type": "process",
+      "command": "node",
+      "args": ["./node_modules/vite/bin/vite.js", "build"],
+      "options": {
+        "cwd": "${workspaceFolder}/src/frontend/web"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Repository: Restore Solution",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["restore", "src/Kautuka.slnx"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Repository: Verify .NET Formatting",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["format", "src/Kautuka.slnx", "--verify-no-changes"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Repository: Build Solution",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "src/Kautuka.slnx", "--no-restore", "-c", "Debug"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$msCompile",
+      "hide": true
+    },
+    {
+      "label": "Repository: Run Backend Tests",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["test", "src/Kautuka.slnx", "--no-build"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Frontend: Lint Web App",
+      "type": "process",
+      "command": "node",
+      "args": [
+        "./node_modules/eslint/bin/eslint.js",
+        "src",
+        "--ext",
+        ".ts,.tsx"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/src/frontend/web"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Frontend: Run Web Tests",
+      "type": "process",
+      "command": "node",
+      "args": ["./node_modules/vitest/vitest.mjs", "run"],
+      "options": {
+        "cwd": "${workspaceFolder}/src/frontend/web"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Repository: Scan NuGet Packages",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "list",
+        "src/Kautuka.slnx",
+        "package",
+        "--vulnerable",
+        "--include-transitive"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Frontend: Audit Web Dependencies",
+      "type": "process",
+      "command": "npm",
+      "args": ["audit", "--omit=dev"],
+      "options": {
+        "cwd": "${workspaceFolder}/src/frontend/web"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": [],
+      "hide": true
+    },
+    {
+      "label": "Backend: Build Update Service",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "src/backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Backend: Run Update Service",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--project",
+        "src/backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "custom",
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*Building.*|.*Launching.*",
+          "endsPattern": ".*(Now listening on:|Application started\\.).*"
+        }
+      }
+    },
+    {
+      "label": "Repository: Run Pre-commit Checks",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Repository: Restore Solution",
+        "Repository: Verify .NET Formatting",
+        "Repository: Build Solution",
+        "Repository: Run Backend Tests",
+        "Frontend: Lint Web App",
+        "Frontend: Run Web Tests",
+        "Frontend: Build Web Assets"
+      ],
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Repository: Run Tests",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Repository: Run Backend Tests", "Frontend: Run Web Tests"],
+      "group": "test",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Repository: Run Security Scan",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Repository: Scan NuGet Packages",
+        "Frontend: Audit Web Dependencies"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Launch Kautuka",
+      "type": "process",
+      "command": "node",
+      "args": ["${workspaceFolder}/scripts/launch-kautuka.mjs"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "kautuka",
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*starting services.*",
+          "endsPattern": ".*stack running\\..*"
+        }
+      }
+    }
+  ]
+}

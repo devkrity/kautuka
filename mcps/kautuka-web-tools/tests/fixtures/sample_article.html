@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Kautuka Retrieval Test Article</title>
+    <meta name="description" content="Fixture content for retrieval and chunking tests." />
+    <meta name="author" content="Kautuka Test Harness" />
+  </head>
+  <body>
+    <main>
+      <h1>Overview</h1>
+      <p>Kautuka Web Tools retrieves pages, converts them into markdown, and prepares evidence for agent workflows.</p>
+      <p>The first version is intentionally narrow and uses structure-aware chunking with character-based limits.</p>
+
+      <h2>Retrieval</h2>
+      <p>Lexical ranking should find the smallest relevant child chunks before bounded context expansion is applied.</p>
+      <p>This keeps the retrieval surface precise while preserving enough local context for coherence and citation.</p>
+
+      <h2>Limits</h2>
+      <p>Character counts control chunk sizing. Token estimates are advisory metadata only.</p>
+      <p>Hard limits include response bytes, normalized markdown characters, redirect cap, and chunk count.</p>
+    </main>
+  </body>
+</html>

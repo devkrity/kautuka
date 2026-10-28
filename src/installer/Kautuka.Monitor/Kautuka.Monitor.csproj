@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ApplicationIcon>..\..\frontend\web\public\assets\icons\kautuka.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Kautuka.Monitor</RootNamespace>
+    <AssemblyName>Kautuka.Monitor</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationTitle>Kautuka Monitor</ApplicationTitle>
+    <Product>Kautuka</Product>
+    <Company>Kautuka</Company>
+    <Description>Tray status and unelevated residency supervisor for the Kautuka WSL appliance.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Kautuka.Monitor.Core\Kautuka.Monitor.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,78 @@
+name: Setup world check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-world-check:
+    name: Developer setup doctor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Enable Corepack package manager
+        run: |
+          corepack_dir="$RUNNER_TEMP/kautuka-corepack"
+          if ! command -v corepack >/dev/null 2>&1; then npm install --prefix "$corepack_dir" corepack; export PATH="$corepack_dir/node_modules/.bin:$PATH"; fi
+          mkdir -p "$corepack_dir/bin"
+          corepack enable --install-directory "$corepack_dir/bin"
+          echo "$corepack_dir/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "$corepack_dir/bin" >> "$GITHUB_PATH"
+          manager=$(node -p "require('./package.json').packageManager")
+          echo "KAUTUKA_PACKAGE_MANAGER=$manager" >> "$GITHUB_ENV"
+      - name: Activate pinned package manager
+        run: corepack prepare "$KAUTUKA_PACKAGE_MANAGER" --activate
+      - name: Install uv
+        uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
+        with:
+          version: 0.13.6
+      - name: Install Podman CLI
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Install pinned Python runtime
+        run: uv python install "$(cat .python-version)"
+      - name: Check developer setup tools
+        run: ./setup_the_world.sh --check
+
+  full-setup:
+    name: Full setup on Ubuntu (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Enable Corepack package manager
+        run: |
+          corepack_dir="$RUNNER_TEMP/kautuka-corepack"
+          if ! command -v corepack >/dev/null 2>&1; then npm install --prefix "$corepack_dir" corepack; export PATH="$corepack_dir/node_modules/.bin:$PATH"; fi
+          mkdir -p "$corepack_dir/bin"
+          corepack enable --install-directory "$corepack_dir/bin"
+          echo "$corepack_dir/node_modules/.bin" >> "$GITHUB_PATH"
+          echo "$corepack_dir/bin" >> "$GITHUB_PATH"
+          manager=$(node -p "require('./package.json').packageManager")
+          corepack prepare "$manager" --activate
+      - name: Install uv
+        uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
+        with:
+          version: 0.13.6
+      - name: Install pinned Python
+        run: uv python install "$(cat .python-version)"
+      - name: Install Podman CLI
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Run complete world setup
+        run: ./setup_the_world.sh

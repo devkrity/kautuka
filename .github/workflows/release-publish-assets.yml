@@ -1,0 +1,451 @@
+name: Release Publish Assets
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+      release_version:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      prerelease:
+        required: true
+        type: string
+      dry_run:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      wsl_rootfs_asset_name:
+        required: true
+        type: string
+      updates_base_url:
+        required: true
+        type: string
+      catalog_manifest_url:
+        required: true
+        type: string
+jobs:
+
+  compose-release-asset-manifest:
+    name: Compose Release Asset Manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Normalize artifact scope
+        id: scope
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: kautuka-*-${{ steps.scope.outputs.artifact_scope }}
+          path: release-artifacts
+
+      - name: Generate asset manifest and checksums
+        run: |
+          node scripts/generate-release-asset-manifest.mjs \
+            --directory release-artifacts \
+            --relative-prefix release-artifacts
+          cp release-artifacts/kautuka-release-assets.sha256 .
+          cp release-artifacts/kautuka-release-assets.json .
+
+      - name: Upload asset manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-release-asset-manifest-${{ steps.scope.outputs.artifact_scope }}
+          path: |
+            kautuka-release-assets.sha256
+            kautuka-release-assets.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+  compose-release-entrypoint-notes:
+    name: Compose Release Entrypoint Notes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Normalize artifact scope
+        id: scope
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Write release entrypoint notes
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
+        run: |
+          updates_base_url="${UPDATES_BASE_URL%/}"
+          cat > kautuka-release-entrypoints.md <<EOF
+          ## Downloads
+
+          Release binaries and compliance assets are published as immutable assets on this versioned GitHub Release.
+
+          - Release assets: \`https://github.com/devkrity/kautuka/releases/tag/${RELEASE_TAG}\`
+          - Linux installer: \`https://github.com/devkrity/kautuka/releases/download/${RELEASE_TAG}/kautuka-install-linux.sh\`
+          - Linux installer attestation: before running with sudo, verify the downloaded file with \`gh attestation verify ./kautuka-install-linux.sh --repo devkrity/kautuka --signer-workflow devkrity/kautuka/.github/workflows/release-build-platform-assets.yml\`.
+          - Windows installer (not Authenticode-signed unless SIGNING-STATUS says SIGNED): \`https://github.com/devkrity/kautuka/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe\`
+          - License, notices, credits, component inventory, SBOMs, source archives, and checksums are included as flat release assets; license texts and source files are bundled in zip archives.
+          - Channel pointer: \`https://raw.githubusercontent.com/devkrity/kautuka-release-feed-${CHANNEL}/main/manifest\`
+          - Catalog: \`${CATALOG_MANIFEST_URL}\`
+
+          **The Windows installer is unsigned in this release unless \`SIGNING-STATUS.txt\` says SIGNED.** SmartScreen will warn.
+          EOF
+
+      - name: Upload release entrypoint notes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-release-entrypoint-notes-${{ steps.scope.outputs.artifact_scope }}
+          path: kautuka-release-entrypoints.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+  publish-public-feed:
+    name: Publish Public Feed
+    needs:
+      - compose-release-asset-manifest
+      - compose-release-entrypoint-notes
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.channel == 'stable' && 'stable' || 'preview' }}
+    concurrency:
+      group: release-publication-and-pointers
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Normalize artifact scope
+        id: scope
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: kautuka-*-${{ steps.scope.outputs.artifact_scope }}
+          path: release-artifacts
+
+      - name: Stage public feed tree
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WSL_ROOTFS_ASSET_NAME: ${{ inputs.wsl_rootfs_asset_name }}
+          ARTIFACT_SCOPE: ${{ steps.scope.outputs.artifact_scope }}
+        run: |
+          set -euo pipefail
+          scope="$ARTIFACT_SCOPE"
+          root="release-artifacts"
+          feed="public-feed"
+          release_dir="${feed}/releases/${RELEASE_TAG}"
+
+          mkdir -p "$release_dir"
+
+          copy_required() {
+            local source="$1"
+            local destination="$2"
+            if [[ ! -f "$source" ]]; then
+              echo "error: required release artifact not found: $source" >&2
+              find "$root" -type f >&2 || true
+              exit 1
+            fi
+            mkdir -p "$(dirname "$destination")"
+            cp "$source" "$destination"
+          }
+
+          copy_required "${root}/kautuka-linux-installer-assets-${scope}/kautuka-install-linux.sh" "${release_dir}/kautuka-install-linux.sh"
+          copy_required "${root}/kautuka-windows-installer-assets-${scope}/Kautuka.Installer.exe" "${release_dir}/Kautuka.Installer.exe"
+          copy_required "${root}/kautuka-windows-installer-assets-${scope}/LICENSE" "${release_dir}/LICENSE"
+          copy_required "${root}/kautuka-windows-installer-assets-${scope}/NOTICE" "${release_dir}/NOTICE"
+          copy_required "${root}/kautuka-windows-installer-assets-${scope}/SIGNING-STATUS.txt" "${release_dir}/SIGNING-STATUS.txt"
+          copy_required "${root}/kautuka-platform-linux-x64-${scope}/kautuka-linux-amd64.tar.gz" "${release_dir}/kautuka-linux-amd64.tar.gz"
+          copy_required "${root}/kautuka-wsl-rootfs-${scope}/${WSL_ROOTFS_ASSET_NAME}" "${release_dir}/${WSL_ROOTFS_ASSET_NAME}"
+          copy_required "${root}/kautuka-platform-release-${scope}/kautuka-platform-release.json" "${release_dir}/kautuka-platform-release.json"
+          copy_required "${root}/kautuka-platform-release-${scope}/kautuka-platform-release.sig" "${release_dir}/kautuka-platform-release.sig"
+          copy_required "${root}/kautuka-platform-release-${scope}/compliance/THIRD_PARTY_NOTICES.txt" "${release_dir}/THIRD_PARTY_NOTICES.txt"
+          copy_required "${root}/kautuka-platform-release-${scope}/compliance/THIRD_PARTY_COMPONENTS.json" "${release_dir}/THIRD_PARTY_COMPONENTS.json"
+          copy_required "${root}/kautuka-platform-release-${scope}/compliance/FRONTEND_DEPENDENCIES.json" "${release_dir}/FRONTEND_DEPENDENCIES.json"
+          cp -a "${root}/kautuka-platform-release-${scope}/compliance/licenses" "${release_dir}/licenses"
+          copy_required "${root}/kautuka-release-asset-manifest-${scope}/kautuka-release-assets.sha256" "${release_dir}/kautuka-release-assets.sha256"
+          copy_required "${root}/kautuka-release-asset-manifest-${scope}/kautuka-release-assets.json" "${release_dir}/kautuka-release-assets.json"
+
+          bundle="${root}/kautuka-manifest-host-bundle-${scope}"
+          if [[ ! -d "$bundle" ]]; then
+            echo "error: manifest host bundle not found: $bundle" >&2
+            find "$root" -maxdepth 2 -type d >&2 || true
+            exit 1
+          fi
+          cp -a "${bundle}/." "${feed}/"
+
+          if [[ ! -f "${feed}/catalog/manifest" ]]; then
+            echo "error: catalog manifest missing from host bundle: catalog/manifest" >&2
+            exit 1
+          fi
+
+          find "$feed" -type f | sort
+
+      - name: Generate release SPDX SBOM
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WSL_ROOTFS_ASSET_NAME: ${{ inputs.wsl_rootfs_asset_name }}
+        run: |
+          set -euo pipefail
+          release_dir="public-feed/releases/${RELEASE_TAG}"
+          mkdir -p sbom-input/linux-platform sbom-input/wsl-appliance
+          tar -xzf "$release_dir/kautuka-linux-amd64.tar.gz" -C sbom-input/linux-platform
+          tar -xzf "$release_dir/$WSL_ROOTFS_ASSET_NAME" -C sbom-input/wsl-appliance
+          docker run --rm \
+            -v "$PWD:/src" \
+            docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+            dir:/src/sbom-input/linux-platform \
+            -o spdx-json="/src/$release_dir/kautuka-linux-amd64.spdx.json"
+          docker run --rm \
+            -v "$PWD:/src" \
+            docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+            dir:/src/sbom-input/wsl-appliance \
+            -o spdx-json="/src/$release_dir/kautuka-wsl-appliance.spdx.json"
+          while IFS=$'\t' read -r image_id archive_name; do
+            docker run --rm \
+              -v "$PWD:/src" \
+              docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+              docker-archive:"/src/sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name" \
+              -o spdx-json="/src/$release_dir/kautuka-${image_id}-image.spdx.json"
+          done < <(jq -r '.images[] | [.id, .archive] | @tsv' src/backend/Kautuka.Manager/runtime-images.json)
+          base_image="$(jq -r '.baseImage // empty' "$release_dir/THIRD_PARTY_COMPONENTS.json")"
+          if [[ -z "$base_image" ]]; then
+            echo 'error: release component inventory has no immutable kautuka-base image digest.' >&2
+            exit 1
+          fi
+          docker run --rm \
+            -v "$PWD:/src" \
+            docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+            "registry:$base_image" \
+            -o spdx-json="/src/$release_dir/kautuka-base-image.spdx.json"
+          docker run --rm \
+            -v "$PWD:/src" \
+            docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
+            "file:/src/$release_dir/Kautuka.Installer.exe" \
+            -o spdx-json="/src/$release_dir/kautuka-windows-installer.spdx.json"
+          bash scripts/stage-third-party-sources.sh \
+            --release-dir "$release_dir" \
+            --wsl-rootfs sbom-input/wsl-appliance \
+            --base-image "$base_image"
+          node scripts/generate-release-credits.mjs --directory "$release_dir"
+          python3 - "$release_dir" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          release = pathlib.Path(sys.argv[1])
+          for source_name, archive_name in [('licenses', 'kautuka-licenses.zip'), ('sources', 'kautuka-third-party-sources.zip')]:
+              source = release / source_name
+              if not source.is_dir():
+                  raise SystemExit(f'missing required release bundle: {source}')
+              with zipfile.ZipFile(release / archive_name, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+                  for item in sorted(source.rglob('*')):
+                      if item.is_file():
+                          bundle.write(item, item.relative_to(release))
+              if not (release / archive_name).stat().st_size:
+                  raise SystemExit(f'empty release bundle: {archive_name}')
+              import shutil
+              shutil.rmtree(source)
+          PY
+          rm -rf sbom-input
+
+          node scripts/generate-release-asset-manifest.mjs \
+            --directory "$release_dir" \
+            --relative-prefix "releases/$RELEASE_TAG"
+
+      - name: Prepare release notes
+        env:
+          ARTIFACT_SCOPE: ${{ steps.scope.outputs.artifact_scope }}
+        run: |
+          notes="release-artifacts/kautuka-release-entrypoint-notes-${ARTIFACT_SCOPE}/kautuka-release-entrypoints.md"
+          test -s "$notes"
+          mkdir -p release-notes
+          cp "$notes" release-notes/kautuka-release-entrypoints.md
+
+      - name: Validate complete flat release asset set
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: node scripts/verify-release-assets.mjs --directory "public-feed/releases/${RELEASE_TAG}" --tag "$RELEASE_TAG"
+
+      - name: Preflight channel pointer repository permission
+        env:
+          GH_TOKEN: ${{ secrets.release_feed_token }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          : "${GH_TOKEN:?the ${CHANNEL} environment must define its own release_feed_token}"
+          feed_repository="devkrity/kautuka-release-feed-${CHANNEL}"
+          permission="$(gh api "repos/${feed_repository}" --jq 'if .default_branch == "main" and .permissions.push == true then "ready" else "unavailable" end')"
+          if [[ "$permission" != 'ready' ]]; then
+            echo "error: the ${CHANNEL} release_feed_token must have Contents write access to ${feed_repository}, whose default branch must be main." >&2
+            exit 1
+          fi
+
+      - name: Confirm release draft is empty and immutable-release compatible
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          if [[ "$(jq -r '.draft' <<< "$existing")" != 'true' \
+            || "$(jq -r '.target_commitish' <<< "$existing")" != "$SOURCE_SHA" ]]; then
+            echo "error: release $RELEASE_TAG is not the expected unpublished draft." >&2
+            exit 1
+          fi
+          expected_prerelease='false'
+          if [[ "$CHANNEL" == 'preview' ]]; then expected_prerelease='true'; fi
+          if [[ "$(jq -r '.prerelease' <<< "$existing")" != "$expected_prerelease" ]]; then
+            echo "error: release $RELEASE_TAG has the wrong stable/preview type." >&2
+            exit 1
+          fi
+          if [[ "$(jq '.assets | length' <<< "$existing")" != '0' ]]; then
+            echo "error: release $RELEASE_TAG already has assets; refusing to replace draft assets." >&2
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --title "$RELEASE_VERSION" --notes-file release-notes/kautuka-release-entrypoints.md
+
+      - name: Upload all versioned release assets to the GitHub draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' release_assets < <(find "public-feed/releases/${RELEASE_TAG}" -maxdepth 1 -type f -print0 | sort -z)
+          ((${#release_assets[@]} > 0)) || { echo 'error: no release assets were staged.' >&2; exit 1; }
+          gh release upload "$RELEASE_TAG" "${release_assets[@]}"
+
+      - name: Validate GitHub asset names, sizes, and digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+          expected="$(node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(`${p}/kautuka-release-assets.json`)); const extra=["kautuka-release-assets.json","kautuka-release-assets.sha256"].map(name=>{const b=fs.readFileSync(`${p}/${name}`); return {name,sha256:crypto.createHash("sha256").update(b).digest("hex"),sizeBytes:b.length};}); console.log([...m.assets,...extra].map(x=>`${x.name}\tsha256:${x.sha256}\t${x.sizeBytes}`).sort().join("\n"))' "public-feed/releases/${RELEASE_TAG}")"
+          actual="$(gh api "repos/$REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[] | [.name, (.digest // ""), .size] | @tsv' | sort)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo 'error: uploaded GitHub Release asset names, sizes, or SHA-256 digests differ from the validated local set.' >&2
+            diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
+            exit 1
+          fi
+
+      - name: Publish catalog to the existing S3 host
+        id: publish_catalog
+        continue-on-error: true
+        env:
+          RELEASE_FEED_S3_ENDPOINT: ${{ secrets.release_feed_s3_endpoint }}
+          RELEASE_FEED_S3_BUCKET: ${{ secrets.release_feed_s3_bucket }}
+          RELEASE_FEED_S3_ACCESS_KEY_ID: ${{ secrets.release_feed_s3_access_key_id }}
+          RELEASE_FEED_S3_SECRET_ACCESS_KEY: ${{ secrets.release_feed_s3_secret_access_key }}
+          RELEASE_FEED_S3_REGION: ${{ secrets.release_feed_s3_region }}
+          RELEASE_FEED_S3_PREFIX: ${{ secrets.release_feed_s3_prefix }}
+        run: |
+          mkdir -p catalog-feed
+          cp -a public-feed/catalog catalog-feed/catalog
+          bash scripts/publish-release-feed.sh --feed-dir catalog-feed
+
+      - name: Report catalog publication failure without blocking releases
+        if: ${{ steps.publish_catalog.outcome == 'failure' }}
+        run: echo 'Catalog publication failed; the GitHub Release and channel pointer will continue independently.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+          gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false --silent
+
+      - name: Require GitHub immutable-release enforcement before moving the channel pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          immutable="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .immutable)"
+          if [[ "$immutable" != 'true' ]]; then
+            echo 'error: GitHub did not mark the published release immutable; configure repository release immutability before cutover. Channel pointer was not moved.' >&2
+            exit 1
+          fi
+
+      - name: Move the GitHub-hosted channel pointer after release publication
+        env:
+          RELEASE_FEED_TOKEN: ${{ secrets.release_feed_token }}
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_FEED_TOKEN:?the ${CHANNEL} environment must define a repo-scoped release_feed_token}"
+          feed_repository="devkrity/kautuka-release-feed-${CHANNEL}"
+          feed_directory="$RUNNER_TEMP/release-feed"
+          feed_auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_FEED_TOKEN" | base64 -w0)"
+          git -c http.extraheader="$feed_auth" clone "https://github.com/${feed_repository}.git" "$feed_directory"
+          cd "$feed_directory"
+          cp "$GITHUB_WORKSPACE/public-feed/releases/${RELEASE_TAG}/kautuka-platform-release.json" manifest
+          git add manifest
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Publish ${CHANNEL} channel pointer for ${RELEASE_TAG} (${SOURCE_SHA:0:7})"
+          git -c http.extraheader="$feed_auth" push origin HEAD:main

@@ -1,0 +1,140 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ApplicationIcon>..\..\frontend\web\public\assets\icons\kautuka.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StripSymbols>false</StripSymbols>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <RootNamespace>Kautuka.Installer.Windows</RootNamespace>
+    <InstallerVersion Condition="'$(InstallerVersion)' == ''">$(KautukaDevNumericVersion)</InstallerVersion>
+    <AssemblyName>Kautuka.Installer.Windows</AssemblyName>
+    <AssemblyTitle>Kautuka Installer (Windows)</AssemblyTitle>
+    <Product>Kautuka</Product>
+    <Company>Kautuka</Company>
+    <Authors>Kautuka</Authors>
+    <Description>Windows installer for the Kautuka WSL appliance.</Description>
+    <RepositoryUrl>https://github.com/devkrity/kautuka</RepositoryUrl>
+    <Version>$(InstallerVersion)</Version>
+    <AssemblyVersion>$([System.Version]::Parse('$(InstallerVersion)').Major).$([System.Version]::Parse('$(InstallerVersion)').Minor).$([System.Version]::Parse('$(InstallerVersion)').Build).0</AssemblyVersion>
+    <FileVersion>$([System.Version]::Parse('$(InstallerVersion)').Major).$([System.Version]::Parse('$(InstallerVersion)').Minor).$([System.Version]::Parse('$(InstallerVersion)').Build).0</FileVersion>
+    <InformationalVersion Condition="'$(InstallerReleaseTag)' != ''">$(InstallerReleaseTag)</InformationalVersion>
+    <InformationalVersion Condition="'$(InstallerReleaseTag)' == ''">$(KautukaDevVersion)</InformationalVersion>
+    <InstallerReleaseTag></InstallerReleaseTag>
+    <InstallerReleaseId></InstallerReleaseId>
+    <InstallerReleaseManifestUrl></InstallerReleaseManifestUrl>
+    <InstallerManifestPublicKeyPath></InstallerManifestPublicKeyPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+        <!-- ASP.NET Core Kestrel + minimal API -->
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+      <PackageReference Include="Photino.NET" />
+    <ProjectReference Include="..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
+    <ProjectReference Include="..\Kautuka.Monitor.Core\Kautuka.Monitor.Core.csproj" />
+    <ProjectReference Include="..\Kautuka.Monitor\Kautuka.Monitor.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
+      </ItemGroup>
+
+  <ItemGroup Condition="'$(InstallerReleaseTag)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KautukaReleaseTag</_Parameter1>
+      <_Parameter2>$(InstallerReleaseTag)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(InstallerReleaseId)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KautukaReleaseId</_Parameter1>
+      <_Parameter2>$(InstallerReleaseId)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(InstallerReleaseManifestUrl)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KautukaReleaseManifestUrl</_Parameter1>
+      <_Parameter2>$(InstallerReleaseManifestUrl)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!-- Single-exe default UI: embed index instead of requiring wwwroot at runtime. -->
+  <ItemGroup>
+    <EmbeddedResource Include="wwwroot\index.html" LogicalName="Kautuka.Installer.Windows.wwwroot.index.html" />
+  </ItemGroup>
+
+  <Target Name="EmbedManifestPublicKey" BeforeTargets="PrepareForBuild" Condition="'$(InstallerManifestPublicKeyPath)' != ''">
+    <Error
+      Text="'$(InstallerManifestPublicKeyPath)' was not found."
+      Condition="!Exists('$(InstallerManifestPublicKeyPath)')" />
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Copy
+      SourceFiles="$(InstallerManifestPublicKeyPath)"
+      DestinationFiles="$(IntermediateOutputPath)embedded-manifest-public-key.pem"
+      SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)embedded-manifest-public-key.pem" LogicalName="Kautuka.Installer.Windows.manifest-public-key.pem" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyMonitorToInstallerOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <_MonitorExe>$(MSBuildThisFileDirectory)..\Kautuka.Monitor\bin\$(Configuration)\net10.0-windows\Kautuka.Monitor.exe</_MonitorExe>
+    </PropertyGroup>
+    <Copy SourceFiles="$(_MonitorExe)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" Condition="Exists('$(_MonitorExe)')" />
+  </Target>
+
+  <!-- The feed ships one installer executable. Publish native Monitor and embed it so a
+       downloaded installer can stage the tray without a second file. The resource pipeline
+       hook lives in Directory.Build.targets so it runs after the SDK initializes
+       PrepareResourceNamesDependsOn. -->
+  <!-- Photino.Native 4.0.22 is the native package Photino.NET 4.0.16 depends on. -->
+  <Target Name="EmbedPhotinoNative" Condition="'$(DesignTimeBuild)' != 'true' AND '$(RuntimeIdentifier)' == 'win-x64'">
+    <PropertyGroup>
+      <_PhotinoNativeDir>$([System.IO.Path]::Combine('$(NuGetPackageRoot)', 'photino.native', '4.0.22', 'runtimes', 'win-x64', 'native'))\</_PhotinoNativeDir>
+    </PropertyGroup>
+    <Error Text="Photino.Native.dll was not found for embedding at '$(_PhotinoNativeDir)'." Condition="!Exists('$(_PhotinoNativeDir)Photino.Native.dll')" />
+    <Error Text="WebView2Loader.dll was not found for embedding at '$(_PhotinoNativeDir)'." Condition="!Exists('$(_PhotinoNativeDir)WebView2Loader.dll')" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(_PhotinoNativeDir)Photino.Native.dll">
+        <LogicalName>Kautuka.Installer.Windows.Photino.Native.dll</LogicalName>
+        <ManifestResourceName>Kautuka.Installer.Windows.Photino.Native.dll</ManifestResourceName>
+      </EmbeddedResource>
+      <EmbeddedResource Include="$(_PhotinoNativeDir)WebView2Loader.dll">
+        <LogicalName>Kautuka.Installer.Windows.WebView2Loader.dll</LogicalName>
+        <ManifestResourceName>Kautuka.Installer.Windows.WebView2Loader.dll</ManifestResourceName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="EmbedPublishedMonitor" Condition="'$(DesignTimeBuild)' != 'true' AND '$(RuntimeIdentifier)' != ''">
+    <PropertyGroup>
+      <!-- Absolute: a relative PublishDir is resolved against Kautuka.Monitor, not this project. -->
+      <_MonitorEmbedDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\monitor-embed\'))</_MonitorEmbedDir>
+    </PropertyGroup>
+    <MSBuild
+      Projects="$(MSBuildThisFileDirectory)..\Kautuka.Monitor\Kautuka.Monitor.csproj"
+      Targets="Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);TargetFramework=net10.0-windows;PublishDir=$(_MonitorEmbedDir);SelfContained=true;PublishAot=true;EnableWindowsTargeting=true" />
+    <Error Text="Kautuka.Monitor.exe was not published for embedding." Condition="!Exists('$(_MonitorEmbedDir)Kautuka.Monitor.exe')" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(_MonitorEmbedDir)Kautuka.Monitor.exe">
+        <LogicalName>Kautuka.Installer.Windows.Kautuka.Monitor.exe</LogicalName>
+        <ManifestResourceName>Kautuka.Installer.Windows.Kautuka.Monitor.exe</ManifestResourceName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="RemovePublishPdb" AfterTargets="Publish">
+    <ItemGroup>
+      <PublishPdbFiles Include="$(PublishDir)\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(PublishPdbFiles)" />
+    <Delete Files="$(PublishDir)Kautuka.Monitor.runtimeconfig.json" />
+  </Target>
+</Project>

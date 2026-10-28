@@ -1,0 +1,5 @@
+# Local checkout only. Copy this file to client-id.txt and replace the placeholder
+# with your own Google OAuth client id. Register this redirect on that client:
+# http://127.0.0.1:<port>/api/connectors/oauth/callback
+# client-id.txt is not committed. A release build uses auth.kautuka.io and does not read this file.
+not-configured

@@ -1,0 +1,184 @@
+name: Dotnet Quality
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - kautuka_v2
+      - "release/**"
+      - "enhancement/**"
+      - "enhancements/**"
+      - "Feature/**"
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - kautuka_v2
+      - "chore/**"
+      - "release/**"
+      - "enhancement/**"
+      - "enhancements/**"
+      - "Feature/**"
+      - "feature/**"
+
+jobs:
+  quality:
+    name: Format, Build, Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Narad validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Validate tracked hygiene
+        run: node ./scripts/validate-tracked-hygiene.mjs
+
+      - name: Test tracked hygiene rejection paths
+        run: node ./scripts/test-tracked-hygiene.mjs
+
+      - name: Test scheduled release gate
+        run: node ./scripts/test-release-schedule-gate.mjs
+
+      - name: Validate documentation
+        run: node ./scripts/validate-docs.mjs
+
+      - name: Validate Narad
+        run: pnpm narad:check
+
+      - name: Narad dependency audit
+        run: node ./scripts/audit-dependencies.mjs
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore src/Kautuka.slnx
+
+      - name: Verify formatting
+        run: dotnet format src/Kautuka.slnx --verify-no-changes
+
+      - name: Build
+        run: dotnet build src/Kautuka.slnx --no-restore
+
+      - name: Test
+        run: dotnet test --solution src/Kautuka.slnx --no-build
+
+      - name: Narad security and performance gates
+        run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
+
+      - name: Frontend Narad verify
+        run: pnpm --dir src/frontend verify
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir src/frontend/web exec playwright install --with-deps chromium
+
+      - name: Run workflow canvas browser tests
+        run: pnpm --dir src/frontend/web test:e2e
+
+  packaging-smoke:
+    name: Packaging Smoke Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate shell scripts
+        run: |
+          mapfile -t shell_scripts < <(find scripts -maxdepth 1 -type f -name '*.sh' -print | sort)
+          if [[ ${#shell_scripts[@]} -eq 0 ]]; then
+            exit 0
+          fi
+
+          for script in "${shell_scripts[@]}"; do
+            bash -n "$script"
+          done
+
+      - name: Validate PowerShell scripts
+        shell: pwsh
+        run: |
+          $scripts = Get-ChildItem -Path scripts -Filter *.ps1 -File | Sort-Object FullName
+          foreach ($script in $scripts) {
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$null)
+          }
+
+  credentials-published-boundary:
+    name: Credentials Published Boundary (${{ matrix.runtime }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            runtime: linux-x64
+            executable: Kautuka.CredentialsHost
+          - os: windows-latest
+            runtime: win-x64
+            executable: Kautuka.CredentialsHost.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Restore Native AOT boundary
+        run: dotnet restore src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -r ${{ matrix.runtime }}
+      - name: Publish Native AOT boundary
+        run: dotnet publish src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -c Release -r ${{ matrix.runtime }} --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/credentialshost -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+      - name: Run published mTLS, SQLite, and readiness smoke
+        shell: pwsh
+        run: ./scripts/test-published-credential-boundary.ps1 -ExecutablePath "${{ github.workspace }}/publish/credentialshost/${{ matrix.executable }}"
+
+  gateway-native-aot:
+    name: Gateway Native AOT (linux-x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Restore Native AOT Gateway
+        run: dotnet restore src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -r linux-x64
+      - name: Publish Native AOT Gateway
+        run: dotnet publish src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -c Release -r linux-x64 --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/gateway -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+      - name: Assert published Gateway binary
+        run: test -x "${{ github.workspace }}/publish/gateway/Kautuka.Gateway"
+
+  acceptance-contract:
+    name: Playwright Contract
+    runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    defaults:
+      run:
+        working-directory: tests/channel-acceptance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Enable pnpm
+        working-directory: ${{ github.workspace }}
+        run: corepack enable && corepack prepare pnpm@11.5.2 --activate
+      - name: Install Narad spec at repo root
+        # narad-contract.spec.ts resolves @devkrity/narad-spec from repo root
+        # via tests/channel-acceptance/src/narad-conformance.ts. That package
+        # is not an acceptance workspace dependency (allowlist ratchet).
+        working-directory: ${{ github.workspace }}
+        run: pnpm install --frozen-lockfile
+      - name: Install acceptance workspace
+        # Root pnpm-workspace.yaml is only '.' (Narad tooling). Without
+        # --ignore-workspace, pnpm --dir walks up and installs the repo root,
+        # leaving tests/channel-acceptance/node_modules missing.
+        run: pnpm install --frozen-lockfile --ignore-workspace
+      - name: Run contract suite
+        run: pnpm test:contract

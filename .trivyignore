@@ -1,0 +1,11 @@
+# Trivy vulnerability suppressions
+# See: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/#by-vulnerability-ids
+
+# GHSA-wrw7-89jp-8q8g: glib < 0.20.0 (memory safety issue)
+# Status: No upstream fix available as of 2026-04-22.
+# glib 0.18.5 is a Linux-only transitive dependency pulled in by webkit2gtk 2.0.2
+# (the latest published version) via wry and tauri. The entire gtk-rs 0.18 ecosystem
+# (webkit2gtk -> gtk -> glib) moves together and no webkit2gtk release targeting
+# glib 0.20 exists on crates.io yet. Re-evaluate when webkit2gtk >= 3.x is published.
+# Affects: kautuka-control/Cargo.lock, installer/src-tauri/Cargo.lock
+GHSA-wrw7-89jp-8q8g

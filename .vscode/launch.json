@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Kautuka",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "node ${workspaceFolder}/scripts/launch-kautuka.mjs"
+    },
+    {
+      "name": "Launch Gateway",
+      "type": "dotnet",
+      "request": "launch",
+      "projectPath": "${workspaceFolder}/src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj"
+    }
+  ]
+}

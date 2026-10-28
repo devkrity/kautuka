@@ -1,0 +1,42 @@
+diff --git a/dist/index.js b/dist/index.js
+index 11103b622bf3959828564e6b26ab3b9d26229336..2c9a549e9715cd2214791d34d31cfb15a45f0908 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1829,6 +1829,7 @@ function validateAuthoritySemantics(state, event) {
+     case "run.error":
+     case "run.cancelled": {
+       const run = requireRun(state, String(event.runId));
++      if (type === "run.error" && event.code === "gateway_process_lost" && ["finished", "error", "cancelled"].includes(run.state)) break;
+       if (run.state === "paused") {
+         throw new NaradClientError("invalid_lifecycle", "Paused run must resume before terminal.");
+       }
+@@ -1901,8 +1902,11 @@ function validateAuthoritySemantics(state, event) {
+       if (run.state !== "running") {
+         throw new NaradClientError("invalid_lifecycle", "Tool call requires a running run.");
+       }
+-      if (state.tools.has(String(event.toolCallId))) {
+-        throw new NaradClientError("invalid_lifecycle", "Tool call already started.");
++      const existing = state.tools.get(String(event.toolCallId));
++      if (existing && (!existing.open || existing.runId !== String(event.runId) || existing.rootRunId !== String(event.rootRunId)
++        || existing.toolName !== String(event.toolName) || existing.executor !== event.executor
++        || JSON.stringify(existing.args) !== JSON.stringify(event.args))) {
++        throw new NaradClientError("invalid_lifecycle", "Tool call already started with conflicting identity or after completion.");
+       }
+       break;
+     }
+@@ -2799,6 +2803,7 @@ function applyRunStopRequested(state, event) {
+ function applyRunTerminal(state, event, type) {
+   const runId = String(event.runId);
+   const existing = state.runs.get(runId);
++  if (type === "run.error" && event.code === "gateway_process_lost" && existing && ["finished", "error", "cancelled"].includes(existing.state)) return;
+   const terminal = terminalRunState(type);
+   const usage = readRunUsage(event);
+   state.runs = cloneMapWithEntry(state.runs, runId, {
+@@ -2879,6 +2884,7 @@ function applyInterruptResolved(state, event) {
+   });
+ }
+ function applyToolStarted(state, event) {
++  if (state.tools.has(String(event.toolCallId))) return;
+   state.tools = cloneMapWithEntry(state.tools, String(event.toolCallId), {
+     toolCallId: String(event.toolCallId),
+     runId: String(event.runId),

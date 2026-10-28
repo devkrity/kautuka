@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ApplicationIcon>..\..\..\frontend\web\public\assets\icons\kautuka.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- Photino requires native libs — must not strip them -->
+    <StripSymbols>false</StripSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Photino.NET" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\..\frontend\web\public\assets\app-icon.png"
+             Link="assets\kautuka-mark.png"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Kautuka.Control.Core\Kautuka.Control.Core.csproj" />
+    <ProjectReference Include="..\..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
+  </ItemGroup>
+</Project>

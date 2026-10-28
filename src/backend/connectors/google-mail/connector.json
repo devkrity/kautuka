@@ -1,0 +1,31 @@
+{
+  "id": "kautuka-google-mail",
+  "name": "Google mail",
+  "description": "Read, download attachments, draft, and send mail for the signed-in Gmail or Google Workspace mailbox.",
+  "auth": {
+    "grant": "authorization_code",
+    "authorizeUrl": "https://accounts.google.com/o/oauth2/v2/auth",
+    "tokenUrl": "https://oauth2.googleapis.com/token",
+    "scopes": "https://www.googleapis.com/auth/gmail.modify",
+    "redirectUri": "https://auth.kautuka.io/callback",
+    "startUrl": "https://auth.kautuka.io/start",
+    "clientIdFile": "client-id.txt",
+    "clientSecretFile": "client-secret.txt",
+    "dpop": true,
+    "dpopKeyCredentialKey": "KAUTUKA_GOOGLE_MAIL_DPOP_KEY",
+    "dpopNonceCredentialKey": "KAUTUKA_GOOGLE_MAIL_DPOP_NONCE",
+    "prompt": "consent",
+    "accessType": "offline",
+    "refreshCredentialKey": "KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN",
+    "accessTokenEnvironmentKey": "KAUTUKA_GOOGLE_MAIL_ACCESS_TOKEN",
+    "revokeUrl": "https://myaccount.google.com/permissions",
+    "signInLabel": "Sign in with Google",
+    "notConfiguredMessage": "Google mail sign-in is not configured on this appliance yet. The OAuth client has not been installed with this connector."
+  },
+  "askFirst": ["gmail_send"],
+  "tools": ["gmail_list", "gmail_read", "gmail_read_attachment", "gmail_create_draft", "gmail_update_draft", "gmail_send"],
+  "server": {
+    "type": "binary",
+    "entryPoint": "kautuka-google-mail"
+  }
+}

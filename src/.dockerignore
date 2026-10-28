@@ -1,0 +1,8 @@
+# Exclude non-source artefacts from the Podman build context (src/).
+# Keeps the context small for multi-stage .NET service builds.
+**/bin/
+**/obj/
+**/TestResults/
+logs/
+frontend/
+tests/

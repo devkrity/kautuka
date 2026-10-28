@@ -1,0 +1,21 @@
+{
+  "name": "@kautuka/channel-acceptance",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "test": "playwright test tests/cross-surface.spec.ts",
+    "test:contract": "playwright test tests/evidence.spec.ts tests/operational-evidence.spec.ts tests/narad-contract.spec.ts tests/service-log-findings.spec.ts tests/simulator-evidence.spec.ts tests/scenario-contract.spec.ts tests/checklist-classification.spec.ts tests/resilience-contract.spec.ts tests/partition-matrix.spec.ts tests/concurrency-matrix.spec.ts tests/failure-triage.spec.ts tests/soak-light.spec.ts tests/auditability-contract.spec.ts tests/cleanup-and-ui-actions.spec.ts tests/thread-creation.spec.ts tests/acceptance-isolation.spec.ts tests/fresh-onboarding-auth.spec.ts tests/owned-cleanup.spec.ts tests/reuse-lifecycle-ownership.spec.ts tests/skill-fixture-contract.spec.ts tests/owned-stack-contract.spec.ts",
+    "test:resilience": "playwright test tests/resilience-contract.spec.ts tests/lifecycle-resilience.spec.ts tests/resilience-executor-contract.spec.ts tests/resilience-cleanup.spec.ts tests/partition-matrix.spec.ts tests/concurrency-matrix.spec.ts tests/soak-light.spec.ts",
+    "test:resilience:owned": "playwright test tests/resilience-owned.spec.ts tests/resilience-approval-restart.spec.ts tests/resilience-nested-restart.spec.ts tests/resilience-dependency.spec.ts",
+    "test:headed": "playwright test --headed",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.15.0",
+    "fflate": "0.8.3",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMiIgaGVpZ2h0PSIzMiIgdmlld0JveD0iMCAwIDQwIDQwIj48cmVjdCB4PSIxLjI1IiB5PSIxLjI1IiB3aWR0aD0iMzcuNSIgaGVpZ2h0PSIzNy41IiByeD0iMTAiIGZpbGw9IiNFMzQyMzQiIHN0cm9rZT0iI0UzQTAxOCIgc3Ryb2tlLXdpZHRoPSIyLjUiLz48cGF0aCB0cmFuc2Zvcm09InRyYW5zbGF0ZSgtMS41IC0uNSkiIGQ9Ik0xMyA4aDR2MTRsOC04aDVsLTggOCA4IDEwaC01bC02LTctMiAydjVoLTR6IiBmaWxsPSIjZmZmIi8+PC9zdmc+">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kautuka API Docs</title>
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: "Segoe UI", sans-serif;
+            background: #f5f7fb;
+        }
+
+        body {
+            margin: 0;
+            background:
+                radial-gradient(circle at top left, #d9ecff 0, transparent 28%),
+                linear-gradient(180deg, #f8fbff 0%, #edf3fb 100%);
+        }
+
+        header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #d7dfeb;
+            background: rgba(255, 255, 255, 0.88);
+            backdrop-filter: blur(12px);
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #10233d;
+        }
+
+        header p {
+            margin: 0.25rem 0 0;
+            font-size: 0.95rem;
+            color: #4b607c;
+        }
+
+        main {
+            min-height: calc(100vh - 76px);
+        }
+
+        rapi-doc {
+            --bg: transparent;
+            --fg: #10233d;
+            --nav-bg-color: #10233d;
+            --nav-hover-bg-color: #17375f;
+            --nav-text-color: #f5f7fb;
+            --primary-color: #0059b3;
+            --primary-color-invert: #ffffff;
+            --header-bg-color: #ffffff;
+            --header-color: #10233d;
+            --schema-bg-color: #eef4fb;
+            --schema-radius: 12px;
+        }
+    </style>
+    <script type="module" src="/docs/rapidoc-min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>Kautuka API Documentation</h1>
+        <p>Static production docs rendered from the live OpenAPI schema at /openapi/v1.json.</p>
+    </header>
+    <main>
+        <rapi-doc
+            spec-url="/openapi/v1.json"
+            theme="light"
+            render-style="read"
+            show-header="false"
+            allow-authentication="true"
+            allow-server-selection="false"
+            persist-auth="true"
+            regular-font="Segoe UI"
+            mono-font="Consolas">
+        </rapi-doc>
+    </main>
+</body>
+</html>

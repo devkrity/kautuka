@@ -1,0 +1,1 @@
+await SimulatorBootstrap.RunAsync(args);

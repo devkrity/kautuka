@@ -1,0 +1,37 @@
+{
+  "name": "kautuka",
+  "license": "Apache-2.0",
+  "version": "0.1.20",
+  "private": true,
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=26.3 <27",
+    "pnpm": ">=11.5.2 <12"
+  },
+  "description": "Kautuka - AI Agent Orchestration Platform",
+  "scripts": {
+    "postinstall": "pnpm --dir src/frontend install",
+    "deadcode": "bash ./scripts/dead-code.sh",
+    "deadcode:backend": "bash ./scripts/dead-code.sh --backend-only",
+    "deadcode:frontend": "bash ./scripts/dead-code.sh --frontend-only",
+    "docs:check": "node ./scripts/validate-docs.mjs && node ./scripts/validate-narad.mjs",
+    "narad:check": "node ./scripts/validate-narad.mjs",
+    "narad:audit": "node ./scripts/audit-dependencies.mjs",
+    "narad:verify": "pnpm narad:check && pnpm narad:audit && pnpm --dir src/frontend verify",
+    "release:local": "bash ./scripts/local-release.sh",
+    "release:smoke:build": "bash ./scripts/build-release-smoke.sh",
+    "release:smoke:serve": "node ./scripts/serve-release-smoke.mjs",
+    "launch": "node ./scripts/launch-kautuka.mjs",
+    "runtime:lineage:lint": "node ./scripts/validate-runtime-lineage.mjs",
+    "frontend:ratchet:no-legacy-runtime": "node ./scripts/validate-no-legacy-frontend-packages.mjs",
+    "acceptance:contract": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:contract",
+    "acceptance:channels": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test",
+    "acceptance:resilience": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:resilience",
+    "acceptance:resilience:owned": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:resilience:owned"
+  },
+  "devDependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "@devkrity/narad-spec": "0.1.0"
+  }
+}

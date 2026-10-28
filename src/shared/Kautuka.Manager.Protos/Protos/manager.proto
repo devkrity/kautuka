@@ -1,0 +1,353 @@
+syntax = "proto3";
+
+option csharp_namespace = "Kautuka.Manager.Protos";
+
+package kautuka.manager.v1;
+
+service ManagerService {
+  rpc Ping                (WorkspacePingRequest)     returns (WorkspaceBoolResponse);
+  rpc GetHostStatus       (WorkspacePingRequest)     returns (ManagerStatusResponse);
+  rpc ListRuntimeContainers (WorkspacePingRequest)   returns (ManagerRuntimeContainersResponse);
+  rpc GetPkgsProxyCacheStats (WorkspacePingRequest)  returns (ManagerPkgsProxyCacheStatsResponse);
+  rpc DescribeWorkspace   (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
+  rpc RebuildWorkspace    (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
+  rpc DeleteWorkspace     (WorkspaceResolvedRequest) returns (WorkspaceDeleteResponse);
+  rpc SpawnSandbox        (WorkspaceResolvedRequest) returns (WorkspaceSandboxResponse);
+  rpc InspectSandbox      (WorkspaceResolvedRequest) returns (WorkspaceSandboxResponse);
+  rpc Exec                (WorkspaceExecRequest)     returns (WorkspaceExecutionResponse);
+  rpc StopSandbox         (WorkspaceResolvedRequest) returns (WorkspaceBoolResponse);
+  rpc PrimeWorkspace      (WorkspaceResolvedRequest) returns (WorkspaceBoolResponse);
+  rpc UpdateDesiredState  (WorkspaceDesiredStateUpdate) returns (DesiredStateUpdateResponse);
+  rpc ProbeMcpContainer   (WorkspaceMcpContainerProbeRequest) returns (WorkspaceMcpProbeResponse);
+  rpc ListMcpContainerTools (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerListToolsResponse);
+  rpc CallMcpContainerTool  (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerCallResponse);
+}
+
+message WorkspacePingRequest {
+  string message = 1;
+}
+
+message WorkspaceScopeRequest {
+  string scope_type = 1;
+  string scope_id   = 2;
+  string user_id    = 3;
+}
+
+message WorkspaceResolvedRequest {
+  WorkspaceContextMessage context = 1;
+}
+
+message WorkspaceExecRequest {
+  WorkspaceContextMessage context = 1;
+  string                  command = 2;
+  int32                   timeout_seconds  = 3;
+  map<string, string>     environment = 4;
+}
+
+message WorkspaceDesiredStateUpdate {
+  ManagerRuntimeSettingsMessage runtime = 1;
+  repeated WorkspaceContextMessage desired_workspaces = 2;
+  repeated WorkspaceMcpContainerConnectorMessage container_connectors = 3;
+  reserved 4;
+  reserved "desired_sidecars";
+  int64 desired_state_version = 5;
+  WorkspaceDesiredStateSyncReason sync_reason = 6;
+  repeated WorkspaceSandboxConnectorBindingsMessage sandbox_connector_bindings = 7;
+  string publisher_epoch = 8;
+  string request_id = 9;
+  int64 expected_accepted_version = 10;
+}
+
+enum DesiredStateUpdateOutcome {
+  DESIRED_STATE_UPDATE_OUTCOME_UNSPECIFIED = 0;
+  DESIRED_STATE_UPDATE_OUTCOME_APPLIED = 1;
+  DESIRED_STATE_UPDATE_OUTCOME_REPLAYED = 2;
+  DESIRED_STATE_UPDATE_OUTCOME_STALE = 3;
+  DESIRED_STATE_UPDATE_OUTCOME_CONFLICT = 4;
+  DESIRED_STATE_UPDATE_OUTCOME_FAILED = 5;
+}
+
+message DesiredStateUpdateResponse {
+  DesiredStateUpdateOutcome outcome = 1;
+  int64 accepted_version = 2;
+  bool reconciliation_required = 3;
+  string request_id = 4;
+  string message = 5;
+}
+
+message WorkspaceSandboxConnectorBindingsMessage {
+  string scope_type = 1;
+  string scope_id = 2;
+  repeated string connector_ids = 3;
+}
+
+enum WorkspaceDesiredStateSyncReason {
+  WORKSPACE_DESIRED_STATE_SYNC_REASON_UNSPECIFIED = 0;
+  WORKSPACE_DESIRED_STATE_SYNC_REASON_BOOTSTRAP = 1;
+  WORKSPACE_DESIRED_STATE_SYNC_REASON_CHANGE = 2;
+  WORKSPACE_DESIRED_STATE_SYNC_REASON_REHYDRATE_RESPONSE = 3;
+}
+
+enum WorkspaceOperationOutcome {
+  WORKSPACE_OPERATION_OUTCOME_UNSPECIFIED = 0;
+  WORKSPACE_OPERATION_OUTCOME_SUCCEEDED = 1;
+  WORKSPACE_OPERATION_OUTCOME_REJECTED = 2;
+  WORKSPACE_OPERATION_OUTCOME_FAILED = 3;
+  WORKSPACE_OPERATION_OUTCOME_NOT_FOUND = 4;
+}
+
+message WorkspaceBoolResponse {
+  bool   ok      = 1;
+  string message = 2;
+  WorkspaceOperationOutcome outcome = 3;
+}
+
+message ManagerStatusResponse {
+  bool   ok             = 1;
+  bool   core_ready     = 2;
+  bool   agents_pending = 3;
+  bool   agents_ready   = 4;
+  string lifecycle      = 5;
+  string message        = 6;
+  int32  active_exec_count = 7;
+  int64  accepted_version = 8;
+  int64  reconciled_version = 9;
+  int32  reconcile_attempt_count = 10;
+  string last_failure_class = 11;
+  string last_reconciled_at_utc = 12;
+  int32 degraded_count = 13;
+  int32 failed_count = 14;
+  repeated string drift_actions = 15;
+}
+
+message ManagerRuntimeContainerMessage {
+  string name = 1;
+  string image = 2;
+  string status = 3;
+  string role = 4;
+}
+
+message ManagerRuntimeContainersResponse {
+  bool ok = 1;
+  string message = 2;
+  repeated ManagerRuntimeContainerMessage containers = 3;
+}
+
+message ManagerPkgsProxyPopularPackageMessage {
+  string ecosystem = 1;
+  string name = 2;
+  int64 hits = 3;
+  int64 size_bytes = 4;
+}
+
+message ManagerPkgsProxyRecentPackageMessage {
+  string ecosystem = 1;
+  string name = 2;
+  string version = 3;
+  string cached_at = 4;
+  int64 size_bytes = 5;
+}
+
+message ManagerPkgsProxyCacheStatsResponse {
+  bool ok = 1;
+  string message = 2;
+  int64 packages = 3;
+  int64 versions = 4;
+  int64 artifacts = 5;
+  int64 total_size_bytes = 6;
+  int64 total_hits = 7;
+  map<string, int64> ecosystems = 8;
+  repeated ManagerPkgsProxyPopularPackageMessage popular = 9;
+  repeated ManagerPkgsProxyRecentPackageMessage recent = 10;
+}
+
+message UpdateReleaseReferenceMessage {
+  string release_id = 1;
+  string version = 2;
+  string channel = 3;
+  string release_fingerprint = 4;
+  string source_url = 5;
+  string published_at_utc = 6;
+  string tag = 7;
+}
+
+message UpdateStatusResponse {
+  bool ok = 1;
+  string message = 2;
+  string workflow_state = 3;
+  UpdateReleaseReferenceMessage current_release = 4;
+  UpdateReleaseReferenceMessage available_release = 5;
+  reserved 6;
+  reserved "staged_release";
+  UpdateReleaseReferenceMessage last_known_good_release = 7;
+  reserved 8;
+  reserved "deferred";
+  string last_discovery_attempt_utc = 9;
+  string last_discovery_success_utc = 10;
+  string manager_version = 11;
+  bool host_ready = 12;
+  int32 active_exec_count = 13;
+  string last_error = 14;
+}
+
+message WorkspaceContextResponse {
+  bool                   ok      = 1;
+  string                 message = 2;
+  WorkspaceContextMessage context = 3;
+  WorkspaceOperationOutcome outcome = 4;
+}
+
+message WorkspaceDeleteResponse {
+  bool   ok      = 1;
+  bool   deleted = 2;
+  string message = 3;
+  WorkspaceOperationOutcome outcome = 4;
+}
+
+message WorkspaceSandboxResponse {
+  bool                    ok      = 1;
+  string                  message = 2;
+  WorkspaceSandboxMessage session = 3;
+  WorkspaceOperationOutcome outcome = 4;
+}
+
+message WorkspaceExecutionResponse {
+  bool                      ok      = 1;
+  string                    message = 2;
+  WorkspaceExecutionMessage result  = 3;
+  WorkspaceOperationOutcome outcome = 4;
+}
+
+message WorkspaceMcpProbeResponse {
+  bool                          ok         = 1;
+  string                        message    = 2;
+  int32                         tool_count = 3;
+  repeated WorkspaceMcpToolMessage tools   = 4;
+  WorkspaceOperationOutcome outcome = 5;
+}
+
+message WorkspaceContextMessage {
+  string              scope_type                   = 1;
+  string              scope_id                     = 2;
+  string              user_id                      = 3;
+  string              host_workspace_path          = 4;
+  string              container_workspace_path     = 5;
+  string              image                        = 9;
+  int32               default_timeout_seconds      = 12;
+  repeated string     base_capabilities            = 13;
+  repeated WorkspaceKvPair container_environment   = 14;
+}
+
+message WorkspaceSandboxMessage {
+  string container_name = 1;
+  bool   running        = 2;
+  string scope_type     = 3;
+  string scope_id       = 4;
+  string user_id        = 5;
+}
+
+message WorkspaceExecutionMessage {
+  string status         = 1;
+  int32  exit_code      = 2;
+  string std_out        = 3;
+  string std_err        = 4;
+  string container_name = 5;
+}
+
+message WorkspaceKvPair {
+  string key   = 1;
+  string value = 2;
+}
+
+message WorkspaceMcpToolMessage {
+  string name        = 1;
+  string description = 2;
+  string json_schema = 3;
+}
+
+message ManagerRuntimeSettingsMessage {
+  string workspace_base_root = 1;
+  string image = 5;
+  int32 default_cpu_limit = 6;
+  string default_memory_limit = 7;
+  int32 default_timeout_seconds = 8;
+  string logs_endpoint = 9;
+  string otlp_protocol = 10;
+  string otlp_headers = 11;
+  string traces_endpoint = 13;
+  string metrics_endpoint = 14;
+}
+
+// Container connector messages for MCP containerized connectors
+enum WorkspaceMcpConnectorUnavailabilityReason {
+  UNAVAILABILITY_REASON_UNSPECIFIED = 0;
+  STARTUP_TIMEOUT = 1;
+  INITIALIZE_FAILED = 2;
+  HEALTH_CHECK_FAILED = 3;
+}
+
+message WorkspaceMcpContainerConnectorMessage {
+  string connector_id = 1;
+  string image = 2;
+  string command = 3;
+  repeated string args = 4;
+  repeated WorkspaceKvPair environment = 5;
+  int32 readiness_timeout_seconds = 6;
+  int32 jit_cooldown_seconds = 7;
+  bool enabled = 8;
+  string bundle_path = 9;
+  string server_type = 10;
+  bool is_internal_system_connector = 11;
+  string mcp_protocol_version = 12;
+}
+
+message WorkspaceMcpContainerProbeRequest {
+  ManagerRuntimeSettingsMessage runtime = 1;
+  string connector_id = 2;
+  string image = 3;
+  string command = 4;
+  repeated string args = 5;
+  repeated WorkspaceKvPair environment = 6;
+  int32 timeout_seconds = 7;
+  string bundle_path = 8;
+  string server_type = 9;
+  string mcp_protocol_version = 10;
+}
+
+message WorkspaceMcpContainerCallRequest {
+  ManagerRuntimeSettingsMessage runtime = 1;
+  string connector_id = 2;
+  repeated WorkspaceKvPair environment = 3;
+  string tool_name = 4;
+  string tool_input_json = 5;
+  int32 timeout_seconds = 6;
+  bool allow_internal_system_connector = 7;
+  WorkspaceContextMessage workspace_context = 8;
+  WorkspaceMcpExecutionContext execution_context = 9;
+  // Host directory for view files. The connector sandbox is not given this path.
+  string host_artifact_directory = 10;
+}
+
+enum WorkspaceMcpExecutionContext {
+  UNSPECIFIED = 0;
+  ISOLATED = 1;
+  ISOLATED_WITH_AGENT_FILES = 2;
+  AGENT_SANDBOX = 3;
+}
+
+message WorkspaceMcpContainerListToolsResponse {
+  bool ok = 1;
+  string message = 2;
+  int32 tool_count = 3;
+  repeated WorkspaceMcpToolMessage tools = 4;
+  WorkspaceMcpConnectorUnavailabilityReason unavailability_reason = 5;
+  WorkspaceOperationOutcome outcome = 6;
+}
+
+message WorkspaceMcpContainerCallResponse {
+  bool ok = 1;
+  string message = 2;
+  string result_json = 3;
+  WorkspaceMcpConnectorUnavailabilityReason unavailability_reason = 4;
+  WorkspaceOperationOutcome outcome = 5;
+}

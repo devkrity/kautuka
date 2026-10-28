@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "policy": "Every externally sourced component copied into a Kautuka release must be recorded here or discovered in the generated release SBOM. Changes to runtime image digests or bundled native assets require an evidence update.",
+  "components": [
+    {
+      "id": "sqlite-vec",
+      "version": "0.1.9",
+      "licenseExpression": "MIT OR Apache-2.0",
+      "source": "https://github.com/asg017/sqlite-vec/tree/v0.1.9",
+      "sourceCommit": "e9f598abfa0c06b328d8fe5da9c3760cce74be10",
+      "licenseFiles": ["LICENSE-MIT", "LICENSE-APACHE"],
+      "artifacts": {
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/linux-x64/vec0.so": "5923730861b86c707cca5602b5f91092f9e52a46706dbc6e269fd4bb9c4498e8",
+        "src/backend/Kautuka.Gateway/NativeAssets/sqlite-vec/win-x64/vec0.dll": "fcf98662a7ad9dce394b96a88f91032047823831b951c76636787c312a6476e6"
+      }
+    },
+    {
+      "id": "openobserve",
+      "version": "0.92.2",
+      "licenseExpression": "AGPL-3.0",
+      "image": "public.ecr.aws/zinclabs/openobserve@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "source": "https://github.com/openobserve/openobserve/tree/v0.92.2",
+      "sourceCommit": "4d68fe837ddfbb7d2e6ea2e16382c936488cb38a",
+      "licenseFiles": ["LICENSE"]
+    },
+    {
+      "id": "git-pkgs-proxy",
+      "version": "0.8.1",
+      "licenseExpression": "GPL-3.0-or-later",
+      "image": "ghcr.io/git-pkgs/proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
+      "source": "https://github.com/git-pkgs/proxy/tree/v0.8.1",
+      "sourceCommit": "a45befd0674981d504ae542afad6c9db110e903d",
+      "licenseFiles": ["LICENSE"]
+    },
+    {
+      "id": "fontsource-ibm-plex-mono",
+      "version": "5.3.0",
+      "licenseExpression": "OFL-1.1",
+      "source": "https://www.npmjs.com/package/@fontsource/ibm-plex-mono/v/5.3.0",
+      "licenseFiles": ["LICENSE-OFL-1.1-IBM-Plex-Mono.txt"]
+    },
+    {
+      "id": "fontsource-source-sans-3",
+      "version": "5.3.0",
+      "licenseExpression": "OFL-1.1",
+      "source": "https://www.npmjs.com/package/@fontsource/source-sans-3/v/5.3.0",
+      "licenseFiles": ["LICENSE-OFL-1.1-Source-Sans-3.txt"]
+    },
+    {
+      "id": "elkjs",
+      "version": "0.12.0",
+      "licenseExpression": "EPL-2.0 OR GPL-3.0-or-later",
+      "source": "https://github.com/kieler/elkjs/tree/0.12.0",
+      "sourceCommit": "ff5771d7165445c42c408bb8a090c8035272218c",
+      "npmSpecifier": "^0.12.0",
+      "npmIntegrity": "sha512-YZcKynxVxYoKIOEpywEPwCFdg+BTbxQRNf3pbwdDCvc8O3kQD8bmIwSxKU1eOTVc4Xo+VG9Te+575mlfvOrhEQ==",
+      "licenseFiles": ["LICENSE-EPL-2.0-elkjs.md"],
+      "artifacts": {
+        "compliance/licenses/LICENSE-EPL-2.0-elkjs.md": "637e81f4a1b6b4079535c499fca05e238cf7605c1ff5b76d60d7da7ce96700c9"
+      },
+      "notes": "This package is included in the production frontend dependency graph. The exact upstream source snapshot is published under sources/ because EPL-2.0 section 3.1(a) requires source availability and reasonable retrieval directions when distributing the program."
+    },
+    {
+      "id": "elkjs-mermaid",
+      "version": "0.9.3",
+      "licenseExpression": "EPL-2.0",
+      "source": "https://github.com/kieler/elkjs/tree/0.9.3",
+      "sourceCommit": "a8304cf79fde75bc2ab1a89d28320f53f8637436",
+      "npmIntegrity": "sha512-f/ZeWvW/BCXbhGEf1Ujp29EASo/lk1FDnETgNKwJrsVvGZhUWCZyg3xLJjAsxfOmt8KjswHmI5EwCQcPMpOYhQ==",
+      "licenseFiles": ["LICENSE-EPL-2.0-elkjs-0.9.3.md"],
+      "artifacts": {
+        "compliance/licenses/LICENSE-EPL-2.0-elkjs-0.9.3.md": "89591d4578fb1ebd91501312a3d25f021bd865a2e436641c1cf7b1bc7e3c1617"
+      },
+      "notes": "This version is a transitive production dependency of Mermaid and is included in the frontend graph. The release stages its version-specific upstream source archive with this EPL-2.0 notice."
+    },
+    {
+      "id": "photino-native",
+      "version": "4.0.22",
+      "licenseExpression": "Apache-2.0",
+      "source": "https://github.com/tryphotino/photino.Native/tree/v4.0.22",
+      "sourceCommit": "3ba4b937d6337b5c58344445db08a5a9a63f07c8",
+      "licenseFiles": ["LICENSE-APACHE-Photino-Native.txt"],
+      "embeddedFiles": ["Photino.Native.dll", "WebView2Loader.dll"],
+      "notes": "The Windows installer embeds the loader DLL from this package. The WebView2 Runtime is not bundled; users rely on the installed Windows runtime."
+    }
+  ]
+}

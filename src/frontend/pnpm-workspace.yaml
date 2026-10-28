@@ -1,0 +1,63 @@
+packages:
+  - 'web'
+
+allowBuilds:
+  '@scarf/scarf': false
+  esbuild: true
+  protobufjs: true
+  '@devkrity/narad': true
+  '@devkrity/narad-react': true
+
+overrides:
+  undici: ^8.12.2
+  uuid: ^14.0.0
+  nanoid: ^3.3.18
+  follow-redirects: ^1.16.1
+  dompurify: ^3.4.17
+  # minimatch 10.2.6 allows ^5.0.8. 5.0.9 is GHSA-6j4f-fj2g-mc7p and GHSA-qhr7-859c-m2p7.
+  brace-expansion@>=5.0.0 <5.0.12: 5.0.12
+  # lodash-es <=4.17.23 is GHSA-r5fr-rjxr-66jc. 4.18.0 is the fix.
+  lodash-es@>=4.0.0 <4.18.0: 4.18.1
+  # source-map-js <=1.2.1 is GHSA-68fv-2mgg-jv7q. 1.2.2 is the fix.
+  source-map-js@>=1.0.0 <1.2.2: 1.2.2
+
+minimumReleaseAgeExclude:
+  - '@radix-ui/number@1.1.2'
+  - '@radix-ui/primitive@1.1.4'
+  - '@radix-ui/react-arrow@1.1.9'
+  - '@radix-ui/react-collection@1.1.9'
+  - '@radix-ui/react-compose-refs@1.1.3'
+  - '@radix-ui/react-context@1.1.4'
+  - '@radix-ui/react-dialog@1.1.16'
+  - '@radix-ui/react-direction@1.1.2'
+  - '@radix-ui/react-dismissable-layer@1.1.12'
+  - '@radix-ui/react-dropdown-menu@2.1.17'
+  - '@radix-ui/react-focus-guards@1.1.4'
+  - '@radix-ui/react-focus-scope@1.1.9'
+  - '@radix-ui/react-id@1.1.2'
+  - '@radix-ui/react-menu@2.1.17'
+  - '@radix-ui/react-popper@1.3.0'
+  - '@radix-ui/react-portal@1.1.11'
+  - '@radix-ui/react-presence@1.1.6'
+  - '@radix-ui/react-primitive@2.1.5'
+  - '@radix-ui/react-roving-focus@1.1.12'
+  - '@radix-ui/react-scroll-area@1.2.11'
+  - '@radix-ui/react-separator@1.1.9'
+  - '@radix-ui/react-slot@1.2.5'
+  - '@radix-ui/react-tabs@1.1.14'
+  - '@radix-ui/react-tooltip@1.2.9'
+  - '@radix-ui/react-use-callback-ref@1.1.2'
+  - '@radix-ui/react-use-controllable-state@1.2.3'
+  - '@radix-ui/react-use-effect-event@0.0.3'
+  - '@radix-ui/react-use-escape-keydown@1.1.2'
+  - '@radix-ui/react-use-layout-effect@1.1.2'
+  - '@radix-ui/react-use-rect@1.1.2'
+  - '@radix-ui/react-use-size@1.1.2'
+  - '@radix-ui/react-visually-hidden@1.2.5'
+  - '@radix-ui/rect@1.1.2'
+  - '@types/react@19.2.17'
+  - '@devkrity/narad-react@0.1.0'
+  - '@devkrity/narad@0.1.0'
+
+patchedDependencies:
+  '@devkrity/narad@0.1.0': patches/@devkrity__narad@0.1.0.patch

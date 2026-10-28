@@ -1,0 +1,33 @@
+{
+  "manifest_version": "0.4",
+  "name": "kautuka-google-mail",
+  "display_name": "Google Mail",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Read, filter by received time, draft, and send Gmail or Google Workspace mail. Sign in on the Connectors page. Sending starts as Ask me first.",
+  "author": {
+    "name": "Kautuka"
+  },
+  "homepage": "https://github.com/devkrity/kautuka",
+  "documentation": "https://github.com/devkrity/kautuka/tree/main/src/backend/connectors/google-mail",
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"]
+  },
+  "user_config": {
+    "KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN": {
+      "type": "string",
+      "title": "Google sign-in",
+      "description": "Stored by Sign in with Google. Owners do not paste this.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "kautuka-google-mail",
+    "mcp_config": {
+      "command": "${__dirname}/kautuka-google-mail",
+      "args": []
+    }
+  }
+}

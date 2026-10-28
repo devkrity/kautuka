@@ -1,0 +1,570 @@
+name: Release Build Platform Assets
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+      release_version:
+        required: true
+        type: string
+      manifest_version:
+        required: true
+        type: string
+      release_tag:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      dry_run:
+        required: true
+        type: string
+      catalog_manifest_url:
+        required: true
+        type: string
+      updates_base_url:
+        required: true
+        type: string
+      wsl_rootfs_asset_name:
+        required: true
+        type: string
+      kautuka_base_image:
+        description: ghcr.io/devkrity/kautuka-base digest built from Fedora 44 for this release.
+        required: true
+        type: string
+jobs:
+  build-linux-release-assets:
+    name: Build Linux Release Assets
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.channel }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Pin the released sandbox image
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: python3 scripts/pin-released-sandbox-image.py src/backend/Kautuka.Manager/runtime-images.json "$KAUTUKA_BASE_IMAGE"
+
+      - name: Normalize artifact scope
+        id: scope
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install frozen frontend dependency graph for release notices
+        run: corepack enable && corepack prepare pnpm@11.5.2 --activate && pnpm --dir src/frontend install --frozen-lockfile
+
+      - name: Write manifest signing key
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+        run: |
+          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
+          chmod 600 manifest-signing-key.pem
+          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          chmod 644 manifest-signing-public.pem
+
+      - name: Build Linux platform, WSL rootfs, and descriptor assets
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          MANIFEST_VERSION: ${{ inputs.manifest_version }}
+          PRODUCT_VERSION: ${{ inputs.release_version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
+          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+        run: |
+          set -euo pipefail
+          updates_base_url="${UPDATES_BASE_URL%/}"
+          artifact_base_url="${updates_base_url}/releases/download/${RELEASE_TAG}"
+          channel_manifest_url="https://raw.githubusercontent.com/devkrity/kautuka-release-feed-${CHANNEL}/main/manifest"
+
+          bash scripts/build-release-assets.sh \
+            --output-root publish/release-assets \
+            --private-key manifest-signing-key.pem \
+            --manifest-public-key manifest-signing-public.pem \
+            --release-id "$RELEASE_TAG" \
+            --release-tag "$RELEASE_TAG" \
+            --version "$MANIFEST_VERSION" \
+            --product-version "$PRODUCT_VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --channel "$CHANNEL" \
+            --manifest-url "$channel_manifest_url" \
+            --preview-manifest-url "${updates_base_url}/manifest/preview" \
+            --stable-manifest-url "${updates_base_url}/manifest/stable" \
+            --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
+            --artifact-base-url "$artifact_base_url"
+
+          # build-release-assets.sh keys its output directory on the manifest version.
+          release_dir="publish/release-assets/$MANIFEST_VERSION"
+          if [[ ! -d "$release_dir" ]]; then
+            echo "error: expected release directory not found: $release_dir" >&2
+            ls -la publish/release-assets >&2 || true
+            exit 1
+          fi
+
+          printf '## Release Artifact Sizes\n\n' >> "$GITHUB_STEP_SUMMARY"
+          for artifact in kautuka-linux-amd64.tar.gz '${{ inputs.wsl_rootfs_asset_name }}' kautuka-platform-release.json kautuka-platform-release.sig; do
+            printf -- '- %s: `%s` (%s bytes)\n' \
+              "$artifact" \
+              "$(numfmt --to=iec-i --suffix=B "$(stat -c %s "$release_dir/$artifact")")" \
+              "$(stat -c %s "$release_dir/$artifact")" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+
+      - name: Verify release identity, signature, and artifact checksums
+        env:
+          RELEASE_DIR: publish/release-assets/${{ inputs.manifest_version }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          node scripts/verify-release-artifacts.mjs \
+            --directory "$RELEASE_DIR" \
+            --version "$RELEASE_VERSION" \
+            --channel "$RELEASE_CHANNEL" \
+            --source-sha "$SOURCE_SHA" \
+            --public-key manifest-signing-public.pem \
+            --platform-archive "$RELEASE_DIR/kautuka-linux-amd64.tar.gz"
+
+      - name: Generate release third-party notices and inventory
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: |
+          node scripts/generate-third-party-compliance.mjs \
+            --output-dir "publish/release-assets/${{ inputs.manifest_version }}/compliance" \
+            --release-tag "$RELEASE_TAG" \
+            --base-image "$KAUTUKA_BASE_IMAGE"
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-platform-linux-x64-${{ steps.scope.outputs.artifact_scope }}
+          path: publish/release-assets/${{ inputs.manifest_version }}/kautuka-linux-amd64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+      - name: Upload prewarmed WSL rootfs artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-wsl-rootfs-${{ steps.scope.outputs.artifact_scope }}
+          path: publish/release-assets/${{ inputs.manifest_version }}/${{ inputs.wsl_rootfs_asset_name }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+      - name: Upload platform release descriptor
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-platform-release-${{ steps.scope.outputs.artifact_scope }}
+          path: |
+            publish/release-assets/${{ inputs.manifest_version }}/kautuka-platform-release.json
+            publish/release-assets/${{ inputs.manifest_version }}/kautuka-platform-release.sig
+            publish/release-assets/${{ inputs.manifest_version }}/compliance/**
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+      - name: Stage catalog artifacts and signed catalog manifest
+        env:
+          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
+        run: |
+          set -euo pipefail
+
+          # Convention shared with scripts/local-release.sh: the catalog manifest is
+          # served at <catalog-base>/manifest.
+          if [[ "$CATALOG_MANIFEST_URL" != */manifest ]]; then
+            echo "error: catalog manifest url must end with /manifest: $CATALOG_MANIFEST_URL" >&2
+            exit 1
+          fi
+          catalog_base_url="${CATALOG_MANIFEST_URL%/manifest}"
+
+          catalog_dir="$RELEASE_DIR/catalog"
+          catalog_artifacts_dir="$catalog_dir/artifacts"
+          rm -rf "$catalog_dir"
+          mkdir -p "$catalog_artifacts_dir"
+
+          catalog_args=(
+            node ./scripts/generate-catalog-manifest.mjs
+            --output-dir "$catalog_dir"
+            --private-key manifest-signing-key.pem
+            --manifest-base-url "$catalog_base_url"
+          )
+
+          if [[ -d mcps/kautuka-web-tools ]]; then
+            bash scripts/stage-built-in-mcpb.sh --output "$catalog_artifacts_dir/kautuka-web-tools.mcpb"
+            catalog_args+=(
+              --connector-artifact-file "$catalog_artifacts_dir/kautuka-web-tools.mcpb"
+              --connector-artifact-path artifacts/kautuka-web-tools.mcpb
+            )
+          fi
+
+          if [[ -d skills/kautuka-docs ]]; then
+            python3 - skills/kautuka-docs "$catalog_artifacts_dir/kautuka-docs.zip" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          source = pathlib.Path(sys.argv[1]).resolve()
+          archive = pathlib.Path(sys.argv[2]).resolve()
+          archive.parent.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+              for file_path in sorted(source.rglob('*')):
+                  if file_path.is_file():
+                      bundle.write(file_path, file_path.relative_to(source.parent))
+          PY
+            catalog_args+=(
+              --docs-artifact-file "$catalog_artifacts_dir/kautuka-docs.zip"
+              --docs-artifact-path artifacts/kautuka-docs.zip
+            )
+          fi
+
+          "${catalog_args[@]}"
+
+      - name: Stage catalog host bundle
+        run: |
+          set -euo pipefail
+          mkdir -p release-manifest-host-bundle
+          cp -a "${RELEASE_DIR}/catalog" release-manifest-host-bundle/catalog
+          if [[ -f release-manifest-host-bundle/catalog/manifest.json ]]; then
+            cp release-manifest-host-bundle/catalog/manifest.json release-manifest-host-bundle/catalog/manifest
+          fi
+
+          cat > release-manifest-host-bundle/README.md <<'EOF'
+          This catalog bundle remains on the existing S3-compatible host. Release binaries and manifests are GitHub Release assets.
+
+          Expected routes:
+          - /catalog/manifest
+          - /catalog/manifest.sig
+          - /catalog/artifacts/*
+          EOF
+
+      - name: Upload manifest host bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-manifest-host-bundle-${{ steps.scope.outputs.artifact_scope }}
+          path: release-manifest-host-bundle/**
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+  build-windows-installer-assets:
+    name: Build Windows Installer Assets
+    runs-on: windows-latest
+    environment:
+      name: ${{ inputs.channel }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Setup Node for frontend release notices
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install frozen frontend dependency graph for release notices
+        shell: bash
+        run: corepack enable && corepack prepare pnpm@11.5.2 --activate && pnpm --dir src/frontend install --frozen-lockfile
+
+      - name: Pin the released sandbox image
+        if: ${{ inputs.dry_run != 'true' }}
+        shell: bash
+        env:
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: python scripts/pin-released-sandbox-image.py src/backend/Kautuka.Manager/runtime-images.json "$KAUTUKA_BASE_IMAGE"
+
+      - name: Normalize artifact scope
+        id: scope
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PRODUCT_VERSION: ${{ inputs.release_version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Write manifest signing public key
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+        shell: bash
+        run: |
+          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
+          chmod 600 manifest-signing-key.pem
+          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          chmod 644 manifest-signing-public.pem
+
+      - name: Publish Windows appliance installer
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          PRODUCT_VERSION: ${{ inputs.release_version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          artifact_base_url="${UPDATES_BASE_URL%/}/releases/download/${RELEASE_TAG}"
+          # InstallerVersion feeds System.Version for AssemblyVersion/FileVersion, so it
+          # must stay Win32-safe Major.Minor.Patch. Leaving it unset lets the project
+          # Product version is numeric for Windows version resources; informational metadata carries the build SHA.
+          dotnet publish src/installer/Kautuka.Installer.Windows/Kautuka.Installer.Windows.csproj \
+            --runtime win-x64 \
+            -p:EnableWindowsTargeting=true \
+            -p:InstallerReleaseTag="${RELEASE_TAG}" \
+            -p:InstallerVersion="${PRODUCT_VERSION%%-preview.*}" \
+            -p:Version="${PRODUCT_VERSION}" \
+            -p:InformationalVersion="${PRODUCT_VERSION}+${SOURCE_SHA:0:7}" \
+            -p:InstallerReleaseId="${RELEASE_TAG}" \
+            -p:InstallerReleaseManifestUrl="${artifact_base_url}/kautuka-platform-release.json" \
+            -p:InstallerManifestPublicKeyPath="$(pwd)/manifest-signing-public.pem" \
+            -c Release \
+            -o publish/windows-installer
+
+      - name: Normalize Windows installer asset name
+        shell: pwsh
+        run: |
+          $preferredAsset = 'publish/windows-installer/Kautuka.Installer.exe'
+          if (Test-Path $preferredAsset) {
+            exit 0
+          }
+
+          $publishedExe = 'publish/windows-installer/Kautuka.Installer.Windows.exe'
+          if (-not (Test-Path -LiteralPath $publishedExe)) {
+            throw 'Kautuka.Installer.Windows.exe was not found. Refusing to rename another executable.'
+          }
+
+          Move-Item -LiteralPath $publishedExe -Destination $preferredAsset
+
+      - name: Verify Windows installer version metadata
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $file = Get-Item -LiteralPath 'publish/windows-installer/Kautuka.Installer.exe'
+          $expectedProduct = "$env:RELEASE_VERSION+$($env:SOURCE_SHA.Substring(0, 7))"
+          $actualProduct = $file.VersionInfo.ProductVersion
+          $actualFile = $file.VersionInfo.FileVersion
+          if ($actualProduct -ne $expectedProduct) {
+            throw "Installer ProductVersion '$actualProduct' does not match '$expectedProduct'."
+          }
+          if ($actualFile -ne "$($env:RELEASE_VERSION.Split('-')[0]).0") {
+            throw "Installer FileVersion '$actualFile' does not match the resolved numeric version."
+          }
+
+      - name: Include project license and notice
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath LICENSE -Destination publish/windows-installer/LICENSE
+          Copy-Item -LiteralPath NOTICE -Destination publish/windows-installer/NOTICE
+
+      - name: Generate release third-party notices and inventory
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: |
+          node scripts/generate-third-party-compliance.mjs \
+            --output-dir publish/windows-installer \
+            --release-tag "$RELEASE_TAG" \
+            --base-image "$KAUTUKA_BASE_IMAGE"
+
+      - name: Sign Windows appliance installer
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+          WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: |
+          $signingStatusPath = 'publish/windows-installer/SIGNING-STATUS.txt'
+
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERT_PASSWORD)) {
+            Write-Host 'Skipping Authenticode signing because Windows signing secrets are not configured.'
+            Set-Content -LiteralPath $signingStatusPath -Value @'
+          UNSIGNED
+
+          Authenticode secrets were not configured for this build.
+          SmartScreen will warn.
+          '@
+            exit 0
+          }
+
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'kautuka-installer-signing.pfx'
+          [System.IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERT_BASE64))
+
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if ([string]::IsNullOrWhiteSpace($signtool)) {
+            throw 'signtool.exe was not found on the Windows runner.'
+          }
+
+          $timestampUrl = if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_TIMESTAMP_URL)) {
+            'http://timestamp.digicert.com'
+          }
+          else {
+            $env:WINDOWS_SIGNING_TIMESTAMP_URL
+          }
+
+          & $signtool sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr $timestampUrl `
+            /f $certificatePath `
+            /p $env:WINDOWS_SIGNING_CERT_PASSWORD `
+            /d 'Kautuka Installer' `
+            /du "https://kautuka.dev" `
+            'publish/windows-installer/Kautuka.Installer.exe'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'signtool sign failed.'
+          }
+
+          & $signtool verify /pa /v 'publish/windows-installer/Kautuka.Installer.exe'
+
+          if ($LASTEXITCODE -ne 0) {
+            throw 'signtool verify failed.'
+          }
+
+          Remove-Item $certificatePath -Force
+
+          Set-Content -LiteralPath $signingStatusPath -Value @'
+          SIGNED
+
+          Authenticode signature verified with signtool /pa.
+          '@
+
+      - name: Upload Windows installer assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-windows-installer-assets-${{ steps.scope.outputs.artifact_scope }}
+          path: publish/windows-installer/**
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+
+  build-linux-installer-assets:
+    name: Build Linux Installer Assets
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.channel }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+
+      - name: Pin the released sandbox image
+        if: ${{ inputs.dry_run != 'true' }}
+        env:
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: python3 scripts/pin-released-sandbox-image.py src/backend/Kautuka.Manager/runtime-images.json "$KAUTUKA_BASE_IMAGE"
+
+      - name: Normalize artifact scope
+        id: scope
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          artifact_scope="$(printf '%s' "$RELEASE_TAG" | tr -cs '[:alnum:]._-' '-')"
+          artifact_scope="${artifact_scope#-}"
+          artifact_scope="${artifact_scope%-}"
+          if [[ -z "$artifact_scope" ]]; then
+            echo 'error: normalized artifact scope is empty.' >&2
+            exit 1
+          fi
+
+          echo "artifact_scope=$artifact_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Write manifest signing key
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
+        run: |
+          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
+          chmod 600 manifest-signing-key.pem
+          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          chmod 644 manifest-signing-public.pem
+
+      - name: Create Linux installer release asset
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          CHANNEL: ${{ inputs.channel }}
+          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
+          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+        run: |
+          set -euo pipefail
+          updates_base_url="${UPDATES_BASE_URL%/}"
+          mkdir -p publish/linux-installer
+          bash scripts/generate-linux-installer.sh \
+            --output publish/linux-installer/kautuka-install-linux.sh \
+            --version "$RELEASE_VERSION" \
+            --release-channel "$CHANNEL" \
+            --artifact-url "${updates_base_url}/releases/download/${RELEASE_TAG}/kautuka-linux-amd64.tar.gz" \
+            --manifest-url "${updates_base_url}/releases/download/${RELEASE_TAG}/kautuka-platform-release.json" \
+            --preview-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-preview/main/manifest" \
+            --stable-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest" \
+            --release-channel "$CHANNEL" \
+            --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
+            --manifest-public-key manifest-signing-public.pem
+
+      - name: Attest Linux installer provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: publish/linux-installer/kautuka-install-linux.sh
+
+      - name: Upload Linux installer assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kautuka-linux-installer-assets-${{ steps.scope.outputs.artifact_scope }}
+          path: publish/linux-installer/kautuka-install-linux.sh
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3

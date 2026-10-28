@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Shared chain SaveWorkflowRequest",
+    "governed": false,
+    "inputSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "workingSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "outputSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "nodes": [
+      { "nodeId": "start", "agentId": "agent-a", "promptTemplate": "Start", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0 },
+      { "nodeId": "finish", "agentId": "agent-a", "promptTemplate": "Finish", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0 }
+    ]
+  },
+  {
+    "name": "Shared diamond SaveWorkflowRequest",
+    "governed": false,
+    "inputSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "workingSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "outputSchema": { "type": "object", "required": ["amount", "title"], "properties": { "amount": { "type": "number" }, "title": { "type": "string" } } },
+    "nodes": [
+      { "nodeId": "check", "agentId": "agent-a", "promptTemplate": "Check", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0, "switchCases": [{ "pointer": "/amount", "op": "gt", "value": "500", "goTo": "ask" }], "defaultGoTo": "auto" },
+      { "nodeId": "ask", "agentId": "agent-a", "promptTemplate": "Ask", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0, "defaultGoTo": "file" },
+      { "nodeId": "auto", "agentId": "agent-a", "promptTemplate": "Auto", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0, "defaultGoTo": "file" },
+      { "nodeId": "file", "agentId": "agent-a", "promptTemplate": "File", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0, "defaultGoTo": "email" },
+      { "nodeId": "email", "agentId": "agent-a", "promptTemplate": "Email", "outputKind": "schema", "outputSchema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } }, "maps": [{ "from": "/title", "to": "/title" }], "sideEffects": "none", "memoryWrites": false, "requiresReview": false, "maxRetries": 0 }
+    ]
+  }
+]

@@ -1,0 +1,33 @@
+[
+  {
+    "name": "chain",
+    "nodes": [
+      { "nodeId": "start" },
+      { "nodeId": "middle" },
+      { "nodeId": "finish" }
+    ],
+    "transitions": [
+      { "source": "start", "target": "middle" },
+      { "source": "middle", "target": "finish" }
+    ]
+  },
+  {
+    "name": "choice diamond",
+    "nodes": [
+      {
+        "nodeId": "review",
+        "switchCases": [{ "pointer": "/amount", "op": "gt", "value": "500", "goTo": "ask" }],
+        "defaultGoTo": "auto"
+      },
+      { "nodeId": "ask", "defaultGoTo": "file" },
+      { "nodeId": "auto", "defaultGoTo": "file" },
+      { "nodeId": "file" }
+    ],
+    "transitions": [
+      { "source": "review", "target": "ask" },
+      { "source": "review", "target": "auto" },
+      { "source": "ask", "target": "file" },
+      { "source": "auto", "target": "file" }
+    ]
+  }
+]

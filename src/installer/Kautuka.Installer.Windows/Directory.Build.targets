@@ -1,0 +1,7 @@
+<Project>
+  <!-- Appended after the SDK sets PrepareResourceNamesDependsOn. A property set in the
+       csproj is overwritten by that assignment. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <PrepareResourceNamesDependsOn>EmbedPublishedMonitor;EmbedPhotinoNative;$(PrepareResourceNamesDependsOn)</PrepareResourceNamesDependsOn>
+  </PropertyGroup>
+</Project>

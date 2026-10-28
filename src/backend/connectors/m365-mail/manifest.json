@@ -1,0 +1,33 @@
+{
+  "manifest_version": "0.4",
+  "name": "kautuka-m365-mail",
+  "display_name": "Microsoft 365 Mail",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Read, filter by received time, draft, and send Microsoft 365 mail. Sign in on the Connectors page. Sending starts as Ask me first.",
+  "author": {
+    "name": "Kautuka"
+  },
+  "homepage": "https://github.com/devkrity/kautuka",
+  "documentation": "https://github.com/devkrity/kautuka/tree/main/src/backend/connectors/m365-mail",
+  "compatibility": {
+    "platforms": ["darwin", "linux", "win32"]
+  },
+  "user_config": {
+    "KAUTUKA_M365_REFRESH_TOKEN": {
+      "type": "string",
+      "title": "Microsoft sign-in",
+      "description": "Stored by Sign in with Microsoft. Owners do not paste this.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "server": {
+    "type": "binary",
+    "entry_point": "kautuka-m365-mail",
+    "mcp_config": {
+      "command": "${__dirname}/kautuka-m365-mail",
+      "args": []
+    }
+  }
+}

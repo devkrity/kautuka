@@ -1,0 +1,45 @@
+{
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit",
+    "source.organizeImports": "explicit"
+  },
+  "editor.codeActionsOnSaveTimeout": 4000,
+  "editor.formatOnSave": true,
+  "editor.formatOnPaste": true,
+  "editor.formatOnType": true,
+  "editor.rulers": [100],
+  "editor.unicodeHighlight.ambiguousCharacters": true,
+  "editor.unicodeHighlight.invisibleCharacters": true,
+  "editor.bracketPairColorization.enabled": true,
+  "editor.guides.bracketPairs": true,
+  "editor.inlayHints.enabled": "on",
+  "editor.inlineSuggest.enabled": true,
+  "editor.stickyScroll.enabled": true,
+  "workbench.editor.enablePreview": false,
+  "problems.decorations.enabled": true,
+  "problems.showCurrentInStatus": true,
+  "breadcrumbs.enabled": true,
+  "terminal.integrated.scrollback": 15000,
+  "git.autofetch": true,
+  "git.openRepositoryInParentFolders": "never",
+  "search.exclude": {
+    "**/bin": true,
+    "**/obj": true,
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/.pnpm-store": true,
+    "**/.turbo": true
+  },
+  "files.watcherExclude": {
+    "**/bin/**": true,
+    "**/obj/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true
+  },
+  "dotnet.defaultSolution": "src/Kautuka.slnx",
+  "dotnet.completion.showCompletionItemsFromUnimportedNamespaces": false,
+  "[csharp]": {
+    "editor.defaultFormatter": "ms-dotnettools.csharp",
+    "editor.formatOnSave": true
+  }
+}

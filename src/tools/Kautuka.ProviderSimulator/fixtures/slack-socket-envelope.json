@@ -1,0 +1,1 @@
+{"provenance":"official:docs.slack.dev/apis/socket-mode","version":"socket-mode-consumed-v1","envelope_id":"envelope","type":"events_api","payload":{"event_id":"event","event":{"type":"message","user":"user","channel":"channel","text":"<redacted>"}}}

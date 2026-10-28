@@ -1,0 +1,143 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
+    <!-- Dapper.AOT is the supported path here; the Dapper runtime package still emits
+         package-level IL2104/IL3053 warnings under AOT publish. Keep the publish gate
+         strict for everything else, but exclude only those external-package warning codes.
+         Google.GenAI 1.19.0 still hits IL2026 in Transformers.ProcessJsonNode (JsonArray.Add);
+         keep it warning-only until the SDK is AOT-clean. -->
+    <NoWarn>$(NoWarn);MEAI001;MAAI001;IL2104;IL3053</NoWarn>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2026</WarningsNotAsErrors>
+    <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IlcGenerateCompleteTypeMetadata>true</IlcGenerateCompleteTypeMetadata>
+    <InterceptorsPreviewNamespaces>$(InterceptorsPreviewNamespaces);Dapper.AOT</InterceptorsPreviewNamespaces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\Kautuka.ChannelContracts\Kautuka.ChannelContracts.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.ChannelHost.Protos\Kautuka.ChannelHost.Protos.csproj" />
+
+    <ProjectReference Include="..\..\shared\Narad.Contracts\Narad.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Contracts\Kautuka.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Hosting\Kautuka.Hosting.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Security\Kautuka.Security.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.UpdateService.Protos\Kautuka.UpdateService.Protos.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.CredentialsHost.Protos\Kautuka.CredentialsHost.Protos.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dapper" />
+    <PackageReference Include="Dapper.AOT" />
+    <PackageReference Include="Mediator.Abstractions" />
+    <PackageReference Include="Mediator.SourceGenerator">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Agents.AI.Workflows" />
+    <PackageReference Include="ModelContextProtocol.Core" />
+    <PackageReference Include="Grpc.Net.Client" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Google.GenAI" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="OllamaSharp" />
+    <PackageReference Include="Scalar.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kautuka.IntegrationTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kautuka.ApiFlowTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kautuka.SecurityTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kautuka.ContractTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Infrastructure\Database\Sql\*.sql" />
+    <Content Include="..\Kautuka.Manager\runtime-images.json" Link="runtime-images.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Avoid copying generated validation artifacts into build output recursively. -->
+    <Content Remove="artifacts\**" />
+    <None Remove="artifacts\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Update="wwwroot\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="CoreAssets\Dockerfile">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\..\skills\**\*">
+      <Link>skills\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="NativeAssets\sqlite-vec\**\*">
+      <Link>sqlite-vec\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(KautukaBuiltInMcpBundlePath)' != '' and Exists('$(KautukaBuiltInMcpBundlePath)')">
+    <None Include="$(KautukaBuiltInMcpBundlePath)">
+      <Link>built-in-mcpb\kautuka-web-tools.mcpb</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\connectors\m365-mail\connector.json" Link="connectors\m365-mail\connector.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\connectors\google-mail\connector.json" Link="connectors\google-mail\connector.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(KautukaReleaseArtifactBuild)' == 'true'">
+    <None Update="CoreAssets\Dockerfile">
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+
+
+</Project>

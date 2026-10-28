@@ -1,0 +1,24 @@
+{
+  "name": "kautuka-frontend",
+  "version": "0.1.20",
+  "license": "Apache-2.0",
+  "private": true,
+  "packageManager": "pnpm@11.5.2",
+  "description": "Kautuka frontend workspace — Narad client packages and web app",
+  "scripts": {
+    "test:smoke:exports": "node ./scripts/smoke-public-exports.mjs",
+    "typecheck:smoke:exports": "tsc --project ./smoke/tsconfig.json",
+    "ratchet:no-legacy-runtime": "node ./scripts/validate-no-legacy-runtime-packages.mjs",
+    "ratchet:narad-pin": "node ./scripts/validate-git-narad-packages.mjs",
+    "dev:web": "pnpm --dir web dev",
+    "build:web": "pnpm --dir web build",
+    "test:web": "pnpm --dir web test:run",
+    "verify": "pnpm ratchet:no-legacy-runtime && pnpm ratchet:narad-pin && pnpm test:smoke:exports && pnpm typecheck:smoke:exports && pnpm --filter kautuka-ui type-check && pnpm --filter kautuka-ui exec vitest run --exclude src/test/productionBundle.test.ts && pnpm --filter kautuka-ui build && pnpm --filter kautuka-ui exec vitest run src/test/productionBundle.test.ts"
+  },
+  "devDependencies": {
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "tsup": "^8.5.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^5.0.0"
+  }
+}

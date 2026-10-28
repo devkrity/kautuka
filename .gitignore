@@ -1,0 +1,84 @@
+# Dependencies
+node_modules/
+
+# Build outputs (.NET)
+dist/
+build/
+bin/
+obj/
+artifacts/
+.artifacts/
+publish/
+TestResults/
+*.trx
+*.user
+*.suo
+*.lscache
+*.csproj.lscache
+.cache/
+
+# Build outputs (Node/Vite)
+.vite/
+*.egg-info/
+
+# Public client id for the Microsoft 365 mail connector. Not a secret, but not committed.
+src/backend/connectors/m365-mail/client-id.txt
+src/backend/connectors/google-mail/client-id.txt
+src/backend/connectors/google-mail/client-secret.txt
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.dotenv
+.dotenv.local
+
+# IDE & Editor
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
+.vscode-insiders/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*/.vs/*
+
+
+# Logs & Temp files
+logs/
+*.log
+npm-debug.log*
+*.tmp
+*.bak
+temp/
+cache/
+
+# Runtime data & dev artifacts
+data/
+kautuka.db
+kautuka.key
+*.db
+.kautuka/
+.kautuka-workspace/
+.kautuka-dev-install/
+.pnpm-store/
+.codex/
+/config.json
+codebase-size.csv
+mcps/kautuka-web-tools/.build/
+
+# tempbuilds
+.tmp*/
+
+# Playwright cross-surface acceptance workspace
+tests/channel-acceptance/node_modules/
+tests/channel-acceptance/test-results/
+tests/channel-acceptance/playwright-report/
+tests/channel-acceptance/run-*.ps1
+tests/channel-acceptance/full-suite-latest.txt
+artifacts/channel-acceptance/
+.cursor/

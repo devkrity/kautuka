@@ -1,0 +1,25 @@
+name: Installed Linux Smoke
+
+# Proves systemd-optional HTTP first-boot against a reachable appliance:
+# GET / → system-health → first-admin → execution-readiness.
+# Does not send chat or HITL (those need Ollama; live CRH stays self-hosted).
+# GitHub-hosted runners cannot wsl --import a WSL appliance. This job runs only
+# when repository variable KAUTUKA_SMOKE_BASE_URL is set to a live WebHost origin.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  installed-linux-smoke:
+    name: Installed Linux Smoke
+    if: ${{ vars.KAUTUKA_SMOKE_BASE_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run installed-linux-smoke
+        env:
+          KAUTUKA_SMOKE_BASE_URL: ${{ vars.KAUTUKA_SMOKE_BASE_URL }}
+          KAUTUKA_SMOKE_USERNAME: ${{ vars.KAUTUKA_SMOKE_USERNAME }}
+          KAUTUKA_SMOKE_PASSWORD: ${{ secrets.KAUTUKA_SMOKE_PASSWORD }}
+        run: bash scripts/installed-linux-smoke.sh --skip-systemd

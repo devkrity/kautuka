@@ -1,0 +1,398 @@
+name: Release Pipeline
+
+on:
+  schedule:
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing main tag to rerun (preview) or promote (stable).
+        required: false
+        type: string
+      dry_run:
+        description: Build and verify without publishing (manual runs only).
+        required: true
+        default: true
+        type: boolean
+
+env:
+  KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.20'
+
+concurrency:
+  group: release-${{ github.event_name == 'schedule' && 'preview' || contains(inputs.release_tag, '-preview.') && 'preview' || 'stable' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-channel:
+    name: Resolve Release Channel
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.KAUTUKA_RELEASES_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      version: ${{ steps.resolve.outputs.version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      dry_run: ${{ steps.resolve.outputs.dry_run }}
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      - name: Require releases to run from main
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          if [[ "$RELEASE_REF" != 'refs/heads/main' ]]; then
+            echo "error: releases must be dispatched from refs/heads/main (received $RELEASE_REF)." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve channel
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          EVENT_NAME: ${{ github.event_name }}
+          UPCOMING_STABLE_VERSION: ${{ env.KAUTUKA_UPCOMING_STABLE_VERSION }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo 'skip=false' >> "$GITHUB_OUTPUT"
+          git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
+          main_sha="$(git rev-parse refs/remotes/origin/main)"
+          dry_run='false'
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+            dry_run="$DRY_RUN"
+            release_tag="$RELEASE_TAG"
+            if [[ -z "$release_tag" ]]; then
+              echo 'error: workflow_dispatch requires an existing release_tag.' >&2
+              exit 1
+            fi
+            if [[ "$release_tag" == *-preview.* && "$dry_run" != 'true' ]]; then
+              echo 'error: a manual Preview rerun must use dry_run=true; scheduled main runs publish Previews.' >&2
+              exit 1
+            fi
+          else
+            release_tag=''
+            version_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+            if [[ ! "$UPCOMING_STABLE_VERSION" =~ $version_re ]]; then
+              echo "error: KAUTUKA_UPCOMING_STABLE_VERSION must be plain SemVer (received $UPCOMING_STABLE_VERSION)." >&2
+              exit 1
+            fi
+            version_prefix="v${UPCOMING_STABLE_VERSION}-preview."
+            newest_number=-1
+            newest_tag=''
+            while IFS= read -r candidate; do
+              suffix="${candidate#"$version_prefix"}"
+              if [[ "$suffix" =~ ^(0|[1-9][0-9]*)$ ]] && (( suffix > newest_number )); then
+                newest_number="$suffix"
+                newest_tag="$candidate"
+              fi
+            done < <(git tag --list "${version_prefix}*")
+            if [[ -n "$newest_tag" ]]; then
+              last_preview_sha="$(git rev-parse "refs/tags/${newest_tag}^{commit}")"
+              if ! git merge-base --is-ancestor "$last_preview_sha" "$main_sha"; then
+                echo "error: newest preview tag $newest_tag is not on main history." >&2
+                exit 1
+              fi
+              if [[ "$(git rev-list --count "${last_preview_sha}..${main_sha}")" == '0' ]]; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                echo "No main commits have landed since $newest_tag; preview run skipped." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+            fi
+            next_number=$((newest_number + 1))
+            release_tag="${version_prefix}${next_number}"
+            git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
+            git push origin "refs/tags/$release_tag"
+          fi
+
+          source_sha="$(git rev-parse "refs/tags/${release_tag}^{commit}")"
+          # main is the only allowed release branch. release/* stays disabled; add it here only after explicit approval.
+          allowed_branches=(origin/main)
+          eligible=false
+          for branch in "${allowed_branches[@]}"; do
+            if git merge-base --is-ancestor "$source_sha" "$branch"; then eligible=true; break; fi
+          done
+          if [[ "$eligible" != true ]]; then
+            echo "error: release tag $release_tag does not point to a commit reachable from main." >&2
+            exit 1
+          fi
+
+          channel='stable'
+          prerelease='false'
+          if [[ "$release_tag" == *-preview.* ]]; then channel='preview'; prerelease='true'; fi
+          if [[ "$channel" == 'stable' ]]; then
+            version="${release_tag#v}"
+            preview_on_same_commit=false
+            while IFS= read -r candidate; do
+              candidate_sha="$(git rev-parse "refs/tags/${candidate}^{commit}")"
+              if [[ "$candidate_sha" == "$source_sha" ]]; then preview_on_same_commit=true; break; fi
+            done < <(git tag --list "v${version}-preview.*")
+            if [[ "$preview_on_same_commit" != true ]]; then
+              echo "error: stable tag $release_tag must point at the same main commit as a tested v${version}-preview.* tag." >&2
+              exit 1
+            fi
+            if [[ "$dry_run" == 'false' ]]; then
+              repository="${GITHUB_REPOSITORY}"
+              if existing_release="$(gh api "repos/$repository/releases/tags/$release_tag" 2>/dev/null)"; then
+                if [[ "$(jq -r '.draft' <<< "$existing_release")" != 'true' \
+                  || "$(jq -r '.target_commitish' <<< "$existing_release")" != "$source_sha" ]]; then
+                  echo "error: stable version $version has already been released and cannot be reused." >&2
+                  exit 1
+                fi
+              fi
+              feed_version="$(curl -fsS https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest | jq -r '.version // empty' || true)"
+              if [[ "$feed_version" == "$version" ]]; then
+                echo "error: Stable feed already points at $version; stable versions cannot be reused." >&2
+                exit 1
+              fi
+            fi
+          fi
+          node scripts/resolve-release.mjs "$release_tag" "$source_sha" "$dry_run"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+  validate-release:
+    name: Validate Release Inputs
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Narad validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Validate tracked hygiene
+        run: node ./scripts/validate-tracked-hygiene.mjs
+
+      - name: Test tracked hygiene rejection paths
+        run: node ./scripts/test-tracked-hygiene.mjs
+
+      - name: Validate documentation
+        run: node ./scripts/validate-docs.mjs
+
+      - name: Verify Linux installer trust preflight regressions
+        run: bash ./scripts/test-linux-installer-security.sh
+
+      - name: Verify flat GitHub release asset regressions
+        run: node ./scripts/test-release-assets.mjs
+
+      - name: Verify frontend third-party inventory regressions
+        run: node ./scripts/test-frontend-third-party-inventory.mjs
+
+      - name: Validate Narad
+        run: pnpm narad:check
+
+      - name: Narad dependency audit
+        run: node ./scripts/audit-dependencies.mjs
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore src/Kautuka.slnx
+
+      - name: Verify formatting
+        run: dotnet format src/Kautuka.slnx --verify-no-changes
+
+      - name: Build
+        run: dotnet build src/Kautuka.slnx --no-restore
+
+      - name: Test
+        run: dotnet test --solution src/Kautuka.slnx --no-build
+
+      - name: Narad security and performance gates
+        run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
+
+      - name: Frontend Narad verify
+        run: pnpm --dir src/frontend verify
+
+      - name: Install acceptance workspace
+        working-directory: tests/channel-acceptance
+        run: pnpm install --frozen-lockfile --ignore-workspace
+
+      - name: Run Playwright contract suite
+        working-directory: tests/channel-acceptance
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: pnpm test:contract
+
+      - name: Secrets scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect --source /repo --verbose --redact --no-banner
+
+  # Hosted runners cannot wsl --import. This job is skipped unless
+  # KAUTUKA_SMOKE_BASE_URL points at a live WebHost (self-hosted appliance).
+  installed-linux-smoke:
+    name: Installed Linux Smoke
+    needs: validate-release
+    if: ${{ vars.KAUTUKA_SMOKE_BASE_URL != '' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/installed-linux-smoke.yml
+
+  prepare-stable-draft:
+    name: Open Versioned Release Draft
+    needs:
+      - resolve-channel
+      - validate-release
+    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.resolve-channel.outputs.channel }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Create stable GitHub release as a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.resolve-channel.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve-channel.outputs.version }}
+          SOURCE_SHA: ${{ needs.resolve-channel.outputs.source_sha }}
+          CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if existing="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)"; then
+            if [[ "$(jq -r '.draft' <<< "$existing")" != 'true' \
+              || "$(jq -r '.target_commitish' <<< "$existing")" != "$SOURCE_SHA" ]]; then
+              echo "error: stable release $RELEASE_TAG already exists and cannot be reused." >&2
+              exit 1
+            fi
+          else
+            release_flags=(--draft)
+            if [[ "$CHANNEL" == 'preview' ]]; then release_flags+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" "${release_flags[@]}" --verify-tag --title "$RELEASE_VERSION" \
+              --target "$SOURCE_SHA" --notes "${CHANNEL^} release build and artifact verification are in progress."
+          fi
+
+  publish-kautuka-base:
+    name: Build and publish kautuka-base
+    needs:
+      - resolve-channel
+      - validate-release
+      - prepare-stable-draft
+    if: ${{ always() && needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' && (needs.prepare-stable-draft.result == 'success' || needs.prepare-stable-draft.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.resolve-channel.outputs.channel }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Build from Fedora latest and test the sandbox contract
+        env:
+          KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+        run: |
+          bash scripts/build-kautuka-base.sh
+
+      - name: Publish the release digest
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_TAG: kautuka-base:test
+          PUSH_TAG: ghcr.io/devkrity/kautuka-base:${{ needs.resolve-channel.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker tag "$LOCAL_TAG" "$PUSH_TAG"
+          resolved_tag="$(docker image inspect --format '{{index .RepoTags 0}}' "$PUSH_TAG")"
+          if [[ "$resolved_tag" != "$PUSH_TAG" ]]; then
+            echo "error: built container tag $resolved_tag does not match $PUSH_TAG." >&2
+            exit 1
+          fi
+          if [[ "${{ needs.resolve-channel.outputs.dry_run }}" == 'true' ]]; then
+            echo 'image=' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$PUSH_TAG"
+          # RepoDigests are name@sha256, never tag@sha256. A tag-qualified grep
+          # exits 1, and pipefail aborts before the fallback can run.
+          image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$LOCAL_TAG" | grep '^ghcr.io/devkrity/kautuka-base@sha256:' | head -n 1 || true)"
+          if [[ ! "$image" =~ ^ghcr.io/devkrity/kautuka-base@sha256:[0-9a-f]{64}$ ]]; then
+            echo "error: push did not yield a kautuka-base digest for ${PUSH_TAG}." >&2
+            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$LOCAL_TAG" >&2 || true
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          # Org container visibility has no working REST endpoint (the call
+          # returns 404). Set kautuka-base public once in package settings;
+          # later tags keep that visibility.
+          echo "kautuka-base digest recorded. Package visibility is unchanged by this job."
+
+  # Native AOT of Manager, Gateway, CredentialsHost, ChannelHost,
+  # UpdateService, WebHost, and TUI is this job (scripts/build-release-assets.sh).
+  build-platform-assets:
+    name: Build Platform Assets
+    needs:
+      - resolve-channel
+      - validate-release
+      - publish-kautuka-base
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-build-platform-assets.yml
+    with:
+      channel: ${{ needs.resolve-channel.outputs.channel }}
+      release_version: ${{ needs.resolve-channel.outputs.version }}
+      manifest_version: ${{ needs.resolve-channel.outputs.version }}
+      release_tag: ${{ needs.resolve-channel.outputs.release_tag }}
+      source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
+      dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
+      catalog_manifest_url: https://kautuka.store/catalog/manifest
+      updates_base_url: https://github.com/devkrity/kautuka
+      wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
+      kautuka_base_image: ${{ needs.publish-kautuka-base.outputs.image }}
+
+  publish-assets:
+    name: Publish Release Assets
+    needs:
+      - resolve-channel
+      - build-platform-assets
+      - prepare-stable-draft
+    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' }}
+    permissions:
+      actions: write
+      contents: write
+    uses: ./.github/workflows/release-publish-assets.yml
+    with:
+      channel: ${{ needs.resolve-channel.outputs.channel }}
+      release_version: ${{ needs.resolve-channel.outputs.version }}
+      release_tag: ${{ needs.resolve-channel.outputs.release_tag }}
+      prerelease: ${{ needs.resolve-channel.outputs.prerelease }}
+      dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
+      source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
+      wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
+      updates_base_url: https://github.com/devkrity/kautuka
+      catalog_manifest_url: https://kautuka.store/catalog/manifest

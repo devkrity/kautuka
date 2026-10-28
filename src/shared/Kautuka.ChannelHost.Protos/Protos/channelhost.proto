@@ -1,0 +1,520 @@
+syntax = "proto3";
+
+option csharp_namespace = "Kautuka.Protos";
+
+package kautuka.channelhost.v1;
+
+service ChannelHostService {
+  rpc Ping           (ChannelHostPingRequest)         returns (ChannelHostPingResponse);
+  rpc ListProviders  (ListChannelProvidersRequest)    returns (ListChannelProvidersResponse);
+  rpc StreamIngress  (ChannelIngressSubscribeRequest) returns (stream ChannelInboundEventMessage);
+  rpc AcknowledgeIngress (AcknowledgeIngressRequest) returns (AcknowledgeIngressResponse);
+  rpc SetRuntimeCredentials (SetRuntimeCredentialsRequest) returns (SetRuntimeCredentialsResponse);
+  rpc ReadInboundMedia (ReadInboundMediaRequest) returns (stream ReadInboundMediaChunk);
+  rpc GetAttachments (GetAttachmentsRequest) returns (GetAttachmentsResponse);
+  rpc GetAttachment (GetAttachmentRequest) returns (GetAttachmentResponse);
+  rpc GetAttachmentSchema (GetAttachmentSchemaRequest) returns (GetAttachmentSchemaResponse);
+  rpc UpsertAttachment (UpsertAttachmentRequest) returns (UpsertAttachmentResponse);
+  rpc SyncOwnerTargets (SyncOwnerTargetsRequest) returns (SyncOwnerTargetsResponse);
+  rpc ProvisionAttachment (ProvisionAttachmentRequest) returns (ProvisionAttachmentResponse);
+  rpc DeactivateAttachment (DeactivateAttachmentRequest) returns (DeactivateAttachmentResponse);
+  rpc TransitionAttachmentLifecycle (TransitionAttachmentLifecycleRequest) returns (TransitionAttachmentLifecycleResponse);
+  rpc SendOutboundMessage (SendOutboundMessageRequest) returns (SendOutboundMessageResponse);
+  rpc UploadOutboundAsset (stream UploadOutboundAssetRequest) returns (UploadOutboundAssetResponse);
+}
+
+message ChannelHostPingRequest {
+  ScopedRequestContext context = 1;
+}
+
+message ChannelHostPingResponse {
+  repeated ChannelProviderHealth providers = 1;
+  ChannelGatewayOperationalHealth operational_health = 2;
+}
+
+message ChannelGatewayOperationalHealth {
+  int32 schema_version = 1;
+  string contract_version = 2;
+  string authenticated_workload_identity = 3;
+  repeated string active_delegation_key_ids = 4;
+  int32 active_registrations = 5;
+  int32 suspended_registrations = 6;
+  int32 reconciliation_required_registrations = 7;
+  int64 ingress_depth = 8;
+  string oldest_ingress_at_utc = 9;
+  int64 authorization_denials = 10;
+  int64 rate_limit_denials = 11;
+  bool state_integrity_verified = 12;
+  int64 oldest_ingress_ack_age_seconds = 13;
+  int64 pending_operations = 14;
+  int64 retry_operations = 15;
+  int64 reconciliation_operations = 16;
+  int64 active_streams = 17;
+  int64 completed_streams = 18;
+  int64 operator_action_failures = 19;
+  int64 state_storage_bytes = 20;
+  repeated string active_rate_limit_dimensions = 21;
+  repeated ChannelRegistrationOperationalHealth registrations = 22;
+  bool client_certificate_valid = 23;
+  bool delegation_certificate_valid = 24;
+  string rotation_state = 25;
+  string rotation_overlap_expires_at_utc = 26;
+  repeated string revoked_identity_key_ids = 27;
+  string authenticated_workload_id = 28;
+}
+
+message ChannelRegistrationOperationalHealth {
+  string registration_id = 1;
+  string provider_key = 2;
+  string lifecycle_status = 3;
+  bool ready = 4;
+  int64 ingress_depth = 5;
+  string oldest_unacknowledged_ingress_at_utc = 6;
+  int64 active_streams = 7;
+  int64 completed_streams = 8;
+  int64 pending_operations = 9;
+  int64 retry_operations = 10;
+  int64 reconciliation_operations = 11;
+  int64 operator_action_failures = 12;
+}
+
+message ListChannelProvidersRequest {
+  ScopedRequestContext context = 1;
+}
+
+message ListChannelProvidersResponse {
+  repeated ChannelProviderDefinition providers = 1;
+}
+
+message ChannelProviderDefinition {
+  string provider_key = 1;
+  string display_name = 2;
+  string schema_version = 3;
+  string capability_version = 4;
+  repeated AttachmentSchemaField fields = 5;
+  ChannelProviderCapabilitiesDocument capabilities = 6;
+}
+
+message ChannelProviderCapabilitiesDocument {
+  string version = 1;
+  bool streaming = 2;
+  bool edits = 3;
+  bool deletes = 4;
+  bool typing = 5;
+  bool reactions = 6;
+  bool modals = 7;
+  bool ephemeral_messages = 8;
+  bool files = 9;
+  bool history = 10;
+  bool commands = 11;
+  bool suggested_prompts = 12;
+  bool thread_titles = 13;
+  int32 maximum_message_characters = 14;
+  int32 maximum_actions = 15;
+  int32 maximum_action_label_characters = 16;
+  int32 maximum_callback_token_bytes = 17;
+  int32 interaction_acknowledgement_deadline_seconds = 18;
+  int32 maximum_blocks = 19;
+  int32 maximum_action_rows = 20;
+  int32 maximum_select_options = 21;
+  int64 maximum_file_bytes = 22;
+  bool user_lookup = 23;
+  bool inbound_files = 24;
+}
+
+message ChannelProviderHealth {
+  string provider_key = 1;
+  string display_name = 2;
+  string status = 3;
+  string detail = 4;
+}
+
+message ChannelIngressSubscribeRequest {
+  string subscriber_id = 1;
+  ScopedRequestContext context = 2;
+}
+
+message AcknowledgeIngressRequest {
+  ScopedRequestContext context = 1;
+  string subscriber_id = 2;
+  string event_id = 3;
+  string delivery_lease_id = 4;
+  string idempotency_key = 5;
+}
+
+message AcknowledgeIngressResponse { bool acknowledged = 1; }
+
+message RuntimeCredentialValue {
+  string field_key = 1;
+  string secret_value = 2;
+}
+
+message SetRuntimeCredentialsRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  repeated RuntimeCredentialValue credentials = 3;
+  string idempotency_key = 4;
+}
+
+message SetRuntimeCredentialsResponse { bool accepted = 1; }
+
+message ChannelInboundEventMessage {
+  string event_id              = 1;
+  string channel_type          = 2;
+  string registration_id       = 3;
+  string owner_user_id         = 4;
+  string external_user_id      = 5;
+  string conversation_id       = 6;
+  string conversation_thread_id = 7;
+  string event_type            = 8;
+  string text                  = 9;
+  string callback_data         = 10;
+  string acknowledge_token     = 11;
+  int64  source_message_id     = 12;
+  reserved 13;
+  reserved "webhook_secret_token";
+  string payload_json          = 14;
+  repeated InboundMediaDescriptorMessage inbound_media = 15;
+  string external_user_display_name = 16;
+  repeated ChannelInboundHistoryMessage bounded_thread_history = 17;
+  // ChannelHost delivery lease. Acknowledgement must present this exact generation.
+  string delivery_lease_id = 19;
+  string source_transport_message_id = 20;
+  string reply_source_transport_message_id = 21;
+}
+
+message ChannelInboundHistoryMessage {
+  string provider_message_id = 1;
+  string external_user_id = 2;
+  string text = 3;
+}
+
+message ReadInboundMediaRequest {
+  ScopedRequestContext context = 1;
+  string registration_id = 2;
+  string event_id = 3;
+  string media_id = 4;
+  string correlation_id = 5;
+  string idempotency_key = 6;
+}
+
+message ReadInboundMediaChunk {
+  string file_name = 1;
+  string content_type = 2;
+  int64 size_bytes = 3;
+  bytes content = 4;
+  bool is_final = 5;
+}
+
+message InboundMediaDescriptorMessage {
+  string media_id = 1;
+  string media_kind = 2;
+  string file_name = 3;
+  string content_type = 4;
+  int64 size_bytes = 5;
+  string provider_unique_id = 6;
+}
+
+message ScopedRequestContext {
+  string request_id = 1;
+  string actor_user_id = 2;
+  string submitted_at_utc = 3;
+  string tenant_id = 4;
+  repeated string actor_capabilities = 5;
+  string gateway_session_id = 6;
+  // Security envelope v1. actor_capabilities is retained only for wire compatibility;
+  // ChannelHost rejects it and derives authority from the signed operation below.
+  string authorization_version = 7;
+  string delegation_issuer = 8;
+  string delegation_audience = 9;
+  string delegated_operation = 10;
+  string delegation_issued_at_utc = 11;
+  string delegation_expires_at_utc = 12;
+  string delegation_token_id = 13;
+  string request_digest = 14;
+  bytes delegation_signature = 15;
+  string delegation_key_id = 16;
+  string contract_version = 17;
+}
+
+message GetAttachmentsRequest {
+  ScopedRequestContext context = 1;
+  string owner_user_id = 2;
+  bool include_inactive = 3;
+}
+
+message GetAttachmentsResponse {
+  repeated AttachmentSummary attachments = 1;
+}
+
+message GetAttachmentRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+}
+
+message GetAttachmentResponse {
+  AttachmentSummary attachment = 1;
+  repeated AttachmentSettingValue settings = 2;
+  repeated AttachmentCredentialReference credential_references = 3;
+}
+
+message AttachmentCredentialReference {
+  string field_key = 1;
+  string credential_key = 2;
+}
+
+message GetAttachmentSchemaRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+}
+
+message GetAttachmentSchemaResponse {
+  string attachment_id = 1;
+  string provider_key = 2;
+  string schema_version = 3;
+  string capability_version = 4;
+  repeated AttachmentSchemaField fields = 5;
+}
+
+message AttachmentSummary {
+  string attachment_id = 1;
+  string display_name = 2;
+  string provider_key = 3;
+  AttachmentStatus status = 4;
+  string schema_version = 5;
+  string capability_version = 6;
+  string provider_instance_display_name = 7;
+  string last_provisioned_at_utc = 8;
+  string last_delivery_status = 9;
+}
+
+message AttachmentSchemaField {
+  string field_key = 1;
+  string label = 2;
+  string description = 3;
+  AttachmentSchemaFieldType field_type = 4;
+  bool required = 5;
+  bool secret = 6;
+  string default_value = 7;
+  string validation_hint = 8;
+  string group = 9;
+  repeated string enum_values = 10;
+}
+
+message AttachmentSettingValue {
+  string field_key = 1;
+  string string_value = 2;
+  bool bool_value = 3;
+  double number_value = 4;
+  repeated string multi_values = 5;
+  string json_value = 6;
+}
+
+message ValidationIssue {
+  string field_key = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message UpsertAttachmentRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  string provider_key = 3;
+  string expected_schema_version = 4;
+  repeated AttachmentSettingValue settings = 5;
+  repeated AttachmentCredentialReference credential_references = 6;
+  string idempotency_key = 7;
+}
+
+message UpsertAttachmentResponse {
+  AttachmentSummary attachment = 1;
+  ValidationStatus validation_status = 2;
+  repeated ValidationIssue validation_issues = 3;
+}
+
+message SyncOwnerTargetsRequest {
+  ScopedRequestContext context = 1;
+  string owner_user_id = 2;
+  string reason = 3;
+  string bot_name = 4;
+  repeated ChannelTargetMessage targets = 5;
+  string idempotency_key = 6;
+  repeated ChannelCommandMessage commands = 7;
+}
+
+message SyncOwnerTargetsResponse {
+  bool accepted = 1;
+  string detail = 2;
+  int32 registrations_considered = 3;
+  int32 registrations_synced = 4;
+}
+
+message ProvisionAttachmentRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  string reason = 3;
+  string bot_name = 4;
+  string description = 5;
+  string short_description = 6;
+  repeated ChannelCommandMessage commands = 7;
+  repeated ChannelTargetMessage targets = 8;
+  string idempotency_key = 9;
+}
+
+message ProvisionAttachmentResponse {
+  string attachment_id = 1;
+  ProvisioningStatus status = 2;
+  string detail = 3;
+  string operation_id = 4;
+}
+
+message DeactivateAttachmentRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  string reason = 3;
+  string idempotency_key = 4;
+}
+
+message DeactivateAttachmentResponse {
+  string attachment_id = 1;
+  AttachmentStatus status = 2;
+  string detail = 3;
+}
+
+message OutboundContentEnvelope {
+  string action_type = 1;
+  string payload_json = 2;
+}
+
+message ChannelCommandMessage {
+  string command = 1;
+  string description = 2;
+}
+
+message ChannelTargetMessage {
+  string target_key = 1;
+  string display_name = 2;
+}
+
+message SendOutboundMessageRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  string message_id = 3;
+  string conversation_id = 4;
+  string conversation_thread_id = 5;
+  string requested_at_utc = 6;
+  string correlation_id = 7;
+  string idempotency_key = 8;
+  OutboundContentEnvelope content = 9;
+}
+
+message SendOutboundMessageResponse {
+  bool accepted = 1;
+  DeliveryStatus delivery_status = 2;
+  string detail = 3;
+  string transport_message_id = 4;
+}
+
+message ChannelHostEventMessage {
+  string event_id = 1;
+  ChannelHostEventKind event_kind = 2;
+  string attachment_id = 3;
+  string occurred_at_utc = 4;
+  string owner_user_id = 5;
+  string conversation_id = 6;
+  string conversation_thread_id = 7;
+  string payload_json = 8;
+}
+
+enum AttachmentStatus {
+  ATTACHMENT_STATUS_UNSPECIFIED = 0;
+  ATTACHMENT_STATUS_ACTIVE = 1;
+  ATTACHMENT_STATUS_INACTIVE = 2;
+  ATTACHMENT_STATUS_PROVISIONING = 3;
+  ATTACHMENT_STATUS_ERROR = 4;
+  ATTACHMENT_STATUS_SUSPENDED = 5;
+  ATTACHMENT_STATUS_RECOVERY_REQUIRED = 6;
+  ATTACHMENT_STATUS_DELETED = 7;
+}
+
+message UploadOutboundAssetMetadata {
+  ScopedRequestContext context = 1;
+  string asset_id = 2;
+  string attachment_id = 3;
+  string conversation_id = 4;
+  string conversation_thread_id = 5;
+  string safe_file_name = 6;
+  string content_type = 7;
+  int64 declared_size_bytes = 8;
+  string sha256_hex = 9;
+  string idempotency_key = 10;
+}
+
+message UploadOutboundAssetRequest {
+  oneof frame {
+    UploadOutboundAssetMetadata metadata = 1;
+    bytes content = 2;
+  }
+}
+
+message UploadOutboundAssetResponse {
+  bool accepted = 1;
+  string upload_id = 2;
+  string status = 3;
+  string detail = 4;
+}
+
+message TransitionAttachmentLifecycleRequest {
+  ScopedRequestContext context = 1;
+  string attachment_id = 2;
+  string transition = 3;
+  string reason = 4;
+  string operation_id = 5;
+}
+
+message TransitionAttachmentLifecycleResponse {
+  bool accepted = 1;
+  AttachmentStatus status = 2;
+  string detail = 3;
+}
+
+enum AttachmentSchemaFieldType {
+  ATTACHMENT_SCHEMA_FIELD_TYPE_UNSPECIFIED = 0;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_TEXT = 1;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_MULTILINE_TEXT = 2;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_SECRET_TEXT = 3;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_BOOLEAN = 4;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_NUMBER = 5;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_ENUM_SINGLE = 6;
+  ATTACHMENT_SCHEMA_FIELD_TYPE_READONLY_TEXT = 7;
+}
+
+enum ValidationStatus {
+  VALIDATION_STATUS_UNSPECIFIED = 0;
+  VALIDATION_STATUS_ACCEPTED = 1;
+  VALIDATION_STATUS_REJECTED = 2;
+}
+
+enum ProvisioningStatus {
+  PROVISIONING_STATUS_UNSPECIFIED = 0;
+  PROVISIONING_STATUS_ACCEPTED = 1;
+  PROVISIONING_STATUS_RUNNING = 2;
+  PROVISIONING_STATUS_SUCCEEDED = 3;
+  PROVISIONING_STATUS_FAILED = 4;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_ACCEPTED = 1;
+  DELIVERY_STATUS_REJECTED = 2;
+  DELIVERY_STATUS_RETRYABLE_FAILURE = 3;
+  DELIVERY_STATUS_DELIVERED = 4;
+}
+
+enum ChannelHostEventKind {
+  CHANNEL_HOST_EVENT_KIND_UNSPECIFIED = 0;
+  CHANNEL_HOST_EVENT_KIND_ATTACHMENT_PROVISIONED = 1;
+  CHANNEL_HOST_EVENT_KIND_ATTACHMENT_DEACTIVATED = 2;
+  CHANNEL_HOST_EVENT_KIND_MESSAGE_DELIVERED = 3;
+  CHANNEL_HOST_EVENT_KIND_MESSAGE_FAILED = 4;
+}

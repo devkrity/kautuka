@@ -1,0 +1,3 @@
+<linker>
+  <assembly fullname="Kautuka.Protos" preserve="all" />
+</linker>

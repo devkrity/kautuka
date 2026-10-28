@@ -1,0 +1,6 @@
+# Local checkout only. Copy this file to client-id.txt and replace the placeholder
+# with your own Entra application (client) id. Microsoft stays a public client: no secret.
+# Register this redirect on that app:
+# http://127.0.0.1:<port>/api/connectors/oauth/callback
+# client-id.txt is not committed. A release build uses auth.kautuka.io and does not read this file.
+00000000-0000-0000-0000-000000000000
