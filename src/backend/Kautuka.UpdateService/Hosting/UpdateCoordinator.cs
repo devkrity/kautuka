@@ -901,7 +901,7 @@ internal sealed class UpdateCoordinator(
             PlatformExtractedPath: extractRoot);
     }
 
-    private static void ValidateDescriptorMatchesCandidate(
+    internal static void ValidateDescriptorMatchesCandidate(
         UpdateReleaseReference candidate,
         PlatformReleaseDescriptor? descriptor,
         PlatformReleaseArtifactDescriptor? artifact,
@@ -920,10 +920,11 @@ internal sealed class UpdateCoordinator(
         if (requireVerification
             && (!Matches(descriptor.Version, candidate.Version)
                 || !Matches(descriptor.Channel, candidate.Channel, ignoreCase: true)
-                || !Matches(descriptor.ReleaseTag, candidate.Tag)))
+                || !Matches(descriptor.ReleaseTag, candidate.Tag)
+                || (candidate.SourceSha is not null && !Matches(descriptor.SourceSha, candidate.SourceSha))))
         {
             throw new InvalidOperationException(
-                $"Signed release manifest identity does not match discovered candidate '{candidate.Tag ?? candidate.ReleaseId}' ({candidate.Channel} {candidate.Version}).");
+                $"Signed release manifest identity does not match discovered candidate '{candidate.Tag ?? candidate.ReleaseId}' ({candidate.Channel} {candidate.Version}, source {candidate.SourceSha ?? "unknown"}).");
         }
 
         if (artifact is null)

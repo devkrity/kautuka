@@ -43,15 +43,29 @@ esac
   }
 
   const workflowText = await readFile(workflow, 'utf8');
-  const feedJob = workflowText.slice(workflowText.indexOf('  publish-public-feed:\n'));
-  assert.doesNotMatch(feedJob, /require-github-release-immutability\.sh/u,
+  const publishJob = workflowText.slice(workflowText.indexOf('  publish-github-release:\n'));
+  assert.doesNotMatch(publishJob, /require-github-release-immutability\.sh/u,
     'the operator-only check must not run in CI with a contents-only token');
-  const publishIndex = feedJob.indexOf('Publish immutable GitHub Release');
-  const postCheckIndex = feedJob.indexOf('Require GitHub immutable-release enforcement before moving the channel pointer');
-  const pointerIndex = feedJob.indexOf('Move the GitHub-hosted channel pointer after release publication');
-  assert.ok(publishIndex >= 0 && publishIndex < postCheckIndex && postCheckIndex < pointerIndex,
-    'the workflow must retain the post-publication immutable assertion before pointer movement');
-  console.log('Operator immutability-preflight CLI tests passed: enabled succeeds; disabled or unknown settings fail closed. CI retains its post-publication assertion and does not use the Admin-read operator helper.');
+  const publishIndex = publishJob.indexOf('Publish immutable GitHub Release');
+  const postCheckIndex = publishJob.indexOf('Require GitHub immutable-release enforcement');
+  const pointerCheckoutIndex = publishJob.indexOf('Check out the protected release-channel branch');
+  const draftMutationIndex = publishJob.indexOf('Confirm release draft is empty and immutable-release compatible');
+  const assetUploadIndex = publishJob.indexOf('Upload all versioned release assets to the GitHub draft');
+  const pointerPublishIndex = publishJob.indexOf('Advance only the selected signed channel pointer');
+  assert.ok(publishIndex >= 0 && publishIndex < postCheckIndex,
+    'the workflow must retain the post-publication immutable assertion');
+  assert.ok(pointerCheckoutIndex >= 0 && pointerCheckoutIndex < draftMutationIndex && pointerCheckoutIndex < assetUploadIndex && pointerCheckoutIndex < publishIndex,
+    'the release-channel branch must be checked out before draft edits, asset uploads, or publication');
+  assert.ok(publishIndex < postCheckIndex && postCheckIndex < pointerPublishIndex,
+    'the channel pointer may advance only after immutable-release enforcement is confirmed');
+  assert.match(publishJob, /node scripts\/update-release-channel-pointer\.mjs/u);
+  assert.match(publishJob, /git -C release-channel add "\$CHANNEL\.json"/u,
+    'publisher must stage only its input channel pointer');
+  assert.doesNotMatch(publishJob, /git -C release-channel add -A|git -C release-channel add \./u,
+    'publisher must not stage the other channel pointer');
+  assert.doesNotMatch(publishJob, /release_feed_deploy_key|raw\.githubusercontent\.com\/devkrity\/kautuka-release-feed/u,
+    'publisher must not depend on separate feed repositories or deploy keys');
+  console.log('Operator immutability-preflight CLI tests passed: enabled succeeds; disabled or unknown settings fail closed. CI retains its post-publication immutable assertion and advances only the selected signed pointer afterward.');
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

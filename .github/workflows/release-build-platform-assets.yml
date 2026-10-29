@@ -24,9 +24,6 @@ on:
       catalog_manifest_url:
         required: true
         type: string
-      updates_base_url:
-        required: true
-        type: string
       wsl_rootfs_asset_name:
         required: true
         type: string
@@ -97,14 +94,11 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
-          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
         run: |
           set -euo pipefail
-          updates_base_url="${UPDATES_BASE_URL%/}"
-          artifact_base_url="${updates_base_url}/releases/download/${RELEASE_TAG}"
-          channel_manifest_url="https://raw.githubusercontent.com/devkrity/kautuka-release-feed-${CHANNEL}/main/manifest"
-
+          artifact_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           bash scripts/build-release-assets.sh \
             --output-root publish/release-assets \
             --private-key "$RELEASE_MANIFEST_PRIVATE_KEY_PATH" \
@@ -115,9 +109,6 @@ jobs:
             --product-version "$PRODUCT_VERSION" \
             --source-sha "$SOURCE_SHA" \
             --channel "$CHANNEL" \
-            --manifest-url "$channel_manifest_url" \
-            --preview-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-preview/main/manifest" \
-            --stable-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest" \
             --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
             --artifact-base-url "$artifact_base_url"
 
@@ -138,6 +129,7 @@ jobs:
           done
 
           echo "RELEASE_DIR=$release_dir" >> "$GITHUB_ENV"
+          cp "$RELEASE_MANIFEST_PUBLIC_KEY_PATH" "$release_dir/manifest-public-key.pem"
 
       - name: Verify release identity, signature, and artifact checksums
         env:
@@ -189,6 +181,7 @@ jobs:
           path: |
             publish/release-assets/${{ inputs.manifest_version }}/kautuka-platform-release.json
             publish/release-assets/${{ inputs.manifest_version }}/kautuka-platform-release.sig
+            publish/release-assets/${{ inputs.manifest_version }}/manifest-public-key.pem
             publish/release-assets/${{ inputs.manifest_version }}/compliance/**
           if-no-files-found: error
           overwrite: true
@@ -342,25 +335,21 @@ jobs:
       - name: Publish Windows appliance installer
         shell: bash
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          CHANNEL: ${{ inputs.channel }}
           PRODUCT_VERSION: ${{ inputs.release_version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          artifact_base_url="${UPDATES_BASE_URL%/}/releases/download/${RELEASE_TAG}"
           # InstallerVersion feeds System.Version for AssemblyVersion/FileVersion, so it
           # must stay Win32-safe Major.Minor.Patch. Leaving it unset lets the project
           # Product version is numeric for Windows version resources; informational metadata carries the build SHA.
           dotnet publish src/installer/Kautuka.Installer.Windows/Kautuka.Installer.Windows.csproj \
             --runtime win-x64 \
             -p:EnableWindowsTargeting=true \
-            -p:InstallerReleaseTag="${RELEASE_TAG}" \
+            -p:InstallerReleaseChannel="${CHANNEL}" \
             -p:InstallerVersion="${PRODUCT_VERSION%%-preview.*}" \
             -p:Version="${PRODUCT_VERSION}" \
             -p:InformationalVersion="${PRODUCT_VERSION}+${SOURCE_SHA:0:7}" \
-            -p:InstallerReleaseId="${RELEASE_TAG}" \
-            -p:InstallerReleaseManifestUrl="${artifact_base_url}/kautuka-platform-release.json" \
             -p:InstallerManifestPublicKeyPath="$(pwd)/manifest-signing-public.pem" \
             -c Release \
             -o publish/windows-installer
@@ -538,23 +527,15 @@ jobs:
 
       - name: Create Linux installer release asset
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_VERSION: ${{ inputs.release_version }}
           CHANNEL: ${{ inputs.channel }}
           CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
-          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
         run: |
           set -euo pipefail
-          updates_base_url="${UPDATES_BASE_URL%/}"
           mkdir -p publish/linux-installer
           bash scripts/generate-linux-installer.sh \
             --output publish/linux-installer/kautuka-install-linux.sh \
             --version "$RELEASE_VERSION" \
-            --release-channel "$CHANNEL" \
-            --artifact-url "${updates_base_url}/releases/download/${RELEASE_TAG}/kautuka-linux-amd64.tar.gz" \
-            --manifest-url "${updates_base_url}/releases/download/${RELEASE_TAG}/kautuka-platform-release.json" \
-            --preview-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-preview/main/manifest" \
-            --stable-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest" \
             --release-channel "$CHANNEL" \
             --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
             --manifest-public-key manifest-signing-public.pem

@@ -71,33 +71,6 @@ internal sealed record WindowsApplianceLaunchOptions
     public required WindowsApplianceUninstallRequest UninstallDefaults { get; init; }
 }
 
-internal sealed record GitHubReleaseInfo
-{
-    public long Id { get; init; }
-
-    [JsonPropertyName("tag_name")]
-    public string TagName { get; init; } = string.Empty;
-
-    public string Name { get; init; } = string.Empty;
-
-    public bool Draft { get; init; }
-
-    public bool Prerelease { get; init; }
-
-    public List<GitHubReleaseAssetInfo> Assets { get; init; } = [];
-}
-
-internal sealed record GitHubReleaseAssetInfo
-{
-    public string Name { get; init; } = string.Empty;
-
-    [JsonPropertyName("url")]
-    public string ApiUrl { get; init; } = string.Empty;
-
-    [JsonPropertyName("browser_download_url")]
-    public string BrowserDownloadUrl { get; init; } = string.Empty;
-}
-
 internal sealed record InstallerPlatformReleaseManifest
 {
     public int SchemaVersion { get; init; }
@@ -105,6 +78,7 @@ internal sealed record InstallerPlatformReleaseManifest
     public string? ReleaseTag { get; init; }
     public string? Channel { get; init; }
     public string? Version { get; init; }
+    public string? SourceSha { get; init; }
     public string? PublishedAt { get; init; }
     public string? MinimumUpdaterVersion { get; init; }
     public InstallerPlatformReleaseSignature? Signature { get; init; }
@@ -149,9 +123,6 @@ internal sealed record WindowsApplianceInstallState
 [JsonSerializable(typeof(WindowsApplianceStatusResponse))]
 [JsonSerializable(typeof(WindowsApplianceBootstrapResponse))]
 [JsonSerializable(typeof(WindowsApplianceInstallState))]
-[JsonSerializable(typeof(GitHubReleaseInfo))]
-[JsonSerializable(typeof(List<GitHubReleaseInfo>))]
-[JsonSerializable(typeof(GitHubReleaseAssetInfo))]
 [JsonSerializable(typeof(InstallerPlatformReleaseManifest))]
 [JsonSerializable(typeof(InstallerPlatformReleaseSignature))]
 [JsonSerializable(typeof(InstallerPlatformReleaseArtifact))]

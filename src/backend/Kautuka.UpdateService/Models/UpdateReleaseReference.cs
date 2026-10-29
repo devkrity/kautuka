@@ -10,4 +10,7 @@ public sealed record UpdateReleaseReference(
     string? PlatformReleaseSignatureAssetUrl,
     string? SourceUrl,
     DateTimeOffset? PublishedAtUtc,
-    string? Tag);
+    string? Tag)
+{
+    public string? SourceSha { get; init; }
+}

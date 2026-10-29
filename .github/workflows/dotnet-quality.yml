@@ -71,7 +71,13 @@ jobs:
       - name: Test release attestation dry-run gate
         run: node ./scripts/test-release-attestation-gate.mjs
 
-      - name: Test release source preparation and channel feed configuration
+      - name: Test Linux GitHub Release discovery
+        run: node ./scripts/test-linux-github-release-discovery.mjs
+
+      - name: Test signed release-channel pointer publication
+        run: node ./scripts/test-release-channel-pointer.mjs
+
+      - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 
       - name: Test release build SDK matches global.json
@@ -83,8 +89,6 @@ jobs:
       - name: Test local release feed signature routes
         run: node ./scripts/test-serve-release-smoke.mjs
 
-      - name: Test channel pointer deploy-key publisher
-        run: node ./scripts/test-channel-pointer-deploy-key.mjs
       - name: Test release immutability preflight
         run: node ./scripts/test-release-immutability-preflight.mjs
 

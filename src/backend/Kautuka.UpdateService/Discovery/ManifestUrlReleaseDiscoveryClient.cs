@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Hosting;
 using Kautuka.UpdateService.Models;
@@ -67,10 +68,51 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
             return ReleaseDiscoveryResult.Failed("Manifest release discovery returned an empty descriptor.");
         }
 
-        if (!string.IsNullOrWhiteSpace(descriptor.Channel)
-            && !string.Equals(descriptor.Channel, request.ReleaseChannel, StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(descriptor.Channel, request.ReleaseChannel, StringComparison.OrdinalIgnoreCase)
+            || (!options.AllowUnsignedLocalFeeds && !ReleaseChannelPolicy.TryParseTag(
+                descriptor.ReleaseTag,
+                request.ReleaseChannel,
+                string.Equals(request.ReleaseChannel, "preview", StringComparison.OrdinalIgnoreCase),
+                out _))
+            || string.IsNullOrWhiteSpace(descriptor.SourceSha)
+            || descriptor.SourceSha.Length != 40
+            || !descriptor.SourceSha.All(Uri.IsHexDigit))
         {
             return ReleaseDiscoveryResult.NoRelease(eTag);
+        }
+
+        string releaseTag = descriptor.ReleaseTag ?? string.Empty;
+        string version;
+        if (ReleaseChannelPolicy.TryParseTag(
+            releaseTag,
+            request.ReleaseChannel,
+            string.Equals(request.ReleaseChannel, "preview", StringComparison.OrdinalIgnoreCase),
+            out ReleaseTagVersion parsedVersion))
+        {
+            version = parsedVersion.ToVersionString();
+            if (!string.Equals(descriptor.Version, version, StringComparison.Ordinal))
+            {
+                return ReleaseDiscoveryResult.NoRelease(eTag);
+            }
+        }
+        else if (options.AllowUnsignedLocalFeeds && !string.IsNullOrWhiteSpace(descriptor.Version))
+        {
+            version = descriptor.Version;
+        }
+        else
+        {
+            return ReleaseDiscoveryResult.NoRelease(eTag);
+        }
+
+        if (!options.AllowUnsignedLocalFeeds)
+        {
+            string owner = options.RepositoryOwner ?? request.RepositoryOwner;
+            string repository = options.RepositoryName ?? request.RepositoryName;
+            Uri expectedPointer = ReleaseChannelPolicy.CreateChannelPointerUrl(owner, repository, request.ReleaseChannel);
+            if (!string.Equals(manifestUri.AbsoluteUri, expectedPointer.AbsoluteUri, StringComparison.Ordinal))
+            {
+                return ReleaseDiscoveryResult.Unsupported("Signed release discovery must use the canonical channel pointer URL.", eTag);
+            }
         }
 
         PlatformReleaseArtifactDescriptor? platformArtifact = ResolvePlatformArtifact(descriptor);
@@ -81,15 +123,51 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
                 eTag);
         }
 
+        string releaseId = releaseTag;
+        if (!options.AllowUnsignedLocalFeeds
+            && !string.IsNullOrWhiteSpace(descriptor.ReleaseId)
+            && !string.Equals(descriptor.ReleaseId, releaseTag, StringComparison.Ordinal))
+        {
+            return ReleaseDiscoveryResult.Unsupported("Signed channel pointer manifest releaseId does not match its exact release tag.", eTag);
+        }
         string? platformArtifactUrl = ResolveAssetUrl(manifestUri, platformArtifact.Url, platformArtifact.Path);
         string? signatureAssetUrl = ResolveAssetUrl(manifestUri, descriptor.Signature?.Url, descriptor.Signature?.Path);
-        string releaseId = FirstNonEmpty(
-            descriptor.Version,
-            string.IsNullOrWhiteSpace(descriptor.ReleaseTag) ? null : NormalizeVersion(descriptor.ReleaseTag),
-            descriptor.ReleaseId,
-            manifestUri.ToString());
-        string releaseTag = FirstNonEmpty(descriptor.ReleaseTag, releaseId);
-        string version = FirstNonEmpty(descriptor.Version, NormalizeVersion(releaseTag), releaseId);
+        if (!options.AllowUnsignedLocalFeeds && !HasExactTagAssetUrls(descriptor, request, releaseTag, platformArtifactUrl, signatureAssetUrl))
+        {
+            return ReleaseDiscoveryResult.Unsupported(
+                "Signed channel pointer manifest does not bind its signature and platform artifact to the exact canonical GitHub Release tag.",
+                eTag);
+        }
+
+        if (!options.AllowUnsignedLocalFeeds)
+        {
+            if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath) || !File.Exists(options.ManifestPublicKeyPath))
+            {
+                return ReleaseDiscoveryResult.Unsupported("No trusted public key is configured for signed channel discovery.", eTag);
+            }
+
+            if (string.IsNullOrWhiteSpace(signatureAssetUrl))
+            {
+                return ReleaseDiscoveryResult.Unsupported("Signed channel pointer manifest has no exact-tag signature URL.", eTag);
+            }
+
+            byte[] signatureBytes;
+            try
+            {
+                signatureBytes = await DownloadBytesAsync(client, signatureAssetUrl, cancellationToken).ConfigureAwait(false);
+                string publicKey = await File.ReadAllTextAsync(options.ManifestPublicKeyPath, cancellationToken).ConfigureAwait(false);
+                string signature = Encoding.UTF8.GetString(signatureBytes);
+                if (!PlatformReleaseSignatureVerifier.TryVerify(manifestBytes, signature, publicKey, out string? verificationError))
+                {
+                    return ReleaseDiscoveryResult.Unsupported(verificationError ?? "Channel pointer manifest signature verification failed.", eTag);
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException)
+            {
+                return ReleaseDiscoveryResult.Failed("Channel pointer signature verification could not complete.");
+            }
+        }
+
         string fingerprint = ComputeReleaseFingerprint(manifestUri, manifestBytes, platformArtifactUrl, signatureAssetUrl);
         DateTimeOffset? publishedAtUtc = TryParsePublishedAt(descriptor.PublishedAt);
 
@@ -108,9 +186,12 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
                 PlatformArtifactUrl: platformArtifactUrl,
                 PlatformReleaseAssetUrl: manifestUri.ToString(),
                 PlatformReleaseSignatureAssetUrl: signatureAssetUrl,
-                SourceUrl: manifestUri.ToString(),
+                SourceUrl: $"https://github.com/{options.RepositoryOwner ?? "devkrity"}/{options.RepositoryName ?? "kautuka"}/releases/tag/{Uri.EscapeDataString(releaseTag)}",
                 PublishedAtUtc: publishedAtUtc,
-                Tag: releaseTag),
+                Tag: releaseTag)
+            {
+                SourceSha = descriptor.SourceSha,
+            },
             eTag);
     }
 
@@ -163,6 +244,38 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
         }
 
         return new Uri(manifestUri, relativePath).ToString();
+    }
+
+    private bool HasExactTagAssetUrls(
+        PlatformReleaseDescriptor descriptor,
+        ReleaseDiscoveryRequest request,
+        string tag,
+        string? platformArtifactUrl,
+        string? signatureAssetUrl)
+    {
+        string owner = options.RepositoryOwner ?? request.RepositoryOwner;
+        string repository = options.RepositoryName ?? request.RepositoryName;
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repository))
+        {
+            return false;
+        }
+
+        string releaseBase = $"https://github.com/{owner}/{repository}/releases/download/{Uri.EscapeDataString(tag)}";
+        string expectedSignature = $"{releaseBase}/{Uri.EscapeDataString(options.PlatformReleaseSignatureAssetName)}";
+        string expectedArtifact = $"{releaseBase}/{Uri.EscapeDataString(options.PlatformAssetName)}";
+        return string.Equals(descriptor.Signature?.Url, expectedSignature, StringComparison.Ordinal)
+            && string.Equals(descriptor.Signature?.Path, options.PlatformReleaseSignatureAssetName, StringComparison.Ordinal)
+            && string.Equals(signatureAssetUrl, expectedSignature, StringComparison.Ordinal)
+            && string.Equals(platformArtifactUrl, expectedArtifact, StringComparison.Ordinal)
+            && descriptor.Artifacts.Count(artifact => string.Equals(artifact.Name, options.PlatformAssetName, StringComparison.Ordinal)) == 1
+            && string.Equals(descriptor.Artifacts.Single(artifact => string.Equals(artifact.Name, options.PlatformAssetName, StringComparison.Ordinal)).Url, expectedArtifact, StringComparison.Ordinal);
+    }
+
+    private static async Task<byte[]> DownloadBytesAsync(HttpClient client, string url, CancellationToken cancellationToken)
+    {
+        using HttpResponseMessage response = await client.GetAsync(new Uri(url, UriKind.Absolute), HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static string ComputeReleaseFingerprint(Uri manifestUri, byte[] manifestBytes, string? artifactUrl, string? signatureUrl)

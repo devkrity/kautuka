@@ -1,5 +1,7 @@
 using System.Reflection;
 
+using Kautuka.Telemetry.Security;
+
 namespace Kautuka.Installer.Windows.Hosting;
 
 internal static partial class Program
@@ -18,7 +20,7 @@ internal static partial class Program
         string? rootfsPath = TryResolveBundledAssetPath("kautuka-wsl-appliance.tar.gz");
         string? releaseManifestUrl = ResolveDefaultReleaseManifestUrl();
         string? manifestPublicKeyPath = null;
-        string releaseChannel = "stable";
+        string releaseChannel = TryGetAssemblyMetadata("KautukaReleaseChannel") ?? "stable";
         string repositoryOwner = "devkrity";
         string repositoryName = "kautuka";
         string? distroName = null;
@@ -81,6 +83,15 @@ internal static partial class Program
         {
             throw new InvalidOperationException(
                 "--allow-unsigned-local-feeds is only permitted for Development or source-checkout installer runs.");
+        }
+
+        if (string.IsNullOrWhiteSpace(releaseManifestUrl))
+        {
+            releaseManifestUrl = IsDevelopmentInstallerContext()
+                ? Environment.GetEnvironmentVariable("KAUTUKA_RELEASE_MANIFEST_URL") ?? "http://127.0.0.1:20300/manifest"
+                : string.IsNullOrWhiteSpace(releaseTag)
+                    ? ReleaseChannelPolicy.CreateChannelPointerUrl(repositoryOwner, repositoryName, releaseChannel).AbsoluteUri
+                    : $"https://github.com/{Uri.EscapeDataString(repositoryOwner)}/{Uri.EscapeDataString(repositoryName)}/releases/download/{Uri.EscapeDataString(releaseTag)}/kautuka-platform-release.json";
         }
 
         manifestPublicKeyPath ??= ResolveDefaultManifestPublicKeyPath();
@@ -195,21 +206,16 @@ internal static partial class Program
 
     private static string? ResolveDefaultReleaseManifestUrl()
     {
-        string? embeddedUrl = TryGetAssemblyMetadata("KautukaReleaseManifestUrl");
-        if (!string.IsNullOrWhiteSpace(embeddedUrl))
-        {
-            return embeddedUrl;
-        }
-
-        string? configuredUrl = Environment.GetEnvironmentVariable("KAUTUKA_RELEASE_MANIFEST_URL");
-        if (!string.IsNullOrWhiteSpace(configuredUrl))
-        {
-            return configuredUrl;
-        }
-
         if (IsDevelopmentInstallerContext())
         {
-            return "http://127.0.0.1:20300/manifest";
+            string? embeddedUrl = TryGetAssemblyMetadata("KautukaReleaseManifestUrl");
+            if (!string.IsNullOrWhiteSpace(embeddedUrl))
+            {
+                return embeddedUrl;
+            }
+
+            return Environment.GetEnvironmentVariable("KAUTUKA_RELEASE_MANIFEST_URL")
+                ?? "http://127.0.0.1:20300/manifest";
         }
 
         return null;

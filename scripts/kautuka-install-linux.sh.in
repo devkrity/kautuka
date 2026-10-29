@@ -10,6 +10,8 @@ set -euo pipefail
 : "${KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM:=}"
 : "${KAUTUKA_DEFAULT_VERSION:=}"
 : "${KAUTUKA_DEFAULT_RELEASE_CHANNEL:=}"
+: "${KAUTUKA_DEFAULT_REPOSITORY_OWNER:=devkrity}"
+: "${KAUTUKA_DEFAULT_REPOSITORY_NAME:=kautuka}"
 
 usage() {
     cat <<'EOF'
@@ -78,6 +80,20 @@ artifact_url_from_feed_base_url() {
     local normalized_base
     normalized_base="$(normalize_feed_base_url "$1")"
     printf '%s/kautuka-linux-amd64.tar.gz\n' "$normalized_base"
+}
+
+resolve_github_release_candidate() {
+    local channel="$1"
+    local owner="$2"
+    local repository="$3"
+    if [[ ! "$owner" =~ ^[A-Za-z0-9_-]+$ || ! "$repository" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        fail 'canonical repository owner and name contain invalid characters'
+    fi
+    case "$channel" in
+        stable|preview) ;;
+        *) fail "unsupported release channel: $channel" ;;
+    esac
+    printf 'https://raw.githubusercontent.com/%s/%s/release-channel/%s.json\n' "$owner" "$repository" "$channel"
 }
 
 write_update_source_document() {
@@ -1755,6 +1771,11 @@ main() {
     local preview_manifest_url="${KAUTUKA_DEFAULT_PREVIEW_MANIFEST_URL}"
     local stable_manifest_url="${KAUTUKA_DEFAULT_STABLE_MANIFEST_URL}"
     local version=""
+    local release_channel="${KAUTUKA_DEFAULT_RELEASE_CHANNEL:-stable}"
+    local release_tag=''
+    local release_source_sha=''
+    local expected_signature_url=''
+    local github_release_candidate='false'
     local install_root="/opt/kautuka/manager"
     local internal_state_root="/var/lib/kautuka"
     local visible_root="/var/lib/kautuka"
@@ -1860,7 +1881,10 @@ main() {
         version="$KAUTUKA_DEFAULT_VERSION"
     fi
 
-    [[ -n "$version" ]] || fail "--version is required"
+    if [[ -z "${KAUTUKA_DEFAULT_RELEASE_CHANNEL:-}" ]]; then
+        if [[ "$version" == *-preview.* ]]; then release_channel='preview'; else release_channel='stable'; fi
+    fi
+    [[ "$release_channel" == 'stable' || "$release_channel" == 'preview' ]] || fail "unsupported release channel: $release_channel"
 
     if [[ -z "$feed_base_url" && -n "$KAUTUKA_DEFAULT_FEED_BASE_URL" ]]; then
         feed_base_url="$KAUTUKA_DEFAULT_FEED_BASE_URL"
@@ -1869,7 +1893,7 @@ main() {
     if [[ -z "$artifact" && -z "$artifact_url" ]]; then
         if [[ -n "$feed_base_url" ]]; then
             artifact_url="$(artifact_url_from_feed_base_url "$feed_base_url")"
-        else
+        elif [[ -n "$KAUTUKA_DEFAULT_ARTIFACT_URL" ]]; then
             artifact_url="$KAUTUKA_DEFAULT_ARTIFACT_URL"
         fi
     fi
@@ -1883,8 +1907,18 @@ main() {
         manifest_url="$KAUTUKA_DEFAULT_MANIFEST_URL"
     fi
 
+    if [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]]; then
+        require_command python3
+        require_command curl
+        manifest_url="$(resolve_github_release_candidate "$release_channel" "$KAUTUKA_DEFAULT_REPOSITORY_OWNER" "$KAUTUKA_DEFAULT_REPOSITORY_NAME")"
+        # The channel pointer selects a signed versioned release manifest. The
+        # manifest, rather than the pointer transport, supplies exact-tag assets.
+        version=''
+        github_release_candidate='true'
+    fi
+
     if [[ -z "$artifact" && -z "$artifact_url" ]]; then
-        fail "either --artifact or --artifact-url is required"
+        [[ -n "$manifest_url" ]] || fail "either --artifact or --artifact-url is required"
     fi
 
     if [[ -n "$artifact_url" && -z "$manifest_url" ]]; then
@@ -1926,17 +1960,61 @@ main() {
         local manifest_path="$tmp_root/kautuka-platform-release.json"
         local signature_path="$tmp_root/kautuka-platform-release.sig"
         local public_key_path="$tmp_root/manifest-public-key.pem"
-        local expected_signature_url="${manifest_url%.json}.sig"
-        local release_channel="${KAUTUKA_DEFAULT_RELEASE_CHANNEL:-}"
-        if [[ -z "$release_channel" ]]; then
-            if [[ "$version" == *-preview.* ]]; then release_channel='preview'; else release_channel='stable'; fi
-        fi
-        [[ "$release_channel" == 'stable' || "$release_channel" == 'preview' ]] || fail "unsupported release channel: $release_channel"
         printf '%s\n' "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM" > "$public_key_path"
         echo "Downloading signed release manifest from: $manifest_url"
         curl --fail --location --silent --show-error --output "$manifest_path" "$manifest_url"
+
+        local manifest_identity
+        manifest_identity="$(python3 - "$manifest_path" "$release_channel" "$KAUTUKA_DEFAULT_REPOSITORY_OWNER" "$KAUTUKA_DEFAULT_REPOSITORY_NAME" "$github_release_candidate" <<'PY'
+import json
+import re
+import sys
+import urllib.parse
+
+manifest_path, channel, owner, repository, is_channel_pointer = sys.argv[1:]
+with open(manifest_path, encoding='utf-8') as stream:
+    document = json.load(stream)
+tag = document.get('releaseTag')
+version = document.get('version')
+source_sha = document.get('sourceSha')
+signature_url = (document.get('signature') or {}).get('url')
+artifacts = [item for item in document.get('artifacts', []) if isinstance(item, dict) and item.get('name') == 'kautuka-linux-amd64.tar.gz']
+if len(artifacts) != 1:
+    raise SystemExit('signed release manifest must contain exactly one Linux platform artifact')
+artifact_url = artifacts[0].get('url')
+pattern = r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' if channel == 'stable' else r'^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-preview\.(0|[1-9][0-9]*)$'
+match = re.fullmatch(pattern, tag or '')
+if is_channel_pointer == 'true' and document.get('channel') != channel:
+    raise SystemExit('channel pointer manifest belongs to a different release channel')
+if is_channel_pointer == 'true' and match is None:
+    raise SystemExit('channel pointer manifest tag is not a strict stable/preview version')
+if is_channel_pointer == 'true' and version != tag[1:]:
+    raise SystemExit('channel pointer manifest version does not match its exact release tag')
+if not isinstance(tag, str) or not isinstance(version, str) or not isinstance(source_sha, str) or not re.fullmatch(r'[0-9a-fA-F]{40}', source_sha):
+    raise SystemExit('signed release manifest identity is incomplete')
+base = f'https://github.com/{owner}/{repository}/releases/download/{urllib.parse.quote(tag, safe="")}'
+expected_signature = f'{base}/kautuka-platform-release.sig'
+expected_artifact = f'{base}/kautuka-linux-amd64.tar.gz'
+if not isinstance(signature_url, str) or not isinstance(artifact_url, str):
+    raise SystemExit('signed release manifest is missing exact signature or artifact URLs')
+if is_channel_pointer == 'true' and (signature_url != expected_signature or artifact_url != expected_artifact):
+    raise SystemExit('channel pointer manifest signature or artifact URL is not the exact-tag GitHub Release asset')
+print('\t'.join([tag, version, source_sha.lower(), signature_url, artifact_url, document.get('channel', '')]))
+PY
+        )" || fail 'signed release manifest identity is invalid'
+        IFS=$'\t' read -r manifest_tag manifest_version release_source_sha expected_signature_url manifest_artifact_url manifest_channel <<< "$manifest_identity"
+        [[ -n "$version" && "$version" != "$manifest_version" ]] && fail 'signed release manifest version does not match requested version'
+        [[ -n "$release_tag" && "$release_tag" != "$manifest_tag" ]] && fail 'signed release manifest tag does not match requested release tag'
+        [[ -n "$release_channel" && "$release_channel" != "$manifest_channel" ]] && fail 'signed release manifest channel does not match requested channel'
+        version="$manifest_version"
+        release_tag="$manifest_tag"
+        release_channel="$manifest_channel"
+        if [[ -z "$artifact_url" ]]; then artifact_url="$manifest_artifact_url"; fi
+        [[ -n "$expected_signature_url" ]] || fail 'signed release manifest has no signature URL'
         curl --fail --location --silent --show-error --output "$signature_path" "$expected_signature_url"
     fi
+
+    [[ -n "$version" ]] || fail "--version is required when installing a local artifact without a signed manifest"
 
     if [[ -n "$artifact_url" ]]; then
         artifact="$tmp_root/$(basename "$artifact_url")"
@@ -1959,20 +2037,23 @@ if len(artifacts) == 1 and isinstance(artifacts[0].get('url'), str):
 PY
         )" || fail 'signed release manifest has no Linux platform artifact URL'
         [[ -n "$manifest_artifact_url" ]] || fail 'signed release manifest has no Linux platform artifact URL'
-        if [[ -z "$artifact_url" ]]; then
-            artifact_url="$manifest_artifact_url"
-        fi
-        verify_linux_release \
+        [[ "$artifact_url" == "$manifest_artifact_url" ]] || fail 'selected artifact URL does not match the signed release manifest'
+        local verification_args=(
             --manifest "$manifest_path" \
             --signature "$signature_path" \
             --public-key "$public_key_path" \
             --archive "$artifact" \
             --version "$version" \
             --channel "$release_channel" \
-            --tag "v${version}" \
+            --tag "${release_tag:-v${version}}" \
             --artifact-name 'kautuka-linux-amd64.tar.gz' \
             --artifact-url "$artifact_url" \
             --signature-url "$expected_signature_url"
+        )
+        if [[ -n "$release_source_sha" ]]; then
+            verification_args+=(--source-sha "$release_source_sha")
+        fi
+        verify_linux_release "${verification_args[@]}"
     fi
 
     # Local-feed installers need a preview/stable runtime policy, but must not
@@ -2036,7 +2117,13 @@ PY
     install_apply_release_helper "$tmp_root/extracted"
 
     if [[ -n "$manifest_url" ]]; then
-        write_update_source_document "$manifest_url" "$preview_manifest_url" "$stable_manifest_url" "$catalog_manifest_url" "$service_user" "$service_group"
+        if [[ "$github_release_candidate" == 'true' ]]; then
+            # UpdateService independently discovers the selected signed channel
+            # snapshot; never persist a version-pinned bootstrap manifest as its source.
+            write_update_source_document '' '' '' "$catalog_manifest_url" "$service_user" "$service_group"
+        else
+            write_update_source_document "$manifest_url" "$preview_manifest_url" "$stable_manifest_url" "$catalog_manifest_url" "$service_user" "$service_group"
+        fi
     fi
     write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM" "$service_user" "$service_group"
     write_service_scope_document "$service_user" 'kautuka.target'

@@ -181,14 +181,18 @@ try {
     'the platform builder must use the temporary private-key path');
   assert.match(linuxBuildJob, /--manifest-public-key "\$RELEASE_MANIFEST_PUBLIC_KEY_PATH"/u,
     'the platform builder must use the corresponding public key path');
-  assert.match(linuxBuildJob, /--preview-manifest-url "https:\/\/raw\.githubusercontent\.com\/devkrity\/kautuka-release-feed-preview\/main\/manifest"/u,
-    'the platform image must discover Preview from the channel feed');
-  assert.match(linuxBuildJob, /--stable-manifest-url "https:\/\/raw\.githubusercontent\.com\/devkrity\/kautuka-release-feed-stable\/main\/manifest"/u,
-    'the platform image must discover Stable from the channel feed');
+  assert.match(linuxBuildJob, /--channel "\$CHANNEL"/u,
+    'the platform image build must retain channel identity without a channel pointer URL');
+  assert.doesNotMatch(linuxBuildJob, /kautuka-release-feed-|--preview-manifest-url|--stable-manifest-url/u,
+    'release appliances must discover GitHub Releases instead of depending on feed repositories');
+  assert.match(linuxBuildJob, /https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\/releases\/download\/\$\{RELEASE_TAG\}/u,
+    'the signed release manifest must use exact-tag GitHub Release URLs');
+  assert.doesNotMatch(workflow, /InstallerReleaseManifestUrl|--manifest-url.*releases\/download/u,
+    'published installers must select the current channel release instead of pinning the build tag');
   assert.match(buildScript, /build_args\+=\("\$release_build_context"\)/u,
     'the compiler image build must use the dedicated empty context instead of the repository workspace');
 
-  console.log('Release source preparation tests passed: current Git working-tree snapshot, ignored-file exclusion, non-ignored helper inclusion, empty destination/context guards, key exclusion, and channel-feed/toolchain configuration.');
+  console.log('Release source preparation tests passed: current Git working-tree snapshot, ignored-file exclusion, non-ignored helper inclusion, empty destination/context guards, key exclusion, and GitHub Releases channel configuration.');
 } finally {
   await rm(tempRoot, { recursive: true, force: true });
 }

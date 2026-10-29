@@ -23,17 +23,7 @@ public static class UpdateServiceCollectionExtensions
         services.AddSingleton<IHostedCatalogStateStore, JsonHostedCatalogStateStore>();
         services.AddSingleton<IHostedCatalogService, HostedCatalogService>();
         services.AddSingleton<UpdateOperationHistoryStore>();
-        services.AddSingleton<IReleaseDiscoveryClient>(static serviceProvider =>
-        {
-            UpdateOptions options = serviceProvider.GetRequiredService<IOptions<UpdateOptions>>().Value;
-            bool hasManifestSource = !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl)
-                || !string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl)
-                || !string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl);
-
-            return hasManifestSource
-                ? ActivatorUtilities.CreateInstance<ManifestUrlReleaseDiscoveryClient>(serviceProvider)
-                : ActivatorUtilities.CreateInstance<GitHubReleaseDiscoveryClient>(serviceProvider);
-        });
+        services.AddSingleton<IReleaseDiscoveryClient, ManifestUrlReleaseDiscoveryClient>();
         services.AddSingleton<IUpdateCoordinator, UpdateCoordinator>();
         services.AddHostedService<UpdateActivationWorker>();
         services.AddHostedService<UpdateDiscoveryWorker>();

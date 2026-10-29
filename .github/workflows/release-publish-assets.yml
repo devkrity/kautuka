@@ -24,9 +24,6 @@ on:
       wsl_rootfs_asset_name:
         required: true
         type: string
-      updates_base_url:
-        required: true
-        type: string
       catalog_manifest_url:
         required: true
         type: string
@@ -105,26 +102,24 @@ jobs:
 
       - name: Write release entrypoint notes
         env:
-          CHANNEL: ${{ inputs.channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          UPDATES_BASE_URL: ${{ inputs.updates_base_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
         run: |
-          updates_base_url="${UPDATES_BASE_URL%/}"
+          repository_url="https://github.com/${GITHUB_REPOSITORY}"
           cat > kautuka-release-entrypoints.md <<EOF
           ## Downloads
 
           Release binaries and compliance assets are published as immutable assets on this versioned GitHub Release.
 
-          - Release assets: \`https://github.com/devkrity/kautuka/releases/tag/${RELEASE_TAG}\`
-          - Linux installer: \`https://github.com/devkrity/kautuka/releases/download/${RELEASE_TAG}/kautuka-install-linux.sh\`
+          - Release assets: \`${repository_url}/releases/tag/${RELEASE_TAG}\`
+          - Linux installer: \`${repository_url}/releases/download/${RELEASE_TAG}/kautuka-install-linux.sh\`
           - Linux installer attestation: before running with sudo, verify the downloaded file with \`gh attestation verify ./kautuka-install-linux.sh --repo devkrity/kautuka --signer-workflow devkrity/kautuka/.github/workflows/release-build-platform-assets.yml\`.
-          - Windows installer (not Authenticode-signed unless SIGNING-STATUS says SIGNED): \`https://github.com/devkrity/kautuka/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe\`
+          - Windows installer: \`${repository_url}/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe\`
           - License, notices, credits, component inventory, SBOMs, source archives, and checksums are included as flat release assets; license texts and source files are bundled in zip archives.
-          - Channel pointer: \`https://raw.githubusercontent.com/devkrity/kautuka-release-feed-${CHANNEL}/main/manifest\`
           - Catalog: \`${CATALOG_MANIFEST_URL}\`
 
-          **The Windows installer is unsigned in this release unless \`SIGNING-STATUS.txt\` says SIGNED.** SmartScreen will warn.
+          Preview Windows installers may be unsigned; Stable installers may also be unsigned when signing secrets are not configured. Check \`SIGNING-STATUS.txt\` and expect a SmartScreen warning when it says \`UNSIGNED\`.
           EOF
 
       - name: Upload release entrypoint notes
@@ -136,8 +131,8 @@ jobs:
           overwrite: true
           retention-days: 3
 
-  publish-public-feed:
-    name: Publish Public Feed
+  publish-github-release:
+    name: Publish GitHub Release
     needs:
       - compose-release-asset-manifest
       - compose-release-entrypoint-notes
@@ -145,7 +140,7 @@ jobs:
     environment:
       name: ${{ inputs.channel == 'stable' && 'stable' || 'preview' }}
     concurrency:
-      group: release-publication-and-pointers
+      group: release-publication
       cancel-in-progress: false
     permissions:
       contents: write
@@ -154,6 +149,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
+
+      - name: Check out the protected release-channel branch before draft mutation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: release-channel
+          path: release-channel
+          fetch-depth: 1
+          token: ${{ github.token }}
+          persist-credentials: true
 
       - name: Normalize artifact scope
         id: scope
@@ -176,7 +180,7 @@ jobs:
           pattern: kautuka-*-${{ steps.scope.outputs.artifact_scope }}
           path: release-artifacts
 
-      - name: Stage public feed tree
+      - name: Stage versioned release assets and S3 catalog input
         env:
           CHANNEL: ${{ inputs.channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -186,7 +190,7 @@ jobs:
           set -euo pipefail
           scope="$ARTIFACT_SCOPE"
           root="release-artifacts"
-          feed="public-feed"
+          feed="release-stage"
           release_dir="${feed}/releases/${RELEASE_TAG}"
 
           mkdir -p "$release_dir"
@@ -212,6 +216,7 @@ jobs:
           copy_required "${root}/kautuka-wsl-rootfs-${scope}/${WSL_ROOTFS_ASSET_NAME}" "${release_dir}/${WSL_ROOTFS_ASSET_NAME}"
           copy_required "${root}/kautuka-platform-release-${scope}/kautuka-platform-release.json" "${release_dir}/kautuka-platform-release.json"
           copy_required "${root}/kautuka-platform-release-${scope}/kautuka-platform-release.sig" "${release_dir}/kautuka-platform-release.sig"
+          copy_required "${root}/kautuka-platform-release-${scope}/manifest-public-key.pem" "release-stage/manifest-signing-public.pem"
           copy_required "${root}/kautuka-platform-release-${scope}/compliance/THIRD_PARTY_NOTICES.txt" "${release_dir}/THIRD_PARTY_NOTICES.txt"
           copy_required "${root}/kautuka-platform-release-${scope}/compliance/THIRD_PARTY_COMPONENTS.json" "${release_dir}/THIRD_PARTY_COMPONENTS.json"
           copy_required "${root}/kautuka-platform-release-${scope}/compliance/FRONTEND_DEPENDENCIES.json" "${release_dir}/FRONTEND_DEPENDENCIES.json"
@@ -225,7 +230,7 @@ jobs:
             find "$root" -maxdepth 2 -type d >&2 || true
             exit 1
           fi
-          cp -a "${bundle}/." "${feed}/"
+          cp -a "${bundle}/catalog" "${feed}/"
 
           if [[ ! -f "${feed}/catalog/manifest" ]]; then
             echo "error: catalog manifest missing from host bundle: catalog/manifest" >&2
@@ -240,7 +245,7 @@ jobs:
           WSL_ROOTFS_ASSET_NAME: ${{ inputs.wsl_rootfs_asset_name }}
         run: |
           set -euo pipefail
-          release_dir="public-feed/releases/${RELEASE_TAG}"
+          release_dir="release-stage/releases/${RELEASE_TAG}"
           mkdir -p sbom-input/linux-platform sbom-input/wsl-appliance
           tar -xzf "$release_dir/kautuka-linux-amd64.tar.gz" -C sbom-input/linux-platform
           tar -xzf "$release_dir/$WSL_ROOTFS_ASSET_NAME" -C sbom-input/wsl-appliance
@@ -318,16 +323,7 @@ jobs:
       - name: Validate complete flat release asset set
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: node scripts/verify-release-assets.mjs --directory "public-feed/releases/${RELEASE_TAG}" --tag "$RELEASE_TAG"
-
-      - name: Preflight channel pointer write access
-        env:
-          CHANNEL: ${{ inputs.channel }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          RELEASE_FEED_DEPLOY_KEY: ${{ secrets.release_feed_deploy_key }}
-        run: |
-          set -euo pipefail
-          bash scripts/publish-channel-pointer.sh preflight --channel "$CHANNEL" --source-sha "$SOURCE_SHA"
+        run: node scripts/verify-release-assets.mjs --directory "release-stage/releases/${RELEASE_TAG}" --tag "$RELEASE_TAG"
 
       - name: Confirm release draft is empty and immutable-release compatible
         env:
@@ -363,7 +359,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          mapfile -d '' release_assets < <(find "public-feed/releases/${RELEASE_TAG}" -maxdepth 1 -type f -print0 | sort -z)
+          mapfile -d '' release_assets < <(find "release-stage/releases/${RELEASE_TAG}" -maxdepth 1 -type f -print0 | sort -z)
           ((${#release_assets[@]} > 0)) || { echo 'error: no release assets were staged.' >&2; exit 1; }
           gh release upload "$RELEASE_TAG" "${release_assets[@]}"
 
@@ -375,7 +371,7 @@ jobs:
         run: |
           set -euo pipefail
           release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
-          expected="$(node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(`${p}/kautuka-release-assets.json`)); const extra=["kautuka-release-assets.json","kautuka-release-assets.sha256"].map(name=>{const b=fs.readFileSync(`${p}/${name}`); return {name,sha256:crypto.createHash("sha256").update(b).digest("hex"),sizeBytes:b.length};}); console.log([...m.assets,...extra].map(x=>`${x.name}\tsha256:${x.sha256}\t${x.sizeBytes}`).sort().join("\n"))' "public-feed/releases/${RELEASE_TAG}")"
+          expected="$(node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(`${p}/kautuka-release-assets.json`)); const extra=["kautuka-release-assets.json","kautuka-release-assets.sha256"].map(name=>{const b=fs.readFileSync(`${p}/${name}`); return {name,sha256:crypto.createHash("sha256").update(b).digest("hex"),sizeBytes:b.length};}); console.log([...m.assets,...extra].map(x=>`${x.name}\tsha256:${x.sha256}\t${x.sizeBytes}`).sort().join("\n"))' "release-stage/releases/${RELEASE_TAG}")"
           actual="$(gh api "repos/$REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[] | [.name, (.digest // ""), .size] | @tsv' | sort)"
           if [[ "$actual" != "$expected" ]]; then
             echo 'error: uploaded GitHub Release asset names, sizes, or SHA-256 digests differ from the validated local set.' >&2
@@ -395,12 +391,12 @@ jobs:
           RELEASE_FEED_S3_PREFIX: ${{ secrets.release_feed_s3_prefix }}
         run: |
           mkdir -p catalog-feed
-          cp -a public-feed/catalog catalog-feed/catalog
+          cp -a release-stage/catalog catalog-feed/catalog
           bash scripts/publish-release-feed.sh --feed-dir catalog-feed
 
       - name: Report catalog publication failure without blocking releases
         if: ${{ steps.publish_catalog.outcome == 'failure' }}
-        run: echo 'Catalog publication failed; the GitHub Release and channel pointer will continue independently.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Catalog publication failed; the immutable GitHub Release remains available independently.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish immutable GitHub Release
         env:
@@ -412,7 +408,7 @@ jobs:
           release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
           gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false --silent
 
-      - name: Require GitHub immutable-release enforcement before moving the channel pointer
+      - name: Require GitHub immutable-release enforcement
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -421,21 +417,35 @@ jobs:
           set -euo pipefail
           immutable="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .immutable)"
           if [[ "$immutable" != 'true' ]]; then
-            echo 'error: GitHub did not mark the published release immutable; configure repository release immutability before cutover. Channel pointer was not moved.' >&2
+            echo 'error: GitHub did not mark the published release immutable; configure repository release immutability before cutover.' >&2
             exit 1
           fi
 
-      - name: Move the GitHub-hosted channel pointer after release publication
+      - name: Advance only the selected signed channel pointer
         env:
-          RELEASE_FEED_DEPLOY_KEY: ${{ secrets.release_feed_deploy_key }}
           CHANNEL: ${{ inputs.channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          MANIFEST_PATH: ${{ github.workspace }}/public-feed/releases/${{ inputs.release_tag }}/kautuka-platform-release.json
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          bash scripts/publish-channel-pointer.sh publish \
+          repository_owner="${REPOSITORY%%/*}"
+          repository_name="${REPOSITORY#*/}"
+          node scripts/update-release-channel-pointer.mjs \
             --channel "$CHANNEL" \
-            --release-tag "$RELEASE_TAG" \
-            --source-sha "$SOURCE_SHA" \
-            --manifest "$MANIFEST_PATH"
+            --manifest "release-stage/releases/${RELEASE_TAG}/kautuka-platform-release.json" \
+            --signature "release-stage/releases/${RELEASE_TAG}/kautuka-platform-release.sig" \
+            --public-key release-stage/manifest-signing-public.pem \
+            --pointer-directory release-channel \
+            --owner "$repository_owner" \
+            --repository "$repository_name"
+          git -C release-channel config user.name 'github-actions[bot]'
+          git -C release-channel config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C release-channel add "$CHANNEL.json"
+          staged_paths="$(git -C release-channel diff --cached --name-only)"
+          if [[ "$staged_paths" != "$CHANNEL.json" ]]; then
+            echo 'error: channel publication attempted to stage a different pointer path.' >&2
+            exit 1
+          fi
+          git -C release-channel diff --cached --check
+          git -C release-channel commit -m "Advance $CHANNEL channel to $RELEASE_TAG"
+          git -C release-channel push origin HEAD:refs/heads/release-channel

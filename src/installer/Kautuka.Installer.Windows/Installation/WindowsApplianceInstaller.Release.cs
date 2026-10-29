@@ -19,59 +19,46 @@ internal static partial class WindowsApplianceInstaller
             ? DeriveInstallDir(string.IsNullOrWhiteSpace(request.DistroName) ? defaultDistroName : request.DistroName)
             : request.InstallDir;
         var resolvedReleaseTag = string.IsNullOrWhiteSpace(request.ReleaseTag) ? null : request.ReleaseTag;
-        GitHubResolvedRelease? resolvedRelease = null;
         InstallerPlatformReleaseManifest? releaseManifest = null;
         Uri? releaseManifestUri = TryCreateAbsoluteUri(request.ReleaseManifestUrl);
         bool requireVerification = !request.AllowUnsignedLocalFeeds;
         string? manifestPublicKeyPath = ResolveManifestPublicKeyPath(request);
 
-        if (string.IsNullOrWhiteSpace(request.RootfsPath) && releaseManifestUri is not null)
+        if (string.IsNullOrWhiteSpace(request.RootfsPath))
         {
+            releaseManifestUri ??= new Uri(
+                string.IsNullOrWhiteSpace(request.ReleaseTag)
+                    ? ReleaseChannelPolicy.CreateChannelPointerUrl(request.RepositoryOwner, request.RepositoryName, request.ReleaseChannel).AbsoluteUri
+                    : $"https://github.com/{Uri.EscapeDataString(request.RepositoryOwner)}/{Uri.EscapeDataString(request.RepositoryName)}/releases/download/{Uri.EscapeDataString(request.ReleaseTag)}/{releaseManifestAssetName}",
+                UriKind.Absolute);
             EnsureApprovedInstallerSourceUrl(releaseManifestUri.ToString(), "Release manifest");
             releaseManifest = await DownloadReleaseManifestAsync(
                 releaseManifestUri,
+                request.ReleaseChannel,
+                request.RepositoryOwner,
+                request.RepositoryName,
+                request.ReleaseTag,
                 requireVerification,
                 manifestPublicKeyPath,
                 cancellationToken).ConfigureAwait(false);
+
+            if (!string.IsNullOrWhiteSpace(request.ReleaseTag)
+                && !string.Equals(request.ReleaseTag, releaseManifest.ReleaseTag, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Signed release manifest tag does not match the requested exact release tag.");
+            }
 
             resolvedReleaseTag ??= string.IsNullOrWhiteSpace(releaseManifest.ReleaseTag)
                 ? null
                 : releaseManifest.ReleaseTag;
 
-            await log($"Resolved install assets from local manifest {releaseManifestUri}.").ConfigureAwait(false);
+            await log($"Resolved install assets from {request.ReleaseChannel} channel manifest {releaseManifestUri}.").ConfigureAwait(false);
         }
 
-        if (string.IsNullOrWhiteSpace(resolvedReleaseTag)
-            && string.IsNullOrWhiteSpace(request.RootfsPath)
-            && releaseManifest is null)
-        {
-            resolvedRelease = await ResolveReleaseForChannelAsync(
-                request.ReleaseChannel,
-                request.RepositoryOwner,
-                request.RepositoryName,
-                cancellationToken).ConfigureAwait(false);
-            resolvedReleaseTag = resolvedRelease.TagName;
-            await log($"Resolved {request.ReleaseChannel} channel to {resolvedRelease.TagName}.").ConfigureAwait(false);
-        }
-
-        if (string.IsNullOrWhiteSpace(request.RootfsPath) && !string.IsNullOrWhiteSpace(resolvedReleaseTag))
-        {
-            if (releaseManifest is null)
-            {
-                releaseManifest = await DownloadReleaseManifestAsync(
-                    resolvedReleaseTag,
-                    request.RepositoryOwner,
-                    request.RepositoryName,
-                    requireVerification,
-                    manifestPublicKeyPath,
-                    cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        var releaseId = !string.IsNullOrWhiteSpace(request.ReleaseId)
-            ? request.ReleaseId!
-            : !string.IsNullOrWhiteSpace(releaseManifest?.ReleaseId)
+        var releaseId = !string.IsNullOrWhiteSpace(releaseManifest?.ReleaseId)
                 ? releaseManifest.ReleaseId!
+            : !string.IsNullOrWhiteSpace(request.ReleaseId)
+                ? request.ReleaseId!
             : !string.IsNullOrWhiteSpace(resolvedReleaseTag)
                 ? resolvedReleaseTag!
                 : throw new InvalidOperationException("The installer could not determine which release assets to use. Publish the installer with embedded release metadata or provide explicit asset paths.");
@@ -248,6 +235,10 @@ internal static partial class WindowsApplianceInstaller
 
     private static async Task<InstallerPlatformReleaseManifest> DownloadReleaseManifestAsync(
         Uri releaseManifestUri,
+        string releaseChannel,
+        string repositoryOwner,
+        string repositoryName,
+        string? expectedTag,
         bool requireVerification,
         string? manifestPublicKeyPath,
         CancellationToken cancellationToken)
@@ -263,51 +254,15 @@ internal static partial class WindowsApplianceInstaller
             InstallerJsonContext.Default.InstallerPlatformReleaseManifest)
             ?? throw new InvalidOperationException($"Failed to parse platform release manifest from '{releaseManifestUri}'.");
 
+        if (requireVerification)
+        {
+            ValidateManifestMatchesChannel(manifest, releaseChannel, repositoryOwner, repositoryName, expectedTag);
+        }
+
         await VerifyInstallerManifestSignatureAsync(
             manifestBytes,
             manifest,
             releaseManifestUri,
-            requireVerification,
-            manifestPublicKeyPath,
-            cancellationToken).ConfigureAwait(false);
-
-        return manifest;
-    }
-
-    private static async Task<InstallerPlatformReleaseManifest> DownloadReleaseManifestAsync(
-        string releaseTag,
-        string repositoryOwner,
-        string repositoryName,
-        bool requireVerification,
-        string? manifestPublicKeyPath,
-        CancellationToken cancellationToken)
-    {
-        GitHubAssetDownload manifestDownload = await GetReleaseAssetUrlAsync(
-            releaseTag,
-            repositoryOwner,
-            repositoryName,
-            releaseManifestAssetName,
-            cancellationToken).ConfigureAwait(false);
-
-        EnsureApprovedInstallerSourceUrl(manifestDownload.Url, "Release manifest");
-
-        using var client = CreateHttpClient();
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(manifestDownload.Url));
-
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-
-        byte[] manifestBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-        InstallerPlatformReleaseManifest manifest = JsonSerializer.Deserialize(
-            manifestBytes,
-            InstallerJsonContext.Default.InstallerPlatformReleaseManifest)
-            ?? throw new InvalidOperationException($"Failed to parse platform release manifest for tag '{releaseTag}'.");
-
-        Uri manifestUri = new(manifestDownload.Url);
-        await VerifyInstallerManifestSignatureAsync(
-            manifestBytes,
-            manifest,
-            manifestUri,
             requireVerification,
             manifestPublicKeyPath,
             cancellationToken).ConfigureAwait(false);
@@ -420,7 +375,7 @@ internal static partial class WindowsApplianceInstaller
             $"{purpose} URL must be https or loopback http. Rejected: {assetUrl}");
     }
 
-    private static async Task<GitHubAssetDownload> ResolveReleaseAssetDownloadAsync(
+    private static Task<GitHubAssetDownload> ResolveReleaseAssetDownloadAsync(
         string releaseTag,
         string repositoryOwner,
         string repositoryName,
@@ -429,22 +384,18 @@ internal static partial class WindowsApplianceInstaller
         Uri? releaseManifestUri,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Uri? manifestAssetUri = ResolveManifestAssetUri(manifestArtifact, releaseManifestUri);
         if (manifestAssetUri is not null)
         {
-            return new GitHubAssetDownload(manifestAssetUri.ToString());
+            return Task.FromResult(new GitHubAssetDownload(manifestAssetUri.ToString()));
         }
 
         string resolvedAssetName = !string.IsNullOrWhiteSpace(manifestArtifact?.Name)
             ? manifestArtifact.Name
             : assetName;
-
-        return await GetReleaseAssetUrlAsync(
-            releaseTag,
-            repositoryOwner,
-            repositoryName,
-            resolvedAssetName,
-            cancellationToken).ConfigureAwait(false);
+        string releaseBase = $"https://github.com/{Uri.EscapeDataString(repositoryOwner)}/{Uri.EscapeDataString(repositoryName)}/releases/download/{Uri.EscapeDataString(releaseTag)}";
+        return Task.FromResult(new GitHubAssetDownload($"{releaseBase}/{Uri.EscapeDataString(resolvedAssetName)}"));
     }
 
     private static Uri? ResolveManifestAssetUri(InstallerPlatformReleaseArtifact? manifestArtifact, Uri? releaseManifestUri)
@@ -484,112 +435,57 @@ internal static partial class WindowsApplianceInstaller
             : null;
     }
 
-    private static async Task<GitHubResolvedRelease> ResolveReleaseForChannelAsync(
-        string releaseChannel,
-        string repositoryOwner,
-        string repositoryName,
-        CancellationToken cancellationToken)
+    private static void ValidateManifestMatchesChannel(
+        InstallerPlatformReleaseManifest manifest,
+        string channel,
+        string owner,
+        string repository,
+        string? expectedTag)
     {
-        using var client = CreateHttpClient();
-        var releasesUri = $"https://api.github.com/repos/{repositoryOwner}/{repositoryName}/releases?per_page=20";
-        using var response = await client.GetAsync(new Uri(releasesUri), cancellationToken).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
+        if (!ReleaseChannelPolicy.TryParseTag(
+                manifest.ReleaseTag,
+                channel,
+                string.Equals(channel, "preview", StringComparison.OrdinalIgnoreCase),
+                out ReleaseTagVersion parsed)
+            || !string.Equals(manifest.Version, parsed.ToVersionString(), StringComparison.Ordinal)
+            || !string.Equals(manifest.Channel, channel, StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(manifest.SourceSha)
+            || manifest.SourceSha.Length != 40
+            || !manifest.SourceSha.All(Uri.IsHexDigit)
+            || (!string.IsNullOrWhiteSpace(expectedTag) && !string.Equals(manifest.ReleaseTag, expectedTag, StringComparison.Ordinal)))
         {
             throw new InvalidOperationException(
-                $"Failed to resolve the {releaseChannel} release channel from {repositoryOwner}/{repositoryName}. GitHub returned {(int)response.StatusCode} ({response.ReasonPhrase}).");
+                $"Signed release manifest identity does not match the selected {channel} channel and its strict release tag.");
         }
 
-        Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        await using (stream.ConfigureAwait(false))
+        if (!string.IsNullOrWhiteSpace(manifest.ReleaseId)
+            && !string.Equals(manifest.ReleaseId, manifest.ReleaseTag, StringComparison.Ordinal))
         {
-            var releases = await JsonSerializer.DeserializeAsync(
-                stream,
-                InstallerJsonContext.Default.ListGitHubReleaseInfo,
-                cancellationToken).ConfigureAwait(false)
-                ?? [];
+            throw new InvalidOperationException("Signed release manifest release ID does not match its release tag.");
+        }
 
-            var selected = SelectReleaseForChannel(releases, releaseChannel);
-            if (selected is null)
-            {
-                throw new InvalidOperationException(
-                    $"No release could be resolved for the {releaseChannel} channel in {repositoryOwner}/{repositoryName}.");
-            }
-
-            return new GitHubResolvedRelease(
-                selected.TagName,
-                selected.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        string releaseBase = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases/download/{Uri.EscapeDataString(manifest.ReleaseTag!)}";
+        string expectedManifestUrl = $"{releaseBase}/{releaseManifestAssetName}";
+        string expectedSignatureUrl = $"{releaseBase}/{releaseManifestAssetName}.sig";
+        string expectedRootfsUrl = $"{releaseBase}/{rootfsAssetName}";
+        string expectedLinuxUrl = $"{releaseBase}/kautuka-linux-amd64.tar.gz";
+        InstallerPlatformReleaseArtifact? rootfs = manifest.Artifacts.SingleOrDefault(artifact =>
+            string.Equals(artifact.Name, rootfsAssetName, StringComparison.Ordinal));
+        InstallerPlatformReleaseArtifact? linux = manifest.Artifacts.SingleOrDefault(artifact =>
+            string.Equals(artifact.Name, "kautuka-linux-amd64.tar.gz", StringComparison.Ordinal));
+        if (!string.Equals(manifest.Signature?.Algorithm, "ecdsa-p256-sha256", StringComparison.Ordinal)
+            || !string.Equals(manifest.Signature?.Format, "base64", StringComparison.Ordinal)
+            || !string.Equals(manifest.Signature?.Path, $"{releaseManifestAssetName}.sig", StringComparison.Ordinal)
+            || !string.Equals(manifest.Signature?.Url, expectedSignatureUrl, StringComparison.Ordinal)
+            || rootfs is null
+            || !string.Equals(rootfs.Url, expectedRootfsUrl, StringComparison.Ordinal)
+            || linux is null
+            || !string.Equals(linux.Url, expectedLinuxUrl, StringComparison.Ordinal)
+            || !Uri.TryCreate(expectedManifestUrl, UriKind.Absolute, out _))
+        {
+            throw new InvalidOperationException("Signed release manifest URLs do not bind the required artifacts and signature to the exact GitHub Release tag.");
         }
     }
-
-    private static GitHubReleaseInfo? SelectReleaseForChannel(IReadOnlyList<GitHubReleaseInfo> releases, string releaseChannel)
-    {
-        var normalizedChannel = (releaseChannel ?? string.Empty).Trim();
-
-        foreach (var release in releases)
-        {
-            if (release.Draft)
-                continue;
-
-            if (string.Equals(normalizedChannel, "stable", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!release.Prerelease)
-                    return release;
-
-                continue;
-            }
-
-            if (!release.Prerelease)
-                continue;
-
-            if (ContainsChannelToken(release, normalizedChannel))
-                return release;
-        }
-
-        return null;
-    }
-
-    private static async Task<GitHubAssetDownload> GetReleaseAssetUrlAsync(
-        string releaseTag,
-        string repositoryOwner,
-        string repositoryName,
-        string assetName,
-        CancellationToken cancellationToken)
-    {
-        using var client = CreateHttpClient();
-        var releaseUri = $"https://api.github.com/repos/{repositoryOwner}/{repositoryName}/releases/tags/{releaseTag}";
-        using var response = await client.GetAsync(new Uri(releaseUri), cancellationToken).ConfigureAwait(false);
-
-        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
-        {
-            throw new InvalidOperationException(
-                $"GitHub release tag '{releaseTag}' could not be resolved in {repositoryOwner}/{repositoryName}. The tag may be missing, or the repository/release may not be accessible anonymously from this machine. Use a published public release or provide a local rootfs path.");
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            throw new InvalidOperationException(
-                $"Failed to resolve release tag '{releaseTag}' from {repositoryOwner}/{repositoryName}. GitHub returned {(int)response.StatusCode} ({response.ReasonPhrase}).");
-        }
-
-        Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        await using (stream.ConfigureAwait(false))
-        {
-            var release = await JsonSerializer.DeserializeAsync(
-                stream,
-                InstallerJsonContext.Default.GitHubReleaseInfo,
-                cancellationToken).ConfigureAwait(false)
-                ?? throw new InvalidOperationException($"Failed to parse release metadata for tag '{releaseTag}'.");
-            var asset = release.Assets.FirstOrDefault(item =>
-                string.Equals(item.Name, assetName, StringComparison.OrdinalIgnoreCase));
-
-            if (asset is null)
-                throw new InvalidOperationException($"Release asset '{assetName}' not found in tag '{releaseTag}'.");
-
-            return new GitHubAssetDownload(asset.BrowserDownloadUrl);
-        }
-    }
-
     private static async Task DownloadFileAsync(
         GitHubAssetDownload assetDownload,
         string destinationPath,
@@ -630,10 +526,6 @@ internal static partial class WindowsApplianceInstaller
         return builder.Length == 0 ? "unknown-release" : builder.ToString();
     }
 
-    private static bool ContainsChannelToken(GitHubReleaseInfo release, string channel)
-        => release.TagName.Contains(channel, StringComparison.OrdinalIgnoreCase)
-            || release.Name.Contains(channel, StringComparison.OrdinalIgnoreCase);
-
     private static HttpClient CreateHttpClient()
     {
         var client = new HttpClient();
@@ -642,6 +534,4 @@ internal static partial class WindowsApplianceInstaller
     }
 
     private sealed record GitHubAssetDownload(string Url);
-
-    private sealed record GitHubResolvedRelease(string TagName, string ReleaseId);
 }

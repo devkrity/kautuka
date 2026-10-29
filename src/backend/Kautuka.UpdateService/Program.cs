@@ -39,25 +39,19 @@ builder.Services.AddOptions<UpdateOptions>()
         {
             // Production never permits the unsigned local-feed escape hatch.
             options.AllowUnsignedLocalFeeds = false;
+            options.RepositoryOwner = "devkrity";
+            options.RepositoryName = "kautuka";
+            options.ManifestPublicKeyPath ??= ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
+            // The release-channel branch contains the latest byte-for-byte signed manifest for
+            // each channel. Release assets remain on the exact immutable GitHub Release tag.
+            options.ReleaseManifestUrl = null;
+            options.PreviewReleaseManifestUrl = ReleaseChannelPolicy.CreateChannelPointerUrl("devkrity", "kautuka", "preview").AbsoluteUri;
+            options.StableReleaseManifestUrl = ReleaseChannelPolicy.CreateChannelPointerUrl("devkrity", "kautuka", "stable").AbsoluteUri;
 
             ProvisionedUpdateSourceDocument? source = ProvisionedUpdateSourcePolicy.Resolve();
 
             if (source is not null)
             {
-                bool hasProvisionedReleaseManifestSource = !string.IsNullOrWhiteSpace(source.ManifestUrl)
-                    || !string.IsNullOrWhiteSpace(source.PreviewManifestUrl)
-                    || !string.IsNullOrWhiteSpace(source.StableManifestUrl);
-
-                if (hasProvisionedReleaseManifestSource)
-                {
-                    options.ReleaseManifestUrl = source.ManifestUrl;
-                    options.PreviewReleaseManifestUrl = source.PreviewManifestUrl;
-                    options.StableReleaseManifestUrl = source.StableManifestUrl;
-                    options.ManifestPublicKeyPath = ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
-                    options.RepositoryOwner = null;
-                    options.RepositoryName = null;
-                }
-
                 if (!string.IsNullOrWhiteSpace(source.CatalogManifestUrl))
                 {
                     options.CatalogManifestUrl = source.CatalogManifestUrl;

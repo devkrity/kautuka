@@ -27,6 +27,7 @@
     <InstallerReleaseTag></InstallerReleaseTag>
     <InstallerReleaseId></InstallerReleaseId>
     <InstallerReleaseManifestUrl></InstallerReleaseManifestUrl>
+    <InstallerReleaseChannel></InstallerReleaseChannel>
     <InstallerManifestPublicKeyPath></InstallerManifestPublicKeyPath>
   </PropertyGroup>
 
@@ -60,6 +61,13 @@
     <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
       <_Parameter1>KautukaReleaseManifestUrl</_Parameter1>
       <_Parameter2>$(InstallerReleaseManifestUrl)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(InstallerReleaseChannel)' != ''">
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KautukaReleaseChannel</_Parameter1>
+      <_Parameter2>$(InstallerReleaseChannel)</_Parameter2>
     </AssemblyAttribute>
   </ItemGroup>
 
