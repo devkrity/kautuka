@@ -28,8 +28,6 @@ public sealed class UpdateServiceIntegrationTests
             Enabled = true,
             StateRootPath = CreateTempDirectory(),
             ReleaseManifestUrl = null,
-            PreviewReleaseManifestUrl = null,
-            StableReleaseManifestUrl = null,
             RepositoryOwner = null,
             RepositoryName = null,
             AllowUnsignedLocalFeeds = false
@@ -1055,6 +1053,31 @@ public sealed class UpdateServiceIntegrationTests
         Assert.Equal("preview", status.EffectiveReleaseChannel);
         Assert.Equal(UpdateEligibilityState.Blocked, status.EligibilityState);
         Assert.Equal(UpdateEligibilityReason.NoNewerPreview, status.EligibilityReason);
+        Assert.Null(status.AvailableRelease);
+    }
+
+    [Fact]
+    public async Task ApplyUpdatePolicyAsyncDoesNotOfferAReplayedOlderPreviewPointer()
+    {
+        var stateStore = new InMemoryUpdateStateStore(
+            UpdateStateRecord.CreateDefault() with
+            {
+                CurrentRelease = CreateRelease("1.2.0-preview.4", "preview"),
+                EffectiveReleaseChannel = "preview",
+            });
+
+        var runtimePolicyStore = new InMemoryUpdateRuntimePolicyStore("preview");
+        var discoveryClient = new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.Available(CreateRelease("1.2.0-preview.3", "preview")));
+        var coordinator = CreateCoordinator(
+            stateStore,
+            runtimePolicyStore,
+            discoveryClient,
+            managerVersion: "1.2.0-preview.4");
+
+        UpdateStatusSnapshot status = await coordinator.ApplyUpdatePolicyAsync("preview", TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+        Assert.Equal(UpdateEligibilityState.None, status.EligibilityState);
+        Assert.Equal(UpdateEligibilityReason.AlreadyCurrent, status.EligibilityReason);
         Assert.Null(status.AvailableRelease);
     }
 

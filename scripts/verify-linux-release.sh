@@ -1,10 +1,10 @@
 verify_linux_release() {
 (
   set -euo pipefail
-  local manifest='' signature='' public_key='' archive='' version='' channel='' tag='' artifact_name='' artifact_url='' expected_signature_url=''
-  local manifest_version manifest_channel manifest_tag signature_algorithm signature_format signature_url artifact_count expected_hash expected_size recorded_url metadata
+  local manifest='' signature='' public_key='' archive='' version='' channel='' tag='' source_sha='' artifact_name='' artifact_url='' expected_signature_url=''
+  local manifest_version manifest_channel manifest_tag manifest_source_sha signature_algorithm signature_format signature_url artifact_count expected_hash expected_size recorded_url metadata
   usage() {
-  echo 'Usage: verify-linux-release.sh --manifest FILE --signature FILE --public-key FILE --archive FILE --version VERSION --channel stable|preview --tag TAG --artifact-name NAME --artifact-url URL --signature-url URL' >&2
+  echo 'Usage: verify-linux-release.sh --manifest FILE --signature FILE --public-key FILE --archive FILE --version VERSION --channel stable|preview --tag TAG [--source-sha SHA] --artifact-name NAME --artifact-url URL --signature-url URL' >&2
     exit 2
   }
 
@@ -17,6 +17,7 @@ while [[ $# -gt 0 ]]; do
     --version) version="$2"; shift 2 ;;
     --channel) channel="$2"; shift 2 ;;
     --tag) tag="$2"; shift 2 ;;
+    --source-sha) source_sha="$2"; shift 2 ;;
     --artifact-name) artifact_name="$2"; shift 2 ;;
     --artifact-url) artifact_url="$2"; shift 2 ;;
     --signature-url) expected_signature_url="$2"; shift 2 ;;
@@ -51,18 +52,24 @@ if len(artifacts) != 1:
     raise SystemExit('manifest must contain exactly one requested platform artifact')
 signature = document.get('signature') or {}
 artifact = artifacts[0]
-values = [document.get('version'), document.get('channel'), document.get('releaseTag'), signature.get('algorithm'), signature.get('format'), signature.get('url'), artifact.get('sha256'), artifact.get('size'), artifact.get('url')]
+values = [document.get('version'), document.get('channel'), document.get('releaseTag'), document.get('sourceSha') or '-', signature.get('algorithm'), signature.get('format'), signature.get('url'), artifact.get('sha256'), artifact.get('size'), artifact.get('url')]
 if any(value is None or isinstance(value, (dict, list, bool)) for value in values):
     raise SystemExit('manifest is missing a required identity, signature, or artifact field')
-if not isinstance(values[7], int) or values[7] <= 0:
+if not isinstance(values[8], int) or values[8] <= 0:
     raise SystemExit('manifest artifact size must be a positive integer')
 print('\t'.join(str(value) for value in values))
 PY
 )" || { echo 'error: release manifest identity or artifact metadata is incomplete.' >&2; exit 1; }
-IFS=$'\t' read -r manifest_version manifest_channel manifest_tag signature_algorithm signature_format signature_url expected_hash expected_size recorded_url <<< "$metadata"
+IFS=$'\t' read -r manifest_version manifest_channel manifest_tag manifest_source_sha signature_algorithm signature_format signature_url expected_hash expected_size recorded_url <<< "$metadata"
 [[ "$manifest_version" == "$version" ]] || { echo "error: release manifest version '$manifest_version' does not match '$version'." >&2; exit 1; }
 [[ "$manifest_channel" == "$channel" ]] || { echo "error: release manifest channel '$manifest_channel' does not match '$channel'." >&2; exit 1; }
 [[ "$manifest_tag" == "$tag" ]] || { echo "error: release manifest tag '$manifest_tag' does not match '$tag'." >&2; exit 1; }
+if [[ -n "$source_sha" ]]; then
+  [[ "$source_sha" =~ ^[0-9a-fA-F]{40}$ && "${manifest_source_sha,,}" == "${source_sha,,}" ]] || {
+    echo 'error: signed release manifest source commit does not match the selected GitHub tag.' >&2
+    exit 1
+  }
+fi
 
 [[ "$signature_algorithm" == 'ecdsa-p256-sha256' && "$signature_format" == 'base64' ]] || {
   echo 'error: release manifest signature format is unsupported.' >&2

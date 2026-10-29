@@ -17,7 +17,7 @@ bash "$script_dir/generate-linux-installer.sh" \
   --manifest-public-key "$tmp/public.pem"
 bash -n "$tmp/generated-kautuka-install-linux.sh"
 grep -q '^verify_linux_release() {' "$tmp/generated-kautuka-install-linux.sh"
-verification_line="$(grep -n 'verify_linux_release \\' "$tmp/generated-kautuka-install-linux.sh" | head -n 1 | cut -d: -f1)"
+verification_line="$(grep -nF 'verify_linux_release "${verification_args[@]}"' "$tmp/generated-kautuka-install-linux.sh" | head -n 1 | cut -d: -f1)"
 mutation_line="$(grep -n 'ensure_service_account "$service_user"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
 [[ "$verification_line" =~ ^[0-9]+$ && "$mutation_line" =~ ^[0-9]+$ && "$verification_line" -lt "$mutation_line" ]] || {
   echo 'error: generated installer does not verify the signed release before account creation.' >&2
@@ -66,20 +66,24 @@ version='0.1.20-preview.1'
 channel='preview'
 artifact_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautuka-linux-amd64.tar.gz"
 signature_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautuka-platform-release.sig"
+source_sha='0123456789abcdef0123456789abcdef01234567'
 
 write_manifest() {
-  local output="$1" manifest_version="${2:-$version}" manifest_channel="${3:-$channel}" manifest_tag="${4:-$tag}" manifest_url="$artifact_url"
+  local output="$1" manifest_version="${2:-$version}" manifest_channel="${3:-$channel}" manifest_tag="${4:-$tag}" manifest_url="$artifact_url" manifest_signature_url="$signature_url" manifest_source_sha="${7:-$source_sha}"
   if [[ -n "${5:-}" ]]; then manifest_url="$5"; fi
-  python3 - "$output" "$manifest_version" "$manifest_channel" "$manifest_tag" "$manifest_url" "$signature_url" "$artifact_hash" "$artifact_size" <<'PY'
+  if [[ -n "${6:-}" ]]; then manifest_signature_url="$6"; fi
+  python3 - "$output" "$manifest_version" "$manifest_channel" "$manifest_tag" "$manifest_url" "$manifest_signature_url" "$artifact_hash" "$artifact_size" "$manifest_source_sha" <<'PY'
 import json
 import sys
 
-output, version, channel, tag, artifact_url, signature_url, sha256, size = sys.argv[1:]
+output, version, channel, tag, artifact_url, signature_url, sha256, size, source_sha = sys.argv[1:]
 manifest = {
     'schemaVersion': 2,
+    'releaseId': tag,
     'version': version,
     'channel': channel,
     'releaseTag': tag,
+    'sourceSha': source_sha,
     'signature': {'algorithm': 'ecdsa-p256-sha256', 'format': 'base64', 'url': signature_url},
     'artifacts': [{'name': 'kautuka-linux-amd64.tar.gz', 'platform': 'linux-x64', 'url': artifact_url, 'sha256': sha256, 'size': int(size)}],
 }
@@ -94,17 +98,17 @@ openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/signature.der" "$tmp/ma
 base64 -w0 "$tmp/signature.der" > "$tmp/signature.sig"
 
 run_preflight() {
-  local manifest="$1" signature="$2" archive="$3" expected_version="${4:-$version}" expected_channel="${5:-$channel}" expected_tag="${6:-$tag}" expected_url="${7:-$artifact_url}" marker="$8"
+  local manifest="$1" signature="$2" archive="$3" expected_version="${4:-$version}" expected_channel="${5:-$channel}" expected_tag="${6:-$tag}" expected_url="${7:-$artifact_url}" marker="$8" expected_source_sha="${9:-}"
   env VERIFIER="$script_dir/verify-linux-release.sh" MANIFEST="$manifest" SIGNATURE="$signature" PUBLIC_KEY="$tmp/public.pem" ARCHIVE="$archive" \
-    VERSION="$expected_version" CHANNEL="$expected_channel" TAG="$expected_tag" ARTIFACT_URL="$expected_url" SIGNATURE_URL="$signature_url" MARKER="$marker" \
-    bash -c 'source "$VERIFIER"; verify_linux_release --manifest "$MANIFEST" --signature "$SIGNATURE" --public-key "$PUBLIC_KEY" --archive "$ARCHIVE" --version "$VERSION" --channel "$CHANNEL" --tag "$TAG" --artifact-name kautuka-linux-amd64.tar.gz --artifact-url "$ARTIFACT_URL" --signature-url "$SIGNATURE_URL" && touch "$MARKER"' 2>/dev/null
+    VERSION="$expected_version" CHANNEL="$expected_channel" TAG="$expected_tag" ARTIFACT_URL="$expected_url" SIGNATURE_URL="$signature_url" MARKER="$marker" SOURCE_SHA="$expected_source_sha" \
+    bash -c 'source "$VERIFIER"; args=(--manifest "$MANIFEST" --signature "$SIGNATURE" --public-key "$PUBLIC_KEY" --archive "$ARCHIVE" --version "$VERSION" --channel "$CHANNEL" --tag "$TAG" --artifact-name kautuka-linux-amd64.tar.gz --artifact-url "$ARTIFACT_URL" --signature-url "$SIGNATURE_URL"); if [[ -n "$SOURCE_SHA" ]]; then args+=(--source-sha "$SOURCE_SHA"); fi; verify_linux_release "${args[@]}" && touch "$MARKER"'
 }
 
 expect_failure_before_mutation() {
-  local label="$1" manifest="$2" signature="$3" archive="$4" expected_version="${5:-$version}" expected_channel="${6:-$channel}" expected_tag="${7:-$tag}" expected_url="${8:-$artifact_url}"
+  local label="$1" manifest="$2" signature="$3" archive="$4" expected_version="${5:-$version}" expected_channel="${6:-$channel}" expected_tag="${7:-$tag}" expected_url="${8:-$artifact_url}" expected_source_sha="${9:-}"
   local marker="$tmp/${label}.persistent-mutation"
   rm -f "$marker"
-  if run_preflight "$manifest" "$signature" "$archive" "$expected_version" "$expected_channel" "$expected_tag" "$expected_url" "$marker"; then
+  if run_preflight "$manifest" "$signature" "$archive" "$expected_version" "$expected_channel" "$expected_tag" "$expected_url" "$marker" "$expected_source_sha"; then
     echo "error: expected $label to fail before persistent mutation." >&2
     exit 1
   fi
@@ -113,6 +117,8 @@ expect_failure_before_mutation() {
 
 run_preflight "$tmp/manifest.json" "$tmp/signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" "$version" "$channel" "$tag" "$artifact_url" "$tmp/valid.marker"
 [[ -f "$tmp/valid.marker" ]]
+run_preflight "$tmp/manifest.json" "$tmp/signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" "$version" "$channel" "$tag" "$artifact_url" "$tmp/source-sha-valid.marker" "$source_sha"
+[[ -f "$tmp/source-sha-valid.marker" ]]
 
 printf 'tampered' >> "$tmp/manifest.json"
 expect_failure_before_mutation tampered-manifest "$tmp/manifest.json" "$tmp/signature.sig" "$tmp/kautuka-linux-amd64.tar.gz"
@@ -135,6 +141,10 @@ for identity in version channel tag artifact-url; do
     artifact-url) expect_failure_before_mutation mismatched-artifact-url "$tmp/manifest.json" "$tmp/signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" "$version" "$channel" "$tag" 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.2/kautuka-linux-amd64.tar.gz' ;;
   esac
 done
+write_manifest "$tmp/manifest.json"
+openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/signature.der" "$tmp/manifest.json"
+base64 -w0 "$tmp/signature.der" > "$tmp/signature.sig"
+expect_failure_before_mutation mismatched-source-sha "$tmp/manifest.json" "$tmp/signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" "$version" "$channel" "$tag" "$artifact_url" 'fedcba9876543210fedcba9876543210fedcba98'
 
 # Exercise the generated installer's real main path. All persistent system
 # commands are replaced with hermetic stubs; groupadd records and stops at the
@@ -151,6 +161,22 @@ bash -n "$tmp/generated-main-installer.sh"
 
 main_mock_bin="$tmp/main-mock-bin"
 mkdir -p "$main_mock_bin"
+mkdir -p "$tmp/github-release-python-mock"
+cat > "$tmp/github-release-python-mock/sitecustomize.py" <<'MOCK_GITHUB_RELEASES'
+import io
+import json
+import os
+import urllib.parse
+import urllib.request
+
+def mocked_urlopen(request, timeout=None):
+    page = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query).get('page', ['1'])[0]
+    tag = os.environ['MOCK_GH_RELEASE_TAG']
+    rows = [{'tag_name': tag, 'draft': False, 'prerelease': '-preview.' in tag, 'published_at': '2026-10-29T00:00:00Z'}] if page == '1' else []
+    return io.BytesIO(json.dumps(rows).encode())
+
+urllib.request.urlopen = mocked_urlopen
+MOCK_GITHUB_RELEASES
 cat > "$main_mock_bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -165,11 +191,12 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$output" && -n "$url" ]]
 printf '%s\n' "$(dirname "$output")" >> "$MAIN_TMP_ROOT_LOG"
+printf '%s\n' "$url" >> "$MAIN_DOWNLOAD_LOG"
 case "$url" in
-  *.json) cat "$MAIN_MANIFEST_SOURCE" > "$output" ;;
+  *.json|*/manifest) cat "$MAIN_MANIFEST_SOURCE" > "$output" ;;
   *.sig) cat "$MAIN_SIGNATURE_SOURCE" > "$output" ;;
   *.tar.gz) cat "$MAIN_ARCHIVE_SOURCE" > "$output" ;;
-  *) echo "unexpected test download URL" >&2; exit 90 ;;
+  *) echo "unexpected test download URL: $url" >&2; exit 90 ;;
 esac
 MOCK_CURL
 cat > "$main_mock_bin/getent" <<'MOCK_GETENT'
@@ -219,12 +246,21 @@ base64 -w0 "$tmp/main-valid-signature.der" > "$tmp/main-valid-signature.sig"
 
 run_generated_main() {
   local manifest="$1" signature="$2" archive="$3"
+  run_generated_main_with_installer "$tmp/generated-main-installer.sh" "$manifest" "$signature" "$archive"
+}
+
+run_generated_main_with_installer() {
+  local generated_installer="$1" manifest="$2" signature="$3" archive="$4"
+  shift 4
   local -a runner_command=(env \
     "PATH=$main_mock_bin:$PATH" \
-    "GENERATED_INSTALLER=$tmp/generated-main-installer.sh" \
+    "PYTHONPATH=$tmp/github-release-python-mock" \
+    "MOCK_GH_RELEASE_TAG=$tag" \
+    "GENERATED_INSTALLER=$generated_installer" \
     "MAIN_MANIFEST_SOURCE=$manifest" \
     "MAIN_SIGNATURE_SOURCE=$signature" \
     "MAIN_ARCHIVE_SOURCE=$archive" \
+    "MAIN_DOWNLOAD_LOG=$tmp/main-downloads.log" \
     "MAIN_TMP_ROOT_LOG=$tmp/main-temp-roots.log" \
     "MAIN_MUTATION_LOG=$tmp/main-mutations.log" \
     "MAIN_ALLOWED_TMP_ROOT=$tmp/main-installer-tmp" \
@@ -232,7 +268,8 @@ run_generated_main() {
     "REAL_RM_PATH=$real_rm_path" \
     bash -c 'set -euo pipefail; source "$GENERATED_INSTALLER"; require_root() { return 0; }; main "$@"' \
     kautuka-installer-test-run \
-    --service-user "kautuka-installer-test-$$")
+    --service-user "kautuka-installer-test-$$" \
+    "$@")
   "${runner_command[@]}"
 }
 
@@ -279,4 +316,145 @@ installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
   exit 1
 }
 
-echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches; generated main reached the mocked mutation boundary only for the valid release.'
+# Exercise the generated installer's public GitHub Releases discovery path. A local
+# pointer and exact-tag assets are served by the curl stub. Account commands still
+# stop before any real system mutation.
+bash "$script_dir/generate-linux-installer.sh" \
+  --output "$tmp/generated-github-installer.sh" \
+  --version "$version" \
+  --release-channel "$channel" \
+  --manifest-public-key "$tmp/public.pem"
+bash -n "$tmp/generated-github-installer.sh"
+write_manifest "$tmp/main-github-valid-manifest.json"
+openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/main-github-valid-signature.der" "$tmp/main-github-valid-manifest.json"
+base64 -w0 "$tmp/main-github-valid-signature.der" > "$tmp/main-github-valid-signature.sig"
+: > "$tmp/main-mutations.log"
+: > "$tmp/main-temp-roots.log"
+: > "$tmp/main-downloads.log"
+set +e
+run_generated_main_with_installer "$tmp/generated-github-installer.sh" "$tmp/main-github-valid-manifest.json" "$tmp/main-github-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" >"$tmp/github-valid.log" 2>&1
+valid_github_status=$?
+set -e
+[[ "$valid_github_status" -eq 97 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$(head -n 1 "$tmp/main-mutations.log")" == groupadd* ]] && \
+  grep -Fq "verified signed release $tag ($channel)" "$tmp/github-valid.log" && \
+  grep -Fxq "$main_manifest_url" "$tmp/main-downloads.log" && \
+  grep -Fxq "$signature_url" "$tmp/main-downloads.log" && \
+  grep -Fxq "$artifact_url" "$tmp/main-downloads.log" || {
+  echo 'error: valid signed GitHub Release did not resolve to the exact-tag signature and archive before the mocked first account-mutation boundary.' >&2
+  exit 1
+}
+cp "$tmp/main-github-valid-manifest.json" "$tmp/main-github-tampered-manifest.json"
+printf 'tampered' >> "$tmp/main-github-tampered-manifest.json"
+: > "$tmp/main-mutations.log"
+: > "$tmp/main-temp-roots.log"
+if run_generated_main_with_installer "$tmp/generated-github-installer.sh" "$tmp/main-github-tampered-manifest.json" "$tmp/main-github-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" >"$tmp/github-tampered-manifest.log" 2>&1; then
+  echo 'error: GitHub Release installer accepted a tampered signed manifest.' >&2
+  exit 1
+fi
+[[ ! -s "$tmp/main-mutations.log" ]] || { echo 'error: tampered release manifest reached a persistent system mutation.' >&2; exit 1; }
+grep -Eq 'JSONDecodeError|signature verification failed|manifest identity is invalid' "$tmp/github-tampered-manifest.log" || {
+  echo 'error: tampered release manifest was rejected for an unexpected reason.' >&2
+  exit 1
+}
+installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
+[[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || { echo 'error: tampered release manifest rejection did not clean its temporary directory.' >&2; exit 1; }
+
+# The local-feed wrapper also writes runtime policy. It must defer that persistent
+# configuration until the actual main path has authenticated both manifest and archive.
+local_feed_base='https://local-feed.example.test/rehearsal'
+local_manifest_url="$local_feed_base/manifest"
+local_artifact_url="$local_feed_base/kautuka-linux-amd64.tar.gz"
+local_signature_url="$local_manifest_url.sig"
+bash "$script_dir/generate-linux-installer.sh" \
+  --output "$tmp/generated-local-feed-installer.sh" \
+  --version "$version" \
+  --release-channel "$channel" \
+  --feed-base-url "$local_feed_base" \
+  --manifest-public-key "$tmp/public.pem" \
+  --local-feed-defaults
+bash -n "$tmp/generated-local-feed-installer.sh"
+write_manifest "$tmp/local-valid-manifest.json" "$version" "$channel" "$tag" "$local_artifact_url" "$local_signature_url"
+openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/local-valid-signature.der" "$tmp/local-valid-manifest.json"
+base64 -w0 "$tmp/local-valid-signature.der" > "$tmp/local-valid-signature.sig"
+
+expect_local_wrapper_rejected_before_configuration() {
+  local label="$1" manifest="$2" signature="$3" archive="$4"
+  : > "$tmp/main-mutations.log"
+  : > "$tmp/main-temp-roots.log"
+  if run_generated_main_with_installer \
+    "$tmp/generated-local-feed-installer.sh" "$manifest" "$signature" "$archive" \
+    --internal-state-root "$tmp/local-test-state" --visible-root "$tmp/local-test-state" >/dev/null 2>&1; then
+    echo "error: local-feed installer accepted $label." >&2
+    exit 1
+  fi
+  [[ ! -s "$tmp/main-mutations.log" ]] || {
+    echo "error: local-feed installer persisted configuration before rejecting $label: $(head -n 1 "$tmp/main-mutations.log")" >&2
+    exit 1
+  }
+  local installer_tmp_root
+  installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
+  [[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || {
+    echo "error: local-feed installer did not clean its temporary directory after rejecting $label." >&2
+    exit 1
+  }
+}
+
+cp "$tmp/local-valid-manifest.json" "$tmp/local-tampered-manifest.json"
+printf 'tampered' >> "$tmp/local-tampered-manifest.json"
+expect_local_wrapper_rejected_before_configuration \
+  tampered-local-manifest "$tmp/local-tampered-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz"
+printf 'invalid signature\n' > "$tmp/local-invalid-signature.sig"
+expect_local_wrapper_rejected_before_configuration \
+  unsigned-local-manifest "$tmp/local-valid-manifest.json" "$tmp/local-invalid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz"
+expect_local_wrapper_rejected_before_configuration \
+  local-wrong-digest "$tmp/local-valid-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/substituted.tar.gz"
+
+: > "$tmp/main-mutations.log"
+: > "$tmp/main-temp-roots.log"
+local_valid_log="$tmp/local-valid-run.log"
+set +e
+run_generated_main_with_installer \
+  "$tmp/generated-local-feed-installer.sh" "$tmp/local-valid-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" \
+  --internal-state-root "$tmp/local-test-state" --visible-root "$tmp/local-test-state" >"$local_valid_log" 2>&1
+valid_local_status=$?
+set -e
+valid_local_mutation="$(head -n 1 "$tmp/main-mutations.log" 2>/dev/null || true)"
+[[ "$valid_local_status" -eq 98 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$valid_local_mutation" == "mkdir -p $tmp/local-test-state/updateService"* ]] || {
+  echo "error: valid local-feed installer did not reach the deferred runtime-policy mutation boundary (status=$valid_local_status; mutation=$valid_local_mutation)." >&2
+  cat "$local_valid_log" >&2
+  exit 1
+}
+installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
+[[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || {
+  echo 'error: local-feed installer did not clean its temporary directory after the mocked mutation stop.' >&2
+  exit 1
+}
+
+socket_installer="$tmp/generated-socket-installer.sh"
+socket_tmpfiles="$tmp/kautuka-sockets.conf"
+grep -Fq "local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'" "$tmp/generated-local-feed-installer.sh"
+sed "s|local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'|local tmpfiles_path='$socket_tmpfiles'|" \
+  "$tmp/generated-local-feed-installer.sh" > "$socket_installer"
+if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket_tmpfiles" bash -c '
+  set -euo pipefail
+  source "$GENERATED_SOCKET_INSTALLER"
+  declare -A known_accounts=([kautuka]=1 [kautuka-gateway]=1 [kautuka-channelhost]=1 [kautuka-credentials]=1)
+  declare -A known_groups=([kautuka-credentials-client]=1)
+  id() { [[ -n "${known_accounts[$1]:-}" ]] || { echo "test account lookup missing $1" >&2; return 1; }; }
+  getent() { [[ "$1" == group && -n "${known_groups[$2]:-}" ]] || { echo "test group lookup missing $2" >&2; return 1; }; }
+  groupadd() { known_groups["$2"]=1; }
+  usermod() { [[ -n "${known_groups[$3]:-}" ]] || { echo "test usermod missing group $3" >&2; return 1; }; }
+  install() { :; }
+  systemd-tmpfiles() { [[ "$1" == --create && -s "$SOCKET_TMPFILES" ]] || { echo "test tmpfiles create failed for $SOCKET_TMPFILES" >&2; return 1; }; }
+  install_socket_runtime_dirs kautuka
+  for group in kautuka-manager-client kautuka-updateservice-client kautuka-gateway-client kautuka-channelhost-client; do
+    [[ -n "${known_groups[$group]:-}" ]] || { echo "missing created client group $group" >&2; exit 1; }
+  done
+  grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+  grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+'; then
+  echo 'error: generated installer did not provision clean-host client socket groups before tmpfiles validation.' >&2
+  exit 1
+fi
+
+echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

@@ -161,11 +161,6 @@ jobs:
                   exit 1
                 fi
               fi
-              feed_version="$(curl -fsS https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest | jq -r '.version // empty' || true)"
-              if [[ "$feed_version" == "$version" ]]; then
-                echo "error: Stable feed already points at $version; stable versions cannot be reused." >&2
-                exit 1
-              fi
             fi
           fi
           node scripts/resolve-release.mjs "$release_tag" "$source_sha" "$dry_run"
@@ -210,13 +205,29 @@ jobs:
       - name: Verify Linux installer trust preflight regressions
         run: bash ./scripts/test-linux-installer-security.sh
 
+      - name: Verify Linux GitHub Release discovery
+        run: node ./scripts/test-linux-github-release-discovery.mjs
+
       - name: Verify flat GitHub release asset regressions
         run: node ./scripts/test-release-assets.mjs
 
-      - name: Verify channel pointer deploy-key publisher
-        run: node ./scripts/test-channel-pointer-deploy-key.mjs
       - name: Verify release immutability preflight
         run: node ./scripts/test-release-immutability-preflight.mjs
+
+      - name: Verify release attestation dry-run gate
+        run: node ./scripts/test-release-attestation-gate.mjs
+
+      - name: Verify release source preparation and channel configuration
+        run: node ./scripts/test-release-source-preparation.mjs
+
+      - name: Verify release build SDK matches global.json
+        run: node ./scripts/test-release-build-sdk.mjs
+
+      - name: Verify signed release signature URL routing
+        run: node ./scripts/test-release-manifest-signature-url.mjs
+
+      - name: Verify local release feed signature routes
+        run: node ./scripts/test-serve-release-smoke.mjs
 
       - name: Verify frontend third-party inventory regressions
         run: node ./scripts/test-frontend-third-party-inventory.mjs
@@ -397,7 +408,6 @@ jobs:
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       catalog_manifest_url: https://kautuka.store/catalog/manifest
-      updates_base_url: https://github.com/devkrity/kautuka
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
       kautuka_base_image: ${{ needs.publish-kautuka-base.outputs.image }}
 
@@ -407,7 +417,7 @@ jobs:
       - resolve-channel
       - build-platform-assets
       - prepare-stable-draft
-    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' }}
+    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' && needs.prepare-stable-draft.result == 'success' }}
     permissions:
       actions: write
       contents: write
@@ -420,5 +430,4 @@ jobs:
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
-      updates_base_url: https://github.com/devkrity/kautuka
       catalog_manifest_url: https://kautuka.store/catalog/manifest

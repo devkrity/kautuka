@@ -14,6 +14,8 @@ internal sealed class PlatformReleaseDescriptor
 
     public string? Version { get; init; }
 
+    public string? SourceSha { get; init; }
+
     public string? PublishedAt { get; init; }
 
     public string? MinimumUpdaterVersion { get; init; }

@@ -708,7 +708,7 @@ ensure_signing_keys
 ensure_supported_invocation
 
 # Two builds sharing one output root corrupt each other. The prune below deletes every
-# release directory that is not the current channel pointer, which includes one a sibling
+# release directory that is not the local feed's current channel manifest, which includes one a sibling
 # build is still assembling: observed as a run that built its platform tarball, had it
 # deleted by the sibling's prune, and then failed with ENOENT in its manifest step.
 #
@@ -759,6 +759,7 @@ build_args=(
   --manifest-url "$public_base_url/manifest"
   --catalog-manifest-url "$public_base_url/catalog/manifest"
   --artifact-base-url "$public_base_url"
+  --signature-url "$public_base_url/manifest.sig"
   --manifest-public-key "$public_key"
 )
 

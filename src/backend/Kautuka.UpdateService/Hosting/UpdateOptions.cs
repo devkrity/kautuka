@@ -21,10 +21,6 @@ public sealed class UpdateOptions
 
     public string? ReleaseManifestUrl { get; set; }
 
-    public string? PreviewReleaseManifestUrl { get; set; }
-
-    public string? StableReleaseManifestUrl { get; set; }
-
     public string? CatalogManifestUrl { get; set; }
 
     public string StateRootPath { get; set; } = string.Empty;

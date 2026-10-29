@@ -137,21 +137,19 @@ public sealed class LinuxApplyReleaseHelperContractTests
     }
 
     [Fact]
-    public void LinuxInstallerGeneratorStripsCarriageReturns()
+    public void LinuxInstallerGeneratorRetainsChannelAndCatalogOptionsWithoutFeedDefaults()
     {
         string projectRoot = FindProjectRoot();
         string generatorPath = Path.Combine(projectRoot, "scripts", "generate-linux-installer.sh");
         Assert.True(File.Exists(generatorPath), $"Expected installer generator to exist: {generatorPath}");
         string source = File.ReadAllText(generatorPath);
         Assert.Contains("| tr -d '\\r' > \"$output_path\"", source, StringComparison.Ordinal);
-        Assert.Contains("--preview-manifest-url", source, StringComparison.Ordinal);
-        Assert.Contains("--stable-manifest-url", source, StringComparison.Ordinal);
-        Assert.Contains("KAUTUKA_DEFAULT_PREVIEW_MANIFEST_URL", source, StringComparison.Ordinal);
-        Assert.Contains("KAUTUKA_DEFAULT_STABLE_MANIFEST_URL", source, StringComparison.Ordinal);
+        Assert.Contains("--release-channel", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("raw.githubusercontent.com/devkrity/kautuka-release-feed", source, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void GitHubReleaseLanePublishesVersionedAssetsAndSeparateChannelPointers()
+    public void GitHubReleaseLanePublishesVersionedAssetsWithoutChannelPointers()
     {
         string projectRoot = FindProjectRoot();
         string buildWorkflow = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-build-platform-assets.yml"));
@@ -159,21 +157,40 @@ public sealed class LinuxApplyReleaseHelperContractTests
         string pipeline = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-pipeline.yml"));
         string publishScript = File.ReadAllText(Path.Combine(projectRoot, "scripts", "publish-release-feed.sh"));
 
-        Assert.Contains("https://github.com/devkrity/kautuka", pipeline, StringComparison.Ordinal);
         Assert.Contains("https://kautuka.store/catalog/manifest", pipeline, StringComparison.Ordinal);
-        Assert.Contains("--manifest-url \"$channel_manifest_url\"", buildWorkflow, StringComparison.Ordinal);
-        Assert.Contains("https://raw.githubusercontent.com/devkrity/kautuka-release-feed-preview/main/manifest", buildWorkflow, StringComparison.Ordinal);
-        Assert.Contains("https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest", buildWorkflow, StringComparison.Ordinal);
+        Assert.Contains("https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("release-feed-", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("--preview-manifest-url", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("--stable-manifest-url", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("InstallerReleaseManifestUrl", buildWorkflow, StringComparison.Ordinal);
         Assert.Contains("scripts/publish-release-feed.sh", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("gh release upload", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("verify-release-assets.mjs", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains(".immutable", publishWorkflow, StringComparison.Ordinal);
-        Assert.Contains("devkrity/kautuka-release-feed-${CHANNEL}", publishWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("release-channel", publishWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("release_feed_deploy_key", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("catalog-feed/catalog", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("releases/download", buildWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("--delete", publishScript, StringComparison.Ordinal);
         Assert.Contains("catalog/*", publishScript, StringComparison.Ordinal);
         Assert.Contains("RELEASE_FEED_S3_ENDPOINT", publishScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowsBootstrapDiscoversNativeReleaseAndValidatesExactTagAssets()
+    {
+        string projectRoot = FindProjectRoot();
+        string argumentParser = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Hosting", "Program.Args.cs"));
+        string installer = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Installation", "WindowsApplianceInstaller.Release.cs"));
+
+        Assert.DoesNotContain("CreateChannelPointerUrl", argumentParser, StringComparison.Ordinal);
+        Assert.Contains("ValidateManifestMatchesChannel", installer, StringComparison.Ordinal);
+        Assert.Contains("expectedSignatureUrl", installer, StringComparison.Ordinal);
+        Assert.Contains("expectedRootfsUrl", installer, StringComparison.Ordinal);
+        Assert.Contains("expectedLinuxUrl", installer, StringComparison.Ordinal);
+        Assert.Contains("api.github.com/repos/", installer, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DiscoverLatestReleaseTagAsync", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("release-channel", installer, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -186,7 +203,7 @@ public sealed class LinuxApplyReleaseHelperContractTests
         string regression = File.ReadAllText(Path.Combine(projectRoot, "scripts", "test-linux-installer-security.sh"));
         string verifiedRunner = File.ReadAllText(Path.Combine(projectRoot, "scripts", "install-verified-linux.sh"));
 
-        int verificationIndex = installer.IndexOf("verify_linux_release \\", StringComparison.Ordinal);
+        int verificationIndex = installer.IndexOf("verify_linux_release \"${verification_args[@]}\"", StringComparison.Ordinal);
         int accountMutationIndex = installer.IndexOf("ensure_service_account \"$service_user\"", StringComparison.Ordinal);
         int packageMutationIndex = installer.LastIndexOf("    ensure_dotnet_host_libraries", StringComparison.Ordinal);
         Assert.True(verificationIndex >= 0, "Network install must call the signed release verifier.");
@@ -202,6 +219,7 @@ public sealed class LinuxApplyReleaseHelperContractTests
         Assert.Contains("mismatched-channel", regression, StringComparison.Ordinal);
         Assert.Contains("mismatched-tag", regression, StringComparison.Ordinal);
         Assert.Contains("mismatched-artifact-url", regression, StringComparison.Ordinal);
+        Assert.Contains("mismatched-source-sha", regression, StringComparison.Ordinal);
         Assert.Contains("gh attestation verify", verifiedRunner, StringComparison.Ordinal);
         Assert.Contains("exec sudo bash", verifiedRunner, StringComparison.Ordinal);
         Assert.Contains("substituted Linux installer", regression, StringComparison.Ordinal);

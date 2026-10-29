@@ -11,8 +11,6 @@ Options:
   --artifact-url <url>          Default platform artifact URL.
   --feed-base-url <url>         Default feed base URL.
   --manifest-url <url>          Default manifest URL.
-  --preview-manifest-url <url>     Default preview channel manifest URL.
-  --stable-manifest-url <url>   Default stable channel manifest URL.
   --catalog-manifest-url <url>  Default catalog manifest URL.
   --release-channel <channel>   Default release channel.
   --manifest-public-key <pem>   Manifest public key PEM file to embed.
@@ -26,8 +24,6 @@ version=''
 artifact_url=''
 feed_base_url=''
 manifest_url=''
-preview_manifest_url=''
-stable_manifest_url=''
 catalog_manifest_url=''
 release_channel=''
 manifest_public_key=''
@@ -53,14 +49,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest-url)
       manifest_url="$2"
-      shift 2
-      ;;
-    --preview-manifest-url)
-      preview_manifest_url="$2"
-      shift 2
-      ;;
-    --stable-manifest-url)
-      stable_manifest_url="$2"
       shift 2
       ;;
     --catalog-manifest-url)
@@ -111,16 +99,6 @@ if [[ -n "$catalog_manifest_url" && ! "$catalog_manifest_url" =~ ^https?:// ]]; 
   exit 1
 fi
 
-if [[ -n "$preview_manifest_url" && ! "$preview_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --preview-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
-if [[ -n "$stable_manifest_url" && ! "$stable_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --stable-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 installer_source="$script_dir/kautuka-install-linux.sh.in"
 release_verifier_source="$script_dir/verify-linux-release.sh"
@@ -135,12 +113,6 @@ release_verifier_source="$script_dir/verify-linux-release.sh"
   fi
   if [[ -n "$manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_MANIFEST_URL=%q\n' "$manifest_url"
-  fi
-  if [[ -n "$preview_manifest_url" ]]; then
-    printf 'KAUTUKA_DEFAULT_PREVIEW_MANIFEST_URL=%q\n' "$preview_manifest_url"
-  fi
-  if [[ -n "$stable_manifest_url" ]]; then
-    printf 'KAUTUKA_DEFAULT_STABLE_MANIFEST_URL=%q\n' "$stable_manifest_url"
   fi
   if [[ -n "$catalog_manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL=%q\n' "$catalog_manifest_url"
@@ -189,137 +161,6 @@ should_bypass_local_release_defaults() {
   return 1
 }
 
-normalize_feed_base_url() {
-  local raw_url="$1"
-  local normalized="${raw_url%/}"
-
-  case "$normalized" in
-    */manifest)
-      printf '%s\n' "${normalized%/manifest}"
-      ;;
-    */kautuka-platform-release.json)
-      printf '%s\n' "${normalized%/kautuka-platform-release.json}"
-      ;;
-    *)
-      printf '%s\n' "$normalized"
-      ;;
-  esac
-}
-
-resolve_feed_base_url_arg() {
-  local args=("$@")
-  local index=0
-
-  while (( index < ${#args[@]} )); do
-    case "${args[index]}" in
-      --feed-base-url)
-        if (( index + 1 < ${#args[@]} )); then
-          printf '%s\n' "${args[index + 1]}"
-          return 0
-        fi
-        ;;
-      --feed-base-url=*)
-        printf '%s\n' "${args[index]#--feed-base-url=}"
-        return 0
-        ;;
-    esac
-    index=$((index + 1))
-  done
-
-  return 1
-}
-
-resolve_service_user_arg() {
-  local args=("$@")
-  local index=0
-
-  while (( index < ${#args[@]} )); do
-    case "${args[index]}" in
-      --service-user)
-        if (( index + 1 < ${#args[@]} )); then
-          printf '%s\n' "${args[index + 1]}"
-          return 0
-        fi
-        ;;
-      --service-user=*)
-        printf '%s\n' "${args[index]#--service-user=}"
-        return 0
-        ;;
-    esac
-    index=$((index + 1))
-  done
-
-  return 1
-}
-
-resolve_service_group_arg() {
-  local args=("$@")
-  local index=0
-
-  while (( index < ${#args[@]} )); do
-    case "${args[index]}" in
-      --service-group)
-        if (( index + 1 < ${#args[@]} )); then
-          printf '%s\n' "${args[index + 1]}"
-          return 0
-        fi
-        ;;
-      --service-group=*)
-        printf '%s\n' "${args[index]#--service-group=}"
-        return 0
-        ;;
-    esac
-    index=$((index + 1))
-  done
-
-  return 1
-}
-
-manifest_url_from_feed_base_url() {
-  local normalized_base
-  normalized_base="$(normalize_feed_base_url "$1")"
-  printf '%s/manifest\n' "$normalized_base"
-}
-
-ensure_local_release_defaults() {
-  local effective_manifest_url="${1:-$KAUTUKA_DEFAULT_MANIFEST_URL}"
-  local effective_catalog_manifest_url="${2:-$KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL}"
-  local service_user="${3:-kautuka}"
-  local service_group="${4:-$service_user}"
-  local policy_file_path='/var/lib/kautuka/updateService/update-runtime-policy.json'
-  local effective_preview_manifest_url=''
-  local effective_stable_manifest_url=''
-
-  mkdir -p "$(dirname "$policy_file_path")"
-  printf '%s\n' \
-    '{' \
-    '  "schemaVersion": 1,' \
-    "  \"releaseChannel\": \"$KAUTUKA_DEFAULT_RELEASE_CHANNEL\"" \
-    '}' > "$policy_file_path"
-  chmod 640 "$policy_file_path"
-  if id "$service_user" >/dev/null 2>&1 && getent group "$service_group" >/dev/null 2>&1; then
-    chown "$service_user:$service_group" "$policy_file_path"
-  fi
-
-  case "$KAUTUKA_DEFAULT_RELEASE_CHANNEL" in
-    stable)
-      effective_stable_manifest_url="$effective_manifest_url"
-      ;;
-    *)
-      effective_preview_manifest_url="$effective_manifest_url"
-      ;;
-  esac
-
-  write_update_source_document \
-    "$effective_manifest_url" \
-    "$effective_preview_manifest_url" \
-    "$effective_stable_manifest_url" \
-    "$effective_catalog_manifest_url" \
-    "$service_user" \
-    "$service_group"
-  write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM" "$service_user" "$service_group"
-}
-
 main() {
   if should_show_help "$@"; then
     base_install_main "$@"
@@ -331,36 +172,7 @@ main() {
     return
   fi
 
-  local feed_base_url
-  local effective_manifest_url
-  local effective_catalog_manifest_url
-  local service_user
-  local service_group
-  feed_base_url="$(resolve_feed_base_url_arg "$@" 2>/dev/null || true)"
-  service_user="$(resolve_service_user_arg "$@" 2>/dev/null || true)"
-  service_group="$(resolve_service_group_arg "$@" 2>/dev/null || true)"
-  if [[ -z "$feed_base_url" && -n "${KAUTUKA_DEFAULT_FEED_BASE_URL:-}" ]]; then
-    feed_base_url="$KAUTUKA_DEFAULT_FEED_BASE_URL"
-  fi
-
-  if [[ -z "$service_user" ]]; then
-    service_user='kautuka'
-  fi
-
-  if [[ -z "$service_group" ]]; then
-    service_group="$service_user"
-  fi
-
-  if [[ -n "$feed_base_url" ]]; then
-    effective_manifest_url="$(manifest_url_from_feed_base_url "$feed_base_url")"
-    effective_catalog_manifest_url="$(catalog_manifest_url_from_feed_base_url "$feed_base_url")"
-  else
-    effective_manifest_url="${KAUTUKA_DEFAULT_MANIFEST_URL:-}"
-    effective_catalog_manifest_url="${KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL:-}"
-  fi
-
-  ensure_local_release_defaults "$effective_manifest_url" "$effective_catalog_manifest_url" "$service_user" "$service_group"
-  base_install_main "$@"
+  KAUTUKA_INSTALL_LOCAL_RELEASE_DEFAULTS=1 base_install_main "$@"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

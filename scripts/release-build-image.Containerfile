@@ -1,6 +1,6 @@
 FROM quay.io/fedora/fedora-minimal:44
 
-ARG DOTNET_SDK_VERSION=10.0.300
+ARG DOTNET_SDK_VERSION
 
 ENV PATH=/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV CC=clang
@@ -23,6 +23,7 @@ RUN microdnf install -y \
     tar \
     zlib-devel \
     && microdnf clean all \
+    && test -n "$DOTNET_SDK_VERSION" \
     && curl --fail --show-error --location --retry 5 --retry-all-errors --retry-delay 2 --silent https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && chmod +x /tmp/dotnet-install.sh \
     && /tmp/dotnet-install.sh --version "$DOTNET_SDK_VERSION" --install-dir /opt/dotnet --no-path \

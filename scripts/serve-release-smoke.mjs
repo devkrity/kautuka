@@ -152,6 +152,8 @@ async function main() {
       const relativePath =
         requestPath === "/manifest"
           ? "/kautuka-platform-release.json"
+          : requestPath === "/manifest.sig"
+            ? "/kautuka-platform-release.sig"
           : requestPath === "/catalog/manifest"
             ? "/catalog/manifest.json"
           : requestPath;

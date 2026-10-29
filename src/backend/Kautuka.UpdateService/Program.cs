@@ -39,25 +39,17 @@ builder.Services.AddOptions<UpdateOptions>()
         {
             // Production never permits the unsigned local-feed escape hatch.
             options.AllowUnsignedLocalFeeds = false;
+            options.RepositoryOwner = "devkrity";
+            options.RepositoryName = "kautuka";
+            options.ManifestPublicKeyPath ??= ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
+            // Production discovers strict channel releases through the anonymous GitHub Releases
+            // API, then verifies the signed manifest from the exact immutable release tag.
+            options.ReleaseManifestUrl = null;
 
             ProvisionedUpdateSourceDocument? source = ProvisionedUpdateSourcePolicy.Resolve();
 
             if (source is not null)
             {
-                bool hasProvisionedReleaseManifestSource = !string.IsNullOrWhiteSpace(source.ManifestUrl)
-                    || !string.IsNullOrWhiteSpace(source.PreviewManifestUrl)
-                    || !string.IsNullOrWhiteSpace(source.StableManifestUrl);
-
-                if (hasProvisionedReleaseManifestSource)
-                {
-                    options.ReleaseManifestUrl = source.ManifestUrl;
-                    options.PreviewReleaseManifestUrl = source.PreviewManifestUrl;
-                    options.StableReleaseManifestUrl = source.StableManifestUrl;
-                    options.ManifestPublicKeyPath = ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
-                    options.RepositoryOwner = null;
-                    options.RepositoryName = null;
-                }
-
                 if (!string.IsNullOrWhiteSpace(source.CatalogManifestUrl))
                 {
                     options.CatalogManifestUrl = source.CatalogManifestUrl;
