@@ -1,6 +1,8 @@
 # Release operations
 
-Kautuka has two release channels. Both release from commits reachable from `main` only. The scheduled Preview job is disabled by default in a new repository; after cutover it can run nightly at 02:00 Brisbane time (`0 16 * * *` UTC) and skips when `main` has no commits since the last Preview tag. Stable releases require a manual run and approval. Each channel uses its own versioned GitHub Release and its own public pointer repository.
+Stable is the supported release baseline; Preview is best-effort for evaluation. See the [support policy](../../SUPPORT.md) and [maintainer process](maintainers.md).
+
+Kautuka has two release channels. Both release from commits reachable from `main` only. The scheduled Preview job is disabled by default in a new repository; after cutover it can run nightly at 02:00 Brisbane time (`0 16 * * *` UTC). When `main` has no commits since the latest Preview tag, it retries that exact tag only if no release exists or if a matching empty draft exists. A draft with uploaded assets, or any mismatched release identity, stops for maintainer review. A matching published release is skipped only when GitHub reports it immutable. Stable releases require a manual run and approval. Each channel uses its own versioned GitHub Release and its own public pointer repository.
 
 **Cutover status:** The release workflow is prepared, but no GitHub release or channel pointer has been published or verified end to end. Follow these procedures after the release feed repositories, environments, deploy keys, and release immutability are configured and validated.
 
@@ -10,7 +12,19 @@ The `resolve-channel` job runs for `workflow_dispatch` so operators can perform 
 
 ## Nightly Preview
 
-Set `KAUTUKA_UPCOMING_STABLE_VERSION` in the release workflow to the next plain SemVer, such as `0.1.20`. The nightly run computes the next `v0.1.20-preview.N`, tags the current `main` commit, builds the artifacts, creates a draft, uploads and validates the complete asset set, publishes the immutable GitHub prerelease, then updates the Preview pointer in `devkrity/kautuka-release-feed-preview`. Preview tags use `vX.Y.Z-preview.N`; versions use `X.Y.Z-preview.N`.
+Set `KAUTUKA_UPCOMING_STABLE_VERSION` in the release workflow to the next plain SemVer, such as `0.1.20`. The nightly run computes the next `v0.1.20-preview.N`, tags the current `main` commit, builds the artifacts, creates a draft, uploads and validates the complete asset set, publishes the immutable GitHub prerelease, then updates the Preview pointer in `devkrity/kautuka-release-feed-preview`. If a run stops before release creation or leaves an empty matching draft, the next scheduled run can retry the same tag. A partial draft requires maintainer review; the workflow will not delete it or move/recreate its tag. Preview tags use `vX.Y.Z-preview.N`; versions use `X.Y.Z-preview.N`.
+
+If a release is published but pointer publication fails, a later scheduled run will see the immutable release and skip it; it does not repair the pointer automatically. An operator must verify that the release is immutable and that its signed manifest, channel, tag, source commit, and exact-tag asset URLs match. Verify the detached signature with the trusted release public key before proceeding; the pointer publisher validates manifest identity fields but does not verify the detached signature itself. Then rerun the publisher with that verified manifest and the matching channel environment's deploy key:
+
+```bash
+bash scripts/publish-channel-pointer.sh publish \
+  --channel preview \
+  --release-tag v0.1.20-preview.3 \
+  --source-sha <verified-40-character-source-sha> \
+  --manifest ./verified-release-manifest.json
+```
+
+The command must run with `RELEASE_FEED_DEPLOY_KEY` supplied from the Preview environment's secret store. Never move or delete the release tag, replace published assets, or use the other channel's key. If any identity or signature check fails, stop and resolve the release through a reviewed fix-forward procedure.
 
 After Preview publication, install it from the Preview feed and set the app update channel to **Preview**. Check the displayed version and short commit SHA, exercise updates, and report regressions against the tagged commit. Preview Windows installers may be unsigned; check `SIGNING-STATUS.txt` in the release assets and expect a SmartScreen warning when it says `UNSIGNED`. A manual `workflow_dispatch` run can rebuild and verify an existing Preview tag with `dry_run=true`; manual dispatch does not publish Preview releases.
 

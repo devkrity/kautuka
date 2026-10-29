@@ -1,0 +1,75 @@
+{
+  "reviewOnly": true,
+  "repository": "devkrity/kautuka",
+  "verifiedActors": {
+    "maintainer": {
+      "actor_type": "User",
+      "actor_id": 103810333,
+      "login": "shukla-amit"
+    },
+    "githubActions": {
+      "actor_type": "Integration",
+      "actor_id": 15368,
+      "name": "GitHub Actions"
+    }
+  },
+  "rulesets": [
+    {
+      "name": "stable-tag-creation",
+      "target": "tag",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/tags/v*"],
+          "exclude": ["refs/tags/v*-preview.*"]
+        }
+      },
+      "rules": [{ "type": "creation" }],
+      "bypass_actors": [
+        {
+          "actor_id": 103810333,
+          "actor_type": "User",
+          "bypass_mode": "always"
+        }
+      ]
+    },
+    {
+      "name": "preview-tag-creation",
+      "target": "tag",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/tags/v*-preview.*"],
+          "exclude": []
+        }
+      },
+      "rules": [{ "type": "creation" }],
+      "bypass_actors": [
+        {
+          "actor_id": 103810333,
+          "actor_type": "User",
+          "bypass_mode": "always"
+        },
+        {
+          "actor_id": 15368,
+          "actor_type": "Integration",
+          "bypass_mode": "always"
+        }
+      ]
+    },
+    {
+      "name": "versioned-tag-update-delete-protection",
+      "target": "tag",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/tags/v*"],
+          "exclude": []
+        }
+      },
+      "rules": [{ "type": "update" }, { "type": "deletion" }],
+      "bypass_actors": []
+    }
+  ],
+  "activationGate": "Review the scheduled Preview retry and pointer-repair procedures before applying. The update/delete rule covers all v* tags, including tags whose release has not yet been published; it has no bypass actors."
+}

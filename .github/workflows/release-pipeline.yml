@@ -100,15 +100,30 @@ jobs:
                 exit 1
               fi
               if [[ "$(git rev-list --count "${last_preview_sha}..${main_sha}")" == '0' ]]; then
-                echo "skip=true" >> "$GITHUB_OUTPUT"
-                echo "No main commits have landed since $newest_tag; preview run skipped." >> "$GITHUB_STEP_SUMMARY"
-                exit 0
+                preview_retry="$(bash scripts/resolve-preview-retry.sh "$GITHUB_REPOSITORY" "$newest_tag" "$last_preview_sha" "$main_sha")"
+                if [[ "$preview_retry" == 'skip' ]]; then
+                  echo "skip=true" >> "$GITHUB_OUTPUT"
+                  echo "No main commits have landed since the published immutable Preview $newest_tag; preview run skipped." >> "$GITHUB_STEP_SUMMARY"
+                  exit 0
+                fi
+                if [[ "$preview_retry" != 'reuse' ]]; then
+                  echo "error: unsafe retry resolution for Preview tag $newest_tag." >&2
+                  exit 1
+                fi
+                release_tag="$newest_tag"
+                echo "Retrying unpublished Preview $release_tag on its original main commit." >> "$GITHUB_STEP_SUMMARY"
+              else
+                next_number=$((newest_number + 1))
+                release_tag="${version_prefix}${next_number}"
+                git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
+                git push origin "refs/tags/$release_tag"
               fi
+            else
+              next_number=$((newest_number + 1))
+              release_tag="${version_prefix}${next_number}"
+              git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
+              git push origin "refs/tags/$release_tag"
             fi
-            next_number=$((newest_number + 1))
-            release_tag="${version_prefix}${next_number}"
-            git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
-            git push origin "refs/tags/$release_tag"
           fi
 
           source_sha="$(git rev-parse "refs/tags/${release_tag}^{commit}")"
@@ -179,6 +194,12 @@ jobs:
 
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
+
+      - name: Test scheduled release gate
+        run: node ./scripts/test-release-schedule-gate.mjs
+
+      - name: Test Preview tag retry resolution
+        run: node ./scripts/test-preview-retry-resolution.mjs
 
       - name: Test tracked hygiene rejection paths
         run: node ./scripts/test-tracked-hygiene.mjs
