@@ -20,6 +20,7 @@ Options:
   --stable-manifest-url <url>       Optional stable channel manifest URL baked into update-source.json.
   --catalog-manifest-url <url>      Optional catalog manifest URL to preconfigure in the release update source file.
   --artifact-base-url <url>         Absolute URL prefix for artifact `url` fields in the signed platform manifest.
+  --signature-url <url>             Optional exact signature URL in the signed release manifest.
   --manifest-public-key <pem>       Required for full builds: public key PEM baked into the prewarmed rootfs.
   --rebuild-images                  Rebuild the cached WSL base rootfs and Linux release build image.
   --prewarm-only                    Layer an existing platform tarball into the cached WSL base rootfs. Skips compile.
@@ -37,6 +38,10 @@ create_work_dir() {
   mkdir -p "$output_root"
   mktemp -d "$output_root/.build-release-assets.XXXXXX"
 }
+
+invocation_dir="$PWD"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
 
 # Fail closed on the staged Manager payload before packing the platform tarball.
 assert_staged_sidecar_seal() {
@@ -161,6 +166,7 @@ stable_manifest_url=''
 catalog_manifest_url=''
 manifest_public_key=''
 artifact_base_url=''
+signature_url=''
 rebuild_images='false'
 prewarm_only='false'
 platform_tarball_override=''
@@ -223,6 +229,10 @@ while [[ $# -gt 0 ]]; do
       artifact_base_url="$2"
       shift 2
       ;;
+    --signature-url)
+      signature_url="$2"
+      shift 2
+      ;;
     --manifest-public-key)
       manifest_public_key="$2"
       shift 2
@@ -250,6 +260,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$private_key" ]]; then
+  private_key="$(bash "$repo_root/scripts/resolve-release-key-path.sh" "$invocation_dir" "$private_key")"
+fi
+if [[ -n "$manifest_public_key" ]]; then
+  manifest_public_key="$(bash "$repo_root/scripts/resolve-release-key-path.sh" "$invocation_dir" "$manifest_public_key")"
+fi
 
 if [[ "$prewarm_only" == 'true' ]]; then
   if [[ -z "$output_root" || -z "$version" || -z "$platform_tarball_override" ]]; then
@@ -295,16 +312,18 @@ if [[ -n "$stable_manifest_url" && ! "$stable_manifest_url" =~ ^https?:// ]]; th
   exit 1
 fi
 
+if [[ -n "$signature_url" && ! "$signature_url" =~ ^https?:// ]]; then
+  echo 'error: --signature-url must be an absolute http(s) URL.' >&2
+  exit 1
+fi
+
 if [[ -n "$manifest_public_key" && ! -f "$manifest_public_key" ]]; then
   echo "error: manifest public key file not found: $manifest_public_key" >&2
   exit 1
 fi
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
-
 container_runtime="${KAUTUKA_RELEASE_CONTAINER_RUNTIME:-podman}"
-dotnet_sdk_version="${KAUTUKA_RELEASE_DOTNET_SDK_VERSION:-10.0.300}"
+dotnet_sdk_version="$(bash "$repo_root/scripts/resolve-release-dotnet-sdk.sh" "$repo_root/global.json")"
 node_build_image="${KAUTUKA_RELEASE_NODE_IMAGE:-quay.io/fedora/fedora:44}"
 node_version="${KAUTUKA_RELEASE_NODE_VERSION:-26.3.0}"
 node_arch="${KAUTUKA_RELEASE_NODE_ARCH:-x64}"
@@ -610,6 +629,7 @@ mkdir -p "$release_dir"
 work_dir="$(create_work_dir "$output_root")"
 source_root="$work_dir/source"
 stage_dir="$work_dir/staging"
+release_build_context="$work_dir/compiler-context"
 compliance_dir="$work_dir/release-compliance"
 compliance_args=(--output-dir "$compliance_dir" --release-tag "$release_tag")
 if [[ -n "${KAUTUKA_BASE_IMAGE:-}" ]]; then
@@ -629,27 +649,22 @@ rootfs_releasever='44'
 rootfs_arch='amd64'
 rootfs_image='quay.io/fedora/fedora:44'
 release_build_containerfile="$repo_root/scripts/release-build-image.Containerfile"
-repo_snapshot_excludes=(
-  --exclude='.git'
-  --exclude='artifacts'
-  --exclude='publish'
-  --exclude='src/frontend/node_modules'
-  --exclude='src/frontend/web/node_modules'
-  --exclude='src/frontend/web/dist'
-)
-
-if [[ "$cache_root" == "$repo_root"/* ]]; then
-  repo_snapshot_excludes+=(--exclude="${cache_root#"$repo_root"/}")
-fi
 
 cleanup_work_dir() {
+  local exit_code=$?
+  trap - EXIT
   stop_sudo_keepalive
 
-  if command -v sudo >/dev/null 2>&1; then
+  if [[ "$exit_code" -ne 0 && "${KAUTUKA_RELEASE_RETAIN_FAILED_WORKDIR:-false}" == 'true' && -d "$work_dir" ]]; then
+    chmod 700 "$work_dir"
+    printf 'Retaining failed release build work directory: %s\n' "$work_dir" >&2
+  elif command -v sudo >/dev/null 2>&1; then
     sudo rm -rf "$work_dir" 2>/dev/null || rm -rf "$work_dir"
   else
     rm -rf "$work_dir"
   fi
+
+  exit "$exit_code"
 }
 
 trap cleanup_work_dir EXIT
@@ -662,17 +677,18 @@ if [[ "$prewarm_only" == 'true' ]]; then
 else
 mkdir -p "$source_root"
 mkdir -p "$stage_dir/bin" "$stage_dir/services/gateway" "$stage_dir/services/credentialshost" "$stage_dir/services/channelhost" "$stage_dir/services/updateservice" "$stage_dir/services/webhost"
-cp "$source_root/LICENSE" "$stage_dir/LICENSE"
-cp "$source_root/NOTICE" "$stage_dir/NOTICE"
 mkdir -p "$pnpm_store_dir" "$nuget_packages_dir" "$rootfs_cache_dir"
 
 start_sudo_keepalive
 
 log_phase "Preparing source snapshot"
-(
-  cd "$repo_root"
-  tar "${repo_snapshot_excludes[@]}" -cf - .
-) | tar -xf - -C "$source_root"
+bash "$repo_root/scripts/prepare-release-source-snapshot.sh" \
+  "$repo_root" \
+  "$source_root" \
+  "$stage_dir" \
+  "$private_key" \
+  "$cache_root" \
+  "$release_build_context"
 
 cd "$source_root"
 
@@ -703,7 +719,7 @@ ensure_release_build_image() {
     build_args+=(--no-cache)
   fi
 
-  build_args+=("$repo_root")
+  build_args+=("$release_build_context")
 
   "$container_runtime" "${build_args[@]}"
 }
@@ -758,6 +774,17 @@ run_build_container \
     curl -fSL \"https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz\" -o /tmp/node.tar.xz
     tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz
     rm -f /tmp/node.tar.xz
+    uv_version=0.13.6
+    uv_archive=uv-x86_64-unknown-linux-gnu.tar.gz
+    uv_sha256=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+    curl --fail --show-error --location --retry 3 --retry-all-errors --silent \
+      \"https://releases.astral.sh/github/uv/releases/download/\${uv_version}/\${uv_archive}\" \
+      -o /tmp/uv.tar.gz
+    printf '%s  %s\n' \"\$uv_sha256\" /tmp/uv.tar.gz | sha256sum --check --status
+    tar -xzf /tmp/uv.tar.gz -C /tmp
+    install -m 0755 \"/tmp/uv-x86_64-unknown-linux-gnu/uv\" /usr/local/bin/uv
+    rm -rf /tmp/uv.tar.gz /tmp/uv-x86_64-unknown-linux-gnu
+    uv --version | grep -Fq \"uv \${uv_version} \"
     bash scripts/stage-built-in-mcpb.sh --output /out/kautuka-web-tools.mcpb
   "
 
@@ -918,7 +945,7 @@ chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/services/credentialshost/kautuka-credentialshost" \
   "$stage_dir/services/channelhost/kautuka-channelhost" \
   "$stage_dir/services/updateservice/kautuka-updateservice" \
-  "$stage_dir/services/webhost/kautuka-webhost" \
+  "$stage_dir/services/webhost/kautuka-webhost"
 mkdir -p "$stage_dir/services/webhost/wwwroot"
 cp -a "$source_root/src/frontend/web/dist/." "$stage_dir/services/webhost/wwwroot/"
 
@@ -1599,6 +1626,9 @@ fi
 manifest_args=()
 if [[ -n "$minimum_updater_version" ]]; then
   manifest_args+=(--minimum-updater-version "$minimum_updater_version")
+fi
+if [[ -n "$signature_url" ]]; then
+  manifest_args+=(--signature-url "$signature_url")
 fi
 
 log_phase "Generating signed release manifest"

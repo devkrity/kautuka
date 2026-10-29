@@ -68,6 +68,21 @@ jobs:
       - name: Test Preview tag retry resolution
         run: node ./scripts/test-preview-retry-resolution.mjs
 
+      - name: Test release attestation dry-run gate
+        run: node ./scripts/test-release-attestation-gate.mjs
+
+      - name: Test release source preparation and channel feed configuration
+        run: node ./scripts/test-release-source-preparation.mjs
+
+      - name: Test release build SDK matches global.json
+        run: node ./scripts/test-release-build-sdk.mjs
+
+      - name: Test signed release signature URL routing
+        run: node ./scripts/test-release-manifest-signature-url.mjs
+
+      - name: Test local release feed signature routes
+        run: node ./scripts/test-serve-release-smoke.mjs
+
       - name: Test channel pointer deploy-key publisher
         run: node ./scripts/test-channel-pointer-deploy-key.mjs
       - name: Test release immutability preflight

@@ -118,6 +118,18 @@ async function main() {
   const publishedAt = options["published-at"] ?? new Date().toISOString();
   const artifactBaseUrl = options["artifact-base-url"] ?? null;
   const signatureBaseUrl = options["signature-base-url"] ?? null;
+  const signatureUrlOverride = options["signature-url"] ?? null;
+  if (signatureUrlOverride) {
+    let parsedSignatureUrl;
+    try {
+      parsedSignatureUrl = new URL(signatureUrlOverride);
+    } catch {
+      throw new Error("--signature-url must be an absolute http(s) URL");
+    }
+    if (!["http:", "https:"].includes(parsedSignatureUrl.protocol)) {
+      throw new Error("--signature-url must be an absolute http(s) URL");
+    }
+  }
 
   const artifacts = [
     await fileMetadata(
@@ -153,7 +165,9 @@ async function main() {
     signature: {
       algorithm: "ecdsa-p256-sha256",
       path: signatureName,
-      url: signatureUrlFor(signatureName, signatureBaseUrl, artifactBaseUrl),
+      url:
+        signatureUrlOverride ??
+        signatureUrlFor(signatureName, signatureBaseUrl, artifactBaseUrl),
       format: "base64",
     },
   });

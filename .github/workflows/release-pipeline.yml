@@ -218,6 +218,21 @@ jobs:
       - name: Verify release immutability preflight
         run: node ./scripts/test-release-immutability-preflight.mjs
 
+      - name: Verify release attestation dry-run gate
+        run: node ./scripts/test-release-attestation-gate.mjs
+
+      - name: Verify release source preparation and channel feed configuration
+        run: node ./scripts/test-release-source-preparation.mjs
+
+      - name: Verify release build SDK matches global.json
+        run: node ./scripts/test-release-build-sdk.mjs
+
+      - name: Verify signed release signature URL routing
+        run: node ./scripts/test-release-manifest-signature-url.mjs
+
+      - name: Verify local release feed signature routes
+        run: node ./scripts/test-serve-release-smoke.mjs
+
       - name: Verify frontend third-party inventory regressions
         run: node ./scripts/test-frontend-third-party-inventory.mjs
 

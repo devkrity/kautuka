@@ -68,9 +68,10 @@ artifact_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautu
 signature_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautuka-platform-release.sig"
 
 write_manifest() {
-  local output="$1" manifest_version="${2:-$version}" manifest_channel="${3:-$channel}" manifest_tag="${4:-$tag}" manifest_url="$artifact_url"
+  local output="$1" manifest_version="${2:-$version}" manifest_channel="${3:-$channel}" manifest_tag="${4:-$tag}" manifest_url="$artifact_url" manifest_signature_url="$signature_url"
   if [[ -n "${5:-}" ]]; then manifest_url="$5"; fi
-  python3 - "$output" "$manifest_version" "$manifest_channel" "$manifest_tag" "$manifest_url" "$signature_url" "$artifact_hash" "$artifact_size" <<'PY'
+  if [[ -n "${6:-}" ]]; then manifest_signature_url="$6"; fi
+  python3 - "$output" "$manifest_version" "$manifest_channel" "$manifest_tag" "$manifest_url" "$manifest_signature_url" "$artifact_hash" "$artifact_size" <<'PY'
 import json
 import sys
 
@@ -166,10 +167,10 @@ done
 [[ -n "$output" && -n "$url" ]]
 printf '%s\n' "$(dirname "$output")" >> "$MAIN_TMP_ROOT_LOG"
 case "$url" in
-  *.json) cat "$MAIN_MANIFEST_SOURCE" > "$output" ;;
+  *.json|*/manifest) cat "$MAIN_MANIFEST_SOURCE" > "$output" ;;
   *.sig) cat "$MAIN_SIGNATURE_SOURCE" > "$output" ;;
   *.tar.gz) cat "$MAIN_ARCHIVE_SOURCE" > "$output" ;;
-  *) echo "unexpected test download URL" >&2; exit 90 ;;
+  *) echo "unexpected test download URL: $url" >&2; exit 90 ;;
 esac
 MOCK_CURL
 cat > "$main_mock_bin/getent" <<'MOCK_GETENT'
@@ -219,9 +220,15 @@ base64 -w0 "$tmp/main-valid-signature.der" > "$tmp/main-valid-signature.sig"
 
 run_generated_main() {
   local manifest="$1" signature="$2" archive="$3"
+  run_generated_main_with_installer "$tmp/generated-main-installer.sh" "$manifest" "$signature" "$archive"
+}
+
+run_generated_main_with_installer() {
+  local generated_installer="$1" manifest="$2" signature="$3" archive="$4"
+  shift 4
   local -a runner_command=(env \
     "PATH=$main_mock_bin:$PATH" \
-    "GENERATED_INSTALLER=$tmp/generated-main-installer.sh" \
+    "GENERATED_INSTALLER=$generated_installer" \
     "MAIN_MANIFEST_SOURCE=$manifest" \
     "MAIN_SIGNATURE_SOURCE=$signature" \
     "MAIN_ARCHIVE_SOURCE=$archive" \
@@ -232,7 +239,8 @@ run_generated_main() {
     "REAL_RM_PATH=$real_rm_path" \
     bash -c 'set -euo pipefail; source "$GENERATED_INSTALLER"; require_root() { return 0; }; main "$@"' \
     kautuka-installer-test-run \
-    --service-user "kautuka-installer-test-$$")
+    --service-user "kautuka-installer-test-$$" \
+    "$@")
   "${runner_command[@]}"
 }
 
@@ -279,4 +287,102 @@ installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
   exit 1
 }
 
-echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches; generated main reached the mocked mutation boundary only for the valid release.'
+# The local-feed wrapper also writes runtime policy. It must defer that persistent
+# configuration until the actual main path has authenticated both manifest and archive.
+local_feed_base='https://local-feed.example.test/rehearsal'
+local_manifest_url="$local_feed_base/manifest"
+local_artifact_url="$local_feed_base/kautuka-linux-amd64.tar.gz"
+local_signature_url="$local_manifest_url.sig"
+bash "$script_dir/generate-linux-installer.sh" \
+  --output "$tmp/generated-local-feed-installer.sh" \
+  --version "$version" \
+  --release-channel "$channel" \
+  --feed-base-url "$local_feed_base" \
+  --manifest-public-key "$tmp/public.pem" \
+  --local-feed-defaults
+bash -n "$tmp/generated-local-feed-installer.sh"
+write_manifest "$tmp/local-valid-manifest.json" "$version" "$channel" "$tag" "$local_artifact_url" "$local_signature_url"
+openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/local-valid-signature.der" "$tmp/local-valid-manifest.json"
+base64 -w0 "$tmp/local-valid-signature.der" > "$tmp/local-valid-signature.sig"
+
+expect_local_wrapper_rejected_before_configuration() {
+  local label="$1" manifest="$2" signature="$3" archive="$4"
+  : > "$tmp/main-mutations.log"
+  : > "$tmp/main-temp-roots.log"
+  if run_generated_main_with_installer \
+    "$tmp/generated-local-feed-installer.sh" "$manifest" "$signature" "$archive" \
+    --internal-state-root "$tmp/local-test-state" --visible-root "$tmp/local-test-state" >/dev/null 2>&1; then
+    echo "error: local-feed installer accepted $label." >&2
+    exit 1
+  fi
+  [[ ! -s "$tmp/main-mutations.log" ]] || {
+    echo "error: local-feed installer persisted configuration before rejecting $label: $(head -n 1 "$tmp/main-mutations.log")" >&2
+    exit 1
+  }
+  local installer_tmp_root
+  installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
+  [[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || {
+    echo "error: local-feed installer did not clean its temporary directory after rejecting $label." >&2
+    exit 1
+  }
+}
+
+cp "$tmp/local-valid-manifest.json" "$tmp/local-tampered-manifest.json"
+printf 'tampered' >> "$tmp/local-tampered-manifest.json"
+expect_local_wrapper_rejected_before_configuration \
+  tampered-local-manifest "$tmp/local-tampered-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz"
+printf 'invalid signature\n' > "$tmp/local-invalid-signature.sig"
+expect_local_wrapper_rejected_before_configuration \
+  unsigned-local-manifest "$tmp/local-valid-manifest.json" "$tmp/local-invalid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz"
+expect_local_wrapper_rejected_before_configuration \
+  local-wrong-digest "$tmp/local-valid-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/substituted.tar.gz"
+
+: > "$tmp/main-mutations.log"
+: > "$tmp/main-temp-roots.log"
+local_valid_log="$tmp/local-valid-run.log"
+set +e
+run_generated_main_with_installer \
+  "$tmp/generated-local-feed-installer.sh" "$tmp/local-valid-manifest.json" "$tmp/local-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" \
+  --internal-state-root "$tmp/local-test-state" --visible-root "$tmp/local-test-state" >"$local_valid_log" 2>&1
+valid_local_status=$?
+set -e
+valid_local_mutation="$(head -n 1 "$tmp/main-mutations.log" 2>/dev/null || true)"
+[[ "$valid_local_status" -eq 98 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$valid_local_mutation" == "mkdir -p $tmp/local-test-state/updateService"* ]] || {
+  echo "error: valid local-feed installer did not reach the deferred runtime-policy mutation boundary (status=$valid_local_status; mutation=$valid_local_mutation)." >&2
+  cat "$local_valid_log" >&2
+  exit 1
+}
+installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
+[[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || {
+  echo 'error: local-feed installer did not clean its temporary directory after the mocked mutation stop.' >&2
+  exit 1
+}
+
+socket_installer="$tmp/generated-socket-installer.sh"
+socket_tmpfiles="$tmp/kautuka-sockets.conf"
+grep -Fq "local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'" "$tmp/generated-local-feed-installer.sh"
+sed "s|local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'|local tmpfiles_path='$socket_tmpfiles'|" \
+  "$tmp/generated-local-feed-installer.sh" > "$socket_installer"
+if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket_tmpfiles" bash -c '
+  set -euo pipefail
+  source "$GENERATED_SOCKET_INSTALLER"
+  declare -A known_accounts=([kautuka]=1 [kautuka-gateway]=1 [kautuka-channelhost]=1 [kautuka-credentials]=1)
+  declare -A known_groups=([kautuka-credentials-client]=1)
+  id() { [[ -n "${known_accounts[$1]:-}" ]] || { echo "test account lookup missing $1" >&2; return 1; }; }
+  getent() { [[ "$1" == group && -n "${known_groups[$2]:-}" ]] || { echo "test group lookup missing $2" >&2; return 1; }; }
+  groupadd() { known_groups["$2"]=1; }
+  usermod() { [[ -n "${known_groups[$3]:-}" ]] || { echo "test usermod missing group $3" >&2; return 1; }; }
+  install() { :; }
+  systemd-tmpfiles() { [[ "$1" == --create && -s "$SOCKET_TMPFILES" ]] || { echo "test tmpfiles create failed for $SOCKET_TMPFILES" >&2; return 1; }; }
+  install_socket_runtime_dirs kautuka
+  for group in kautuka-manager-client kautuka-updateservice-client kautuka-gateway-client kautuka-channelhost-client; do
+    [[ -n "${known_groups[$group]:-}" ]] || { echo "missing created client group $group" >&2; exit 1; }
+  done
+  grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+  grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+'; then
+  echo 'error: generated installer did not provision clean-host client socket groups before tmpfiles validation.' >&2
+  exit 1
+fi
+
+echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

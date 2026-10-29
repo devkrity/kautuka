@@ -39,7 +39,7 @@ Stable versions are plain SemVer (`vX.Y.Z` tags, `X.Y.Z` product versions). Neve
 
 ## Roll back
 
-Revert the Stable pointer repository's manifest file in a reviewed commit to stop fresh installs and new offers from selecting the bad release. Already-installed clients reject a lower version as an update; use the appliance's explicit rollback path where available or publish a higher-version fix-forward release. Keep the newer release assets, tag, and pointer commit history for auditability. Never reuse a version number.
+Revert the Stable pointer repository's manifest file in a reviewed commit to stop feed-discovered offers from selecting the bad release. Pointer rollback does not withdraw immutable exact-tag release downloads or change GitHub's latest-release selection. Already-installed clients reject a lower version as an update; use the appliance's explicit rollback path where available. For fresh installs, select a verified known-good release explicitly or publish a higher-version fix-forward release. Keep the newer release assets, tag, and pointer commit history for auditability. Never reuse a version number.
 
 ## Environment secrets
 

@@ -879,6 +879,13 @@ install_socket_runtime_dirs() {
 
     install -d -m 0755 /usr/lib/tmpfiles.d
 
+    # A clean Linux host does not have these groups pre-created by the WSL image builder.
+    # Granting membership first creates the dedicated client groups before tmpfiles checks.
+    grant_socket_group_membership "$service_user" kautuka-gateway-client
+    grant_socket_group_membership kautuka-gateway kautuka-manager-client
+    grant_socket_group_membership kautuka-gateway kautuka-updateservice-client
+    grant_socket_group_membership kautuka-gateway kautuka-channelhost-client
+
     {
         printf '%s\n' \
             '# Managed by the Kautuka installer.' \
@@ -905,20 +912,6 @@ install_socket_runtime_dirs() {
         done
     } > "$tmpfiles_path"
     chmod 0644 "$tmpfiles_path"
-
-    # One grant per client-to-server edge: WebHost (the service user) reaches Gateway, and
-    # Gateway reaches Manager, UpdateService and ChannelHost. Gateway is already in
-    # kautuka-credentials-client, which covers CredentialsHost.
-    #
-    # Manager and UpdateService both run as the service user, so their sockets could have
-    # been left in that user's own group, which Gateway already belongs to. They are not,
-    # because that group also carries their group-readable state under the state root, so
-    # relying on it would widen Gateway's reach past the two sockets it needs.
-    # UpdateService still reaches the manager socket as its owner.
-    grant_socket_group_membership "$service_user" kautuka-gateway-client
-    grant_socket_group_membership kautuka-gateway kautuka-manager-client
-    grant_socket_group_membership kautuka-gateway kautuka-updateservice-client
-    grant_socket_group_membership kautuka-gateway kautuka-channelhost-client
 
     # Materialise the directories now: a fresh install starts its services before the
     # next boot would otherwise run systemd-tmpfiles. ProtectSystem=strict units bind
@@ -1980,6 +1973,22 @@ PY
             --artifact-name 'kautuka-linux-amd64.tar.gz' \
             --artifact-url "$artifact_url" \
             --signature-url "$expected_signature_url"
+    fi
+
+    # Local-feed installers need a preview/stable runtime policy, but must not
+    # persist that policy until the signed manifest and archive digest have passed.
+    if [[ "${KAUTUKA_INSTALL_LOCAL_RELEASE_DEFAULTS:-0}" == '1' ]]; then
+        case "$release_channel" in
+            stable) stable_manifest_url="$manifest_url" ;;
+            preview) preview_manifest_url="$manifest_url" ;;
+        esac
+        local local_policy_path="$internal_state_root/updateService/update-runtime-policy.json"
+        mkdir -p "$(dirname "$local_policy_path")"
+        printf '{\n  "schemaVersion": 1,\n  "releaseChannel": "%s"\n}\n' "$release_channel" > "$local_policy_path"
+        chmod 640 "$local_policy_path"
+        if id "$service_user" >/dev/null 2>&1 && getent group "$service_group" >/dev/null 2>&1; then
+            chown "$service_user:$service_group" "$local_policy_path"
+        fi
     fi
 
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"

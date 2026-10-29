@@ -71,7 +71,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: "26"
 
       - name: Install frozen frontend dependency graph for release notices
         run: corepack enable && corepack prepare pnpm@11.5.2 --activate && pnpm --dir src/frontend install --frozen-lockfile
@@ -80,10 +80,14 @@ jobs:
         env:
           RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.release_manifest_private_key }}
         run: |
-          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
-          chmod 600 manifest-signing-key.pem
-          openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
-          chmod 644 manifest-signing-public.pem
+          private_key_path="$RUNNER_TEMP/manifest-signing-key.pem"
+          public_key_path="$RUNNER_TEMP/manifest-signing-public.pem"
+          printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > "$private_key_path"
+          chmod 600 "$private_key_path"
+          openssl pkey -in "$private_key_path" -pubout -out "$public_key_path"
+          chmod 644 "$public_key_path"
+          printf 'RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\n' "$private_key_path" >> "$GITHUB_ENV"
+          printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
 
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
@@ -103,8 +107,8 @@ jobs:
 
           bash scripts/build-release-assets.sh \
             --output-root publish/release-assets \
-            --private-key manifest-signing-key.pem \
-            --manifest-public-key manifest-signing-public.pem \
+            --private-key "$RELEASE_MANIFEST_PRIVATE_KEY_PATH" \
+            --manifest-public-key "$RELEASE_MANIFEST_PUBLIC_KEY_PATH" \
             --release-id "$RELEASE_TAG" \
             --release-tag "$RELEASE_TAG" \
             --version "$MANIFEST_VERSION" \
@@ -112,8 +116,8 @@ jobs:
             --source-sha "$SOURCE_SHA" \
             --channel "$CHANNEL" \
             --manifest-url "$channel_manifest_url" \
-            --preview-manifest-url "${updates_base_url}/manifest/preview" \
-            --stable-manifest-url "${updates_base_url}/manifest/stable" \
+            --preview-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-preview/main/manifest" \
+            --stable-manifest-url "https://raw.githubusercontent.com/devkrity/kautuka-release-feed-stable/main/manifest" \
             --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
             --artifact-base-url "$artifact_base_url"
 
@@ -147,7 +151,7 @@ jobs:
             --version "$RELEASE_VERSION" \
             --channel "$RELEASE_CHANNEL" \
             --source-sha "$SOURCE_SHA" \
-            --public-key manifest-signing-public.pem \
+            --public-key "$RELEASE_MANIFEST_PUBLIC_KEY_PATH" \
             --platform-archive "$RELEASE_DIR/kautuka-linux-amd64.tar.gz"
 
       - name: Generate release third-party notices and inventory
@@ -212,7 +216,7 @@ jobs:
           catalog_args=(
             node ./scripts/generate-catalog-manifest.mjs
             --output-dir "$catalog_dir"
-            --private-key manifest-signing-key.pem
+            --private-key "$RELEASE_MANIFEST_PRIVATE_KEY_PATH"
             --manifest-base-url "$catalog_base_url"
           )
 
@@ -289,7 +293,7 @@ jobs:
       - name: Setup Node for frontend release notices
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version: "26"
 
       - name: Install frozen frontend dependency graph for release notices
         shell: bash
@@ -556,6 +560,7 @@ jobs:
             --manifest-public-key manifest-signing-public.pem
 
       - name: Attest Linux installer provenance
+        if: ${{ inputs.dry_run != 'true' }}
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: publish/linux-installer/kautuka-install-linux.sh

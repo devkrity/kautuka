@@ -759,6 +759,7 @@ build_args=(
   --manifest-url "$public_base_url/manifest"
   --catalog-manifest-url "$public_base_url/catalog/manifest"
   --artifact-base-url "$public_base_url"
+  --signature-url "$public_base_url/manifest.sig"
   --manifest-public-key "$public_key"
 )
 
