@@ -55,21 +55,6 @@ public static partial class ReleaseChannelPolicy
         return true;
     }
 
-    public static Uri CreateChannelPointerUrl(string owner, string repository, string channel)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
-        ArgumentException.ThrowIfNullOrWhiteSpace(repository);
-        ArgumentException.ThrowIfNullOrWhiteSpace(channel);
-        if (!string.Equals(channel, "stable", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(channel, "preview", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Channel must be stable or preview.", nameof(channel));
-        }
-
-        string normalizedChannel = string.Equals(channel, "preview", StringComparison.OrdinalIgnoreCase) ? "preview" : "stable";
-        return new Uri($"https://raw.githubusercontent.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/release-channel/{normalizedChannel}.json", UriKind.Absolute);
-    }
-
     public static T? SelectLatest<T>(
         IEnumerable<T> releases,
         string channel,
@@ -98,6 +83,10 @@ public static partial class ReleaseChannelPolicy
             {
                 selected = release;
                 selectedVersion = version;
+            }
+            else if (version.CompareTo(selectedVersion) == 0 && !ReferenceEquals(selected, release))
+            {
+                throw new InvalidOperationException($"Multiple published {channel} releases claim the same strict version '{version.ToVersionString()}'.");
             }
         }
 

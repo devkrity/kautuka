@@ -11,7 +11,7 @@ public sealed class ProvisionedUpdateSourcePolicyTests
             """
             {
               "schemaVersion": 1,
-              "manifestUrl": "https://updates.kautuka.dev/manifest",
+              "manifestUrl": "http://127.0.0.1:20300/manifest",
               "catalogManifestUrl": "https://store.kautuka.dev/catalog/manifest"
             }
             """);
@@ -21,7 +21,7 @@ public sealed class ProvisionedUpdateSourcePolicyTests
             ProvisionedUpdateSourceDocument? document = ProvisionedUpdateSourcePolicy.Resolve(sourceDocumentPath);
 
             Assert.NotNull(document);
-            Assert.Equal("https://updates.kautuka.dev/manifest", document.ManifestUrl);
+            Assert.Equal("http://127.0.0.1:20300/manifest", document.ManifestUrl);
             Assert.Equal("https://store.kautuka.dev/catalog/manifest", document.CatalogManifestUrl);
         }
         finally
@@ -47,8 +47,6 @@ public sealed class ProvisionedUpdateSourcePolicyTests
 
             Assert.NotNull(document);
             Assert.Null(document.ManifestUrl);
-            Assert.Null(document.PreviewManifestUrl);
-            Assert.Null(document.StableManifestUrl);
             Assert.Equal("https://store.kautuka.dev/catalog/manifest", document.CatalogManifestUrl);
         }
         finally
@@ -64,9 +62,7 @@ public sealed class ProvisionedUpdateSourcePolicyTests
             """
             {
               "schemaVersion": 1,
-              "manifestUrl": "",
-              "previewManifestUrl": "",
-              "stableManifestUrl": ""
+              "manifestUrl": ""
             }
             """);
 

@@ -28,8 +28,6 @@ public sealed class UpdateServiceIntegrationTests
             Enabled = true,
             StateRootPath = CreateTempDirectory(),
             ReleaseManifestUrl = null,
-            PreviewReleaseManifestUrl = null,
-            StableReleaseManifestUrl = null,
             RepositoryOwner = null,
             RepositoryName = null,
             AllowUnsignedLocalFeeds = false

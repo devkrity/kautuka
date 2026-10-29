@@ -6,8 +6,6 @@ namespace Kautuka.UpdateService.Hosting;
 public sealed record ProvisionedUpdateSourceDocument(
     int SchemaVersion,
     string? ManifestUrl,
-    string? PreviewManifestUrl,
-    string? StableManifestUrl,
     string? CatalogManifestUrl);
 
 public static class ProvisionedUpdateSourcePolicy
@@ -43,8 +41,6 @@ public static class ProvisionedUpdateSourcePolicy
         }
 
         if (string.IsNullOrWhiteSpace(document.ManifestUrl)
-            && string.IsNullOrWhiteSpace(document.PreviewManifestUrl)
-            && string.IsNullOrWhiteSpace(document.StableManifestUrl)
             && string.IsNullOrWhiteSpace(document.CatalogManifestUrl))
         {
             return null;

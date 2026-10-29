@@ -74,9 +74,6 @@ jobs:
       - name: Test Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 
-      - name: Test signed release-channel pointer publication
-        run: node ./scripts/test-release-channel-pointer.mjs
-
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 

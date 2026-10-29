@@ -42,11 +42,9 @@ builder.Services.AddOptions<UpdateOptions>()
             options.RepositoryOwner = "devkrity";
             options.RepositoryName = "kautuka";
             options.ManifestPublicKeyPath ??= ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
-            // The release-channel branch contains the latest byte-for-byte signed manifest for
-            // each channel. Release assets remain on the exact immutable GitHub Release tag.
+            // Production discovers strict channel releases through the anonymous GitHub Releases
+            // API, then verifies the signed manifest from the exact immutable release tag.
             options.ReleaseManifestUrl = null;
-            options.PreviewReleaseManifestUrl = ReleaseChannelPolicy.CreateChannelPointerUrl("devkrity", "kautuka", "preview").AbsoluteUri;
-            options.StableReleaseManifestUrl = ReleaseChannelPolicy.CreateChannelPointerUrl("devkrity", "kautuka", "stable").AbsoluteUri;
 
             ProvisionedUpdateSourceDocument? source = ProvisionedUpdateSourcePolicy.Resolve();
 

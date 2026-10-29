@@ -16,8 +16,6 @@ Options:
   --minimum-updater-version <ver>   Optional minimum updater version for the manifest.
   --manifest-url <url>              Optional manifest URL to preconfigure in the release update source file.
                                     Defaults to <artifact-base-url>/kautuka-platform-release.json when that base is set.
-  --preview-manifest-url <url>      Optional preview channel manifest URL baked into update-source.json.
-  --stable-manifest-url <url>       Optional stable channel manifest URL baked into update-source.json.
   --catalog-manifest-url <url>      Optional catalog manifest URL to preconfigure in the release update source file.
   --artifact-base-url <url>         Absolute URL prefix for artifact `url` fields in the signed platform manifest.
   --signature-url <url>             Optional exact signature URL in the signed release manifest.
@@ -161,8 +159,6 @@ source_sha=''
 channel=''
 minimum_updater_version=''
 manifest_url=''
-preview_manifest_url=''
-stable_manifest_url=''
 catalog_manifest_url=''
 manifest_public_key=''
 artifact_base_url=''
@@ -211,14 +207,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest-url)
       manifest_url="$2"
-      shift 2
-      ;;
-    --preview-manifest-url)
-      preview_manifest_url="$2"
-      shift 2
-      ;;
-    --stable-manifest-url)
-      stable_manifest_url="$2"
       shift 2
       ;;
     --catalog-manifest-url)
@@ -302,16 +290,6 @@ if [[ -n "$catalog_manifest_url" && ! "$catalog_manifest_url" =~ ^https?:// ]]; 
   exit 1
 fi
 
-if [[ -n "$preview_manifest_url" && ! "$preview_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --preview-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
-if [[ -n "$stable_manifest_url" && ! "$stable_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --stable-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
 if [[ -n "$signature_url" && ! "$signature_url" =~ ^https?:// ]]; then
   echo 'error: --signature-url must be an absolute http(s) URL.' >&2
   exit 1
@@ -389,8 +367,6 @@ write_provisioned_update_source_document() {
   local channel_name="$3"
   local catalog_manifest_url_value="$4"
   local use_sudo="${5:-false}"
-  local preview_manifest_url_value="${6:-}"
-  local stable_manifest_url_value="${7:-}"
   local document
 
   if [[ "$use_sudo" == 'true' ]]; then
@@ -399,46 +375,18 @@ write_provisioned_update_source_document() {
     mkdir -p "$(dirname "$destination_path")"
   fi
 
-  if [[ -z "$preview_manifest_url_value" && "$channel_name" == 'preview' ]]; then
-    preview_manifest_url_value="$manifest_url_value"
-  fi
-  if [[ -z "$stable_manifest_url_value" && "$channel_name" == 'stable' ]]; then
-    stable_manifest_url_value="$manifest_url_value"
-  fi
-
-  if [[ -n "$preview_manifest_url_value" || -n "$stable_manifest_url_value" ]]; then
-    if [[ -n "$catalog_manifest_url_value" ]]; then
-      document="$(printf '%s\n' \
-        '{' \
-        '  "schemaVersion": 1,' \
-        "  \"manifestUrl\": \"$manifest_url_value\"," \
-        "  \"previewManifestUrl\": \"$preview_manifest_url_value\"," \
-        "  \"stableManifestUrl\": \"$stable_manifest_url_value\"," \
-        "  \"catalogManifestUrl\": \"$catalog_manifest_url_value\"" \
-        '}')"
-    else
-      document="$(printf '%s\n' \
-        '{' \
-        '  "schemaVersion": 1,' \
-        "  \"manifestUrl\": \"$manifest_url_value\"," \
-        "  \"previewManifestUrl\": \"$preview_manifest_url_value\"," \
-        "  \"stableManifestUrl\": \"$stable_manifest_url_value\"" \
-        '}')"
-    fi
-  elif [[ -n "$catalog_manifest_url_value" ]]; then
+  if [[ -n "$catalog_manifest_url_value" ]]; then
     document="$(printf '%s\n' \
       '{' \
       '  "schemaVersion": 1,' \
       "  \"manifestUrl\": \"$manifest_url_value\"," \
-      "  \"${channel_name}ManifestUrl\": \"$manifest_url_value\"," \
       "  \"catalogManifestUrl\": \"$catalog_manifest_url_value\"" \
       '}')"
   else
     document="$(printf '%s\n' \
       '{' \
       '  "schemaVersion": 1,' \
-      "  \"manifestUrl\": \"$manifest_url_value\"," \
-      "  \"${channel_name}ManifestUrl\": \"$manifest_url_value\"" \
+      "  \"manifestUrl\": \"$manifest_url_value\"" \
       '}')"
   fi
 
@@ -457,7 +405,7 @@ stage_provisioned_update_source() {
 
   if [[ -n "$manifest_url" ]]; then
     local destination_path="$root_path/update-source.json"
-    write_provisioned_update_source_document "$destination_path" "$manifest_url" "$channel" "$catalog_manifest_url" "$( [[ -n "$owner_spec" ]] && printf 'true' || printf 'false' )" "$preview_manifest_url" "$stable_manifest_url"
+    write_provisioned_update_source_document "$destination_path" "$manifest_url" "$channel" "$catalog_manifest_url" "$( [[ -n "$owner_spec" ]] && printf 'true' || printf 'false' )"
 
     if [[ -n "$owner_spec" ]]; then
       sudo chown "$owner_spec" "$destination_path"

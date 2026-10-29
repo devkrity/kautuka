@@ -150,15 +150,6 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
 
-      - name: Check out the protected release-channel branch before draft mutation
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: release-channel
-          path: release-channel
-          fetch-depth: 1
-          token: ${{ github.token }}
-          persist-credentials: true
-
       - name: Normalize artifact scope
         id: scope
         env:
@@ -420,32 +411,3 @@ jobs:
             echo 'error: GitHub did not mark the published release immutable; configure repository release immutability before cutover.' >&2
             exit 1
           fi
-
-      - name: Advance only the selected signed channel pointer
-        env:
-          CHANNEL: ${{ inputs.channel }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          repository_owner="${REPOSITORY%%/*}"
-          repository_name="${REPOSITORY#*/}"
-          node scripts/update-release-channel-pointer.mjs \
-            --channel "$CHANNEL" \
-            --manifest "release-stage/releases/${RELEASE_TAG}/kautuka-platform-release.json" \
-            --signature "release-stage/releases/${RELEASE_TAG}/kautuka-platform-release.sig" \
-            --public-key release-stage/manifest-signing-public.pem \
-            --pointer-directory release-channel \
-            --owner "$repository_owner" \
-            --repository "$repository_name"
-          git -C release-channel config user.name 'github-actions[bot]'
-          git -C release-channel config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git -C release-channel add "$CHANNEL.json"
-          staged_paths="$(git -C release-channel diff --cached --name-only)"
-          if [[ "$staged_paths" != "$CHANNEL.json" ]]; then
-            echo 'error: channel publication attempted to stage a different pointer path.' >&2
-            exit 1
-          fi
-          git -C release-channel diff --cached --check
-          git -C release-channel commit -m "Advance $CHANNEL channel to $RELEASE_TAG"
-          git -C release-channel push origin HEAD:refs/heads/release-channel

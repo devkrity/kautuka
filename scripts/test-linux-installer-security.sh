@@ -79,6 +79,7 @@ import sys
 output, version, channel, tag, artifact_url, signature_url, sha256, size, source_sha = sys.argv[1:]
 manifest = {
     'schemaVersion': 2,
+    'releaseId': tag,
     'version': version,
     'channel': channel,
     'releaseTag': tag,
@@ -160,6 +161,22 @@ bash -n "$tmp/generated-main-installer.sh"
 
 main_mock_bin="$tmp/main-mock-bin"
 mkdir -p "$main_mock_bin"
+mkdir -p "$tmp/github-release-python-mock"
+cat > "$tmp/github-release-python-mock/sitecustomize.py" <<'MOCK_GITHUB_RELEASES'
+import io
+import json
+import os
+import urllib.parse
+import urllib.request
+
+def mocked_urlopen(request, timeout=None):
+    page = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query).get('page', ['1'])[0]
+    tag = os.environ['MOCK_GH_RELEASE_TAG']
+    rows = [{'tag_name': tag, 'draft': False, 'prerelease': '-preview.' in tag, 'published_at': '2026-10-29T00:00:00Z'}] if page == '1' else []
+    return io.BytesIO(json.dumps(rows).encode())
+
+urllib.request.urlopen = mocked_urlopen
+MOCK_GITHUB_RELEASES
 cat > "$main_mock_bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -237,6 +254,8 @@ run_generated_main_with_installer() {
   shift 4
   local -a runner_command=(env \
     "PATH=$main_mock_bin:$PATH" \
+    "PYTHONPATH=$tmp/github-release-python-mock" \
+    "MOCK_GH_RELEASE_TAG=$tag" \
     "GENERATED_INSTALLER=$generated_installer" \
     "MAIN_MANIFEST_SOURCE=$manifest" \
     "MAIN_SIGNATURE_SOURCE=$signature" \
@@ -318,27 +337,27 @@ valid_github_status=$?
 set -e
 [[ "$valid_github_status" -eq 97 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$(head -n 1 "$tmp/main-mutations.log")" == groupadd* ]] && \
   grep -Fq "verified signed release $tag ($channel)" "$tmp/github-valid.log" && \
-  grep -Fxq 'https://raw.githubusercontent.com/devkrity/kautuka/release-channel/preview.json' "$tmp/main-downloads.log" && \
+  grep -Fxq "$main_manifest_url" "$tmp/main-downloads.log" && \
   grep -Fxq "$signature_url" "$tmp/main-downloads.log" && \
   grep -Fxq "$artifact_url" "$tmp/main-downloads.log" || {
-  echo 'error: valid signed channel pointer did not resolve to the exact-tag signature and archive before the mocked first account-mutation boundary.' >&2
+  echo 'error: valid signed GitHub Release did not resolve to the exact-tag signature and archive before the mocked first account-mutation boundary.' >&2
   exit 1
 }
-cp "$tmp/main-github-valid-manifest.json" "$tmp/main-github-tampered-pointer.json"
-printf 'tampered' >> "$tmp/main-github-tampered-pointer.json"
+cp "$tmp/main-github-valid-manifest.json" "$tmp/main-github-tampered-manifest.json"
+printf 'tampered' >> "$tmp/main-github-tampered-manifest.json"
 : > "$tmp/main-mutations.log"
 : > "$tmp/main-temp-roots.log"
-if run_generated_main_with_installer "$tmp/generated-github-installer.sh" "$tmp/main-github-tampered-pointer.json" "$tmp/main-github-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" >"$tmp/github-tampered-pointer.log" 2>&1; then
-  echo 'error: GitHub channel installer accepted a tampered signed pointer manifest.' >&2
+if run_generated_main_with_installer "$tmp/generated-github-installer.sh" "$tmp/main-github-tampered-manifest.json" "$tmp/main-github-valid-signature.sig" "$tmp/kautuka-linux-amd64.tar.gz" >"$tmp/github-tampered-manifest.log" 2>&1; then
+  echo 'error: GitHub Release installer accepted a tampered signed manifest.' >&2
   exit 1
 fi
-[[ ! -s "$tmp/main-mutations.log" ]] || { echo 'error: tampered channel pointer reached a persistent system mutation.' >&2; exit 1; }
-grep -Eq 'JSONDecodeError|signature verification failed|manifest identity is invalid' "$tmp/github-tampered-pointer.log" || {
-  echo 'error: tampered channel pointer was rejected for an unexpected reason.' >&2
+[[ ! -s "$tmp/main-mutations.log" ]] || { echo 'error: tampered release manifest reached a persistent system mutation.' >&2; exit 1; }
+grep -Eq 'JSONDecodeError|signature verification failed|manifest identity is invalid' "$tmp/github-tampered-manifest.log" || {
+  echo 'error: tampered release manifest was rejected for an unexpected reason.' >&2
   exit 1
 }
 installer_tmp_root="$(tail -n 1 "$tmp/main-temp-roots.log")"
-[[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || { echo 'error: tampered channel pointer rejection did not clean its temporary directory.' >&2; exit 1; }
+[[ -n "$installer_tmp_root" && ! -e "$installer_tmp_root" ]] || { echo 'error: tampered release manifest rejection did not clean its temporary directory.' >&2; exit 1; }
 
 # The local-feed wrapper also writes runtime policy. It must defer that persistent
 # configuration until the actual main path has authenticated both manifest and archive.

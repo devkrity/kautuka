@@ -11,8 +11,6 @@ Options:
   --artifact-url <url>          Default platform artifact URL.
   --feed-base-url <url>         Default feed base URL.
   --manifest-url <url>          Default manifest URL.
-  --preview-manifest-url <url>     Default preview channel manifest URL.
-  --stable-manifest-url <url>   Default stable channel manifest URL.
   --catalog-manifest-url <url>  Default catalog manifest URL.
   --release-channel <channel>   Default release channel.
   --manifest-public-key <pem>   Manifest public key PEM file to embed.
@@ -26,8 +24,6 @@ version=''
 artifact_url=''
 feed_base_url=''
 manifest_url=''
-preview_manifest_url=''
-stable_manifest_url=''
 catalog_manifest_url=''
 release_channel=''
 manifest_public_key=''
@@ -53,14 +49,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest-url)
       manifest_url="$2"
-      shift 2
-      ;;
-    --preview-manifest-url)
-      preview_manifest_url="$2"
-      shift 2
-      ;;
-    --stable-manifest-url)
-      stable_manifest_url="$2"
       shift 2
       ;;
     --catalog-manifest-url)
@@ -111,16 +99,6 @@ if [[ -n "$catalog_manifest_url" && ! "$catalog_manifest_url" =~ ^https?:// ]]; 
   exit 1
 fi
 
-if [[ -n "$preview_manifest_url" && ! "$preview_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --preview-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
-if [[ -n "$stable_manifest_url" && ! "$stable_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --stable-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 installer_source="$script_dir/kautuka-install-linux.sh.in"
 release_verifier_source="$script_dir/verify-linux-release.sh"
@@ -135,12 +113,6 @@ release_verifier_source="$script_dir/verify-linux-release.sh"
   fi
   if [[ -n "$manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_MANIFEST_URL=%q\n' "$manifest_url"
-  fi
-  if [[ -n "$preview_manifest_url" ]]; then
-    printf 'KAUTUKA_DEFAULT_PREVIEW_MANIFEST_URL=%q\n' "$preview_manifest_url"
-  fi
-  if [[ -n "$stable_manifest_url" ]]; then
-    printf 'KAUTUKA_DEFAULT_STABLE_MANIFEST_URL=%q\n' "$stable_manifest_url"
   fi
   if [[ -n "$catalog_manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL=%q\n' "$catalog_manifest_url"

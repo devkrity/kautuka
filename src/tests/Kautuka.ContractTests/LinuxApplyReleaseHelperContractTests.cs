@@ -149,14 +149,13 @@ public sealed class LinuxApplyReleaseHelperContractTests
     }
 
     [Fact]
-    public void GitHubReleaseLanePublishesVersionedAssetsAndSignedChannelPointers()
+    public void GitHubReleaseLanePublishesVersionedAssetsWithoutChannelPointers()
     {
         string projectRoot = FindProjectRoot();
         string buildWorkflow = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-build-platform-assets.yml"));
         string publishWorkflow = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-publish-assets.yml"));
         string pipeline = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-pipeline.yml"));
         string publishScript = File.ReadAllText(Path.Combine(projectRoot, "scripts", "publish-release-feed.sh"));
-        string pointerPublisher = File.ReadAllText(Path.Combine(projectRoot, "scripts", "update-release-channel-pointer.mjs"));
 
         Assert.Contains("https://kautuka.store/catalog/manifest", pipeline, StringComparison.Ordinal);
         Assert.Contains("https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}", buildWorkflow, StringComparison.Ordinal);
@@ -168,32 +167,30 @@ public sealed class LinuxApplyReleaseHelperContractTests
         Assert.Contains("gh release upload", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("verify-release-assets.mjs", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains(".immutable", publishWorkflow, StringComparison.Ordinal);
-        Assert.Contains("scripts/update-release-channel-pointer.mjs", publishWorkflow, StringComparison.Ordinal);
-        Assert.Contains("release-channel add \"$CHANNEL.json\"", publishWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("release-channel", publishWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("release_feed_deploy_key", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("catalog-feed/catalog", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("releases/download", buildWorkflow, StringComparison.Ordinal);
-        Assert.Contains("verifyManifestBytes(currentBytes, currentSignature, publicKeyPem)", pointerPublisher, StringComparison.Ordinal);
-        Assert.Contains("comparison <= 0", pointerPublisher, StringComparison.Ordinal);
-        Assert.Contains("currentBytes.equals(manifestBytes)", pointerPublisher, StringComparison.Ordinal);
         Assert.DoesNotContain("--delete", publishScript, StringComparison.Ordinal);
         Assert.Contains("catalog/*", publishScript, StringComparison.Ordinal);
         Assert.Contains("RELEASE_FEED_S3_ENDPOINT", publishScript, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void WindowsBootstrapSelectsChannelSnapshotAndValidatesExactTagAssets()
+    public void WindowsBootstrapDiscoversNativeReleaseAndValidatesExactTagAssets()
     {
         string projectRoot = FindProjectRoot();
         string argumentParser = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Hosting", "Program.Args.cs"));
         string installer = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Installation", "WindowsApplianceInstaller.Release.cs"));
 
-        Assert.Contains("CreateChannelPointerUrl(repositoryOwner, repositoryName, releaseChannel)", argumentParser, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateChannelPointerUrl", argumentParser, StringComparison.Ordinal);
         Assert.Contains("ValidateManifestMatchesChannel", installer, StringComparison.Ordinal);
         Assert.Contains("expectedSignatureUrl", installer, StringComparison.Ordinal);
         Assert.Contains("expectedRootfsUrl", installer, StringComparison.Ordinal);
         Assert.Contains("expectedLinuxUrl", installer, StringComparison.Ordinal);
-        Assert.DoesNotContain("api.github.com", installer, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("api.github.com/repos/", installer, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("DiscoverLatestReleaseTagAsync", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("release-channel", installer, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -441,9 +441,7 @@ internal sealed class UpdateCoordinator(
 
     private static bool IsDiscoveryConfigured(UpdateOptions options)
     {
-        bool hasManifestSource = !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl);
+        bool hasManifestSource = !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl);
 
         return hasManifestSource
             || (!string.IsNullOrWhiteSpace(options.RepositoryOwner)
@@ -642,9 +640,7 @@ internal sealed class UpdateCoordinator(
     }
 
     private bool HasManifestDiscoveryConfigured()
-        => !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl);
+        => !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl);
 
     private static UpdateStatusSnapshot CreateSnapshot(UpdateStateRecord state, UpdateServiceContext hostContext)
         => new(

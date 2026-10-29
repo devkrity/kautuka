@@ -26,10 +26,18 @@ internal static partial class WindowsApplianceInstaller
 
         if (string.IsNullOrWhiteSpace(request.RootfsPath))
         {
+            if (releaseManifestUri is null && string.IsNullOrWhiteSpace(request.ReleaseTag))
+            {
+                resolvedReleaseTag = await DiscoverLatestReleaseTagAsync(
+                    request.RepositoryOwner,
+                    request.RepositoryName,
+                    request.ReleaseChannel,
+                    log,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             releaseManifestUri ??= new Uri(
-                string.IsNullOrWhiteSpace(request.ReleaseTag)
-                    ? ReleaseChannelPolicy.CreateChannelPointerUrl(request.RepositoryOwner, request.RepositoryName, request.ReleaseChannel).AbsoluteUri
-                    : $"https://github.com/{Uri.EscapeDataString(request.RepositoryOwner)}/{Uri.EscapeDataString(request.RepositoryName)}/releases/download/{Uri.EscapeDataString(request.ReleaseTag)}/{releaseManifestAssetName}",
+                $"https://github.com/{Uri.EscapeDataString(request.RepositoryOwner)}/{Uri.EscapeDataString(request.RepositoryName)}/releases/download/{Uri.EscapeDataString(resolvedReleaseTag ?? request.ReleaseTag ?? string.Empty)}/{releaseManifestAssetName}",
                 UriKind.Absolute);
             EnsureApprovedInstallerSourceUrl(releaseManifestUri.ToString(), "Release manifest");
             releaseManifest = await DownloadReleaseManifestAsync(
@@ -37,7 +45,7 @@ internal static partial class WindowsApplianceInstaller
                 request.ReleaseChannel,
                 request.RepositoryOwner,
                 request.RepositoryName,
-                request.ReleaseTag,
+                resolvedReleaseTag,
                 requireVerification,
                 manifestPublicKeyPath,
                 cancellationToken).ConfigureAwait(false);
@@ -90,6 +98,100 @@ internal static partial class WindowsApplianceInstaller
             AllowLanAccess = request.AllowLanAccess,
         };
     }
+
+    private static async Task<string> DiscoverLatestReleaseTagAsync(
+        string owner,
+        string repository,
+        string channel,
+        Func<string, Task> log,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repository))
+        {
+            throw new InvalidOperationException("GitHub release repository is not configured.");
+        }
+
+        using HttpClient client = CreateHttpClient();
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        var releases = new List<GitHubReleaseCandidate>();
+        const int pageSize = 100;
+        for (int page = 1; page <= 11; page++)
+        {
+            string url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases?per_page={pageSize}&page={page}";
+            using HttpResponseMessage response = await client.GetAsync(new Uri(url, UriKind.Absolute), HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            using JsonDocument document = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidOperationException("GitHub release discovery returned an invalid response.");
+            }
+
+            JsonElement[] rows = document.RootElement.EnumerateArray().ToArray();
+            if (page == 11)
+            {
+                if (rows.Length != 0)
+                {
+                    throw new InvalidOperationException("GitHub release history exceeds the safe 1,000-release discovery limit.");
+                }
+
+                break;
+            }
+
+            foreach (JsonElement row in rows)
+            {
+                if (row.ValueKind != JsonValueKind.Object
+                    || !row.TryGetProperty("tag_name", out JsonElement tagValue)
+                    || tagValue.ValueKind != JsonValueKind.String
+                    || !row.TryGetProperty("draft", out JsonElement draftValue)
+                    || draftValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                    || !row.TryGetProperty("prerelease", out JsonElement prereleaseValue)
+                    || prereleaseValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                    || !row.TryGetProperty("published_at", out JsonElement publishedValue)
+                    || publishedValue.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                {
+                    throw new InvalidOperationException("GitHub release discovery contained malformed release metadata.");
+                }
+
+                string? tag = tagValue.GetString();
+                bool draft = draftValue.ValueKind == JsonValueKind.True;
+                bool prerelease = prereleaseValue.ValueKind == JsonValueKind.True;
+                bool published = publishedValue.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(publishedValue.GetString());
+                if (draft || !published || !ReleaseChannelPolicy.TryParseTag(tag, channel, prerelease, out ReleaseTagVersion version))
+                {
+                    await log($"Skipping non-eligible GitHub release '{tag}'.").ConfigureAwait(false);
+                    continue;
+                }
+
+                releases.Add(new GitHubReleaseCandidate(tag!, version));
+            }
+
+            if (rows.Length < pageSize)
+            {
+                break;
+            }
+        }
+
+        GitHubReleaseCandidate? selected;
+        try
+        {
+            selected = ReleaseChannelPolicy.SelectLatest(
+                releases,
+                channel,
+                static release => release.Tag,
+                static _ => false,
+                release => release.Version.IsPreview);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new InvalidOperationException(ex.Message, ex);
+        }
+
+        return selected?.Tag ?? throw new InvalidOperationException($"No published strict {channel} GitHub release was found.");
+    }
+
+    private sealed record GitHubReleaseCandidate(string Tag, ReleaseTagVersion Version);
 
     private static string ResolveWindowsPathWithStableCasing(string path)
     {
@@ -244,6 +346,15 @@ internal static partial class WindowsApplianceInstaller
         CancellationToken cancellationToken)
     {
         using var client = CreateHttpClient();
+        if (requireVerification && !string.IsNullOrWhiteSpace(expectedTag))
+        {
+            string expectedManifestUrl = $"https://github.com/{Uri.EscapeDataString(repositoryOwner)}/{Uri.EscapeDataString(repositoryName)}/releases/download/{Uri.EscapeDataString(expectedTag)}/{releaseManifestAssetName}";
+            if (!string.Equals(releaseManifestUri.AbsoluteUri, expectedManifestUrl, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Signed release manifest URL does not match the selected exact GitHub Release tag.");
+            }
+        }
+
         using var request = new HttpRequestMessage(HttpMethod.Get, releaseManifestUri);
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -458,8 +569,7 @@ internal static partial class WindowsApplianceInstaller
                 $"Signed release manifest identity does not match the selected {channel} channel and its strict release tag.");
         }
 
-        if (!string.IsNullOrWhiteSpace(manifest.ReleaseId)
-            && !string.Equals(manifest.ReleaseId, manifest.ReleaseTag, StringComparison.Ordinal))
+        if (!string.Equals(manifest.ReleaseId, manifest.ReleaseTag, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Signed release manifest release ID does not match its release tag.");
         }

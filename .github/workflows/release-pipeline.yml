@@ -208,9 +208,6 @@ jobs:
       - name: Verify Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 
-      - name: Verify signed release-channel pointer publication
-        run: node ./scripts/test-release-channel-pointer.mjs
-
       - name: Verify flat GitHub release asset regressions
         run: node ./scripts/test-release-assets.mjs
 
@@ -291,32 +288,11 @@ jobs:
       contents: read
     uses: ./.github/workflows/installed-linux-smoke.yml
 
-  validate-release-channel-branch:
-    name: Verify release-channel branch before release setup
-    needs:
-      - resolve-channel
-      - validate-release
-    if: ${{ needs.resolve-channel.outputs.skip != 'true' && needs.resolve-channel.outputs.dry_run != 'true' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Check out release-channel branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: release-channel
-          path: release-channel
-          fetch-depth: 1
-
-      - name: Verify channel branch bootstrap file
-        run: test -s release-channel/README.md
-
   prepare-stable-draft:
     name: Open Versioned Release Draft
     needs:
       - resolve-channel
       - validate-release
-      - validate-release-channel-branch
     if: ${{ needs.resolve-channel.outputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
     environment:
@@ -356,9 +332,8 @@ jobs:
     needs:
       - resolve-channel
       - validate-release
-      - validate-release-channel-branch
       - prepare-stable-draft
-    if: ${{ always() && needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' && (needs.resolve-channel.outputs.dry_run == 'true' || needs.validate-release-channel-branch.result == 'success') && (needs.prepare-stable-draft.result == 'success' || needs.prepare-stable-draft.result == 'skipped') }}
+    if: ${{ always() && needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' && (needs.prepare-stable-draft.result == 'success' || needs.prepare-stable-draft.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment:
       name: ${{ needs.resolve-channel.outputs.channel }}
@@ -440,10 +415,9 @@ jobs:
     name: Publish Release Assets
     needs:
       - resolve-channel
-      - validate-release-channel-branch
       - build-platform-assets
       - prepare-stable-draft
-    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' && needs.validate-release-channel-branch.result == 'success' }}
+    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' && needs.prepare-stable-draft.result == 'success' }}
     permissions:
       actions: write
       contents: write

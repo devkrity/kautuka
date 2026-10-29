@@ -182,7 +182,7 @@ try {
   assert.match(linuxBuildJob, /--manifest-public-key "\$RELEASE_MANIFEST_PUBLIC_KEY_PATH"/u,
     'the platform builder must use the corresponding public key path');
   assert.match(linuxBuildJob, /--channel "\$CHANNEL"/u,
-    'the platform image build must retain channel identity without a channel pointer URL');
+    'the platform image build must retain channel identity without a channel-feed URL');
   assert.doesNotMatch(linuxBuildJob, /kautuka-release-feed-|--preview-manifest-url|--stable-manifest-url/u,
     'release appliances must discover GitHub Releases instead of depending on feed repositories');
   assert.match(linuxBuildJob, /https:\/\/github\.com\/\$\{GITHUB_REPOSITORY\}\/releases\/download\/\$\{RELEASE_TAG\}/u,

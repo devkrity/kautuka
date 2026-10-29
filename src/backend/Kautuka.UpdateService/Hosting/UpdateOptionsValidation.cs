@@ -34,27 +34,13 @@ internal sealed class UpdateOptionsValidation : IValidateOptions<UpdateOptions>
             return ValidateOptionsResult.Fail("Update:ReleaseManifestUrl must be an absolute URI when configured.");
         }
 
-        if (!string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl)
-            && !Uri.TryCreate(options.PreviewReleaseManifestUrl, UriKind.Absolute, out _))
-        {
-            return ValidateOptionsResult.Fail("Update:PreviewReleaseManifestUrl must be an absolute URI when configured.");
-        }
-
-        if (!string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl)
-            && !Uri.TryCreate(options.StableReleaseManifestUrl, UriKind.Absolute, out _))
-        {
-            return ValidateOptionsResult.Fail("Update:StableReleaseManifestUrl must be an absolute URI when configured.");
-        }
-
         if (!string.IsNullOrWhiteSpace(options.CatalogManifestUrl)
             && !Uri.TryCreate(options.CatalogManifestUrl, UriKind.Absolute, out _))
         {
             return ValidateOptionsResult.Fail("Update:CatalogManifestUrl must be an absolute URI when configured.");
         }
 
-        bool hasReleaseManifestUrl = !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl)
-            || !string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl);
+        bool hasReleaseManifestUrl = !string.IsNullOrWhiteSpace(options.ReleaseManifestUrl);
         bool hasRepositorySource = !string.IsNullOrWhiteSpace(options.RepositoryOwner)
             && !string.IsNullOrWhiteSpace(options.RepositoryName);
         bool hasCatalogManifestUrl = !string.IsNullOrWhiteSpace(options.CatalogManifestUrl);

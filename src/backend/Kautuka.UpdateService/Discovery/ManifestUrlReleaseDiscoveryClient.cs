@@ -24,19 +24,35 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
 
     public async Task<ReleaseDiscoveryResult> DiscoverAsync(ReleaseDiscoveryRequest request, CancellationToken cancellationToken)
     {
-        string? manifestUrl = ResolveManifestUrl(request.ReleaseChannel);
+        string? manifestUrl = ResolveManifestUrl();
+        string? selectedReleaseTag = null;
+        string? discoveryETag = null;
+        HttpClient client = httpClientFactory.CreateClient("kautuka.updateservice.github");
+        client.DefaultRequestHeaders.UserAgent.Clear();
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("KautukaUpdateService", "1.0"));
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+        if (string.IsNullOrWhiteSpace(manifestUrl))
+        {
+            var resolution = await ResolveLatestReleaseAsync(client, request, cancellationToken).ConfigureAwait(false);
+            manifestUrl = resolution.ManifestUrl;
+            selectedReleaseTag = resolution.ReleaseTag;
+            discoveryETag = resolution.ETag;
+            ReleaseDiscoveryResult? failure = resolution.Failure;
+            if (failure is not null)
+            {
+                return failure;
+            }
+        }
+
         if (string.IsNullOrWhiteSpace(manifestUrl)
             || !Uri.TryCreate(manifestUrl, UriKind.Absolute, out Uri? manifestUri))
         {
             return ReleaseDiscoveryResult.NoRelease();
         }
 
-        HttpClient client = httpClientFactory.CreateClient("kautuka.updateservice.github");
-        client.DefaultRequestHeaders.UserAgent.Clear();
-        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("KautukaUpdateService", "1.0"));
-
         using HttpRequestMessage manifestRequest = new(HttpMethod.Get, manifestUri);
-        if (!string.IsNullOrWhiteSpace(request.IfNoneMatch))
+        if (selectedReleaseTag is null && !string.IsNullOrWhiteSpace(request.IfNoneMatch))
         {
             manifestRequest.Headers.IfNoneMatch.ParseAdd(request.IfNoneMatch);
         }
@@ -57,7 +73,7 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
                 $"Manifest release discovery failed with HTTP {(int)response.StatusCode}.");
         }
 
-        string? eTag = response.Headers.ETag?.Tag;
+        string? eTag = response.Headers.ETag?.Tag ?? discoveryETag;
         byte[] manifestBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
         PlatformReleaseDescriptor? descriptor = JsonSerializer.Deserialize(
             manifestBytes,
@@ -82,6 +98,10 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
         }
 
         string releaseTag = descriptor.ReleaseTag ?? string.Empty;
+        if (selectedReleaseTag is not null && !string.Equals(selectedReleaseTag, releaseTag, StringComparison.Ordinal))
+        {
+            return ReleaseDiscoveryResult.Unsupported("Signed release manifest tag does not match the selected published GitHub Release.", eTag);
+        }
         string version;
         if (ReleaseChannelPolicy.TryParseTag(
             releaseTag,
@@ -104,15 +124,9 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
             return ReleaseDiscoveryResult.NoRelease(eTag);
         }
 
-        if (!options.AllowUnsignedLocalFeeds)
+        if (!options.AllowUnsignedLocalFeeds && selectedReleaseTag is null)
         {
-            string owner = options.RepositoryOwner ?? request.RepositoryOwner;
-            string repository = options.RepositoryName ?? request.RepositoryName;
-            Uri expectedPointer = ReleaseChannelPolicy.CreateChannelPointerUrl(owner, repository, request.ReleaseChannel);
-            if (!string.Equals(manifestUri.AbsoluteUri, expectedPointer.AbsoluteUri, StringComparison.Ordinal))
-            {
-                return ReleaseDiscoveryResult.Unsupported("Signed release discovery must use the canonical channel pointer URL.", eTag);
-            }
+            return ReleaseDiscoveryResult.Unsupported("Production release discovery must select a published GitHub Release.", eTag);
         }
 
         PlatformReleaseArtifactDescriptor? platformArtifact = ResolvePlatformArtifact(descriptor);
@@ -125,17 +139,16 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
 
         string releaseId = releaseTag;
         if (!options.AllowUnsignedLocalFeeds
-            && !string.IsNullOrWhiteSpace(descriptor.ReleaseId)
             && !string.Equals(descriptor.ReleaseId, releaseTag, StringComparison.Ordinal))
         {
-            return ReleaseDiscoveryResult.Unsupported("Signed channel pointer manifest releaseId does not match its exact release tag.", eTag);
+            return ReleaseDiscoveryResult.Unsupported("Signed release manifest releaseId does not match its exact release tag.", eTag);
         }
         string? platformArtifactUrl = ResolveAssetUrl(manifestUri, platformArtifact.Url, platformArtifact.Path);
         string? signatureAssetUrl = ResolveAssetUrl(manifestUri, descriptor.Signature?.Url, descriptor.Signature?.Path);
         if (!options.AllowUnsignedLocalFeeds && !HasExactTagAssetUrls(descriptor, request, releaseTag, platformArtifactUrl, signatureAssetUrl))
         {
             return ReleaseDiscoveryResult.Unsupported(
-                "Signed channel pointer manifest does not bind its signature and platform artifact to the exact canonical GitHub Release tag.",
+                "Signed release manifest does not bind its signature and platform artifact to the exact canonical GitHub Release tag.",
                 eTag);
         }
 
@@ -143,12 +156,12 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
         {
             if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath) || !File.Exists(options.ManifestPublicKeyPath))
             {
-                return ReleaseDiscoveryResult.Unsupported("No trusted public key is configured for signed channel discovery.", eTag);
+                return ReleaseDiscoveryResult.Unsupported("No trusted public key is configured for signed release discovery.", eTag);
             }
 
             if (string.IsNullOrWhiteSpace(signatureAssetUrl))
             {
-                return ReleaseDiscoveryResult.Unsupported("Signed channel pointer manifest has no exact-tag signature URL.", eTag);
+                return ReleaseDiscoveryResult.Unsupported("Signed release manifest has no exact-tag signature URL.", eTag);
             }
 
             byte[] signatureBytes;
@@ -159,12 +172,12 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
                 string signature = Encoding.UTF8.GetString(signatureBytes);
                 if (!PlatformReleaseSignatureVerifier.TryVerify(manifestBytes, signature, publicKey, out string? verificationError))
                 {
-                    return ReleaseDiscoveryResult.Unsupported(verificationError ?? "Channel pointer manifest signature verification failed.", eTag);
+                    return ReleaseDiscoveryResult.Unsupported(verificationError ?? "Release manifest signature verification failed.", eTag);
                 }
             }
             catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException)
             {
-                return ReleaseDiscoveryResult.Failed("Channel pointer signature verification could not complete.");
+                return ReleaseDiscoveryResult.Failed("Release signature verification could not complete.");
             }
         }
 
@@ -214,22 +227,131 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
         return byPlatform ?? descriptor.Artifacts[0];
     }
 
-    private string? ResolveManifestUrl(string releaseChannel)
+    private async Task<(string? ManifestUrl, string? ReleaseTag, string? ETag, ReleaseDiscoveryResult? Failure)> ResolveLatestReleaseAsync(
+        HttpClient client,
+        ReleaseDiscoveryRequest request,
+        CancellationToken cancellationToken)
     {
-        if (string.Equals(releaseChannel, "preview", StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(options.PreviewReleaseManifestUrl))
+        string owner = options.RepositoryOwner ?? request.RepositoryOwner;
+        string repository = options.RepositoryName ?? request.RepositoryName;
+        if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(repository))
         {
-            return options.PreviewReleaseManifestUrl;
+            return (null, null, null, ReleaseDiscoveryResult.Failed("GitHub release repository is not configured."));
         }
 
-        if (string.Equals(releaseChannel, "stable", StringComparison.OrdinalIgnoreCase)
-            && !string.IsNullOrWhiteSpace(options.StableReleaseManifestUrl))
+        var candidates = new List<GitHubReleaseCandidate>();
+        string? firstPageETag = null;
+        const int pageSize = 100;
+        for (int page = 1; page <= 11; page++)
         {
-            return options.StableReleaseManifestUrl;
+            string url = $"https://api.github.com/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases?per_page={pageSize}&page={page}";
+            HttpResponseMessage response;
+            try
+            {
+                response = await client.GetAsync(new Uri(url, UriKind.Absolute), HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            }
+            catch (HttpRequestException)
+            {
+                return (null, null, null, ReleaseDiscoveryResult.Failed("GitHub release discovery request failed."));
+            }
+
+            using (response)
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    return (null, null, null, ReleaseDiscoveryResult.Failed($"GitHub release discovery failed with HTTP {(int)response.StatusCode}."));
+                }
+
+                if (page == 1)
+                {
+                    firstPageETag = response.Headers.ETag?.Tag;
+                }
+
+                using JsonDocument document = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (document.RootElement.ValueKind != JsonValueKind.Array)
+                {
+                    return (null, null, firstPageETag, ReleaseDiscoveryResult.Failed("GitHub release discovery returned an invalid response."));
+                }
+
+                JsonElement[] rows = document.RootElement.EnumerateArray().ToArray();
+                if (page == 11)
+                {
+                    if (rows.Length != 0)
+                    {
+                        return (null, null, firstPageETag, ReleaseDiscoveryResult.Failed("GitHub release history exceeds the safe 1,000-release discovery limit."));
+                    }
+
+                    break;
+                }
+
+                foreach (JsonElement row in rows)
+                {
+                    if (row.ValueKind != JsonValueKind.Object
+                        || !row.TryGetProperty("tag_name", out JsonElement tagValue)
+                        || tagValue.ValueKind != JsonValueKind.String
+                        || !row.TryGetProperty("draft", out JsonElement draftValue)
+                        || draftValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                        || !row.TryGetProperty("prerelease", out JsonElement prereleaseValue)
+                        || prereleaseValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                        || !row.TryGetProperty("published_at", out JsonElement publishedValue)
+                        || publishedValue.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                    {
+                        return (null, null, firstPageETag, ReleaseDiscoveryResult.Failed("GitHub release discovery contained malformed release metadata."));
+                    }
+
+                    string? tag = GetString(row, "tag_name");
+                    bool draft = draftValue.ValueKind == JsonValueKind.True;
+                    bool prerelease = prereleaseValue.ValueKind == JsonValueKind.True;
+                    bool published = !string.IsNullOrWhiteSpace(GetString(row, "published_at"));
+                    if (draft || !published || !ReleaseChannelPolicy.TryParseTag(tag, request.ReleaseChannel, prerelease, out ReleaseTagVersion parsed))
+                    {
+                        logger.LogDebug("Skipping GitHub release {ReleaseTag}: draft, unpublished, or not a strict {Channel} release.", tag, request.ReleaseChannel);
+                        continue;
+                    }
+
+                    candidates.Add(new GitHubReleaseCandidate(tag!, parsed));
+                }
+
+                if (rows.Length < pageSize)
+                {
+                    break;
+                }
+            }
         }
 
-        return options.ReleaseManifestUrl;
+        GitHubReleaseCandidate? selected;
+        try
+        {
+            selected = ReleaseChannelPolicy.SelectLatest(
+                candidates,
+                request.ReleaseChannel,
+                static candidate => candidate.Tag,
+                static _ => false,
+                candidate => candidate.Version.IsPreview);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return (null, null, firstPageETag, ReleaseDiscoveryResult.Failed(ex.Message));
+        }
+
+        if (selected is null)
+        {
+            return (null, null, firstPageETag, ReleaseDiscoveryResult.NoRelease(firstPageETag));
+        }
+
+        string manifestUrl = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases/download/{Uri.EscapeDataString(selected.Tag)}/{Uri.EscapeDataString(options.PlatformReleaseAssetName)}";
+        return (manifestUrl, selected.Tag, firstPageETag, null);
     }
+
+    private static string? GetString(JsonElement row, string property)
+        => row.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private sealed record GitHubReleaseCandidate(string Tag, ReleaseTagVersion Version);
+
+    private string? ResolveManifestUrl()
+        => options.ReleaseManifestUrl;
 
     private static string? ResolveAssetUrl(Uri manifestUri, string? absoluteUrl, string? relativePath)
     {

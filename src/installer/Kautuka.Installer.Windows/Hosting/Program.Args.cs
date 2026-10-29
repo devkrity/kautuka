@@ -1,6 +1,5 @@
 using System.Reflection;
 
-using Kautuka.Telemetry.Security;
 
 namespace Kautuka.Installer.Windows.Hosting;
 
@@ -89,9 +88,7 @@ internal static partial class Program
         {
             releaseManifestUrl = IsDevelopmentInstallerContext()
                 ? Environment.GetEnvironmentVariable("KAUTUKA_RELEASE_MANIFEST_URL") ?? "http://127.0.0.1:20300/manifest"
-                : string.IsNullOrWhiteSpace(releaseTag)
-                    ? ReleaseChannelPolicy.CreateChannelPointerUrl(repositoryOwner, repositoryName, releaseChannel).AbsoluteUri
-                    : $"https://github.com/{Uri.EscapeDataString(repositoryOwner)}/{Uri.EscapeDataString(repositoryName)}/releases/download/{Uri.EscapeDataString(releaseTag)}/kautuka-platform-release.json";
+                : null;
         }
 
         manifestPublicKeyPath ??= ResolveDefaultManifestPublicKeyPath();

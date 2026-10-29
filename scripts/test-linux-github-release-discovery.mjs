@@ -9,18 +9,42 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const template = await readFile(path.join(root, "scripts/kautuka-install-linux.sh.in"), "utf8");
-assert.doesNotMatch(template, /api\.github\.com|releases\?per_page|git\/ref\/tags/u,
-  "Linux bootstrap must not scan the anonymous GitHub Releases API");
+assert.match(template, /api\.github\.com\/repos\/\{owner\}\/\{repository\}\/releases\?per_page=100&page=/u,
+  "Linux bootstrap must discover releases from the public GitHub Releases API");
 
 const resolverStart = template.indexOf("resolve_github_release_candidate() {");
 const resolverEnd = template.indexOf("\nwrite_update_source_document()", resolverStart);
-assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, "Linux installer must provide channel pointer URL resolution");
+assert.ok(resolverStart >= 0 && resolverEnd > resolverStart, "Linux installer must provide GitHub Release discovery");
 const resolver = template.slice(resolverStart, resolverEnd);
-for (const channel of ["stable", "preview"]) {
-  const resolverResult = spawnSync("bash", ["-c", `fail(){ echo "$*" >&2; return 1; }; ${resolver}\nresolve_github_release_candidate ${channel} devkrity kautuka`], { encoding: "utf8" });
-  assert.equal(resolverResult.status, 0, resolverResult.stderr);
-  assert.equal(resolverResult.stdout.trim(), `https://raw.githubusercontent.com/devkrity/kautuka/release-channel/${channel}.json`);
-}
+const temp = await mkdtemp(path.join(os.tmpdir(), "kautuka-linux-release-discovery-"));
+const pythonMock = `import io, json, os, urllib.parse, urllib.request\ndef mocked(request, timeout=None):\n    page = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query).get('page', ['1'])[0]\n    pages = json.loads(os.environ.get('MOCK_GH_RELEASE_PAGES', '{}'))\n    return io.BytesIO(json.dumps(pages.get(page, [])).encode())\nurllib.request.urlopen = mocked\n`;
+await writeFile(path.join(temp, "sitecustomize.py"), pythonMock);
+const runResolver = (channel, pages) => spawnSync("bash", ["-c", `fail(){ echo "$*" >&2; return 1; }; ${resolver}\nresolve_github_release_candidate ${channel} devkrity kautuka`], {
+  encoding: "utf8",
+  env: { ...process.env, PYTHONPATH: temp, MOCK_GH_RELEASE_PAGES: JSON.stringify(pages) },
+});
+const release = (tag, { draft = false, prerelease = tag.includes("-preview."), published = true } = {}) => ({
+  tag_name: tag, draft, prerelease, published_at: published ? "2026-10-29T00:00:00Z" : null,
+});
+const stable = runResolver("stable", { "1": [release("v1.0.1"), release("v2.0.0"), release("v9.0.0-preview.1"), release("v3.0.0", { draft: true }), release("v3.0.0", { published: false }), release("prefix-v8.0.0")] });
+assert.equal(stable.status, 0, stable.stderr);
+assert.equal(stable.stdout.trim(), "v2.0.0\thttps://github.com/devkrity/kautuka/releases/download/v2.0.0/kautuka-platform-release.json");
+const preview = runResolver("preview", { "1": [release("v1.0.0-preview.9"), release("v1.0.0-preview.10")] });
+assert.equal(preview.status, 0, preview.stderr);
+assert.match(preview.stdout.trim(), /^v1\.0\.0-preview\.10\t/u);
+const duplicate = runResolver("preview", { "1": [release("v1.0.0-preview.1"), release("v1.0.0-preview.1")] });
+assert.notEqual(duplicate.status, 0);
+assert.match(duplicate.stderr, /multiple published preview releases claim the same version/u);
+const malformed = runResolver("stable", { "1": [{ tag_name: "v1.0.0", draft: "false", prerelease: false, published_at: "2026-10-29T00:00:00Z" }] });
+assert.notEqual(malformed.status, 0);
+assert.match(malformed.stderr, /metadata is malformed/u);
+const exactThousandPages = Object.fromEntries(Array.from({ length: 10 }, (_, page) => [String(page + 1), Array.from({ length: 100 }, (_, index) => release(`v1.0.${page * 100 + index}`))]));
+const exactThousand = runResolver("stable", exactThousandPages);
+assert.equal(exactThousand.status, 0, exactThousand.stderr);
+assert.match(exactThousand.stdout, /^v1\.0\.999\t/u);
+const overThousand = runResolver("stable", { ...exactThousandPages, "11": [release("v2.0.0")] });
+assert.notEqual(overThousand.status, 0);
+assert.match(overThousand.stderr, /exceeds the safe 1,000-release/u);
 
 const parserMarker = 'manifest_identity="$(python3 - ';
 const parserMarkerIndex = template.indexOf(parserMarker);
@@ -30,10 +54,9 @@ const parserEnd = template.indexOf("\nPY\n", parserStart);
 assert.ok(parserMarkerIndex >= 0 && heredocStartIndex > parserMarkerIndex && parserEnd > parserStart,
   "installer must validate selected pointer manifest identity before downloading selected assets");
 const manifestParser = template.slice(parserStart, parserEnd);
-const temp = await mkdtemp(path.join(os.tmpdir(), "kautuka-linux-channel-pointer-"));
-
 try {
   const makeManifest = (channel, tag, overrides = {}) => ({
+    releaseId: tag,
     releaseTag: tag,
     channel,
     version: tag.slice(1),
@@ -79,15 +102,15 @@ try {
     signature: { url: "https://example.invalid/sig" },
   }));
   assert.notEqual(substitutedSignature.status, 0);
-  assert.match(substitutedSignature.stderr, /not the exact-tag GitHub Release asset/u);
+  assert.match(substitutedSignature.stderr, /not its exact-tag asset/u);
 
   const substitutedArtifact = await run("preview", makeManifest("preview", "v1.2.3-preview.4", {
     artifacts: [{ name: "kautuka-linux-amd64.tar.gz", url: "https://example.invalid/archive" }],
   }));
   assert.notEqual(substitutedArtifact.status, 0);
-  assert.match(substitutedArtifact.stderr, /not the exact-tag GitHub Release asset/u);
+  assert.match(substitutedArtifact.stderr, /not its exact-tag asset/u);
 
-  console.log("Linux channel pointer discovery regressions passed: fixed selected-channel raw URL, strict signed-manifest identity parsing, and exact-tag signature/artifact URL validation without Releases API calls.");
+  console.log("Linux GitHub Release discovery regressions passed: strict channel selection, highest SemVer, duplicate rejection, exact 1,000 cap, and signed-manifest exact-tag validation.");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
