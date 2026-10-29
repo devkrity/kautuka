@@ -662,14 +662,12 @@ build_linux_installer() {
   local destination_path="$1"
   local feed_base_url="$2"
   local manifest_url="$3"
-  local catalog_manifest_url="$4"
-  local manifest_public_key_source="$5"
+  local manifest_public_key_source="$4"
 
   bash "$repo_root/scripts/generate-linux-installer.sh" \
     --output "$destination_path" \
     --feed-base-url "$feed_base_url" \
     --manifest-url "$manifest_url" \
-    --catalog-manifest-url "$catalog_manifest_url" \
     --version "$version" \
     --release-channel "$channel" \
     --manifest-public-key "$manifest_public_key_source" \
@@ -757,7 +755,6 @@ build_args=(
   --source-sha "$(git -C "$repo_root" rev-parse HEAD)"
   --channel "$channel"
   --manifest-url "$public_base_url/manifest"
-  --catalog-manifest-url "$public_base_url/catalog/manifest"
   --artifact-base-url "$public_base_url"
   --signature-url "$public_base_url/manifest.sig"
   --manifest-public-key "$public_key"
@@ -785,7 +782,6 @@ build_linux_installer \
   "$release_dir/kautuka-install-linux.sh" \
   "$public_base_url" \
   "$public_base_url/manifest" \
-  "$public_base_url/catalog/manifest" \
   "$public_key"
 
 stage_catalog_artifacts "$release_dir"

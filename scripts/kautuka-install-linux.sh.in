@@ -4,7 +4,6 @@ set -euo pipefail
 : "${KAUTUKA_DEFAULT_ARTIFACT_URL:=}"
 : "${KAUTUKA_DEFAULT_FEED_BASE_URL:=}"
 : "${KAUTUKA_DEFAULT_MANIFEST_URL:=}"
-: "${KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL:=}"
 : "${KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM:=}"
 : "${KAUTUKA_DEFAULT_VERSION:=}"
 : "${KAUTUKA_DEFAULT_RELEASE_CHANNEL:=}"
@@ -66,12 +65,6 @@ manifest_url_from_feed_base_url() {
     local normalized_base
     normalized_base="$(normalize_feed_base_url "$1")"
     printf '%s/manifest\n' "$normalized_base"
-}
-
-catalog_manifest_url_from_feed_base_url() {
-    local normalized_base
-    normalized_base="$(normalize_feed_base_url "$1")"
-    printf '%s/catalog/manifest\n' "$normalized_base"
 }
 
 artifact_url_from_feed_base_url() {
@@ -140,14 +133,13 @@ PY
 
 write_update_source_document() {
     local manifest_url="$1"
-    local catalog_manifest_url="$2"
-    local service_user="$3"
-    local service_group="$4"
+    local service_user="$2"
+    local service_group="$3"
     local destination='/etc/kautuka/update-source.json'
 
     mkdir -p "$(dirname "$destination")"
 
-    if [[ -z "$manifest_url" && -z "$catalog_manifest_url" ]]; then
+    if [[ -z "$manifest_url" ]]; then
         echo "warning: skipping empty update-source.json; UpdateService stays unprovisioned" >&2
         return 0
     fi
@@ -155,8 +147,7 @@ write_update_source_document() {
     cat > "$destination" <<EOF
 {
     "schemaVersion": 1,
-    "manifestUrl": "${manifest_url}",
-    "catalogManifestUrl": "${catalog_manifest_url}"
+    "manifestUrl": "${manifest_url}"
 }
 EOF
 
@@ -1794,7 +1785,6 @@ main() {
     local artifact_url=""
     local feed_base_url=""
     local manifest_url=""
-    local catalog_manifest_url="${KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL}"
     local version=""
     local release_channel="${KAUTUKA_DEFAULT_RELEASE_CHANNEL:-stable}"
     local release_tag=''
@@ -1925,7 +1915,6 @@ main() {
 
     if [[ -n "$feed_base_url" ]]; then
         manifest_url="$(manifest_url_from_feed_base_url "$feed_base_url")"
-        catalog_manifest_url="$(catalog_manifest_url_from_feed_base_url "$feed_base_url")"
     elif [[ -n "$KAUTUKA_DEFAULT_MANIFEST_URL" ]]; then
         manifest_url="$KAUTUKA_DEFAULT_MANIFEST_URL"
     fi
@@ -2143,9 +2132,9 @@ PY
         if [[ "$github_release_candidate" == 'true' ]]; then
             # UpdateService independently discovers the selected signed channel
             # snapshot; never persist a version-pinned bootstrap manifest as its source.
-            write_update_source_document '' "$catalog_manifest_url" "$service_user" "$service_group"
+            write_update_source_document '' "$service_user" "$service_group"
         else
-            write_update_source_document "$manifest_url" "$catalog_manifest_url" "$service_user" "$service_group"
+            write_update_source_document "$manifest_url" "$service_user" "$service_group"
         fi
     fi
     write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM" "$service_user" "$service_group"

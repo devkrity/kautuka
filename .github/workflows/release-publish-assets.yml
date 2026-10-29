@@ -24,9 +24,6 @@ on:
       wsl_rootfs_asset_name:
         required: true
         type: string
-      catalog_manifest_url:
-        required: true
-        type: string
 jobs:
 
   compose-release-asset-manifest:
@@ -104,7 +101,6 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
         run: |
           repository_url="https://github.com/${GITHUB_REPOSITORY}"
           cat > kautuka-release-entrypoints.md <<EOF
@@ -117,8 +113,6 @@ jobs:
           - Linux installer attestation: before running with sudo, verify the downloaded file with \`gh attestation verify ./kautuka-install-linux.sh --repo devkrity/kautuka --signer-workflow devkrity/kautuka/.github/workflows/release-build-platform-assets.yml\`.
           - Windows installer: \`${repository_url}/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe\`
           - License, notices, credits, component inventory, SBOMs, source archives, and checksums are included as flat release assets; license texts and source files are bundled in zip archives.
-          - Catalog: \`${CATALOG_MANIFEST_URL}\`
-
           Preview Windows installers may be unsigned; Stable installers may also be unsigned when signing secrets are not configured. Check \`SIGNING-STATUS.txt\` and expect a SmartScreen warning when it says \`UNSIGNED\`.
           EOF
 
@@ -171,7 +165,7 @@ jobs:
           pattern: kautuka-*-${{ steps.scope.outputs.artifact_scope }}
           path: release-artifacts
 
-      - name: Stage versioned release assets and S3 catalog input
+      - name: Stage versioned release assets
         env:
           CHANNEL: ${{ inputs.channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -181,8 +175,7 @@ jobs:
           set -euo pipefail
           scope="$ARTIFACT_SCOPE"
           root="release-artifacts"
-          feed="release-stage"
-          release_dir="${feed}/releases/${RELEASE_TAG}"
+          release_dir="release-stage/releases/${RELEASE_TAG}"
 
           mkdir -p "$release_dir"
 
@@ -215,20 +208,7 @@ jobs:
           copy_required "${root}/kautuka-release-asset-manifest-${scope}/kautuka-release-assets.sha256" "${release_dir}/kautuka-release-assets.sha256"
           copy_required "${root}/kautuka-release-asset-manifest-${scope}/kautuka-release-assets.json" "${release_dir}/kautuka-release-assets.json"
 
-          bundle="${root}/kautuka-manifest-host-bundle-${scope}"
-          if [[ ! -d "$bundle" ]]; then
-            echo "error: manifest host bundle not found: $bundle" >&2
-            find "$root" -maxdepth 2 -type d >&2 || true
-            exit 1
-          fi
-          cp -a "${bundle}/catalog" "${feed}/"
-
-          if [[ ! -f "${feed}/catalog/manifest" ]]; then
-            echo "error: catalog manifest missing from host bundle: catalog/manifest" >&2
-            exit 1
-          fi
-
-          find "$feed" -type f | sort
+          find "$release_dir" -type f | sort
 
       - name: Generate release SPDX SBOM
         env:
@@ -369,25 +349,6 @@ jobs:
             diff -u <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
             exit 1
           fi
-
-      - name: Publish catalog to the existing S3 host
-        id: publish_catalog
-        continue-on-error: true
-        env:
-          RELEASE_FEED_S3_ENDPOINT: ${{ secrets.release_feed_s3_endpoint }}
-          RELEASE_FEED_S3_BUCKET: ${{ secrets.release_feed_s3_bucket }}
-          RELEASE_FEED_S3_ACCESS_KEY_ID: ${{ secrets.release_feed_s3_access_key_id }}
-          RELEASE_FEED_S3_SECRET_ACCESS_KEY: ${{ secrets.release_feed_s3_secret_access_key }}
-          RELEASE_FEED_S3_REGION: ${{ secrets.release_feed_s3_region }}
-          RELEASE_FEED_S3_PREFIX: ${{ secrets.release_feed_s3_prefix }}
-        run: |
-          mkdir -p catalog-feed
-          cp -a release-stage/catalog catalog-feed/catalog
-          bash scripts/publish-release-feed.sh --feed-dir catalog-feed
-
-      - name: Report catalog publication failure without blocking releases
-        if: ${{ steps.publish_catalog.outcome == 'failure' }}
-        run: echo 'Catalog publication failed; the immutable GitHub Release remains available independently.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish immutable GitHub Release
         env:

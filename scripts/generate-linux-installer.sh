@@ -11,7 +11,6 @@ Options:
   --artifact-url <url>          Default platform artifact URL.
   --feed-base-url <url>         Default feed base URL.
   --manifest-url <url>          Default manifest URL.
-  --catalog-manifest-url <url>  Default catalog manifest URL.
   --release-channel <channel>   Default release channel.
   --manifest-public-key <pem>   Manifest public key PEM file to embed.
   --local-feed-defaults         Emit the local-feed wrapper behavior.
@@ -24,7 +23,6 @@ version=''
 artifact_url=''
 feed_base_url=''
 manifest_url=''
-catalog_manifest_url=''
 release_channel=''
 manifest_public_key=''
 local_feed_defaults='false'
@@ -49,10 +47,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --manifest-url)
       manifest_url="$2"
-      shift 2
-      ;;
-    --catalog-manifest-url)
-      catalog_manifest_url="$2"
       shift 2
       ;;
     --release-channel)
@@ -94,10 +88,6 @@ if [[ -n "$manifest_public_key" && ! -f "$manifest_public_key" ]]; then
   exit 1
 fi
 
-if [[ -n "$catalog_manifest_url" && ! "$catalog_manifest_url" =~ ^https?:// ]]; then
-  echo 'error: --catalog-manifest-url must be an absolute http(s) URL.' >&2
-  exit 1
-fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 installer_source="$script_dir/kautuka-install-linux.sh.in"
@@ -113,9 +103,6 @@ release_verifier_source="$script_dir/verify-linux-release.sh"
   fi
   if [[ -n "$manifest_url" ]]; then
     printf 'KAUTUKA_DEFAULT_MANIFEST_URL=%q\n' "$manifest_url"
-  fi
-  if [[ -n "$catalog_manifest_url" ]]; then
-    printf 'KAUTUKA_DEFAULT_CATALOG_MANIFEST_URL=%q\n' "$catalog_manifest_url"
   fi
   if [[ -n "$release_channel" ]]; then
     printf 'KAUTUKA_DEFAULT_RELEASE_CHANNEL=%q\n' "$release_channel"

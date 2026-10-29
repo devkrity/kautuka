@@ -42,6 +42,10 @@ builder.Services.AddOptions<UpdateOptions>()
             options.RepositoryOwner = "devkrity";
             options.RepositoryName = "kautuka";
             options.ManifestPublicKeyPath ??= ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
+            // Catalog discovery powers the in-app connector and skill directory. Keep this
+            // runtime setting independent from the installer/update source document.
+            options.CatalogManifestUrl ??= "https://kautuka.store/catalog/manifest";
+            options.CatalogManifestPublicKeyPath ??= ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
             // Production discovers strict channel releases through the anonymous GitHub Releases
             // API, then verifies the signed manifest from the exact immutable release tag.
             options.ReleaseManifestUrl = null;
@@ -50,12 +54,6 @@ builder.Services.AddOptions<UpdateOptions>()
 
             if (source is not null)
             {
-                if (!string.IsNullOrWhiteSpace(source.CatalogManifestUrl))
-                {
-                    options.CatalogManifestUrl = source.CatalogManifestUrl;
-                    options.CatalogManifestPublicKeyPath = ProvisionedUpdateSourcePolicy.DefaultManifestPublicKeyPath;
-                }
-
                 return;
             }
 
