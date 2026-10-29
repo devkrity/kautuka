@@ -141,9 +141,9 @@ public sealed class ChannelRuntimeModularityArchitectureTests
     [Fact]
     public void AcceptanceCodeKeepsResilienceQuantitiesExplicitAndReplayable()
     {
-        string profile = Read("tests/channel-acceptance/src/resilience.ts");
-        string evidence = Read("tests/channel-acceptance/src/evidence.ts");
-        string replay = Read("tests/channel-acceptance/src/replay.ts");
+        string profile = Read("src/tests/channel-acceptance/src/resilience.ts");
+        string evidence = Read("src/tests/channel-acceptance/src/evidence.ts");
+        string replay = Read("src/tests/channel-acceptance/src/replay.ts");
         Assert.Contains("KAUTUKA_RESILIENCE_ITERATIONS", profile, StringComparison.Ordinal);
         Assert.Contains("KAUTUKA_RESILIENCE_CONCURRENCY", profile, StringComparison.Ordinal);
         Assert.Contains("KAUTUKA_RESILIENCE_MAX_DURATION_MS", profile, StringComparison.Ordinal);

@@ -192,6 +192,11 @@ jobs:
       - name: Verify flat GitHub release asset regressions
         run: node ./scripts/test-release-assets.mjs
 
+      - name: Verify channel pointer deploy-key publisher
+        run: node ./scripts/test-channel-pointer-deploy-key.mjs
+      - name: Verify release immutability preflight
+        run: node ./scripts/test-release-immutability-preflight.mjs
+
       - name: Verify frontend third-party inventory regressions
         run: node ./scripts/test-frontend-third-party-inventory.mjs
 
@@ -225,11 +230,11 @@ jobs:
         run: pnpm --dir src/frontend verify
 
       - name: Install acceptance workspace
-        working-directory: tests/channel-acceptance
+        working-directory: src/tests/channel-acceptance
         run: pnpm install --frozen-lockfile --ignore-workspace
 
       - name: Run Playwright contract suite
-        working-directory: tests/channel-acceptance
+        working-directory: src/tests/channel-acceptance
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: pnpm test:contract

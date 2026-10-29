@@ -47,6 +47,11 @@ jobs:
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
 
+      - name: Test channel pointer deploy-key publisher
+        run: node ./scripts/test-channel-pointer-deploy-key.mjs
+      - name: Test release immutability preflight
+        run: node ./scripts/test-release-immutability-preflight.mjs
+
       - name: Validate documentation
         run: node ./scripts/validate-docs.mjs
 
@@ -159,7 +164,7 @@ jobs:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
     defaults:
       run:
-        working-directory: tests/channel-acceptance
+        working-directory: src/tests/channel-acceptance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Setup Node
@@ -171,14 +176,14 @@ jobs:
         run: corepack enable && corepack prepare pnpm@11.5.2 --activate
       - name: Install Narad spec at repo root
         # narad-contract.spec.ts resolves @devkrity/narad-spec from repo root
-        # via tests/channel-acceptance/src/narad-conformance.ts. That package
+        # via src/tests/channel-acceptance/src/narad-conformance.ts. That package
         # is not an acceptance workspace dependency (allowlist ratchet).
         working-directory: ${{ github.workspace }}
         run: pnpm install --frozen-lockfile
       - name: Install acceptance workspace
         # Root pnpm-workspace.yaml is only '.' (Narad tooling). Without
         # --ignore-workspace, pnpm --dir walks up and installs the repo root,
-        # leaving tests/channel-acceptance/node_modules missing.
+        # leaving src/tests/channel-acceptance/node_modules missing.
         run: pnpm install --frozen-lockfile --ignore-workspace
       - name: Run contract suite
         run: pnpm test:contract

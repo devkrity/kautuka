@@ -1,6 +1,6 @@
 # Cross-surface acceptance mapping
 
-`tests/channel-acceptance` is the typed Playwright workspace for the channel-runtime hardening backlog. It starts test-owned processes unless an explicitly configured execution reuses a stack. It never enables a product authentication bypass or a production simulator path.
+`src/tests/channel-acceptance` is the typed Playwright workspace for the channel-runtime hardening backlog. It starts test-owned processes unless an explicitly configured execution reuses a stack. It never enables a product authentication bypass or a production simulator path.
 
 Status is deliberately narrow: **Automated** means a concrete Playwright scenario exercises the stated behaviour; **Contract** means a fast source/evidence invariant only; **Resilience-owned** means a direct-child owned-stack Playwright test outside the aggregate acceptance suite; **Planned** means it is not yet an executable acceptance claim.
 
