@@ -58,6 +58,8 @@ esac
     'native GitHub Releases discovery must not publish channel pointers');
   assert.doesNotMatch(publishJob, /release_feed_deploy_key|raw\.githubusercontent\.com\/devkrity\/kautuka-release-feed/u,
     'publisher must not depend on separate feed repositories or deploy keys');
+  assert.doesNotMatch(publishJob, /RELEASE_FEED_S3_|publish-release-feed\.sh|S3 catalog/iu,
+    'release publisher must not upload release or catalog data to an S3-compatible host');
   console.log('Operator immutability-preflight CLI tests passed: enabled succeeds; disabled or unknown settings fail closed. CI retains its post-publication immutable assertion without channel-pointer publication.');
 } finally {
   await rm(temp, { recursive: true, force: true });

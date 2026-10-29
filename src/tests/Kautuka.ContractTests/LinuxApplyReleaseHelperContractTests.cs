@@ -155,25 +155,27 @@ public sealed class LinuxApplyReleaseHelperContractTests
         string buildWorkflow = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-build-platform-assets.yml"));
         string publishWorkflow = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-publish-assets.yml"));
         string pipeline = File.ReadAllText(Path.Combine(projectRoot, ".github", "workflows", "release-pipeline.yml"));
-        string publishScript = File.ReadAllText(Path.Combine(projectRoot, "scripts", "publish-release-feed.sh"));
 
-        Assert.Contains("https://kautuka.store/catalog/manifest", pipeline, StringComparison.Ordinal);
+        Assert.DoesNotContain("catalog_manifest_url", pipeline, StringComparison.Ordinal);
         Assert.Contains("https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}", buildWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("release-feed-", buildWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("--preview-manifest-url", buildWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("--stable-manifest-url", buildWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("InstallerReleaseManifestUrl", buildWorkflow, StringComparison.Ordinal);
-        Assert.Contains("scripts/publish-release-feed.sh", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("gh release upload", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("verify-release-assets.mjs", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains(".immutable", publishWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("release-channel", publishWorkflow, StringComparison.Ordinal);
         Assert.DoesNotContain("release_feed_deploy_key", publishWorkflow, StringComparison.Ordinal);
-        Assert.Contains("catalog-feed/catalog", publishWorkflow, StringComparison.Ordinal);
         Assert.Contains("releases/download", buildWorkflow, StringComparison.Ordinal);
-        Assert.DoesNotContain("--delete", publishScript, StringComparison.Ordinal);
-        Assert.Contains("catalog/*", publishScript, StringComparison.Ordinal);
-        Assert.Contains("RELEASE_FEED_S3_ENDPOINT", publishScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("publish-release-feed.sh", publishWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("RELEASE_FEED_S3_", publishWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("S3 catalog", publishWorkflow, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("manifest-host-bundle", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("Stage catalog artifacts", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("catalog-manifest-url", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("catalog_manifest_url", buildWorkflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("catalogManifestUrl", File.ReadAllText(Path.Combine(projectRoot, "scripts", "kautuka-install-linux.sh.in")), StringComparison.Ordinal);
     }
 
     [Fact]

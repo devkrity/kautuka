@@ -21,9 +21,6 @@ on:
       dry_run:
         required: true
         type: string
-      catalog_manifest_url:
-        required: true
-        type: string
       wsl_rootfs_asset_name:
         required: true
         type: string
@@ -93,7 +90,6 @@ jobs:
           PRODUCT_VERSION: ${{ inputs.release_version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
         run: |
@@ -109,7 +105,6 @@ jobs:
             --product-version "$PRODUCT_VERSION" \
             --source-sha "$SOURCE_SHA" \
             --channel "$CHANNEL" \
-            --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
             --artifact-base-url "$artifact_base_url"
 
           # build-release-assets.sh keys its output directory on the manifest version.
@@ -183,90 +178,6 @@ jobs:
             publish/release-assets/${{ inputs.manifest_version }}/kautuka-platform-release.sig
             publish/release-assets/${{ inputs.manifest_version }}/manifest-public-key.pem
             publish/release-assets/${{ inputs.manifest_version }}/compliance/**
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 3
-
-      - name: Stage catalog artifacts and signed catalog manifest
-        env:
-          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
-        run: |
-          set -euo pipefail
-
-          # Convention shared with scripts/local-release.sh: the catalog manifest is
-          # served at <catalog-base>/manifest.
-          if [[ "$CATALOG_MANIFEST_URL" != */manifest ]]; then
-            echo "error: catalog manifest url must end with /manifest: $CATALOG_MANIFEST_URL" >&2
-            exit 1
-          fi
-          catalog_base_url="${CATALOG_MANIFEST_URL%/manifest}"
-
-          catalog_dir="$RELEASE_DIR/catalog"
-          catalog_artifacts_dir="$catalog_dir/artifacts"
-          rm -rf "$catalog_dir"
-          mkdir -p "$catalog_artifacts_dir"
-
-          catalog_args=(
-            node ./scripts/generate-catalog-manifest.mjs
-            --output-dir "$catalog_dir"
-            --private-key "$RELEASE_MANIFEST_PRIVATE_KEY_PATH"
-            --manifest-base-url "$catalog_base_url"
-          )
-
-          if [[ -d mcps/kautuka-web-tools ]]; then
-            bash scripts/stage-built-in-mcpb.sh --output "$catalog_artifacts_dir/kautuka-web-tools.mcpb"
-            catalog_args+=(
-              --connector-artifact-file "$catalog_artifacts_dir/kautuka-web-tools.mcpb"
-              --connector-artifact-path artifacts/kautuka-web-tools.mcpb
-            )
-          fi
-
-          if [[ -d skills/kautuka-docs ]]; then
-            python3 - skills/kautuka-docs "$catalog_artifacts_dir/kautuka-docs.zip" <<'PY'
-          import pathlib
-          import sys
-          import zipfile
-
-          source = pathlib.Path(sys.argv[1]).resolve()
-          archive = pathlib.Path(sys.argv[2]).resolve()
-          archive.parent.mkdir(parents=True, exist_ok=True)
-
-          with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
-              for file_path in sorted(source.rglob('*')):
-                  if file_path.is_file():
-                      bundle.write(file_path, file_path.relative_to(source.parent))
-          PY
-            catalog_args+=(
-              --docs-artifact-file "$catalog_artifacts_dir/kautuka-docs.zip"
-              --docs-artifact-path artifacts/kautuka-docs.zip
-            )
-          fi
-
-          "${catalog_args[@]}"
-
-      - name: Stage catalog host bundle
-        run: |
-          set -euo pipefail
-          mkdir -p release-manifest-host-bundle
-          cp -a "${RELEASE_DIR}/catalog" release-manifest-host-bundle/catalog
-          if [[ -f release-manifest-host-bundle/catalog/manifest.json ]]; then
-            cp release-manifest-host-bundle/catalog/manifest.json release-manifest-host-bundle/catalog/manifest
-          fi
-
-          cat > release-manifest-host-bundle/README.md <<'EOF'
-          This catalog bundle remains on the existing S3-compatible host. Release binaries and manifests are GitHub Release assets.
-
-          Expected routes:
-          - /catalog/manifest
-          - /catalog/manifest.sig
-          - /catalog/artifacts/*
-          EOF
-
-      - name: Upload manifest host bundle
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: kautuka-manifest-host-bundle-${{ steps.scope.outputs.artifact_scope }}
-          path: release-manifest-host-bundle/**
           if-no-files-found: error
           overwrite: true
           retention-days: 3
@@ -529,7 +440,6 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.release_version }}
           CHANNEL: ${{ inputs.channel }}
-          CATALOG_MANIFEST_URL: ${{ inputs.catalog_manifest_url }}
         run: |
           set -euo pipefail
           mkdir -p publish/linux-installer
@@ -537,7 +447,6 @@ jobs:
             --output publish/linux-installer/kautuka-install-linux.sh \
             --version "$RELEASE_VERSION" \
             --release-channel "$CHANNEL" \
-            --catalog-manifest-url "$CATALOG_MANIFEST_URL" \
             --manifest-public-key manifest-signing-public.pem
 
       - name: Attest Linux installer provenance

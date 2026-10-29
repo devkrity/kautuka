@@ -407,7 +407,6 @@ jobs:
       release_tag: ${{ needs.resolve-channel.outputs.release_tag }}
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
-      catalog_manifest_url: https://kautuka.store/catalog/manifest
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
       kautuka_base_image: ${{ needs.publish-kautuka-base.outputs.image }}
 
@@ -430,4 +429,3 @@ jobs:
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
-      catalog_manifest_url: https://kautuka.store/catalog/manifest

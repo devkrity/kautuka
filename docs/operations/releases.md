@@ -29,18 +29,18 @@ Stable tags are plain SemVer (`vX.Y.Z`; product version `X.Y.Z`). Do not reuse p
 
 Releases are immutable and tags are never moved or deleted by the workflow. An installed client rejects a release at or below its installed version. Reverting discovery state is not part of this design; removing an offer requires a higher-version fix-forward, while an installed appliance may use the explicit last-known-good rollback when available. Exact-tag downloads remain available for a published release. A first install has no installed-version high-water mark, so signed release identity and exact-tag URLs are important even before updates are enabled.
 
-If publication fails before the release is published, inspect the exact release tag. The workflow can retry an absent release or a matching empty draft; a partial draft requires maintainer review. If publication succeeds but catalog upload fails, the GitHub Release remains available and the workflow reports the catalog failure separately. The catalog is hosted at `kautuka.store/catalog/manifest` and is not part of release discovery.
+If publication fails before the release is published, inspect the exact release tag. The workflow can retry an absent release or a matching empty draft; a partial draft requires maintainer review. The updater discovers releases from GitHub Releases; catalog hosting is a separate service and is not part of release discovery or the release publisher.
 
 ## Environment secrets and repository settings
 
 Release secrets belong in GitHub Environments, never repository-level secrets:
 
-- `preview`: `release_manifest_private_key` and the existing S3 catalog credentials (`release_feed_s3_endpoint`, `release_feed_s3_bucket`, `release_feed_s3_access_key_id`, `release_feed_s3_secret_access_key`, `release_feed_s3_region`, and `release_feed_s3_prefix`).
-- `stable`: the same manifest signing and catalog credentials. Authenticode signing is performed when the Windows signing secrets are configured; otherwise `SIGNING-STATUS.txt` discloses that the installer is unsigned.
+- `preview`: `release_manifest_private_key`.
+- `stable`: `release_manifest_private_key`. Authenticode signing is performed when the Windows signing secrets are configured; otherwise `SIGNING-STATUS.txt` discloses that the installer is unsigned.
 
 The `preview` and `stable` environments apply to the canonical source repository's release workflows. Restrict deployments to the intended `main` branch; configure Stable to require owner approval before enabling publication. The source repository must have GitHub release immutability enabled. The workflow creates releases as drafts, validates the full asset set, publishes them, and checks the resulting `.immutable` field. The `GET /immutable-releases` readback requires `Administration: read`, which the contents-only workflow token does not have.
 
-The release workflow continues to publish the catalog to the existing S3 host. Catalog failures are reported independently from the versioned GitHub Release.
+The release workflow publishes versioned release assets to GitHub Releases only. It does not generate or upload catalog data, and installers do not carry catalog settings. The Update Service configures catalog discovery at runtime for the in-app connector and skill directory. No Cloudflare, R2, or S3 publishing is part of the release workflow.
 ### Linux installer verification before sudo
 
 Download `kautuka-install-linux.sh` from a versioned GitHub Release, then verify its GitHub Actions provenance from an independently trusted GitHub identity before executing it as root:
