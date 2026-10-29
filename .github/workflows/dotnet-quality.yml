@@ -38,6 +38,24 @@ jobs:
       - name: Install Narad validation dependencies
         run: corepack enable && pnpm install --frozen-lockfile
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
+        with:
+          version: 0.13.6
+
+      - name: Test Python MCP web tools
+        working-directory: mcps/kautuka-web-tools
+        run: |
+          uv python install 3.12
+          uv sync --locked
+          uv run --locked pytest
+
+      - name: Test Node MCP diagnostics tool
+        run: |
+          npm ci --ignore-scripts --prefix mcps/kautuka-mcp-diagnostics
+          npm --prefix mcps/kautuka-mcp-diagnostics run check
+          npm --prefix mcps/kautuka-mcp-diagnostics test
+
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
 
@@ -46,6 +64,9 @@ jobs:
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
+
+      - name: Test Preview tag retry resolution
+        run: node ./scripts/test-preview-retry-resolution.mjs
 
       - name: Test channel pointer deploy-key publisher
         run: node ./scripts/test-channel-pointer-deploy-key.mjs

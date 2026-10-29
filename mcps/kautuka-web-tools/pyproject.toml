@@ -9,7 +9,7 @@ dependencies = [
     "beautifulsoup4==4.14.3",
     "httpx[http2]==0.28.1",
     "markitdown==0.1.6",
-    "mcp[cli]==1.27.2",
+    "mcp[cli]==1.30.0",
     "trafilatura==2.0.0",
 ]
 

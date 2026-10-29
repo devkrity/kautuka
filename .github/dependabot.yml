@@ -2,7 +2,7 @@ version: 2
 updates:
   # NuGet dependencies: weekly updates, conservative (patch + security)
   - package-ecosystem: "nuget"
-    directory: "/"
+    directory: "/src"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -18,13 +18,73 @@ updates:
         update-types:
           - "version-update:semver-major"
 
-  # npm/pnpm dependencies in frontend: weekly
+  # Root Node tooling and Narad schema tooling.
   - package-ecosystem: "npm"
-    directory: "/src/frontend/web"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "04:00"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Frontend pnpm workspace and its lockfile live at /src/frontend.
+  - package-ecosystem: "npm"
+    directory: "/src/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:30"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Channel acceptance workspace has its own pnpm lockfile.
+  - package-ecosystem: "npm"
+    directory: "/src/tests/channel-acceptance"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:40"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Standalone Node MCP diagnostics server; package-lock.json is kept in sync.
+  - package-ecosystem: "npm"
+    directory: "/mcps/kautuka-mcp-diagnostics"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:45"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-type: "all"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+
+  # Python MCP runtime is managed with uv.lock.
+  - package-ecosystem: "uv"
+    directory: "/mcps/kautuka-web-tools"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "05:00"
     open-pull-requests-limit: 3
     allow:
       - dependency-type: "all"

@@ -11,6 +11,7 @@ const ignoredDirectoryNames = new Set([
   '.cursor',
   '.codex',
   '.tmp',
+  '.venv',
   'artifacts',
   'bin',
   'dist',
