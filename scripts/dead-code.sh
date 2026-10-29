@@ -183,7 +183,7 @@ cat >"$SUMMARY_FILE" <<EOF
 
 - Generated at: $TIMESTAMP
 - Scope: active .NET solution in src/Kautuka.slnx plus src/frontend/web
-- Excluded by policy: src/archive, docs, scripts unrelated to product code, tools, artifacts, generated build output, runtime data
+- Excluded by policy: docs, scripts unrelated to product code, tools, artifacts, generated build output, runtime data
 - Strictness: conservative; framework-rooted or generated items still require manual review before removal
 
 ## Backend

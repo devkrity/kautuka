@@ -320,19 +320,14 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: node scripts/verify-release-assets.mjs --directory "public-feed/releases/${RELEASE_TAG}" --tag "$RELEASE_TAG"
 
-      - name: Preflight channel pointer repository permission
+      - name: Preflight channel pointer write access
         env:
-          GH_TOKEN: ${{ secrets.release_feed_token }}
           CHANNEL: ${{ inputs.channel }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_FEED_DEPLOY_KEY: ${{ secrets.release_feed_deploy_key }}
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?the ${CHANNEL} environment must define its own release_feed_token}"
-          feed_repository="devkrity/kautuka-release-feed-${CHANNEL}"
-          permission="$(gh api "repos/${feed_repository}" --jq 'if .default_branch == "main" and .permissions.push == true then "ready" else "unavailable" end')"
-          if [[ "$permission" != 'ready' ]]; then
-            echo "error: the ${CHANNEL} release_feed_token must have Contents write access to ${feed_repository}, whose default branch must be main." >&2
-            exit 1
-          fi
+          bash scripts/publish-channel-pointer.sh preflight --channel "$CHANNEL" --source-sha "$SOURCE_SHA"
 
       - name: Confirm release draft is empty and immutable-release compatible
         env:
@@ -432,20 +427,15 @@ jobs:
 
       - name: Move the GitHub-hosted channel pointer after release publication
         env:
-          RELEASE_FEED_TOKEN: ${{ secrets.release_feed_token }}
+          RELEASE_FEED_DEPLOY_KEY: ${{ secrets.release_feed_deploy_key }}
           CHANNEL: ${{ inputs.channel }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          MANIFEST_PATH: ${{ github.workspace }}/public-feed/releases/${{ inputs.release_tag }}/kautuka-platform-release.json
         run: |
           set -euo pipefail
-          : "${RELEASE_FEED_TOKEN:?the ${CHANNEL} environment must define a repo-scoped release_feed_token}"
-          feed_repository="devkrity/kautuka-release-feed-${CHANNEL}"
-          feed_directory="$RUNNER_TEMP/release-feed"
-          feed_auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$RELEASE_FEED_TOKEN" | base64 -w0)"
-          git -c http.extraheader="$feed_auth" clone "https://github.com/${feed_repository}.git" "$feed_directory"
-          cd "$feed_directory"
-          cp "$GITHUB_WORKSPACE/public-feed/releases/${RELEASE_TAG}/kautuka-platform-release.json" manifest
-          git add manifest
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "Publish ${CHANNEL} channel pointer for ${RELEASE_TAG} (${SOURCE_SHA:0:7})"
-          git -c http.extraheader="$feed_auth" push origin HEAD:main
+          bash scripts/publish-channel-pointer.sh publish \
+            --channel "$CHANNEL" \
+            --release-tag "$RELEASE_TAG" \
+            --source-sha "$SOURCE_SHA" \
+            --manifest "$MANIFEST_PATH"

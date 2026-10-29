@@ -17,7 +17,7 @@ KAUTUKA_RESILIENCE_MAX_DURATION_MS=<positive integer>
 
 ## Implemented deterministic checkpoints
 
-`pnpm acceptance:resilience:owned` (and `npm run test:resilience:owned` in `tests/channel-acceptance`) runs isolated owned-stack Playwright specs:
+`pnpm acceptance:resilience:owned` (and `npm run test:resilience:owned` in `src/tests/channel-acceptance`) runs isolated owned-stack Playwright specs:
 
 | Scenario | Boundary |
 |---|---|

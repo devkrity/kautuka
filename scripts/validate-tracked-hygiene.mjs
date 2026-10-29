@@ -15,8 +15,8 @@ const forbidden = [
   /^codebase-size\.csv$/,
   /^config\.json$/,
   /^vendor\/narad\//,
-  /^tests\/channel-acceptance\/run-.*\.ps1$/,
-  /^tests\/channel-acceptance\/full-suite-latest\.txt$/,
+  /^src\/tests\/channel-acceptance\/run-.*\.ps1$/,
+  /^src\/tests\/channel-acceptance\/full-suite-latest\.txt$/,
 ];
 
 const tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })

@@ -1,0 +1,5 @@
+# Isolate this suite from the repo-root workspace (`packages: ['.']`).
+# Otherwise `pnpm --dir src/tests/channel-acceptance install` walks up and
+# installs Kautuka's Narad tooling instead of Playwright.
+packages:
+  - "."

@@ -31,7 +31,7 @@ upgrade path.
 
 ### Removed
 
-- Retired the legacy `kautuka` command-line/TUI tool from the solution, release assets, and active integration tests. Its source is retained under `src/archive/legacy-tui/` for historical reference.
+- Retired the legacy `kautuka` command-line/TUI tool from the solution, release assets, and active integration tests. Its source is excluded from this source tree.
 
 ## [0.0.1-alpha.1] - 2026-08-30
 

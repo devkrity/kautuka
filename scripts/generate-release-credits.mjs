@@ -19,7 +19,7 @@ const SPDX_LICENSE_LIST_COMMIT = '31ba1a50e5397e00a304dbadc76531740e89ee48';
 const lockfiles = [
   'pnpm-lock.yaml',
   'src/frontend/pnpm-lock.yaml',
-  'tests/channel-acceptance/pnpm-lock.yaml',
+  'src/tests/channel-acceptance/pnpm-lock.yaml',
   'mcps/kautuka-web-tools/uv.lock',
 ];
 const lockfileHashes = {};

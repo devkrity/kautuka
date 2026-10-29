@@ -24,10 +24,10 @@
     "launch": "node ./scripts/launch-kautuka.mjs",
     "runtime:lineage:lint": "node ./scripts/validate-runtime-lineage.mjs",
     "frontend:ratchet:no-legacy-runtime": "node ./scripts/validate-no-legacy-frontend-packages.mjs",
-    "acceptance:contract": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:contract",
-    "acceptance:channels": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test",
-    "acceptance:resilience": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:resilience",
-    "acceptance:resilience:owned": "npx --yes pnpm@11.5.2 --dir tests/channel-acceptance run test:resilience:owned"
+    "acceptance:contract": "npx --yes pnpm@11.5.2 --dir src/tests/channel-acceptance run test:contract",
+    "acceptance:channels": "npx --yes pnpm@11.5.2 --dir src/tests/channel-acceptance run test",
+    "acceptance:resilience": "npx --yes pnpm@11.5.2 --dir src/tests/channel-acceptance run test:resilience",
+    "acceptance:resilience:owned": "npx --yes pnpm@11.5.2 --dir src/tests/channel-acceptance run test:resilience:owned"
   },
   "devDependencies": {
     "ajv": "^8.20.0",

@@ -75,10 +75,10 @@ mcps/kautuka-web-tools/.build/
 .tmp*/
 
 # Playwright cross-surface acceptance workspace
-tests/channel-acceptance/node_modules/
-tests/channel-acceptance/test-results/
-tests/channel-acceptance/playwright-report/
-tests/channel-acceptance/run-*.ps1
-tests/channel-acceptance/full-suite-latest.txt
+src/tests/channel-acceptance/node_modules/
+src/tests/channel-acceptance/test-results/
+src/tests/channel-acceptance/playwright-report/
+src/tests/channel-acceptance/run-*.ps1
+src/tests/channel-acceptance/full-suite-latest.txt
 artifacts/channel-acceptance/
 .cursor/
