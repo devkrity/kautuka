@@ -173,7 +173,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
           KAUTUKA_RELEASE_BUILD_IMAGE: ${{ inputs.release_builder_image }}
-          KAUTUKA_RELEASE_WSL_ROOTFS_PATH: ${{ inputs.wsl_rootfs_image != '' && '.cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz' || '' }}
+          KAUTUKA_RELEASE_WSL_ROOTFS_PATH: ${{ inputs.wsl_rootfs_image != '' && format('{0}/.cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz', github.workspace) || '' }}
           KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
         run: |
           set -euo pipefail

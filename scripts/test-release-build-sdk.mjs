@@ -69,6 +69,7 @@ try {
   assert.match(rootfsPin.image, /^ghcr\.io\/devkrity\/kautuka-wsl-rootfs@sha256:[a-f0-9]{64}$/, 'WSL rootfs must be pinned to an immutable GHCR digest');
   assert.match(refreshInputsWorkflow, /docker build --provenance=false -f src\/images\/wsl-rootfs\/Containerfile/, 'single-platform rootfs publish must upload a plain manifest whose digest can be pinned');
   assert.match(platformAssetsWorkflow, /docker create --entrypoint \/bin\/true \"\$WSL_ROOTFS_IMAGE\"/, 'data-only WSL rootfs image has no CMD, so extraction must provide a command when creating the stopped container');
+  assert.match(platformAssetsWorkflow, /KAUTUKA_RELEASE_WSL_ROOTFS_PATH:.*format\('\{0\}\/\.cache\/release-build\/wsl-rootfs\/pinned-rootfs\.tar\.gz', github\.workspace\)/, 'the build script changes directories, so the pinned WSL rootfs path must be absolute');
 
   const mcpStage = normalizedBuilder.split('log_phase "Building built-in MCP bundles"')[1]?.split('normalize_owned_paths "$built_in_mcpb_stage_dir"')[0];
   assert.ok(mcpStage, 'builder must retain the built-in MCP build stage');
