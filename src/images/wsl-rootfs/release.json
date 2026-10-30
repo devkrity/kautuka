@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "image": "",
+  "image": "ghcr.io/devkrity/kautuka-wsl-rootfs@sha256:405a85aa7f24b00123aaf87b1cf2efd373eb8a06ac1afac042cac02cef86f683",
   "description": "Reviewed GHCR digest for the generic Fedora WSL base rootfs. Release-specific Kautuka binaries and configuration are layered later."
 }
