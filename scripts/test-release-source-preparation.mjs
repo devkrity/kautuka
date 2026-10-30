@@ -12,6 +12,7 @@ const helper = path.join(root, 'scripts/prepare-release-source-snapshot.sh');
 const keyPathResolver = path.join(root, 'scripts/resolve-release-key-path.sh');
 const buildScript = await readFile(path.join(root, 'scripts/build-release-assets.sh'), 'utf8');
 const workflow = await readFile(path.join(root, '.github/workflows/release-build-platform-assets.yml'), 'utf8');
+const releasePipeline = await readFile(path.join(root, '.github/workflows/release-pipeline.yml'), 'utf8');
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'kautuka-release-source-'));
 
 try {
@@ -173,6 +174,10 @@ try {
     'Linux release build must use the supported Node 26 line');
   assert.match(windowsBuildJob, /node-version:\s*["']26["']/u,
     'Windows release build must use the supported Node 26 line');
+  assert.match(workflow, /workflow_call:[\s\S]*?secrets:[\s\S]*?release_manifest_private_key:\s*\n\s+required:\s*true/u,
+    'the reusable platform workflow must require the manifest signing key');
+  assert.match(releasePipeline, /build-platform-assets:[\s\S]*?secrets:\s*\n\s+release_manifest_private_key:\s*\$\{\{\s*secrets\.RELEASE_MANIFEST_PRIVATE_KEY\s*\}\}/u,
+    'the caller must pass its Preview or Stable environment signing key into the reusable platform workflow');
   assert.match(linuxBuildJob, /\$RUNNER_TEMP\/manifest-signing-key\.pem/u,
     'the Linux build job must keep its private signing key outside the checked-out workspace');
   assert.match(linuxBuildJob, /RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\\n.*\$GITHUB_ENV/u,

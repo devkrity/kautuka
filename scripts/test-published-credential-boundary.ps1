@@ -63,10 +63,38 @@ namespace Kautuka.CredentialBoundarySmoke
     [void]$handler.ClientCertificates.Add($clientCertificate)
     $handler.ServerCertificateCustomValidationCallback = [Kautuka.CredentialBoundarySmoke.Tls]::AcceptCredentialsServer
     $client = [System.Net.Http.HttpClient]::new($handler)
-    $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, 'https://localhost:20002/health')
-    $request.Version = [Version]::new(2, 0)
-    $request.VersionPolicy = [System.Net.Http.HttpVersionPolicy]::RequestVersionExact
-    $response = $client.SendAsync($request).GetAwaiter().GetResult()
+    # The host writes the certificates before Kestrel binds its endpoint. Wait for
+    # the authenticated health request to succeed instead of racing that startup gap.
+    $endpointDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    $response = $null
+    $lastConnectionError = $null
+    while (!$response -and [DateTime]::UtcNow -lt $endpointDeadline) {
+        if ($process.HasExited) { throw "CredentialsHost exited before its endpoint became ready: $(Get-Content $stderr -Raw)" }
+
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, 'https://localhost:20002/health')
+        $request.Version = [Version]::new(2, 0)
+        $request.VersionPolicy = [System.Net.Http.HttpVersionPolicy]::RequestVersionExact
+        try {
+            $response = $client.SendAsync($request).GetAwaiter().GetResult()
+        }
+        catch [System.Net.Http.HttpRequestException] {
+            $socketException = $_.Exception
+            while ($socketException -and $socketException -isnot [System.Net.Sockets.SocketException]) {
+                $socketException = $socketException.InnerException
+            }
+
+            if (!$socketException -or $socketException.SocketErrorCode -ne [System.Net.Sockets.SocketError]::ConnectionRefused) {
+                throw
+            }
+
+            $lastConnectionError = $_.Exception
+            Start-Sleep -Milliseconds 100
+        }
+        finally {
+            $request.Dispose()
+        }
+    }
+    if (!$response) { throw "CredentialsHost did not accept an authenticated health request before timeout. Last connection error: $lastConnectionError" }
     if (!$response.IsSuccessStatusCode) { throw "Published CredentialsHost health failed: $($response.StatusCode)" }
     if (!(Test-Path (Join-Path $stateRoot 'credentialsHost/vault/kautuka.credentials.db'))) { throw 'Published CredentialsHost did not initialize its SQLite vault.' }
 }
