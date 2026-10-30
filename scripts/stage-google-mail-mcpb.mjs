@@ -30,6 +30,19 @@ async function runNpx(label, args) {
   await run(label, "npx", args);
 }
 
+async function runMcpb(label, args) {
+  if (process.platform !== "win32") {
+    try {
+      await run(label, "mcpb", args);
+      return;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  await runNpx(label, ["-y", "@anthropic-ai/mcpb", ...args]);
+}
+
 function run(label, command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -125,8 +138,8 @@ for (const entry of readdirSync(publishDir, { withFileTypes: true })) {
 mkdirSync(path.dirname(outputFile), { recursive: true });
 rmSync(outputFile, { force: true });
 process.stdout.write("[stage-google-mail] packing mcpb...\n");
-await runNpx("mcpb validate", ["-y", "@anthropic-ai/mcpb", "validate", packDir]);
-await runNpx("mcpb pack", ["-y", "@anthropic-ai/mcpb", "pack", packDir, outputFile]);
+await runMcpb("mcpb validate", ["validate", packDir]);
+await runMcpb("mcpb pack", ["pack", packDir, outputFile]);
 
 if (!existsSync(outputFile)) {
   throw new Error(`Failed to create ${outputFile}.`);
