@@ -406,6 +406,8 @@ jobs:
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
       kautuka_base_image: ${{ needs.resolve-kautuka-base.outputs.image }}
+    secrets:
+      release_manifest_private_key: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
 
   publish-assets:
     name: Publish Release Assets
