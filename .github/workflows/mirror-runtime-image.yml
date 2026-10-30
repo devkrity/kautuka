@@ -124,8 +124,8 @@ jobs:
           {
             echo '## Devkrity runtime image mirror'
             echo
-            echo "- Version tag: `$DESTINATION`"
-            echo "- Exact digest: `$image`"
+            printf -- '- Version tag: `%s`\n' "$DESTINATION"
+            printf -- '- Exact digest: `%s`\n' "$image"
             echo '- The mirror copied the upstream multi-platform manifest and verified the exact digest is unchanged.'
             echo '- The checked-in runtime configuration uses this digest; Kautuka releases consume only the Devkrity namespace.'
             echo '- Set the GHCR package visibility to public if anonymous distribution is required.'
