@@ -376,7 +376,7 @@ jobs:
         run: dotnet restore src/Kautuka.slnx
 
       - name: Build
-        run: dotnet build src/Kautuka.slnx --no-restore
+        run: dotnet build src/Kautuka.slnx --no-restore --maxcpucount
 
       - name: Test
         run: dotnet test --solution src/Kautuka.slnx --no-build

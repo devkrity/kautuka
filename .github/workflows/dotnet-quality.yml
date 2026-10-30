@@ -116,6 +116,9 @@ jobs:
       - name: Test release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
+      - name: Test parallel .NET build settings
+        run: node ./scripts/test-dotnet-parallel-build.mjs
+
       - name: Test signed release signature URL routing
         run: node ./scripts/test-release-manifest-signature-url.mjs
 
@@ -244,7 +247,7 @@ jobs:
         run: dotnet restore src/Kautuka.slnx
 
       - name: Build
-        run: dotnet build src/Kautuka.slnx --no-restore
+        run: dotnet build src/Kautuka.slnx --no-restore --maxcpucount
 
       - name: Test
         run: dotnet test --solution src/Kautuka.slnx --no-build
@@ -345,7 +348,7 @@ jobs:
       - name: Restore Native AOT boundary
         run: dotnet restore src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -r ${{ matrix.runtime }}
       - name: Publish Native AOT boundary
-        run: dotnet publish src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -c Release -r ${{ matrix.runtime }} --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/credentialshost -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+        run: dotnet publish src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -c Release -r ${{ matrix.runtime }} --self-contained true --no-restore --maxcpucount -p:PublishDir=${{ github.workspace }}/publish/credentialshost -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
       - name: Run published mTLS, SQLite, and readiness smoke
         shell: pwsh
         run: ./scripts/test-published-credential-boundary.ps1 -ExecutablePath "${{ github.workspace }}/publish/credentialshost/${{ matrix.executable }}"
@@ -361,7 +364,7 @@ jobs:
       - name: Restore Native AOT Gateway
         run: dotnet restore src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -r linux-x64
       - name: Publish Native AOT Gateway
-        run: dotnet publish src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -c Release -r linux-x64 --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/gateway -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+        run: dotnet publish src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -c Release -r linux-x64 --self-contained true --no-restore --maxcpucount -p:PublishDir=${{ github.workspace }}/publish/gateway -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
       - name: Assert published Gateway binary
         run: test -x "${{ github.workspace }}/publish/gateway/Kautuka.Gateway"
 

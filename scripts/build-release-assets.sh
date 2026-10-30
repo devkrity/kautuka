@@ -748,6 +748,7 @@ run_build_container \
       echo "Publishing ${project_path}..."
 
       dotnet publish "$project_path" \
+        --maxcpucount \
         --runtime linux-x64 \
         --self-contained \
         -p:KautukaReleaseArtifactBuild=true \
@@ -780,11 +781,13 @@ run_build_container \
     }
 
     dotnet publish src/backend/connectors/m365-mail/kautuka-m365-mail.csproj \
+      --maxcpucount \
       --runtime linux-x64 \
       --self-contained \
       -c Release \
       -o /m365-mail-aot
     dotnet publish src/backend/connectors/google-mail/kautuka-google-mail.csproj \
+      --maxcpucount \
       --runtime linux-x64 \
       --self-contained \
       -c Release \

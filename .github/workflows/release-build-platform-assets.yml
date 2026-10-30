@@ -320,6 +320,7 @@ jobs:
           # must stay Win32-safe Major.Minor.Patch. Leaving it unset lets the project
           # Product version is numeric for Windows version resources; informational metadata carries the build SHA.
           dotnet publish src/installer/Kautuka.Installer.Windows/Kautuka.Installer.Windows.csproj \
+            --maxcpucount \
             --runtime win-x64 \
             -p:EnableWindowsTargeting=true \
             -p:InstallerReleaseChannel="${CHANNEL}" \
