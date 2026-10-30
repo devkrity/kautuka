@@ -2,7 +2,8 @@ name: Release Pipeline
 
 on:
   schedule:
-    - cron: '0 16 * * *'
+    - cron: '0 12 * * 5'
+      timezone: 'Australia/Brisbane'
   workflow_dispatch:
     inputs:
       release_tag:
