@@ -1,0 +1,7 @@
+# Maintained build inputs
+
+`toolchain.json` and `rootfs.json` are the source configuration for the reusable Linux release toolchain and generic Fedora WSL root filesystem. The SDK follows the repository `global.json`; Corepack and MCP bundle tooling use the committed npm lockfile in `release-builder/npm-tools`. Update these files when intentionally changing compiler/runtime inputs. Their sibling `release.json` files pin the exact GHCR image digests that app releases consume.
+
+Use **Actions → Refresh Linux Release Inputs** for a reviewed manual refresh. A weekly schedule is available in `.github/workflows/refresh-linux-release-inputs.yml`, but publishing scheduled candidates is disabled by default in both JSON configs. To enable it, set `scheduledRefreshEnabled` to `true`; scheduled runs publish uniquely tagged candidate images and report their digests, but do not silently change the release pins. Change the cron in the workflow to alter the schedule. Review the candidate, then update the corresponding `release.json` digest in a normal PR.
+
+The first refresh bootstraps each image. Until its digest is reviewed into `release.json`, release builds keep their existing local build path. Packages are private GHCR images and require the `kautuka` repository to have package read access. The generic WSL rootfs contains no Kautuka release binaries; those are layered into it during each app release.

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "scheduledRefreshEnabled": false,
+  "baseImage": "quay.io/fedora/fedora-minimal:44",
+  "dotnetSdkVersionSource": "../../../global.json",
+  "node": {
+    "version": "26.3.0",
+    "linuxX64Sha256": "0ce210831380ab75a5fec0d3fb6b5af0958898016b2cae51cc2fa11057d2f77e"
+  },
+  "pnpmVersion": "11.5.2",
+  "uv": {
+    "version": "0.13.6",
+    "linuxX64Sha256": "f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645"
+  }
+}

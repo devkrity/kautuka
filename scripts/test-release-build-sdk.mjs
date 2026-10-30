@@ -25,19 +25,40 @@ try {
     readFile(path.join(root, 'src/images/release-builder/Containerfile'), 'utf8'),
     readFile(path.join(root, 'global.json'), 'utf8'),
   ]);
+  const toolchain = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/toolchain.json'), 'utf8'));
+  const npmTools = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package.json'), 'utf8'));
+  const npmToolsLock = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package-lock.json'), 'utf8'));
+  const rootfsConfig = JSON.parse(await readFile(path.join(root, 'src/images/wsl-rootfs/rootfs.json'), 'utf8'));
   const projectSdk = JSON.parse(globalJson).sdk.version;
   const normalizedBuilder = builder.replaceAll('\r\n', '\n');
   assert.match(builder, /resolve-release-dotnet-sdk\.sh.*global\.json/, 'builder must derive its SDK from project global.json');
   assert.match(builder, /--build-arg "DOTNET_SDK_VERSION=\$dotnet_sdk_version"/, 'builder must pass the selected SDK to the image');
   assert.match(builder, /KAUTUKA_RELEASE_RETAIN_FAILED_WORKDIR:-false/, 'failed work directory retention must remain opt-in');
+  assert.match(builder, /KAUTUKA_RELEASE_BUILD_IMAGE/, 'release should accept a digest-pinned reusable builder image');
+  assert.match(builder, /KAUTUKA_RELEASE_WSL_ROOTFS_PATH/, 'release should accept the separately maintained WSL rootfs archive');
+  assert.match(builder, /src\/images\/wsl-rootfs\/rootfs\.json/, 'WSL rootfs releasever and source image must come from repository config');
+  assert.match(builder, /NODE_SHA256=.*node\.linuxX64Sha256/, 'local image fallback must use the configured Node checksum');
+  assert.match(builder, /UV_SHA256=.*uv\.linuxX64Sha256/, 'local image fallback must use the configured uv checksum');
   assert.match(image, /^ARG DOTNET_SDK_VERSION\s*$/m, 'image SDK must be supplied explicitly by the builder');
   assert.match(image, /test -n "\$DOTNET_SDK_VERSION"/, 'image build must reject a missing SDK argument');
+  assert.match(image, /sha256sum --check --status/, 'toolchain dependencies must be hash-verified while the image is built');
+  assert.match(image, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/, 'the builder image must pre-install the configured pnpm version');
+  assert.match(image, /npm ci --prefix \/opt\/release-tools/, 'the builder image must install the locked release tool dependencies');
+  assert.match(image, /mcpb --version \| grep -Fq/, 'the builder image must check its bundled MCP bundle CLI');
+  assert.equal(toolchain.node.version, '26.3.0');
+  assert.equal(toolchain.uv.version, '0.13.6');
+  assert.equal(npmTools.dependencies['@anthropic-ai/mcpb'], '2.1.2');
+  assert.equal(npmTools.dependencies.corepack, '0.35.0');
+  assert.equal(npmToolsLock.packages['node_modules/@anthropic-ai/mcpb'].version, npmTools.dependencies['@anthropic-ai/mcpb']);
+  assert.equal(npmToolsLock.packages['node_modules/corepack'].version, npmTools.dependencies.corepack);
+  assert.equal(rootfsConfig.releasever, '44');
+  assert.equal(rootfsConfig.architecture, 'amd64');
 
   const mcpStage = normalizedBuilder.split('log_phase "Building built-in MCP bundles"')[1]?.split('normalize_owned_paths "$built_in_mcpb_stage_dir"')[0];
   assert.ok(mcpStage, 'builder must retain the built-in MCP build stage');
-  assert.match(mcpStage, /uv_version=0\.13\.6/, 'MCP stage must install the pinned uv release in its default build container');
-  assert.match(mcpStage, /f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645/, 'MCP stage must verify the pinned uv archive digest');
-  assert.ok(mcpStage.indexOf('sha256sum --check') < mcpStage.indexOf('stage-built-in-mcpb.sh'), 'MCP dependency lock verification must run only after uv archive verification');
+  assert.match(mcpStage, /command -v uv/, 'MCP stage must use the prebuilt uv toolchain');
+  assert.match(mcpStage, /command -v mcpb/, 'MCP stage must use the preinstalled bundle CLI');
+  assert.doesNotMatch(mcpStage, /releases\.astral\.sh|nodejs\.org\/dist/, 'MCP stage must not download toolchain binaries per release');
 
   if (process.platform !== 'win32') {
     const logIndex = normalizedBuilder.indexOf('log_phase "Building built-in MCP bundles"');
@@ -55,10 +76,9 @@ try {
       env: { ...process.env, CAPTURE: captured, source_root: '/source', built_in_mcpb_stage_dir: '/output', node_build_image: 'quay.io/fedora/fedora:44', node_version: '26.3.0', node_arch: 'x64' },
     });
     const innerCommand = await readFile(captured, 'utf8');
-    assert.match(innerCommand, /uv_version=0\.13\.6/, 'outer builder must preserve inner uv variables for the container');
-    assert.match(innerCommand, /releases\/download\/\$\{uv_version\}\/\$\{uv_archive\}/, 'container must expand pinned uv URL variables inside the container');
-    assert.match(innerCommand, /printf '%s  %s\\n' "\$uv_sha256"/, 'container must expand the expected uv digest only inside the container');
-    assert.match(innerCommand, /nodejs\.org\/dist\/v26\.3\.0\//, 'configured Node version must be expanded by the outer builder');
+    assert.match(innerCommand, /command -v uv/, 'container must consume the prebuilt uv command');
+    assert.match(innerCommand, /command -v mcpb/, 'container must consume the preinstalled MCP bundle CLI');
+    assert.doesNotMatch(innerCommand, /nodejs\.org\/dist|releases\.astral\.sh/, 'container command must not install release toolchain binaries');
   }
 
   const assembly = builder.match(/chmod \+x "\$stage_dir\/bin\/kautuka-manager"[\s\S]*?mkdir -p "\$stage_dir\/services\/webhost\/wwwroot"/)?.[0];

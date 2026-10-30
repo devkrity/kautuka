@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+    printf '%s\n' 'error: this installer requires Bash; run it with `sudo bash ./kautuka-install-linux.sh`.' >&2
+    exit 2
+fi
+if shopt -oq posix; then
+    printf '%s\n' 'error: this installer requires Bash mode; run it with `sudo bash ./kautuka-install-linux.sh`, not `sh`.' >&2
+    exit 2
+fi
 set -euo pipefail
 
 : "${KAUTUKA_DEFAULT_ARTIFACT_URL:=}"
@@ -319,7 +327,8 @@ run_as_service_user() {
 
     local dbus_session_bus_address="unix:path=${xdg_runtime_dir}/bus"
     if command -v runuser >/dev/null 2>&1; then
-        runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address" "$@"
+        runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address" \
+            sh -c 'cd "$HOME" || exit; exec "$@"' kautuka "$@"
         return
     fi
 
@@ -337,24 +346,39 @@ run_as_service_user() {
     fail "either runuser or su is required to validate rootless Podman for ${service_user}"
 }
 
-ensure_dotnet_host_libraries() {
-    if ldconfig -p 2>/dev/null | grep -q 'libicuuc\.so'; then
-        return
+icu_library_available() {
+    local library="$1"
+    local candidate=''
+
+    if command -v ldconfig >/dev/null 2>&1 \
+        && ldconfig -p 2>/dev/null | grep -Eq "${library}\\.so([.[:space:]]|$)"; then
+        return 0
     fi
-    if [[ -e /usr/lib64/libicuuc.so || -e /usr/lib/x86_64-linux-gnu/libicuuc.so || -e /usr/lib/libicuuc.so ]]; then
+
+    for candidate in \
+        "/usr/lib64/${library}.so"* \
+        "/usr/lib/x86_64-linux-gnu/${library}.so"* \
+        "/usr/lib/${library}.so"*; do
+        if [[ -e "$candidate" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ensure_dotnet_host_libraries() {
+    if icu_library_available libicuuc; then
         return
     fi
 
     if command -v dnf >/dev/null 2>&1; then
-        dnf install -y icu >/dev/null
+        dnf install -y libicu >/dev/null
     elif command -v apt-get >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y libicu-dev >/dev/null
     fi
 
-    if ldconfig -p 2>/dev/null | grep -q 'libicuuc\.so'; then
-        return
-    fi
-    if [[ -e /usr/lib64/libicuuc.so || -e /usr/lib/x86_64-linux-gnu/libicuuc.so || -e /usr/lib/libicuuc.so ]]; then
+    if icu_library_available libicuuc; then
         return
     fi
 

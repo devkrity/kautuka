@@ -16,6 +16,15 @@ bash "$script_dir/generate-linux-installer.sh" \
   --manifest-url 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/kautuka-platform-release.json' \
   --manifest-public-key "$tmp/public.pem"
 bash -n "$tmp/generated-kautuka-install-linux.sh"
+if sh "$tmp/generated-kautuka-install-linux.sh" --help >"$tmp/wrong-shell.stdout" 2>"$tmp/wrong-shell.stderr"; then
+  echo 'error: generated Linux installer unexpectedly ran under sh.' >&2
+  exit 1
+fi
+grep -q 'requires Bash' "$tmp/wrong-shell.stderr" || {
+  echo 'error: invoking the generated installer through sh did not explain the Bash requirement.' >&2
+  cat "$tmp/wrong-shell.stderr" >&2
+  exit 1
+}
 grep -q '^verify_linux_release() {' "$tmp/generated-kautuka-install-linux.sh"
 verification_line="$(grep -nF 'verify_linux_release "${verification_args[@]}"' "$tmp/generated-kautuka-install-linux.sh" | head -n 1 | cut -d: -f1)"
 mutation_line="$(grep -n 'ensure_service_account "$service_user"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"

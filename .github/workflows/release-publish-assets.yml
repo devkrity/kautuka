@@ -100,20 +100,22 @@ jobs:
       - name: Write release entrypoint notes
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          CHANNEL: ${{ inputs.channel }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           repository_url="https://github.com/${GITHUB_REPOSITORY}"
           cat > kautuka-release-entrypoints.md <<EOF
-          ## Downloads
+          ## Install Kautuka
 
-          Release binaries and compliance assets are published as immutable assets on this versioned GitHub Release.
+          **Windows (64-bit)** — [Download the Kautuka installer](${repository_url}/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe) and run it. The installer downloads and verifies the WSL appliance for you; do not download the appliance archive manually.
 
-          - Release assets: \`${repository_url}/releases/tag/${RELEASE_TAG}\`
-          - Linux installer: \`${repository_url}/releases/download/${RELEASE_TAG}/kautuka-install-linux.sh\`
-          - Linux installer attestation: before running with sudo, verify the downloaded file with \`gh attestation verify ./kautuka-install-linux.sh --repo devkrity/kautuka --signer-workflow devkrity/kautuka/.github/workflows/release-build-platform-assets.yml\`.
-          - Windows installer: \`${repository_url}/releases/download/${RELEASE_TAG}/Kautuka.Installer.exe\`
-          - License, notices, credits, component inventory, SBOMs, source archives, and checksums are included as flat release assets; license texts and source files are bundled in zip archives.
-          Preview Windows installers may be unsigned; Stable installers may also be unsigned when signing secrets are not configured. Check \`SIGNING-STATUS.txt\` and expect a SmartScreen warning when it says \`UNSIGNED\`.
+          **Linux (x86-64)** — [Download the Linux installer](${repository_url}/releases/download/${RELEASE_TAG}/kautuka-install-linux.sh). Before running it with sudo, verify it with \`gh attestation verify ./kautuka-install-linux.sh --repo devkrity/kautuka --signer-workflow devkrity/kautuka/.github/workflows/release-build-platform-assets.yml\`. The script downloads and verifies the Linux application payload.
+
+          ## About the other files
+
+          The platform archives and signed manifest are downloaded and verified automatically by the installers and updater. Most users should not download them manually. \`kautuka-release-support.zip\` contains the license texts, third-party notices, SBOMs, component inventory, and corresponding source archives.
+
+          The Windows installer is unsigned for this ${CHANNEL} release unless \`SIGNING-STATUS.txt\` says \`SIGNED\`; Windows SmartScreen may warn.
           EOF
 
       - name: Upload release entrypoint notes
@@ -262,6 +264,7 @@ jobs:
           import pathlib
           import sys
           import zipfile
+          import shutil
 
           release = pathlib.Path(sys.argv[1])
           for source_name, archive_name in [('licenses', 'kautuka-licenses.zip'), ('sources', 'kautuka-third-party-sources.zip')]:
@@ -274,8 +277,29 @@ jobs:
                           bundle.write(item, item.relative_to(release))
               if not (release / archive_name).stat().st_size:
                   raise SystemExit(f'empty release bundle: {archive_name}')
-              import shutil
               shutil.rmtree(source)
+
+          support_names = [
+              'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_COMPONENTS.json',
+              'FRONTEND_DEPENDENCIES.json', 'CREDITS.md', 'kautuka-licenses.zip',
+              'kautuka-third-party-sources.zip',
+          ]
+          support_files = [release / name for name in support_names]
+          support_files.extend(sorted(release.glob('*.spdx.json')))
+          missing = [str(item.name) for item in support_files if not item.is_file()]
+          if missing:
+              raise SystemExit(f'missing release support files: {", ".join(missing)}')
+
+          support_archive = release / 'kautuka-release-support.zip'
+          with zipfile.ZipFile(support_archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+              for item in support_files:
+                  archive_compression = zipfile.ZIP_STORED if item.suffix == '.zip' else zipfile.ZIP_DEFLATED
+                  bundle.write(item, item.name, compress_type=archive_compression)
+          if not support_archive.stat().st_size:
+              raise SystemExit('empty release support archive')
+
+          for item in support_files:
+              item.unlink()
           PY
           rm -rf sbom-input
 
@@ -329,13 +353,23 @@ jobs:
           fi
           gh release edit "$RELEASE_TAG" --title "$RELEASE_VERSION" --notes-file release-notes/kautuka-release-entrypoints.md
 
-      - name: Upload all versioned release assets to the GitHub draft
+      - name: Upload public release assets to the GitHub draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          mapfile -d '' release_assets < <(find "release-stage/releases/${RELEASE_TAG}" -maxdepth 1 -type f -print0 | sort -z)
+          release_dir="release-stage/releases/${RELEASE_TAG}"
+          mapfile -t release_asset_names < <(jq -r '.[]' scripts/release-public-assets.json)
+          release_assets=()
+          for name in "${release_asset_names[@]}"; do
+            asset="$release_dir/$name"
+            if [[ ! -f "$asset" ]]; then
+              echo "error: public release asset was not staged: $name" >&2
+              exit 1
+            fi
+            release_assets+=("$asset")
+          done
           ((${#release_assets[@]} > 0)) || { echo 'error: no release assets were staged.' >&2; exit 1; }
           gh release upload "$RELEASE_TAG" "${release_assets[@]}"
 
@@ -348,7 +382,20 @@ jobs:
           set -euo pipefail
           existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
           release_id="$(jq -er '.id' <<< "$existing")"
-          expected="$(node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(`${p}/kautuka-release-assets.json`)); const extra=["kautuka-release-assets.json","kautuka-release-assets.sha256"].map(name=>{const b=fs.readFileSync(`${p}/${name}`); return {name,sha256:crypto.createHash("sha256").update(b).digest("hex"),sizeBytes:b.length};}); console.log([...m.assets,...extra].map(x=>`${x.name}\tsha256:${x.sha256}\t${x.sizeBytes}`).sort().join("\n"))' "release-stage/releases/${RELEASE_TAG}")"
+          expected="$(node - "release-stage/releases/${RELEASE_TAG}" <<'NODE'
+          const fs = require('node:fs');
+          const directory = process.argv[2];
+          const names = JSON.parse(fs.readFileSync('scripts/release-public-assets.json', 'utf8'));
+          const manifest = JSON.parse(fs.readFileSync(`${directory}/kautuka-release-assets.json`, 'utf8'));
+          const byName = new Map(manifest.assets.map(asset => [asset.name, asset]));
+          const selected = names.map(name => {
+            const asset = byName.get(name);
+            if (!asset) throw new Error(`public asset missing from verified inventory: ${name}`);
+            return asset;
+          });
+          console.log(selected.map(asset => `${asset.name}\tsha256:${asset.sha256}\t${asset.sizeBytes}`).sort().join('\n'));
+          NODE
+          )"
           actual="$(gh api "repos/$REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[] | [.name, (.digest // ""), .size] | @tsv' | sort)"
           if [[ "$actual" != "$expected" ]]; then
             echo 'error: uploaded GitHub Release asset names, sizes, or SHA-256 digests differ from the validated local set.' >&2

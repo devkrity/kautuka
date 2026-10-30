@@ -4,6 +4,7 @@ internal static partial class WindowsApplianceInstaller
 {
     private const string rootfsAssetName = "kautuka-wsl-appliance.tar.gz";
     private const string releaseManifestAssetName = "kautuka-platform-release.json";
+    private const string releaseManifestSignatureAssetName = "kautuka-platform-release.sig";
     private const string webUrl = "http://localhost:20229";
     private const string defaultDistroName = "kautuka";
     private static readonly char[] newLineSeparators = ['\r', '\n'];

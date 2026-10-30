@@ -74,7 +74,7 @@ Run the checks relevant to the files and behavior changed:
 | Area | Command |
 |---|---|
 | Backend build and tests | `dotnet test src/Kautuka.slnx` |
-| .NET formatting | `dotnet format src/Kautuka.slnx --verify-no-changes` |
+| .NET whitespace formatting | `dotnet format whitespace src/Kautuka.slnx --verify-no-changes` |
 | Frontend unit tests | `pnpm --dir src/frontend/web test` |
 | Frontend browser tests | `pnpm --dir src/frontend/web test:e2e` |
 | Frontend lint | `pnpm --dir src/frontend/web lint` |
@@ -85,7 +85,7 @@ Tests that require external providers should use documented test doubles or loca
 
 ## Hooks and commits
 
-Setup enables the repository's Husky.Net hooks. Keep them enabled: pre-commit checks include documentation validation and secret scanning. Sign every commit with `git commit -s`; the sign-off records acceptance of the Developer Certificate of Origin. See [Contributing](../../CONTRIBUTING.md) for compatibility requirements and the pull request checklist.
+Setup installs the repository's pinned Lefthook hooks. Pre-commit runs documentation checks, staged-content secret scanning, and formatting/linting for staged C# and frontend files. Pre-push runs the full local .NET format, build, and test suite together with frontend lint, tests, and build. This keeps commits quick while preserving the complete local gate before pushing. Keep both hooks enabled. Sign every commit with `git commit -s`; the sign-off records acceptance of the Developer Certificate of Origin. See [Contributing](../../CONTRIBUTING.md) for compatibility requirements and the pull request checklist.
 
 ## Architecture and security
 

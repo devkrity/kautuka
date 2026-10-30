@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((all, value, index, values) => {
   if (value.startsWith('--')) all.push([value.slice(2), values[index + 1]]);
@@ -16,6 +17,7 @@ if (!args.directory || !tag) {
 
 const manifestPath = path.join(directory, 'kautuka-release-assets.json');
 const checksumPath = path.join(directory, 'kautuka-release-assets.sha256');
+const publicAssetNames = JSON.parse(await readFile(path.join(path.dirname(fileURLToPath(import.meta.url)), 'release-public-assets.json'), 'utf8'));
 const maxGitHubReleaseAssetBytes = 2 * 1024 * 1024 * 1024;
 const directoryEntries = await readdir(directory, { withFileTypes: true });
 for (const entry of directoryEntries) {
@@ -53,15 +55,7 @@ for (const asset of manifest.assets) {
   records.set(asset.name, asset);
 }
 
-const expectedRequired = [
-  'kautuka-install-linux.sh', 'Kautuka.Installer.exe', 'kautuka-linux-amd64.tar.gz',
-  'kautuka-wsl-appliance.tar.gz', 'kautuka-platform-release.json', 'kautuka-platform-release.sig',
-  'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_COMPONENTS.json',
-  'FRONTEND_DEPENDENCIES.json',
-  'CREDITS.md', 'kautuka-licenses.zip', 'kautuka-third-party-sources.zip',
-  'kautuka-linux-amd64.spdx.json', 'kautuka-wsl-appliance.spdx.json',
-];
-for (const name of expectedRequired) {
+for (const name of publicAssetNames) {
   if (!records.has(name)) throw new Error(`required release asset is absent: ${name}`);
 }
 
@@ -72,7 +66,7 @@ if (unexpectedEntries.length > 0) {
 const directoryFiles = directoryEntries
   .map((entry) => entry.name)
   .sort();
-const expectedNames = [...records.keys(), 'kautuka-release-assets.json', 'kautuka-release-assets.sha256'].sort();
+const expectedNames = [...publicAssetNames, 'kautuka-release-assets.json', 'kautuka-release-assets.sha256'].sort();
 if (JSON.stringify(directoryFiles) !== JSON.stringify(expectedNames)) {
   throw new Error(`release directory does not match its flat asset manifest; found [${directoryFiles.join(', ')}]`);
 }

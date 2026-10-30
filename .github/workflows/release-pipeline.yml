@@ -186,8 +186,8 @@ jobs:
           node scripts/resolve-release.mjs "$release_tag" "$source_sha" "$dry_run"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-  validate-release:
-    name: Validate Release Inputs
+  validate-release-automation:
+    name: Release Regression Checks
     needs: resolve-channel
     if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
@@ -196,19 +196,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           ref: ${{ needs.resolve-channel.outputs.source_sha }}
 
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
-
-      - name: Install Narad validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
-
-      - name: Validate tracked hygiene
-        run: node ./scripts/validate-tracked-hygiene.mjs
+          node-version-file: .nvmrc
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
@@ -218,12 +211,6 @@ jobs:
 
       - name: Test Preview tag retry resolution
         run: node ./scripts/test-preview-retry-resolution.mjs
-
-      - name: Test tracked hygiene rejection paths
-        run: node ./scripts/test-tracked-hygiene.mjs
-
-      - name: Validate documentation
-        run: node ./scripts/validate-docs.mjs
 
       - name: Verify Linux installer trust preflight regressions
         run: bash ./scripts/test-linux-installer-security.sh
@@ -264,31 +251,195 @@ jobs:
       - name: Verify frontend third-party inventory regressions
         run: node ./scripts/test-frontend-third-party-inventory.mjs
 
+  validate-release-hygiene:
+    name: Release Hygiene and Secrets
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Validate tracked hygiene
+        run: node ./scripts/validate-tracked-hygiene.mjs
+
+      - name: Test tracked hygiene rejection paths
+        run: node ./scripts/test-tracked-hygiene.mjs
+
+      - name: Validate documentation
+        run: node ./scripts/validate-docs.mjs
+
+      - name: Secrets scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect --source /repo --verbose --redact --no-banner
+
+  validate-release-narad:
+    name: Release Narad Validation and Audit
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install Narad validation dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Validate Narad
         run: pnpm narad:check
 
       - name: Narad dependency audit
         run: node ./scripts/audit-dependencies.mjs
 
+  validate-release-dotnet:
+    name: Release Backend Build and Tests
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node for Narad conformance fixtures
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install Narad conformance fixtures
+        run: pnpm install --frozen-lockfile
+
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
 
       - name: Restore
         run: dotnet restore src/Kautuka.slnx
 
-      - name: Verify formatting
-        run: dotnet format src/Kautuka.slnx --verify-no-changes
-
       - name: Build
-        run: dotnet build src/Kautuka.slnx --no-restore
+        run: dotnet build src/Kautuka.slnx --no-restore --maxcpucount
 
       - name: Test
         run: dotnet test --solution src/Kautuka.slnx --no-build
 
-      - name: Narad security and performance gates
-        run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
+  validate-release-format:
+    name: Release .NET Formatting
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+      - name: Restore for formatting workspace
+        run: dotnet restore src/Kautuka.slnx
+      - name: Verify formatting
+        run: dotnet format whitespace src/Kautuka.slnx --no-restore --verify-no-changes
+
+  validate-release-frontend:
+    name: Release Frontend and Contract Tests
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install frontend validation dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
@@ -303,12 +454,35 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: pnpm test:contract
 
-      - name: Secrets scan
+  validate-release:
+    name: Validate Release Gate
+    needs:
+      - resolve-channel
+      - validate-release-automation
+      - validate-release-hygiene
+      - validate-release-narad
+      - validate-release-dotnet
+      - validate-release-format
+      - validate-release-frontend
+    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all parallel release validations to pass
+        env:
+          AUTOMATION_RESULT: ${{ needs.validate-release-automation.result }}
+          HYGIENE_RESULT: ${{ needs.validate-release-hygiene.result }}
+          NARAD_RESULT: ${{ needs.validate-release-narad.result }}
+          DOTNET_RESULT: ${{ needs.validate-release-dotnet.result }}
+          FORMAT_RESULT: ${{ needs.validate-release-format.result }}
+          FRONTEND_RESULT: ${{ needs.validate-release-frontend.result }}
         run: |
-          docker run --rm \
-            -v "$PWD:/repo" \
-            ghcr.io/gitleaks/gitleaks:v8.30.1 \
-            detect --source /repo --verbose --redact --no-banner
+          set -euo pipefail
+          printf 'Release checks: %s\nHygiene/secrets: %s\nNarad: %s\nBackend: %s\nFormat: %s\nFrontend: %s\n' \
+            "$AUTOMATION_RESULT" "$HYGIENE_RESULT" "$NARAD_RESULT" "$DOTNET_RESULT" "$FORMAT_RESULT" "$FRONTEND_RESULT"
+          [[ "$AUTOMATION_RESULT" == success \
+            && "$HYGIENE_RESULT" == success && "$NARAD_RESULT" == success \
+            && "$DOTNET_RESULT" == success && "$FORMAT_RESULT" == success \
+            && "$FRONTEND_RESULT" == success ]]
 
   # Hosted runners cannot wsl --import. This job is skipped unless
   # KAUTUKA_SMOKE_BASE_URL points at a live WebHost (self-hosted appliance).
@@ -360,17 +534,18 @@ jobs:
               --target "$SOURCE_SHA" --notes "${CHANNEL^} release build and artifact verification are in progress."
           fi
 
-  resolve-kautuka-base:
-    name: Resolve approved kautuka-base digest
+  resolve-release-image-inputs:
+    name: Resolve approved release image digests
     needs:
       - resolve-channel
-      - validate-release
-    if: ${{ needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' }}
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     permissions:
-      packages: read
+      contents: read
     outputs:
       image: ${{ steps.resolve.outputs.image }}
+      release_builder_image: ${{ steps.resolve.outputs.release_builder_image }}
+      wsl_rootfs_image: ${{ steps.resolve.outputs.wsl_rootfs_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -378,8 +553,6 @@ jobs:
 
       - name: Resolve the selected independent base-image version
         id: resolve
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           image="$(jq -r '.image // empty' src/images/kautuka-base/release.json)"
@@ -388,15 +561,18 @@ jobs:
             exit 1
           fi
           echo "Selected base image digest: $image"
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker pull "$image"
-          resolved_image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep '^ghcr.io/devkrity/kautuka-base@sha256:' | head -n 1 || true)"
-          if [[ "$resolved_image" != "$image" ]]; then
-            echo "error: pulled kautuka-base digest does not match the reviewed selection $image (resolved $resolved_image)." >&2
-            exit 1
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          release_builder_image="$(jq -r '.image // empty' src/images/release-builder/release.json)"
+          wsl_rootfs_image="$(jq -r '.image // empty' src/images/wsl-rootfs/release.json)"
+          if [[ -n "$release_builder_image" ]]; then
+            [[ "$release_builder_image" =~ ^ghcr\.io/devkrity/kautuka-release-builder@sha256:[0-9a-f]{64}$ ]]
           fi
-          echo "image=$resolved_image" >> "$GITHUB_OUTPUT"
-          echo "Release will use $resolved_image; building Kautuka does not rebuild or retag kautuka-base."
+          if [[ -n "$wsl_rootfs_image" ]]; then
+            [[ "$wsl_rootfs_image" =~ ^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:[0-9a-f]{64}$ ]]
+          fi
+          echo "release_builder_image=$release_builder_image" >> "$GITHUB_OUTPUT"
+          echo "wsl_rootfs_image=$wsl_rootfs_image" >> "$GITHUB_OUTPUT"
+          echo 'Release inputs are validated here and pulled once by the assembly job.'
 
   # Native AOT of Manager, Gateway, CredentialsHost, ChannelHost,
   # UpdateService, WebHost, and TUI is this job (scripts/build-release-assets.sh).
@@ -405,9 +581,10 @@ jobs:
     needs:
       - resolve-channel
       - validate-release
-      - resolve-kautuka-base
+      - resolve-release-image-inputs
     permissions:
       contents: read
+      packages: read
       id-token: write
       attestations: write
     uses: ./.github/workflows/release-build-platform-assets.yml
@@ -419,7 +596,9 @@ jobs:
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
-      kautuka_base_image: ${{ needs.resolve-kautuka-base.outputs.image }}
+      kautuka_base_image: ${{ needs.resolve-release-image-inputs.outputs.image }}
+      release_builder_image: ${{ needs.resolve-release-image-inputs.outputs.release_builder_image }}
+      wsl_rootfs_image: ${{ needs.resolve-release-image-inputs.outputs.wsl_rootfs_image }}
     secrets:
       release_manifest_private_key: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
 

@@ -13,6 +13,7 @@ const keyPathResolver = path.join(root, 'scripts/resolve-release-key-path.sh');
 const buildScript = await readFile(path.join(root, 'scripts/build-release-assets.sh'), 'utf8');
 const workflow = await readFile(path.join(root, '.github/workflows/release-build-platform-assets.yml'), 'utf8');
 const releasePipeline = await readFile(path.join(root, '.github/workflows/release-pipeline.yml'), 'utf8');
+const qualityWorkflow = await readFile(path.join(root, '.github/workflows/dotnet-quality.yml'), 'utf8');
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'kautuka-release-source-'));
 
 try {
@@ -177,8 +178,8 @@ try {
     'Linux Preview builds must pass the base product version; the builder appends the channel version suffix itself');
   assert.match(linuxBuildJob, /KAUTUKA_BASE_IMAGE:\s*\$\{\{\s*inputs\.kautuka_base_image\s*\}\}/u,
     'Linux release packaging must report the separately pinned base image in its component inventory');
-  assert.match(windowsBuildJob, /node-version:\s*["']26["']/u,
-    'Windows release build must use the supported Node 26 line');
+  assert.doesNotMatch(windowsBuildJob, /Pin the released sandbox image|Setup Node for frontend release notices|Install frozen frontend dependency graph for release notices|Generate release third-party notices and inventory/u,
+    'Windows installer job must not repeat platform-image pinning or frontend compliance setup already handled by the Linux platform asset job');
   assert.match(windowsBuildJob, /-p:InformationalVersion="\$\{PRODUCT_VERSION\}\+\$\{SOURCE_SHA:0:7\}"[ \t]*\\\r?\n\s+-p:IncludeSourceRevisionInInformationalVersion=false/u,
     'Windows installer metadata must keep the explicit short SHA without the SDK appending it again');
   assert.match(windowsBuildJob, /-p:UseAppHost=true/u,
@@ -187,6 +188,32 @@ try {
     'release compliance must validate the sidecars and the separately pinned base image');
   assert.match(workflow, /workflow_call:[\s\S]*?secrets:[\s\S]*?release_manifest_private_key:\s*\n\s+required:\s*true/u,
     'the reusable platform workflow must require the manifest signing key');
+
+  const pnpmCacheJobs = [
+    ['PR Narad validation', qualityWorkflow, '  quality-narad:\n', '  quality-frontend:\n'],
+    ['PR frontend validation', qualityWorkflow, '  quality-frontend:\n', '  quality-dotnet:\n'],
+    ['PR backend conformance fixtures', qualityWorkflow, '  quality-dotnet:\n', '  quality-format:\n'],
+    ['release Narad validation', releasePipeline, '  validate-release-narad:\n', '  validate-release-dotnet:\n'],
+    ['release backend conformance fixtures', releasePipeline, '  validate-release-dotnet:\n', '  validate-release-format:\n'],
+    ['release frontend validation', releasePipeline, '  validate-release-frontend:\n', '  validate-release:\n'],
+    ['release asset generation', workflow, '  build-linux-release-assets:\n', '  build-windows-installer-assets:\n'],
+  ];
+  for (const [label, source, startMarker, endMarker] of pnpmCacheJobs) {
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start + startMarker.length);
+    assert.ok(start >= 0 && end > start, `${label} must exist for the pnpm cache check`);
+    const job = source.slice(start, end);
+    assert.doesNotMatch(job, /cache:\s*pnpm/u,
+      `${label} must not ask setup-node to locate pnpm before Corepack enables it`);
+    const enablePnpm = job.indexOf('corepack prepare pnpm@11.5.2 --activate');
+    const restoreCache = job.indexOf('uses: actions/cache@');
+    const installDependencies = job.search(/pnpm(?:\s+--dir\s+\S+)? install/u);
+    assert.ok(enablePnpm >= 0 && restoreCache > enablePnpm,
+      `${label} must activate pnpm before restoring the pnpm store`);
+    assert.ok(installDependencies > restoreCache,
+      `${label} must restore the pnpm store before installing dependencies`);
+  }
+
   assert.match(releasePipeline, /build-platform-assets:[\s\S]*?secrets:\s*\n\s+release_manifest_private_key:\s*\$\{\{\s*secrets\.RELEASE_MANIFEST_PRIVATE_KEY\s*\}\}/u,
     'the caller must pass its Preview or Stable environment signing key into the reusable platform workflow');
   assert.match(linuxBuildJob, /\$RUNNER_TEMP\/manifest-signing-key\.pem/u,

@@ -575,25 +575,36 @@ internal static partial class WindowsApplianceInstaller
         }
 
         string releaseBase = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases/download/{Uri.EscapeDataString(manifest.ReleaseTag!)}";
-        string expectedManifestUrl = $"{releaseBase}/{releaseManifestAssetName}";
-        string expectedSignatureUrl = $"{releaseBase}/{releaseManifestAssetName}.sig";
+        string expectedSignatureUrl = $"{releaseBase}/{releaseManifestSignatureAssetName}";
         string expectedRootfsUrl = $"{releaseBase}/{rootfsAssetName}";
         string expectedLinuxUrl = $"{releaseBase}/kautuka-linux-amd64.tar.gz";
         InstallerPlatformReleaseArtifact? rootfs = manifest.Artifacts.SingleOrDefault(artifact =>
             string.Equals(artifact.Name, rootfsAssetName, StringComparison.Ordinal));
         InstallerPlatformReleaseArtifact? linux = manifest.Artifacts.SingleOrDefault(artifact =>
             string.Equals(artifact.Name, "kautuka-linux-amd64.tar.gz", StringComparison.Ordinal));
-        if (!string.Equals(manifest.Signature?.Algorithm, "ecdsa-p256-sha256", StringComparison.Ordinal)
-            || !string.Equals(manifest.Signature?.Format, "base64", StringComparison.Ordinal)
-            || !string.Equals(manifest.Signature?.Path, $"{releaseManifestAssetName}.sig", StringComparison.Ordinal)
-            || !string.Equals(manifest.Signature?.Url, expectedSignatureUrl, StringComparison.Ordinal)
-            || rootfs is null
-            || !string.Equals(rootfs.Url, expectedRootfsUrl, StringComparison.Ordinal)
-            || linux is null
-            || !string.Equals(linux.Url, expectedLinuxUrl, StringComparison.Ordinal)
-            || !Uri.TryCreate(expectedManifestUrl, UriKind.Absolute, out _))
+        var urlBindingErrors = new List<string>();
+        if (!string.Equals(manifest.Signature?.Algorithm, "ecdsa-p256-sha256", StringComparison.Ordinal))
+            urlBindingErrors.Add($"signature algorithm was '{manifest.Signature?.Algorithm ?? "<missing>"}'");
+        if (!string.Equals(manifest.Signature?.Format, "base64", StringComparison.Ordinal))
+            urlBindingErrors.Add($"signature format was '{manifest.Signature?.Format ?? "<missing>"}'");
+        if (!string.Equals(manifest.Signature?.Path, releaseManifestSignatureAssetName, StringComparison.Ordinal))
+            urlBindingErrors.Add($"signature path was '{manifest.Signature?.Path ?? "<missing>"}'");
+        if (!string.Equals(manifest.Signature?.Url, expectedSignatureUrl, StringComparison.Ordinal))
+            urlBindingErrors.Add($"signature URL was '{manifest.Signature?.Url ?? "<missing>"}'");
+        if (rootfs is null)
+            urlBindingErrors.Add($"artifact '{rootfsAssetName}' was missing");
+        else if (!string.Equals(rootfs.Url, expectedRootfsUrl, StringComparison.Ordinal))
+            urlBindingErrors.Add($"artifact '{rootfsAssetName}' URL was '{rootfs.Url ?? "<missing>"}'");
+        if (linux is null)
+            urlBindingErrors.Add("artifact 'kautuka-linux-amd64.tar.gz' was missing");
+        else if (!string.Equals(linux.Url, expectedLinuxUrl, StringComparison.Ordinal))
+            urlBindingErrors.Add($"artifact 'kautuka-linux-amd64.tar.gz' URL was '{linux.Url ?? "<missing>"}'");
+        if (urlBindingErrors.Count > 0)
         {
-            throw new InvalidOperationException("Signed release manifest URLs do not bind the required artifacts and signature to the exact GitHub Release tag.");
+            throw new InvalidOperationException(
+                "Signed release manifest URLs do not bind the required artifacts and signature to the exact GitHub Release tag: "
+                + string.Join("; ", urlBindingErrors)
+                + ".");
         }
     }
     private static async Task DownloadFileAsync(

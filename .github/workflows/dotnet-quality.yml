@@ -1,16 +1,13 @@
 name: Dotnet Quality
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
       - main
       - kautuka_v2
       - "release/**"
-      - "enhancement/**"
-      - "enhancements/**"
-      - "Feature/**"
-      - "feature/**"
   pull_request:
     branches:
       - main
@@ -22,11 +19,14 @@ on:
       - "Feature/**"
       - "feature/**"
 
-jobs:
-  quality:
-    name: Format, Build, Test
-    runs-on: ubuntu-latest
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
+jobs:
+  quality-mcp:
+    name: MCP Tests
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -34,14 +34,15 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-
-      - name: Install Narad validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
+          cache: npm
+          cache-dependency-path: mcps/kautuka-mcp-diagnostics/package-lock.json
 
       - name: Install uv
         uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
         with:
           version: 0.13.6
+          enable-cache: true
+          cache-dependency-glob: mcps/kautuka-web-tools/uv.lock
 
       - name: Test Python MCP web tools
         working-directory: mcps/kautuka-web-tools
@@ -56,11 +57,39 @@ jobs:
           npm --prefix mcps/kautuka-mcp-diagnostics run check
           npm --prefix mcps/kautuka-mcp-diagnostics test
 
+  quality-repository-hygiene:
+    name: Repository Hygiene and Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
 
       - name: Test tracked hygiene rejection paths
         run: node ./scripts/test-tracked-hygiene.mjs
+
+      - name: Require full-repository quality validation
+        run: node ./scripts/test-full-quality-workflow.mjs
+
+      - name: Validate documentation
+        run: node ./scripts/validate-docs.mjs
+
+  quality-release-regressions:
+    name: Release Regression Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
@@ -86,8 +115,14 @@ jobs:
       - name: Test release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
+      - name: Test parallel .NET build settings
+        run: node ./scripts/test-dotnet-parallel-build.mjs
+
       - name: Test signed release signature URL routing
         run: node ./scripts/test-release-manifest-signature-url.mjs
+
+      - name: Test release asset packaging and public allow-list
+        run: node ./scripts/test-release-assets.mjs
 
       - name: Test local release feed signature routes
         run: node ./scripts/test-serve-release-smoke.mjs
@@ -95,8 +130,34 @@ jobs:
       - name: Test release immutability preflight
         run: node ./scripts/test-release-immutability-preflight.mjs
 
-      - name: Validate documentation
-        run: node ./scripts/validate-docs.mjs
+  quality-narad:
+    name: Narad Validation and Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install Narad validation dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Validate Narad
         run: pnpm narad:check
@@ -104,25 +165,34 @@ jobs:
       - name: Narad dependency audit
         run: node ./scripts/audit-dependencies.mjs
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+  quality-frontend:
+    name: Frontend Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          global-json-file: global.json
+          node-version-file: .nvmrc
 
-      - name: Restore
-        run: dotnet restore src/Kautuka.slnx
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
 
-      - name: Verify formatting
-        run: dotnet format src/Kautuka.slnx --verify-no-changes
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
 
-      - name: Build
-        run: dotnet build src/Kautuka.slnx --no-restore
-
-      - name: Test
-        run: dotnet test --solution src/Kautuka.slnx --no-build
-
-      - name: Narad security and performance gates
-        run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
+      - name: Install Narad validation dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
@@ -132,6 +202,115 @@ jobs:
 
       - name: Run workflow canvas browser tests
         run: pnpm --dir src/frontend/web test:e2e
+
+  quality-dotnet:
+    name: Backend Build and Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node for Narad conformance fixtures
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install Narad conformance fixtures
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+
+      - name: Restore
+        run: dotnet restore src/Kautuka.slnx
+
+      - name: Build
+        run: dotnet build src/Kautuka.slnx --no-restore --maxcpucount
+
+      - name: Test
+        run: dotnet test --solution src/Kautuka.slnx --no-build
+
+  quality-format:
+    name: .NET Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
+      - name: Restore for formatting workspace
+        run: dotnet restore src/Kautuka.slnx
+      - name: Verify formatting
+        run: dotnet format whitespace src/Kautuka.slnx --no-restore --verify-no-changes
+
+  quality:
+    name: Format, Build, Test
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - quality-mcp
+      - quality-repository-hygiene
+      - quality-release-regressions
+      - quality-narad
+      - quality-frontend
+      - quality-dotnet
+      - quality-format
+      - packaging-smoke
+      - credentials-published-boundary
+      - gateway-native-aot
+      - acceptance-contract
+    steps:
+      - name: Require all parallel quality jobs to pass
+        env:
+          MCP_RESULT: ${{ needs.quality-mcp.result }}
+          HYGIENE_RESULT: ${{ needs.quality-repository-hygiene.result }}
+          RELEASE_RESULT: ${{ needs.quality-release-regressions.result }}
+          NARAD_RESULT: ${{ needs.quality-narad.result }}
+          FRONTEND_RESULT: ${{ needs.quality-frontend.result }}
+          DOTNET_RESULT: ${{ needs.quality-dotnet.result }}
+          FORMAT_RESULT: ${{ needs.quality-format.result }}
+          PACKAGING_RESULT: ${{ needs.packaging-smoke.result }}
+          CREDENTIALS_RESULT: ${{ needs.credentials-published-boundary.result }}
+          GATEWAY_AOT_RESULT: ${{ needs.gateway-native-aot.result }}
+          ACCEPTANCE_RESULT: ${{ needs.acceptance-contract.result }}
+        run: |
+          set -euo pipefail
+          printf 'MCP: %s\nHygiene/docs: %s\nRelease checks: %s\nNarad: %s\nFrontend: %s\nBackend: %s\nFormat: %s\nPackaging: %s\nCredentials: %s\nGateway AOT: %s\nAcceptance: %s\n' \
+            "$MCP_RESULT" "$HYGIENE_RESULT" "$RELEASE_RESULT" "$NARAD_RESULT" "$FRONTEND_RESULT" "$DOTNET_RESULT" "$FORMAT_RESULT" \
+            "$PACKAGING_RESULT" "$CREDENTIALS_RESULT" "$GATEWAY_AOT_RESULT" "$ACCEPTANCE_RESULT"
+          [[ "$HYGIENE_RESULT" == success && \
+            "$MCP_RESULT" == success && "$RELEASE_RESULT" == success && \
+            "$NARAD_RESULT" == success && "$FRONTEND_RESULT" == success && \
+            "$DOTNET_RESULT" == success && "$FORMAT_RESULT" == success && \
+            "$PACKAGING_RESULT" == success && "$CREDENTIALS_RESULT" == success && \
+            "$GATEWAY_AOT_RESULT" == success && "$ACCEPTANCE_RESULT" == success ]]
 
   packaging-smoke:
     name: Packaging Smoke Checks
@@ -177,10 +356,16 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
       - name: Restore Native AOT boundary
         run: dotnet restore src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -r ${{ matrix.runtime }}
       - name: Publish Native AOT boundary
-        run: dotnet publish src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -c Release -r ${{ matrix.runtime }} --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/credentialshost -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+        run: dotnet publish src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -c Release -r ${{ matrix.runtime }} --self-contained true --no-restore --maxcpucount -p:PublishDir=${{ github.workspace }}/publish/credentialshost -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
       - name: Run published mTLS, SQLite, and readiness smoke
         shell: pwsh
         run: ./scripts/test-published-credential-boundary.ps1 -ExecutablePath "${{ github.workspace }}/publish/credentialshost/${{ matrix.executable }}"
@@ -193,10 +378,16 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
       - name: Restore Native AOT Gateway
         run: dotnet restore src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -r linux-x64
       - name: Publish Native AOT Gateway
-        run: dotnet publish src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -c Release -r linux-x64 --self-contained true --no-restore -p:PublishDir=${{ github.workspace }}/publish/gateway -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
+        run: dotnet publish src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -c Release -r linux-x64 --self-contained true --no-restore --maxcpucount -p:PublishDir=${{ github.workspace }}/publish/gateway -p:TreatWarningsAsErrors=true -p:IlcTreatWarningsAsErrors=true
       - name: Assert published Gateway binary
         run: test -x "${{ github.workspace }}/publish/gateway/Kautuka.Gateway"
 
@@ -213,10 +404,22 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
       - name: Enable pnpm
         working-directory: ${{ github.workspace }}
         run: corepack enable && corepack prepare pnpm@11.5.2 --activate
+      - name: Configure pnpm store
+        working-directory: ${{ github.workspace }}
+        run: |
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+      - name: Cache acceptance and root pnpm packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-acceptance-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/tests/channel-acceptance/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-acceptance-pnpm-${{ runner.os }}-11.5.2-
       - name: Install Narad spec at repo root
         # narad-contract.spec.ts resolves @devkrity/narad-spec from repo root
         # via src/tests/channel-acceptance/src/narad-conformance.ts. That package
