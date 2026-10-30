@@ -248,9 +248,6 @@ jobs:
       - name: Verify local release feed signature routes
         run: node ./scripts/test-serve-release-smoke.mjs
 
-      - name: Verify frontend third-party inventory regressions
-        run: node ./scripts/test-frontend-third-party-inventory.mjs
-
   validate-release-hygiene:
     name: Release Hygiene and Secrets
     needs: resolve-channel
@@ -443,6 +440,9 @@ jobs:
 
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
+
+      - name: Verify frontend third-party inventory regressions
+        run: node ./scripts/test-frontend-third-party-inventory.mjs
 
       - name: Install acceptance workspace
         working-directory: src/tests/channel-acceptance

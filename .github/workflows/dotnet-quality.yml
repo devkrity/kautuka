@@ -200,6 +200,9 @@ jobs:
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
 
+      - name: Verify frontend third-party inventory regressions
+        run: node ./scripts/test-frontend-third-party-inventory.mjs
+
       - name: Install Playwright Chromium
         run: pnpm --dir src/frontend/web exec playwright install --with-deps chromium
 
