@@ -89,13 +89,13 @@ jobs:
         env:
           CHANNEL: ${{ inputs.channel }}
           MANIFEST_VERSION: ${{ inputs.manifest_version }}
-          PRODUCT_VERSION: ${{ inputs.release_version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
         run: |
           set -euo pipefail
+          product_version="${MANIFEST_VERSION%%-preview.*}"
           artifact_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}"
           bash scripts/build-release-assets.sh \
             --output-root publish/release-assets \
@@ -104,7 +104,7 @@ jobs:
             --release-id "$RELEASE_TAG" \
             --release-tag "$RELEASE_TAG" \
             --version "$MANIFEST_VERSION" \
-            --product-version "$PRODUCT_VERSION" \
+            --product-version "$product_version" \
             --source-sha "$SOURCE_SHA" \
             --channel "$CHANNEL" \
             --artifact-base-url "$artifact_base_url"
@@ -263,6 +263,7 @@ jobs:
             -p:InstallerVersion="${PRODUCT_VERSION%%-preview.*}" \
             -p:Version="${PRODUCT_VERSION}" \
             -p:InformationalVersion="${PRODUCT_VERSION}+${SOURCE_SHA:0:7}" \
+            -p:IncludeSourceRevisionInInformationalVersion=false \
             -p:InstallerManifestPublicKeyPath="$(pwd)/manifest-signing-public.pem" \
             -c Release \
             -o publish/windows-installer

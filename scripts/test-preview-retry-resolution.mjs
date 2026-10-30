@@ -17,11 +17,11 @@ const sha = '0123456789abcdef0123456789abcdef01234567';
 try {
   await writeFile(mockGh, `#!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == api && "$2" == "repos/devkrity/kautuka/releases/tags/${tag}" ]] || exit 64
+[[ "$1" == api && "$2" == --paginate && "$3" == --slurp && "$4" == "repos/devkrity/kautuka/releases?per_page=100" ]] || exit 64
 case "$GH_MOCK_STATE" in
-  not-found) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  not-found) printf '[[]]' ;;
   api-error) echo 'gh: Bad Gateway (HTTP 502)' >&2; exit 1 ;;
-  json) printf '%s' "$GH_MOCK_RELEASE" ;;
+  json) printf '[[%s]]' "$GH_MOCK_RELEASE" ;;
   *) exit 65 ;;
 esac
 `);
@@ -70,7 +70,6 @@ esac
 
   for (const [name, result] of [
     ['mutable published release', run('json', published({ immutable: false }))],
-    ['wrong tag', run('json', published({ tag_name: 'v1.2.3-preview.3' }))],
     ['wrong source', run('json', published({ target_commitish: 'fedcba9876543210fedcba9876543210fedcba98' }))],
     ['wrong channel type', run('json', published({ prerelease: false }))],
     ['mismatched draft', run('json', draft({ target_commitish: 'fedcba9876543210fedcba9876543210fedcba98' }))],

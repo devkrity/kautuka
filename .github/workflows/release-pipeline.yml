@@ -173,7 +173,8 @@ jobs:
             fi
             if [[ "$dry_run" == 'false' ]]; then
               repository="${GITHUB_REPOSITORY}"
-              if existing_release="$(gh api "repos/$repository/releases/tags/$release_tag" 2>/dev/null)"; then
+              existing_release="$(bash scripts/find-github-release-by-tag.sh "$repository" "$release_tag")"
+              if [[ "$existing_release" != 'null' ]]; then
                 if [[ "$(jq -r '.draft' <<< "$existing_release")" != 'true' \
                   || "$(jq -r '.target_commitish' <<< "$existing_release")" != "$source_sha" ]]; then
                   echo "error: stable version $version has already been released and cannot be reused." >&2
@@ -211,6 +212,9 @@ jobs:
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
+
+      - name: Verify draft release lookup uses the paginated API
+        run: node ./scripts/test-find-github-release-by-tag.mjs
 
       - name: Test Preview tag retry resolution
         run: node ./scripts/test-preview-retry-resolution.mjs
@@ -333,7 +337,8 @@ jobs:
           CHANNEL: ${{ needs.resolve-channel.outputs.channel }}
         run: |
           set -euo pipefail
-          if existing="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" 2>/dev/null)"; then
+          existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
+          if [[ "$existing" != 'null' ]]; then
             if [[ "$(jq -r '.draft' <<< "$existing")" != 'true' \
               || "$(jq -r '.target_commitish' <<< "$existing")" != "$SOURCE_SHA" ]]; then
               echo "error: stable release $RELEASE_TAG already exists and cannot be reused." >&2

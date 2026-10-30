@@ -306,7 +306,11 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
-          existing="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
+          if [[ "$existing" == 'null' ]]; then
+            echo "error: release draft $RELEASE_TAG was not found." >&2
+            exit 1
+          fi
           if [[ "$(jq -r '.draft' <<< "$existing")" != 'true' \
             || "$(jq -r '.target_commitish' <<< "$existing")" != "$SOURCE_SHA" ]]; then
             echo "error: release $RELEASE_TAG is not the expected unpublished draft." >&2
@@ -341,7 +345,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+          existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
+          release_id="$(jq -er '.id' <<< "$existing")"
           expected="$(node -e 'const fs=require("node:fs"), crypto=require("node:crypto"); const p=process.argv[1]; const m=JSON.parse(fs.readFileSync(`${p}/kautuka-release-assets.json`)); const extra=["kautuka-release-assets.json","kautuka-release-assets.sha256"].map(name=>{const b=fs.readFileSync(`${p}/${name}`); return {name,sha256:crypto.createHash("sha256").update(b).digest("hex"),sizeBytes:b.length};}); console.log([...m.assets,...extra].map(x=>`${x.name}\tsha256:${x.sha256}\t${x.sizeBytes}`).sort().join("\n"))' "release-stage/releases/${RELEASE_TAG}")"
           actual="$(gh api "repos/$REPOSITORY/releases/$release_id/assets?per_page=100" --jq '.[] | [.name, (.digest // ""), .size] | @tsv' | sort)"
           if [[ "$actual" != "$expected" ]]; then
@@ -357,7 +362,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .id)"
+          existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
+          release_id="$(jq -er '.id' <<< "$existing")"
           gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false --silent
 
       - name: Require GitHub immutable-release enforcement
@@ -367,7 +373,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          immutable="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" --jq .immutable)"
+          existing="$(bash scripts/find-github-release-by-tag.sh "$REPOSITORY" "$RELEASE_TAG")"
+          immutable="$(jq -r '.immutable // false' <<< "$existing")"
           if [[ "$immutable" != 'true' ]]; then
             echo 'error: GitHub did not mark the published release immutable; configure repository release immutability before cutover.' >&2
             exit 1
