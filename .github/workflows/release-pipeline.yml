@@ -246,6 +246,9 @@ jobs:
       - name: Verify Fedora source RPM archive fallback
         run: node ./scripts/test-stage-third-party-sources.mjs
 
+      - name: Verify read-only SBOM input cleanup
+        run: node ./scripts/test-sbom-input-cleanup.mjs
+
       - name: Verify release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
