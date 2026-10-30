@@ -62,6 +62,9 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("wait_for_web_ui \"$service_user\"", source, StringComparison.Ordinal);
         Assert.Contains("ensure_dotnet_host_libraries", source, StringComparison.Ordinal);
         Assert.Contains("libicu is required to run Kautuka host services", source, StringComparison.Ordinal);
+        Assert.Contains("dnf install -y libicu", source, StringComparison.Ordinal);
+        Assert.Contains("cd \"$HOME\" || exit; exec \"$@\"", source, StringComparison.Ordinal);
+        Assert.Contains("this installer requires Bash", source, StringComparison.Ordinal);
         Assert.Contains("ensure_rootless_idmap_helpers", source, StringComparison.Ordinal);
         Assert.Contains("kautuka-root-rshared.service", source, StringComparison.Ordinal);
         Assert.Contains("cap_setuid=ep", source, StringComparison.Ordinal);
