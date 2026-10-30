@@ -68,7 +68,7 @@ exit 1
     '--wsl-rootfs', rootfs,
     '--base-image', `ghcr.io/devkrity/kautuka-base@sha256:${'a'.repeat(64)}`,
   ];
-  const command = `cd ${quote(toMsysPath(root))} && ./scripts/stage-third-party-sources.sh ${args.map(quote).join(' ')}`;
+  const command = `cd ${quote(toMsysPath(root))} && bash ./scripts/stage-third-party-sources.sh ${args.map(quote).join(' ')}`;
   const gitBash = 'C:/Program Files/Git/bin/bash.exe';
   const bash = process.platform === 'win32' && existsSync(gitBash) ? gitBash : 'bash';
   const result = spawnSync(bash, ['-c', command], { env, encoding: 'utf8' });
