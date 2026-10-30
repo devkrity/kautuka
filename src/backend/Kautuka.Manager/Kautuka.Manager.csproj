@@ -33,21 +33,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Remove="SandboxAssets\Dockerfile" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Remove="SidecarAssets\**\*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="SandboxAssets\Dockerfile">
+    <Content Include="..\..\images\kautuka-base\Dockerfile">
       <TargetPath>sandbox\Dockerfile</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
-    <Content Include="SidecarAssets\**\*">
-      <TargetPath>sidecar-assets\%(RecursiveDir)%(Filename)%(Extension)</TargetPath>
+    <Content Include="..\..\images\kautuka-pkgs-proxy\Dockerfile">
+      <TargetPath>sidecar-assets\pkgs-proxy\Dockerfile</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="..\..\images\openobserve\README.txt">
+      <TargetPath>sidecar-assets\openobserve\README.txt</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

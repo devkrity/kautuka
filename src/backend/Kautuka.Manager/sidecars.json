@@ -2,7 +2,7 @@
   "sidecars": [
     {
       "name": "kautuka-openobserve",
-      "image": "public.ecr.aws/zinclabs/openobserve@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "image": "ghcr.io/devkrity/kautuka-observability@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
       "ports": [
         {
           "hostPort": 20215,

@@ -1,5 +1,5 @@
-# Fedora 44 is a build input on the release runner only. The appliance runs the
-# finished ghcr.io image recorded for that platform release, not this tag.
+# Fedora 44 is a build input for the separately versioned base-image release.
+# App releases pin the finished GHCR image digest in their signed runtime manifest.
 ARG FEDORA_IMAGE=quay.io/fedora/fedora-minimal:44
 FROM ${FEDORA_IMAGE}
 

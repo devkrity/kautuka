@@ -1,0 +1,132 @@
+name: Mirror Runtime Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Upstream image to mirror into the Devkrity GHCR namespace.
+        required: true
+        type: choice
+        options:
+          - openobserve
+          - package-proxy
+      image_version:
+        description: New Devkrity mirror version (for example 0.1.0).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-image-mirror-${{ inputs.image }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Copy pinned upstream image to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Validate dispatch and select allowlisted source and destination
+        id: image
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          IMAGE_ID: ${{ inputs.image }}
+          IMAGE_VERSION: ${{ inputs.image_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF" != 'refs/heads/main' ]]; then
+            echo 'error: image mirrors must be dispatched from main.' >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'error: image_version must be plain SemVer such as 0.1.0.' >&2
+            exit 1
+          fi
+          case "$IMAGE_ID" in
+            openobserve)
+              source_file='src/images/openobserve/upstream.json'
+              destination='ghcr.io/devkrity/kautuka-observability'
+              ;;
+            package-proxy)
+              source_file='src/images/kautuka-pkgs-proxy/upstream.json'
+              destination='ghcr.io/devkrity/kautuka-package-proxy'
+              ;;
+            *)
+              echo "error: unsupported runtime image $IMAGE_ID." >&2
+              exit 1
+              ;;
+          esac
+          source_image="$(jq -er '.image' "$source_file")"
+          if [[ ! "$source_image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "error: $source_file must pin its upstream source by digest." >&2
+            exit 1
+          fi
+          echo "source_image=$source_image" >> "$GITHUB_OUTPUT"
+          echo "destination=$destination" >> "$GITHUB_OUTPUT"
+          echo "versioned_destination=$destination:$IMAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install registry copy tool
+        run: sudo apt-get update && sudo apt-get install --yes skopeo
+
+      - name: Authenticate to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | skopeo login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Refuse to overwrite a published mirror version
+        env:
+          DESTINATION: ${{ steps.image.outputs.versioned_destination }}
+        run: |
+          set -euo pipefail
+          if skopeo inspect "docker://$DESTINATION" >/dev/null 2>&1; then
+            echo "error: $DESTINATION already exists; publish a new image_version instead of replacing it." >&2
+            exit 1
+          fi
+
+      - name: Copy every upstream platform without changing manifest digests
+        env:
+          SOURCE_IMAGE: ${{ steps.image.outputs.source_image }}
+          DESTINATION: ${{ steps.image.outputs.versioned_destination }}
+        run: |
+          set -euo pipefail
+          skopeo copy --all --preserve-digests "docker://$SOURCE_IMAGE" "docker://$DESTINATION"
+
+      - name: Report the mirrored digest and cutover files
+        env:
+          DESTINATION: ${{ steps.image.outputs.versioned_destination }}
+          SOURCE_IMAGE: ${{ steps.image.outputs.source_image }}
+          IMAGE_ID: ${{ inputs.image }}
+        run: |
+          set -euo pipefail
+          digest="sha256:$(skopeo inspect --raw "docker://$DESTINATION" | sha256sum | awk '{print $1}')"
+          expected_digest="${SOURCE_IMAGE##*@}"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ || "$digest" != "$expected_digest" ]]; then
+            echo "error: mirror digest $digest does not match pinned upstream digest $expected_digest." >&2
+            exit 1
+          fi
+          image="${DESTINATION%:*}@$digest"
+          case "$IMAGE_ID" in
+            openobserve)
+              echo "Confirm $image matches src/images/openobserve/release.json, src/backend/Kautuka.Manager/sidecars.json, and src/backend/Kautuka.Manager/runtime-images.json."
+              ;;
+            package-proxy)
+              echo "Confirm $image matches src/images/kautuka-pkgs-proxy/release.json, src/images/kautuka-pkgs-proxy/Dockerfile, and src/backend/Kautuka.Manager/runtime-images.json."
+              ;;
+          esac
+          {
+            echo '## Devkrity runtime image mirror'
+            echo
+            echo "- Version tag: `$DESTINATION`"
+            echo "- Exact digest: `$image`"
+            echo '- The mirror copied the upstream multi-platform manifest and verified the exact digest is unchanged.'
+            echo '- The checked-in runtime configuration uses this digest; Kautuka releases consume only the Devkrity namespace.'
+            echo '- Set the GHCR package visibility to public if anonymous distribution is required.'
+          } >> "$GITHUB_STEP_SUMMARY"

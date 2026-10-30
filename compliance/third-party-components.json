@@ -18,7 +18,8 @@
       "id": "openobserve",
       "version": "0.92.2",
       "licenseExpression": "AGPL-3.0",
-      "image": "public.ecr.aws/zinclabs/openobserve@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "image": "ghcr.io/devkrity/kautuka-observability@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "upstreamImage": "public.ecr.aws/zinclabs/openobserve@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
       "source": "https://github.com/openobserve/openobserve/tree/v0.92.2",
       "sourceCommit": "4d68fe837ddfbb7d2e6ea2e16382c936488cb38a",
       "licenseFiles": ["LICENSE"]
@@ -27,7 +28,8 @@
       "id": "git-pkgs-proxy",
       "version": "0.8.1",
       "licenseExpression": "GPL-3.0-or-later",
-      "image": "ghcr.io/git-pkgs/proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
+      "image": "ghcr.io/devkrity/kautuka-package-proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
+      "upstreamImage": "ghcr.io/git-pkgs/proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
       "source": "https://github.com/git-pkgs/proxy/tree/v0.8.1",
       "sourceCommit": "a45befd0674981d504ae542afad6c9db110e903d",
       "licenseFiles": ["LICENSE"]

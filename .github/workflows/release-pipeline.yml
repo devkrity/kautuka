@@ -346,65 +346,43 @@ jobs:
               --target "$SOURCE_SHA" --notes "${CHANNEL^} release build and artifact verification are in progress."
           fi
 
-  publish-kautuka-base:
-    name: Build and publish kautuka-base
+  resolve-kautuka-base:
+    name: Resolve approved kautuka-base digest
     needs:
       - resolve-channel
       - validate-release
-      - prepare-stable-draft
-    if: ${{ always() && needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' && (needs.prepare-stable-draft.result == 'success' || needs.prepare-stable-draft.result == 'skipped') }}
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' }}
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ needs.resolve-channel.outputs.channel }}
     permissions:
-      contents: read
-      packages: write
+      packages: read
     outputs:
-      image: ${{ steps.publish.outputs.image }}
+      image: ${{ steps.resolve.outputs.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve-channel.outputs.source_sha }}
 
-      - name: Build from Fedora latest and test the sandbox contract
-        env:
-          KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
-        run: |
-          bash scripts/build-kautuka-base.sh
-
-      - name: Publish the release digest
-        id: publish
+      - name: Resolve the selected independent base-image version
+        id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
-          LOCAL_TAG: kautuka-base:test
-          PUSH_TAG: ghcr.io/devkrity/kautuka-base:${{ needs.resolve-channel.outputs.version }}
         run: |
           set -euo pipefail
-          docker tag "$LOCAL_TAG" "$PUSH_TAG"
-          resolved_tag="$(docker image inspect --format '{{index .RepoTags 0}}' "$PUSH_TAG")"
-          if [[ "$resolved_tag" != "$PUSH_TAG" ]]; then
-            echo "error: built container tag $resolved_tag does not match $PUSH_TAG." >&2
+          image="$(jq -r '.image // empty' src/images/kautuka-base/release.json)"
+          if [[ ! "$image" =~ ^ghcr\.io/devkrity/kautuka-base@sha256:[0-9a-f]{64}$ ]]; then
+            echo 'error: src/images/kautuka-base/release.json must select an exact kautuka-base digest before an app release.' >&2
             exit 1
           fi
-          if [[ "${{ needs.resolve-channel.outputs.dry_run }}" == 'true' ]]; then
-            echo 'image=' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          echo "Selected base image digest: $image"
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$PUSH_TAG"
-          # RepoDigests are name@sha256, never tag@sha256. A tag-qualified grep
-          # exits 1, and pipefail aborts before the fallback can run.
-          image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$LOCAL_TAG" | grep '^ghcr.io/devkrity/kautuka-base@sha256:' | head -n 1 || true)"
-          if [[ ! "$image" =~ ^ghcr.io/devkrity/kautuka-base@sha256:[0-9a-f]{64}$ ]]; then
-            echo "error: push did not yield a kautuka-base digest for ${PUSH_TAG}." >&2
-            docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$LOCAL_TAG" >&2 || true
+          docker pull "$image"
+          resolved_image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep '^ghcr.io/devkrity/kautuka-base@sha256:' | head -n 1 || true)"
+          if [[ "$resolved_image" != "$image" ]]; then
+            echo "error: pulled kautuka-base digest does not match the reviewed selection $image (resolved $resolved_image)." >&2
             exit 1
           fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          # Org container visibility has no working REST endpoint (the call
-          # returns 404). Set kautuka-base public once in package settings;
-          # later tags keep that visibility.
-          echo "kautuka-base digest recorded. Package visibility is unchanged by this job."
+          echo "image=$resolved_image" >> "$GITHUB_OUTPUT"
+          echo "Release will use $resolved_image; building Kautuka does not rebuild or retag kautuka-base."
 
   # Native AOT of Manager, Gateway, CredentialsHost, ChannelHost,
   # UpdateService, WebHost, and TUI is this job (scripts/build-release-assets.sh).
@@ -413,7 +391,7 @@ jobs:
     needs:
       - resolve-channel
       - validate-release
-      - publish-kautuka-base
+      - resolve-kautuka-base
     permissions:
       contents: read
       id-token: write
@@ -427,7 +405,7 @@ jobs:
       source_sha: ${{ needs.resolve-channel.outputs.source_sha }}
       dry_run: ${{ needs.resolve-channel.outputs.dry_run }}
       wsl_rootfs_asset_name: kautuka-wsl-appliance.tar.gz
-      kautuka_base_image: ${{ needs.publish-kautuka-base.outputs.image }}
+      kautuka_base_image: ${{ needs.resolve-kautuka-base.outputs.image }}
 
   publish-assets:
     name: Publish Release Assets

@@ -91,11 +91,4 @@ for (const name of jobs.keys()) {
   }
 }
 
-const publishBaseIf = /^    if:\s*\$\{\{\s*(.*?)\s*\}\}\s*$/m.exec(jobs.get('publish-kautuka-base') ?? '')?.[1] ?? '';
-if (!publishBaseIf.includes('always()') ||
-    !publishBaseIf.includes("needs.resolve-channel.outputs.skip != 'true'") ||
-    !publishBaseIf.includes("needs.validate-release.result == 'success'")) {
-  throw new Error('The explicit always() publisher must still require successful release validation and a non-skipped resolver.');
-}
-
-console.log('scheduled release gate defaults off; manual dispatch remains usable; all downstream jobs require the resolver; always() publisher requires successful validation');
+console.log('scheduled release gate defaults off; manual dispatch remains usable; all downstream jobs require the resolver');
