@@ -26,6 +26,7 @@ try {
     readFile(path.join(root, 'global.json'), 'utf8'),
   ]);
   const refreshInputsWorkflow = await readFile(path.join(root, '.github/workflows/refresh-linux-release-inputs.yml'), 'utf8');
+  const platformAssetsWorkflow = await readFile(path.join(root, '.github/workflows/release-build-platform-assets.yml'), 'utf8');
   const toolchain = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/toolchain.json'), 'utf8'));
   const releaseBuilderPin = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/release.json'), 'utf8'));
   const npmTools = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package.json'), 'utf8'));
@@ -67,6 +68,7 @@ try {
   assert.match(releaseBuilderPin.image, /^ghcr\.io\/devkrity\/kautuka-release-builder@sha256:[a-f0-9]{64}$/, 'release builder must be pinned to an immutable GHCR digest');
   assert.match(rootfsPin.image, /^ghcr\.io\/devkrity\/kautuka-wsl-rootfs@sha256:[a-f0-9]{64}$/, 'WSL rootfs must be pinned to an immutable GHCR digest');
   assert.match(refreshInputsWorkflow, /docker build --provenance=false -f src\/images\/wsl-rootfs\/Containerfile/, 'single-platform rootfs publish must upload a plain manifest whose digest can be pinned');
+  assert.match(platformAssetsWorkflow, /docker create --entrypoint \/bin\/true \"\$WSL_ROOTFS_IMAGE\"/, 'data-only WSL rootfs image has no CMD, so extraction must provide a command when creating the stopped container');
 
   const mcpStage = normalizedBuilder.split('log_phase "Building built-in MCP bundles"')[1]?.split('normalize_owned_paths "$built_in_mcpb_stage_dir"')[0];
   assert.ok(mcpStage, 'builder must retain the built-in MCP build stage');

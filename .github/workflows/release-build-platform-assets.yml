@@ -86,7 +86,10 @@ jobs:
             docker pull "$WSL_ROOTFS_IMAGE"
             resolved="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$WSL_ROOTFS_IMAGE" | grep '^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:' | head -n 1)"
             [[ "$resolved" == "$WSL_ROOTFS_IMAGE" ]]
-            container="$(docker create "$WSL_ROOTFS_IMAGE")"
+            # This is a data-only image built FROM scratch, so it has no CMD.
+            # `docker create` still requires a command even though we only use
+            # the stopped container as a source for `docker cp`.
+            container="$(docker create --entrypoint /bin/true "$WSL_ROOTFS_IMAGE")"
             mkdir -p .cache/release-build/wsl-rootfs
             docker cp "$container:/kautuka-wsl-rootfs.tar.gz" .cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz
             docker rm "$container" >/dev/null
