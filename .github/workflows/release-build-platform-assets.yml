@@ -93,6 +93,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
         run: |
           set -euo pipefail
           product_version="${MANIFEST_VERSION%%-preview.*}"
@@ -264,6 +265,7 @@ jobs:
             -p:Version="${PRODUCT_VERSION}" \
             -p:InformationalVersion="${PRODUCT_VERSION}+${SOURCE_SHA:0:7}" \
             -p:IncludeSourceRevisionInInformationalVersion=false \
+            -p:UseAppHost=true \
             -p:InstallerManifestPublicKeyPath="$(pwd)/manifest-signing-public.pem" \
             -c Release \
             -o publish/windows-installer
@@ -278,7 +280,9 @@ jobs:
 
           $publishedExe = 'publish/windows-installer/Kautuka.Installer.Windows.exe'
           if (-not (Test-Path -LiteralPath $publishedExe)) {
-            throw 'Kautuka.Installer.Windows.exe was not found. Refusing to rename another executable.'
+            $publishedFiles = Get-ChildItem -LiteralPath 'publish/windows-installer' -Force |
+              Select-Object -ExpandProperty Name
+            throw "Kautuka.Installer.Windows.exe was not found. Published files: $($publishedFiles -join ', '). Refusing to rename another executable."
           }
 
           Move-Item -LiteralPath $publishedExe -Destination $preferredAsset
