@@ -1,1 +1,1 @@
-{"name":"@devkrity/kautuka-release-tools","private":true,"version":"1.0.0","description":"Locked command line tools bundled into the Kautuka Linux release builder","dependencies":{"@anthropic-ai/mcpb":"2.1.2","corepack":"0.35.0"}}
+{"name":"@devkrity/kautuka-release-tools","private":true,"version":"1.0.0","description":"Locked command line tools bundled into the Kautuka Linux release builder","dependencies":{"@anthropic-ai/mcpb":"2.1.2","corepack":"0.35.0"},"overrides":{"tmp":"0.2.7","zod":"4.6.6"}}

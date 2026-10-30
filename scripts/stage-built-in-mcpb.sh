@@ -47,8 +47,13 @@ uv lock --check --project "$package_dir"
 mkdir -p "$(dirname "$output_file")"
 rm -f "$output_file"
 
-npx -y @anthropic-ai/mcpb validate "$package_dir"
-npx -y @anthropic-ai/mcpb pack "$package_dir" "$output_file"
+if command -v mcpb >/dev/null 2>&1; then
+  mcpb validate "$package_dir"
+  mcpb pack "$package_dir" "$output_file"
+else
+  npx -y @anthropic-ai/mcpb validate "$package_dir"
+  npx -y @anthropic-ai/mcpb pack "$package_dir" "$output_file"
+fi
 
 if [[ ! -f "$output_file" ]]; then
   echo "error: failed to create MCPB archive at $output_file" >&2

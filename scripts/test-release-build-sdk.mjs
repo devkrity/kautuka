@@ -52,8 +52,16 @@ try {
   assert.equal(toolchain.uv.version, '0.13.6');
   assert.equal(npmTools.dependencies['@anthropic-ai/mcpb'], '2.1.2');
   assert.equal(npmTools.dependencies.corepack, '0.35.0');
+  assert.equal(npmTools.overrides.zod, '4.6.6', 'release builder must override vulnerable zod to a patched version');
+  assert.equal(npmTools.overrides.tmp, '0.2.7', 'release builder must override vulnerable tmp to a patched version');
+  for (const script of ['stage-built-in-mcpb.sh', 'stage-m365-mail-mcpb.mjs', 'stage-google-mail-mcpb.mjs']) {
+    const source = await readFile(path.join(root, 'scripts', script), 'utf8');
+    assert.match(source, /command -v mcpb|run\(label, "mcpb"/, `${script} must prefer the release-builder's preinstalled MCPB CLI`);
+  }
   assert.equal(npmToolsLock.packages['node_modules/@anthropic-ai/mcpb'].version, npmTools.dependencies['@anthropic-ai/mcpb']);
   assert.equal(npmToolsLock.packages['node_modules/corepack'].version, npmTools.dependencies.corepack);
+  assert.equal(npmToolsLock.packages['node_modules/zod'].version, npmTools.overrides.zod, 'lockfile must resolve the patched zod override');
+  assert.equal(npmToolsLock.packages['node_modules/tmp'].version, npmTools.overrides.tmp, 'lockfile must resolve the patched tmp override');
   assert.equal(rootfsConfig.releasever, '44');
   assert.equal(rootfsConfig.architecture, 'amd64');
   assert.match(releaseBuilderPin.image, /^ghcr\.io\/devkrity\/kautuka-release-builder@sha256:[a-f0-9]{64}$/, 'release builder must be pinned to an immutable GHCR digest');
