@@ -95,14 +95,42 @@ fi
       echo "error: the Fedora package manifests had no source RPM entries." >&2
       exit 1
     fi
-    dnf download --source --destdir /output/srpms "${source_specs[@]}"
-    while IFS= read -r srpm; do
-      if [[ ! -s "/output/srpms/$srpm" ]]; then
-        echo "error: source RPM was not retrieved: $srpm" >&2
-        exit 1
-      fi
-    done < /input/fedora-srpm-list.txt
+    # Fedora mirrors retain only current package builds. Preserve what is
+    # available there, then let the caller retrieve older exact builds from
+    # Fedora Koji instead of silently omitting them.
+    dnf download --source --skip-unavailable --destdir /output/srpms "${source_specs[@]}"
   '
+
+# Resolve exact Fedora source RPM builds from Koji when the current mirror no
+# longer carries them. The rootfs manifest records NAME-VERSION-RELEASE, so
+# this URL is deterministic and stays tied to the installed binary build.
+while IFS= read -r srpm; do
+  [[ -n "$srpm" ]] || continue
+  if [[ -s "$work_dir/srpms/$srpm" ]]; then
+    continue
+  fi
+  if [[ ! "$srpm" =~ ^(.+)-([^-]+)-([^-]+)\.src\.rpm$ ]]; then
+    echo "error: source RPM name is not a valid Fedora NVR: $srpm" >&2
+    exit 1
+  fi
+  package_name="${BASH_REMATCH[1]}"
+  package_version="${BASH_REMATCH[2]}"
+  package_release="${BASH_REMATCH[3]}"
+  source_url="https://kojipkgs.fedoraproject.org/packages/$package_name/$package_version/$package_release/src/$srpm"
+  "$curl_bin" --fail --location --silent --show-error --retry 3 \
+    "$source_url" --output "$work_dir/srpms/$srpm"
+  if [[ ! -s "$work_dir/srpms/$srpm" ]]; then
+    echo "error: Fedora Koji did not provide required source RPM: $srpm" >&2
+    exit 1
+  fi
+done < "$work_dir/fedora-srpm-list.txt"
+
+while IFS= read -r srpm; do
+  if [[ ! -s "$work_dir/srpms/$srpm" ]]; then
+    echo "error: source RPM was not retrieved: $srpm" >&2
+    exit 1
+  fi
+done < "$work_dir/fedora-srpm-list.txt"
 
 cp "$work_dir/fedora-srpm-list.txt" "$source_dir/Fedora-SOURCE-RPMS.txt"
 (cd "$work_dir/srpms" && sha256sum *.src.rpm) > "$source_dir/Fedora-SOURCE-RPMS.sha256"

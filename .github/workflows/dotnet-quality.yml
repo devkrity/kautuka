@@ -77,6 +77,9 @@ jobs:
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 
+      - name: Test Fedora source RPM archive fallback
+        run: node ./scripts/test-stage-third-party-sources.mjs
+
       - name: Test release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 

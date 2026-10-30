@@ -28,6 +28,7 @@ while (($#)); do
   else shift; fi
 done
 printf '%s\\n' "$url" > "$output"
+printf '%s\\n' "$url" >> "$MOCK_CURL_LOG"
 `;
   const runtime = `#!/usr/bin/env bash
 set -euo pipefail
@@ -39,9 +40,6 @@ if [[ "$joined" == *" /bin/cat "* ]]; then
 fi
 for arg in "${'${args[@]}'}"; do
   if [[ "$arg" == *":/output/srpms:rw" ]]; then
-    destination="${'${arg%%:/output/srpms:rw}'}"
-    mkdir -p "$destination"
-    printf 'mock source rpm\\n' > "$destination/fixture-1.0-1.src.rpm"
     exit 0
   fi
 done
@@ -63,13 +61,14 @@ exit 1
     ...process.env,
     KAUTUKA_RELEASE_CURL: toMsysPath(path.join(mockBin, 'curl')),
     KAUTUKA_RELEASE_CONTAINER_RUNTIME: toMsysPath(path.join(mockBin, 'mock-container-runtime')),
+    MOCK_CURL_LOG: toMsysPath(path.join(temp, 'curl-urls.txt')),
   };
   const args = [
     '--release-dir', release,
     '--wsl-rootfs', rootfs,
     '--base-image', `ghcr.io/devkrity/kautuka-base@sha256:${'a'.repeat(64)}`,
   ];
-  const command = `cd ${quote(toMsysPath(root))} && ./scripts/stage-third-party-sources.sh ${args.map(quote).join(' ')}`;
+  const command = `cd ${quote(toMsysPath(root))} && bash ./scripts/stage-third-party-sources.sh ${args.map(quote).join(' ')}`;
   const gitBash = 'C:/Program Files/Git/bin/bash.exe';
   const bash = process.platform === 'win32' && existsSync(gitBash) ? gitBash : 'bash';
   const result = spawnSync(bash, ['-c', command], { env, encoding: 'utf8' });
@@ -88,7 +87,12 @@ exit 1
   }
   const sums = await readFile(path.join(sourceDir, 'SHA256SUMS'), 'utf8');
   if (!sums.includes(expected[0][0]) || !sums.includes(expected[1][0])) throw new Error('source checksum manifest omitted an elkjs source snapshot');
-  console.log('mocked source staging selected and checksummed both exact elkjs source commits, including transitive elkjs-mermaid');
+  const fedoraSourceUrl = 'https://kojipkgs.fedoraproject.org/packages/fixture/1.0/1/src/fixture-1.0-1.src.rpm';
+  const curlUrls = await readFile(path.join(temp, 'curl-urls.txt'), 'utf8');
+  if (!curlUrls.includes(fedoraSourceUrl)) throw new Error('staging did not fall back to the exact Fedora Koji source RPM URL');
+  const sourceChecksums = await readFile(path.join(sourceDir, 'Fedora-SOURCE-RPMS.sha256'), 'utf8');
+  if (!sourceChecksums.includes('fixture-1.0-1.src.rpm')) throw new Error('Fedora source checksum manifest omitted the Koji-fetched RPM');
+  console.log('mocked source staging selected and checksummed exact upstream source snapshots and exercised Fedora Koji fallback');
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
