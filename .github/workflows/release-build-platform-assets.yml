@@ -297,6 +297,12 @@ jobs:
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
 
       - name: Write manifest signing public key
         env:

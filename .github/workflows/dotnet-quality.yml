@@ -8,10 +8,6 @@ on:
       - main
       - kautuka_v2
       - "release/**"
-      - "enhancement/**"
-      - "enhancements/**"
-      - "Feature/**"
-      - "feature/**"
   pull_request:
     branches:
       - main
@@ -95,7 +91,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
 
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
@@ -117,7 +113,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
@@ -169,7 +165,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
 
       - name: Enable pinned pnpm and configure its cache
         run: |
@@ -206,7 +202,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
 
       - name: Enable pinned pnpm and configure its cache
         run: |
@@ -246,7 +242,7 @@ jobs:
       - name: Setup Node for Narad conformance fixtures
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
 
       - name: Enable pinned pnpm and configure its cache
         run: |
@@ -300,6 +296,7 @@ jobs:
             global.json
             src/**/*.csproj
             src/Directory.Packages.props
+            src/Directory.Build.props
       - name: Restore for formatting workspace
         run: dotnet restore src/Kautuka.slnx
       - name: Verify formatting
@@ -421,6 +418,12 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
       - name: Restore Native AOT boundary
         run: dotnet restore src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj -r ${{ matrix.runtime }}
       - name: Publish Native AOT boundary
@@ -439,6 +442,12 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+            src/Directory.Build.props
       - name: Restore Native AOT Gateway
         run: dotnet restore src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj -r linux-x64
       - name: Publish Native AOT Gateway
@@ -461,10 +470,22 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22"
+          node-version-file: .nvmrc
       - name: Enable pnpm
         working-directory: ${{ github.workspace }}
         run: corepack enable && corepack prepare pnpm@11.5.2 --activate
+      - name: Configure pnpm store
+        working-directory: ${{ github.workspace }}
+        run: |
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+      - name: Cache acceptance and root pnpm packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-acceptance-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/tests/channel-acceptance/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-acceptance-pnpm-${{ runner.os }}-11.5.2-
       - name: Install Narad spec at repo root
         # narad-contract.spec.ts resolves @devkrity/narad-spec from repo root
         # via src/tests/channel-acceptance/src/narad-conformance.ts. That package
