@@ -11,23 +11,22 @@ tag="$2"
 tag_sha="$3"
 main_sha="$4"
 gh_bin="${GH_BIN:-gh}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ "$tag_sha" != "$main_sha" ]]; then
   echo 'error: only an exact Preview tag on current main can be retried.' >&2
   exit 1
 fi
 
-if release="$("$gh_bin" api "repos/$repository/releases/tags/$tag" 2>&1)"; then
-  :
-else
-  if grep -Eq 'HTTP 404|Not Found \(HTTP 404\)' <<< "$release"; then
-    # The immutable tag exists, but release creation did not complete. Reuse
-    # this exact tag; never create a replacement tag for the same main commit.
-    echo 'reuse'
-    exit 0
-  fi
+if ! release="$(GH_BIN="$gh_bin" bash "$script_dir/find-github-release-by-tag.sh" "$repository" "$tag")"; then
   echo 'error: GitHub release lookup failed; refusing Preview tag recovery.' >&2
   exit 1
+fi
+if [[ "$release" == 'null' ]]; then
+  # The immutable tag exists, but release creation did not complete. Reuse
+  # this exact tag; never create a replacement tag for the same main commit.
+  echo 'reuse'
+  exit 0
 fi
 
 if ! jq -e --arg tag "$tag" --arg sha "$tag_sha" \

@@ -172,8 +172,12 @@ try {
   const windowsBuildJob = workflow.slice(windowsBuildStart, linuxInstallerStart);
   assert.match(linuxBuildJob, /node-version:\s*["']26["']/u,
     'Linux release build must use the supported Node 26 line');
+  assert.match(linuxBuildJob, /product_version="\$\{MANIFEST_VERSION%%-preview\.\*\}"[\s\S]*?--product-version "\$product_version"/u,
+    'Linux Preview builds must pass the base product version; the builder appends the channel version suffix itself');
   assert.match(windowsBuildJob, /node-version:\s*["']26["']/u,
     'Windows release build must use the supported Node 26 line');
+  assert.match(windowsBuildJob, /-p:InformationalVersion="\$\{PRODUCT_VERSION\}\+\$\{SOURCE_SHA:0:7\}"[ \t]*\\\r?\n\s+-p:IncludeSourceRevisionInInformationalVersion=false/u,
+    'Windows installer metadata must keep the explicit short SHA without the SDK appending it again');
   assert.match(workflow, /workflow_call:[\s\S]*?secrets:[\s\S]*?release_manifest_private_key:\s*\n\s+required:\s*true/u,
     'the reusable platform workflow must require the manifest signing key');
   assert.match(releasePipeline, /build-platform-assets:[\s\S]*?secrets:\s*\n\s+release_manifest_private_key:\s*\$\{\{\s*secrets\.RELEASE_MANIFEST_PRIVATE_KEY\s*\}\}/u,
