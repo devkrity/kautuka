@@ -78,8 +78,8 @@ public sealed class RuntimeImageAllowlistTests
     {
         RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
         string repoRoot = FindRepoRoot();
-        string dockerfile = File.ReadAllText(Path.Combine(repoRoot, "src", "backend", "Kautuka.Manager", "SandboxAssets", "Dockerfile"));
-        string pkgsProxy = File.ReadAllText(Path.Combine(repoRoot, "src", "backend", "Kautuka.Manager", "SidecarAssets", "pkgs-proxy", "Dockerfile"));
+        string dockerfile = File.ReadAllText(Path.Combine(repoRoot, "src", "images", "kautuka-base", "Dockerfile"));
+        string pkgsProxy = File.ReadAllText(Path.Combine(repoRoot, "src", "images", "kautuka-pkgs-proxy", "Dockerfile"));
         string sidecarsJson = File.ReadAllText(Path.Combine(repoRoot, "src", "backend", "Kautuka.Manager", "sidecars.json"));
 
         Assert.Contains("ARG FEDORA_IMAGE=quay.io/fedora/fedora-minimal:44", dockerfile, StringComparison.Ordinal);

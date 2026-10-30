@@ -1,7 +1,7 @@
-# Local wrapper over git-pkgs/proxy so Podman can run an in-container HEALTHCHECK.
+# Local wrapper over the Devkrity-mirrored package proxy so Podman can run an in-container HEALTHCHECK.
 # Manager cannot HTTP-probe unpublished sandbox aliases from the host netns (rootless).
 # HEALTHCHECK uses wget already in this Alpine image; do not add a second probe container.
-FROM ghcr.io/git-pkgs/proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5
+FROM ghcr.io/devkrity/kautuka-package-proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5
 
 ENV PROXY_LISTEN=:20101
 

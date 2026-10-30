@@ -25,7 +25,7 @@ on:
         required: true
         type: string
       kautuka_base_image:
-        description: ghcr.io/devkrity/kautuka-base digest built from Fedora 44 for this release.
+        description: Immutable digest resolved from the separately released kautuka-base stable selector.
         required: true
         type: string
 jobs:
@@ -42,7 +42,6 @@ jobs:
           ref: ${{ inputs.source_sha }}
 
       - name: Pin the released sandbox image
-        if: ${{ inputs.dry_run != 'true' }}
         env:
           KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
         run: python3 scripts/pin-released-sandbox-image.py src/backend/Kautuka.Manager/runtime-images.json "$KAUTUKA_BASE_IMAGE"

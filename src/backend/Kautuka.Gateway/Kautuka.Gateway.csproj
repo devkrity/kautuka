@@ -91,7 +91,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="CoreAssets\Dockerfile">
+    <None Include="..\..\images\kautuka-gateway\Dockerfile" Link="CoreAssets\Dockerfile">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
@@ -133,7 +133,7 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(KautukaReleaseArtifactBuild)' == 'true'">
-    <None Update="CoreAssets\Dockerfile">
+    <None Update="..\..\images\kautuka-gateway\Dockerfile">
       <CopyToPublishDirectory>Never</CopyToPublishDirectory>
     </None>
   </ItemGroup>

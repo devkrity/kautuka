@@ -1,6 +1,6 @@
 # Kautuka Web assets build stage for Kautuka.WebHost.
-# Build from src/frontend/web/ directory when you need a standalone dist bundle:
-#   podman build -f Dockerfile --target export -t localhost/kautuka-web-assets:latest .
+# Build with src/frontend/web as context when you need a standalone dist bundle:
+#   podman build -f src/images/kautuka-web-assets/Dockerfile --target export -t localhost/kautuka-web-assets:latest src/frontend/web
 FROM quay.io/fedora/fedora:44 AS builder
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./

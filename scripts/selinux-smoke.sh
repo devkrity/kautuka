@@ -70,8 +70,8 @@ chmod 0777 "$host_workspace"
 
 podman build \
   -t "$image_ref" \
-  -f "$repo_root/src/backend/Kautuka.Manager/SandboxAssets/Dockerfile" \
-  "$repo_root/src/backend/Kautuka.Manager/SandboxAssets" \
+  -f "$repo_root/src/images/kautuka-base/Dockerfile" \
+  "$repo_root/src/images/kautuka-base" \
   >/dev/null
 
 podman run --rm \

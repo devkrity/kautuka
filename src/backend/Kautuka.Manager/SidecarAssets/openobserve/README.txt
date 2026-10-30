@@ -1,1 +1,0 @@
-OpenObserve sidecar assets placeholder.

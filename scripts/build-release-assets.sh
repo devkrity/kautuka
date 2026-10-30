@@ -576,7 +576,7 @@ rootfs_cache_dir="$cache_root/wsl-rootfs"
 rootfs_releasever='44'
 rootfs_arch='amd64'
 rootfs_image='quay.io/fedora/fedora:44'
-release_build_containerfile="$repo_root/scripts/release-build-image.Containerfile"
+release_build_containerfile="$repo_root/src/images/release-builder/Containerfile"
 
 cleanup_work_dir() {
   local exit_code=$?
@@ -763,8 +763,9 @@ run_build_container \
 
       mkdir -p "$output_path/sandbox" "$output_path/sidecar-assets"
       cp src/backend/Kautuka.Manager/sidecars.json "$output_path/sidecars.json"
-      cp src/backend/Kautuka.Manager/SandboxAssets/Dockerfile "$output_path/sandbox/Dockerfile"
-      cp -a src/backend/Kautuka.Manager/SidecarAssets/. "$output_path/sidecar-assets/"
+      install -D -m 0644 src/images/kautuka-base/Dockerfile "$output_path/sandbox/Dockerfile"
+      install -D -m 0644 src/images/kautuka-pkgs-proxy/Dockerfile "$output_path/sidecar-assets/pkgs-proxy/Dockerfile"
+      install -D -m 0644 src/images/openobserve/README.txt "$output_path/sidecar-assets/openobserve/README.txt"
     }
 
     copy_gateway_runtime_assets() {

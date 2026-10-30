@@ -1,0 +1,96 @@
+name: Release Kautuka Base Image
+
+on:
+  pull_request:
+    paths:
+      - 'src/images/kautuka-base/**'
+      - 'scripts/build-kautuka-base.sh'
+      - 'scripts/test-kautuka-base.sh'
+      - '.github/workflows/release-kautuka-base.yml'
+  workflow_dispatch:
+    inputs:
+      image_version:
+        description: New independent kautuka-base image version (for example 0.1.0).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kautuka-base-release
+  cancel-in-progress: false
+
+jobs:
+  validate-image:
+    name: Build and test the sandbox image
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and test kautuka-base
+        env:
+          KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+          KAUTUKA_BASE_LOCAL_TAG: kautuka-base:test
+        run: bash scripts/build-kautuka-base.sh
+
+  publish-image:
+    name: Publish independent base image version
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Require a main-branch dispatch and a new semantic image version
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          IMAGE_VERSION: ${{ inputs.image_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF" != 'refs/heads/main' ]]; then
+            echo 'error: base image releases must be dispatched from main.' >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo 'error: image_version must be plain SemVer such as 0.1.0.' >&2
+            exit 1
+          fi
+
+      - name: Build and test kautuka-base
+        env:
+          KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+          KAUTUKA_BASE_LOCAL_TAG: kautuka-base:test
+        run: bash scripts/build-kautuka-base.sh
+
+      - name: Publish the independent version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_VERSION: ${{ inputs.image_version }}
+          LOCAL_TAG: kautuka-base:test
+          VERSIONED_TAG: ghcr.io/devkrity/kautuka-base:${{ inputs.image_version }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if docker manifest inspect "$VERSIONED_TAG" >/dev/null 2>&1; then
+            echo "error: kautuka-base version $IMAGE_VERSION already exists; publish a new version instead of replacing it." >&2
+            exit 1
+          fi
+          docker tag "$LOCAL_TAG" "$VERSIONED_TAG"
+          docker push "$VERSIONED_TAG"
+          image="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$VERSIONED_TAG" | grep '^ghcr.io/devkrity/kautuka-base@sha256:' | head -n 1 || true)"
+          if [[ ! "$image" =~ ^ghcr.io/devkrity/kautuka-base@sha256:[0-9a-f]{64}$ ]]; then
+            echo 'error: published version did not resolve to an immutable kautuka-base digest.' >&2
+            exit 1
+          fi
+          {
+            echo '## Published kautuka-base image'
+            echo
+            echo "- Version tag: `$VERSIONED_TAG`"
+            echo "- Digest: `$image`"
+            echo '- Update `src/images/kautuka-base/release.json` in a reviewed Kautuka change with this exact digest; subsequent app releases will pin it in their signed manifests.'
+          } >> "$GITHUB_STEP_SUMMARY"

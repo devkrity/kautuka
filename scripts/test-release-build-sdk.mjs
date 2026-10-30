@@ -22,7 +22,7 @@ try {
 
   const [builder, image, globalJson] = await Promise.all([
     readFile(path.join(root, 'scripts/build-release-assets.sh'), 'utf8'),
-    readFile(path.join(root, 'scripts/release-build-image.Containerfile'), 'utf8'),
+    readFile(path.join(root, 'src/images/release-builder/Containerfile'), 'utf8'),
     readFile(path.join(root, 'global.json'), 'utf8'),
   ]);
   const projectSdk = JSON.parse(globalJson).sdk.version;
