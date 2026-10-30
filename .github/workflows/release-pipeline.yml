@@ -2,7 +2,7 @@ name: Release Pipeline
 
 on:
   schedule:
-    - cron: '0 12 * * 5'
+    - cron: '0 2 * * *'
       timezone: 'Australia/Brisbane'
   workflow_dispatch:
     inputs:
@@ -10,8 +10,13 @@ on:
         description: Existing main tag to rerun (preview) or promote (stable).
         required: false
         type: string
+      publish_preview_now:
+        description: Create and publish the next Preview from main now.
+        required: true
+        default: false
+        type: boolean
       dry_run:
-        description: Build and verify without publishing (manual runs only).
+        description: Build and verify without publishing (leave true unless publishing).
         required: true
         default: true
         type: boolean
@@ -20,7 +25,7 @@ env:
   KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.20'
 
 concurrency:
-  group: release-${{ github.event_name == 'schedule' && 'preview' || contains(inputs.release_tag, '-preview.') && 'preview' || 'stable' }}
+  group: release-${{ (github.event_name == 'schedule' || inputs.publish_preview_now) && 'preview' || contains(inputs.release_tag, '-preview.') && 'preview' || 'stable' }}
   cancel-in-progress: false
 
 jobs:
@@ -56,6 +61,7 @@ jobs:
         id: resolve
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH_PREVIEW_NOW: ${{ inputs.publish_preview_now }}
           DRY_RUN: ${{ inputs.dry_run }}
           EVENT_NAME: ${{ github.event_name }}
           UPCOMING_STABLE_VERSION: ${{ env.KAUTUKA_UPCOMING_STABLE_VERSION }}
@@ -66,7 +72,17 @@ jobs:
           git fetch origin +refs/heads/main:refs/remotes/origin/main --tags
           main_sha="$(git rev-parse refs/remotes/origin/main)"
           dry_run='false'
-          if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' && "$PUBLISH_PREVIEW_NOW" == 'true' ]]; then
+            if [[ "$DRY_RUN" != 'false' ]]; then
+              echo 'error: publishing a new Preview requires dry_run=false.' >&2
+              exit 1
+            fi
+            if [[ -n "$RELEASE_TAG" ]]; then
+              echo 'error: publish_preview_now creates the next Preview tag; do not also provide release_tag.' >&2
+              exit 1
+            fi
+          fi
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' && "$PUBLISH_PREVIEW_NOW" != 'true' ]]; then
             dry_run="$DRY_RUN"
             release_tag="$RELEASE_TAG"
             if [[ -z "$release_tag" ]]; then
@@ -74,7 +90,7 @@ jobs:
               exit 1
             fi
             if [[ "$release_tag" == *-preview.* && "$dry_run" != 'true' ]]; then
-              echo 'error: a manual Preview rerun must use dry_run=true; scheduled main runs publish Previews.' >&2
+              echo 'error: manual Preview reruns must use dry_run=true; use publish_preview_now to publish a new Preview.' >&2
               exit 1
             fi
           else

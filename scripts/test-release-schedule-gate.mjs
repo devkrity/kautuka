@@ -30,6 +30,15 @@ if (gate !== "github.event_name == 'workflow_dispatch' || vars.KAUTUKA_RELEASES_
   throw new Error('Channel resolution must default off for scheduled runs and remain available to manual dispatch.');
 }
 
+if (!/^      publish_preview_now:\r?\n        description:.*\r?\n        required: true\r?\n        default: false\r?\n        type: boolean\s*$/m.test(workflow)) {
+  throw new Error('Immediate Preview publication must require its explicit boolean opt-in, defaulting to false.');
+}
+if (!resolve.includes('PUBLISH_PREVIEW_NOW: ${{ inputs.publish_preview_now }}')
+  || !resolve.includes('if [[ "$EVENT_NAME" == \'workflow_dispatch\' && "$PUBLISH_PREVIEW_NOW" == \'true\' ]]')
+  || !resolve.includes('if [[ "$DRY_RUN" != \'false\' ]]')) {
+  throw new Error('Immediate Preview publication must be manually opted into and require dry_run=false.');
+}
+
 const scheduleGateAllows = (event, enabled) => event === 'workflow_dispatch' || enabled === 'true';
 for (const [event, enabled, expected] of [
   ['schedule', undefined, false],

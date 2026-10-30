@@ -8,13 +8,15 @@ Kautuka publishes versioned GitHub Releases. Stable uses exact `vX.Y.Z` tags and
 
 ## Scheduled release gate
 
-The `resolve-channel` job runs for `workflow_dispatch` so maintainers can perform a manual dry run. Scheduled releases stay disabled unless the repository variable `KAUTUKA_RELEASES_ENABLED` is exactly `true`; an unset or other value skips channel resolution before tag creation. Set it to `true` only after the source repository is public, release immutability is configured, signing and attestation work, and a live signed install/update rehearsal succeeds. Before Stable publication, verify the `stable` GitHub Environment requires owner approval. Manual Preview dispatches remain dry-run only.
+The `resolve-channel` job runs for `workflow_dispatch` so maintainers can perform a manual dry run. Scheduled releases stay disabled unless the repository variable `KAUTUKA_RELEASES_ENABLED` is exactly `true`; an unset or other value skips channel resolution before tag creation. Set it to `true` only after the source repository is public, release immutability is configured, signing and attestation work, and a live signed install/update rehearsal succeeds. Before Stable publication, verify the `stable` GitHub Environment requires owner approval.
 
 ## Nightly Preview
 
 Set `KAUTUKA_UPCOMING_STABLE_VERSION` to the next plain SemVer, such as `0.1.20`. The nightly run computes the next `v0.1.20-preview.N`, tags the current `main` commit, builds the artifacts, creates a draft, uploads and validates the complete asset set, and publishes an immutable GitHub prerelease. If no commits have landed since the latest Preview tag, a retry can reuse that exact tag only when no release exists or a matching empty draft exists. A partial draft or mismatched release identity stops for maintainer review. A matching published release is skipped only when GitHub reports it immutable. The workflow never moves or deletes tags and does not replace published assets.
 
-After Preview publication, install it from the public repository's Releases page and set the app update channel to **Preview**. Check the displayed version and short commit SHA, exercise updates, and report regressions against the tagged commit. Preview Windows installers may be unsigned; Authenticode status is disclosed in `SIGNING-STATUS.txt`. Manual `workflow_dispatch` can rebuild and verify an existing Preview tag with `dry_run=true`; it does not publish Preview releases.
+For an immediate Preview, dispatch **Release Pipeline** from `main`, set `publish_preview_now=true`, leave `release_tag` empty, and set `dry_run=false`. This explicit opt-in uses the same next-tag selection, immutable-release retry checks, signing, attestation, artifact validation, draft upload, and publish path as the scheduled run. Without that opt-in, manual Preview dispatches can only rebuild and verify an existing Preview tag with `dry_run=true`.
+
+After Preview publication, install it from the public repository's Releases page and set the app update channel to **Preview**. Check the displayed version and short commit SHA, exercise updates, and report regressions against the tagged commit. Preview Windows installers may be unsigned; Authenticode status is disclosed in `SIGNING-STATUS.txt`.
 
 ## Manual Stable release
 
