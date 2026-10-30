@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "image": "",
-  "description": "Reviewed GHCR digest consumed by release jobs. Empty keeps the reproducible local-build fallback enabled until the first image is bootstrapped."
+  "image": "ghcr.io/devkrity/kautuka-release-builder@sha256:799eae56a717cb84e3ba5cb905abb6ae7b1d2d2fdd2a641e851fdb1b02af5544",
+  "description": "Reviewed public GHCR digest consumed by release jobs."
 }

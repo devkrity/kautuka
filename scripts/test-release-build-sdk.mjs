@@ -27,9 +27,11 @@ try {
   ]);
   const refreshInputsWorkflow = await readFile(path.join(root, '.github/workflows/refresh-linux-release-inputs.yml'), 'utf8');
   const toolchain = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/toolchain.json'), 'utf8'));
+  const releaseBuilderPin = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/release.json'), 'utf8'));
   const npmTools = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package.json'), 'utf8'));
   const npmToolsLock = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package-lock.json'), 'utf8'));
   const rootfsConfig = JSON.parse(await readFile(path.join(root, 'src/images/wsl-rootfs/rootfs.json'), 'utf8'));
+  const rootfsPin = JSON.parse(await readFile(path.join(root, 'src/images/wsl-rootfs/release.json'), 'utf8'));
   const projectSdk = JSON.parse(globalJson).sdk.version;
   const normalizedBuilder = builder.replaceAll('\r\n', '\n');
   assert.match(builder, /resolve-release-dotnet-sdk\.sh.*global\.json/, 'builder must derive its SDK from project global.json');
@@ -54,6 +56,8 @@ try {
   assert.equal(npmToolsLock.packages['node_modules/corepack'].version, npmTools.dependencies.corepack);
   assert.equal(rootfsConfig.releasever, '44');
   assert.equal(rootfsConfig.architecture, 'amd64');
+  assert.match(releaseBuilderPin.image, /^ghcr\.io\/devkrity\/kautuka-release-builder@sha256:[a-f0-9]{64}$/, 'release builder must be pinned to an immutable GHCR digest');
+  assert.match(rootfsPin.image, /^ghcr\.io\/devkrity\/kautuka-wsl-rootfs@sha256:[a-f0-9]{64}$/, 'WSL rootfs must be pinned to an immutable GHCR digest');
   assert.match(refreshInputsWorkflow, /docker build --provenance=false -f src\/images\/wsl-rootfs\/Containerfile/, 'single-platform rootfs publish must upload a plain manifest whose digest can be pinned');
 
   const mcpStage = normalizedBuilder.split('log_phase "Building built-in MCP bundles"')[1]?.split('normalize_owned_paths "$built_in_mcpb_stage_dir"')[0];
