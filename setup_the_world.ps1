@@ -113,11 +113,10 @@ if (-not $Check) {
   try {
     dotnet restore src/Kautuka.slnx; if ($LASTEXITCODE) { throw 'dotnet restore failed' }
     pnpm install; if ($LASTEXITCODE) { throw 'pnpm install failed' }
-    dotnet tool restore; if ($LASTEXITCODE) { throw 'dotnet tool restore failed' }
     uv sync --project mcps/kautuka-web-tools; if ($LASTEXITCODE) { throw 'uv sync failed' }
     pnpm --dir src/frontend/web build; if ($LASTEXITCODE) { throw 'Frontend build failed' }
     dotnet build src/Kautuka.slnx --no-restore; if ($LASTEXITCODE) { throw 'dotnet build failed' }
-    dotnet husky install; if ($LASTEXITCODE) { throw 'Husky install failed' }
+    git config --local core.hooksPath .husky; if ($LASTEXITCODE) { throw 'Git hook path setup failed' }
     foreach($Example in @((Join-Path $Root '.env.example'),(Join-Path $Root 'src/backend/Kautuka.Gateway/.env.example'),(Join-Path (Split-Path $Root -Parent) 'kautuka-auth/.dev.vars.example'))){ if(Test-Path -LiteralPath $Example){$Target=$Example -replace '\.example$','.local'; if($Example -like '*\.dev.vars.example'){$Target=$Example -replace '\.example$',''}; if(-not (Test-Path -LiteralPath $Target)){Copy-Item -LiteralPath $Example -Destination $Target}} }
   } finally { Pop-Location }
   $AuthVars=Join-Path (Split-Path $Root -Parent) 'kautuka-auth/.dev.vars'

@@ -121,12 +121,12 @@ new_repos=()
 for repo in "${REPOS[@]}"; do case "$repo" in kautuka-auth|narad) url="https://github.com/devkrity/$repo.git";; *) echo "Unknown repo: $repo" >&2; exit 2;; esac; dest="$(dirname "$ROOT")/$repo"; if [[ -e "$dest" ]]; then [[ -d "$dest/.git" ]] || { echo "Path exists but is not a Git repository; leaving it untouched: $dest" >&2; exit 1; }; git -C "$dest" fetch --all --prune; else git clone "$url" "$dest"; new_repos+=("$repo"); fi; done
 for repo in "${new_repos[@]:-}"; do [[ -n "$repo" ]] || continue; dest="$(dirname "$ROOT")/$repo"; case "$repo" in kautuka-auth) if node -e "process.exit(require('$dest/package.json').scripts && require('$dest/package.json').scripts.setup ? 0 : 1)"; then npm --prefix "$dest" run setup; else npm --prefix "$dest" ci; fi;; narad) if node -e "process.exit(require('$dest/package.json').scripts && require('$dest/package.json').scripts.setup ? 0 : 1)"; then pnpm --dir "$dest" run setup; else pnpm --dir "$dest" install --frozen-lockfile; fi;; esac; done
 for example in "$ROOT"/.env.example "$ROOT"/src/backend/Kautuka.Gateway/.env.example "$(dirname "$ROOT")/kautuka-auth/.dev.vars.example"; do [[ -f "$example" ]] || continue; target="${example%.example}.local"; [[ "$example" == */.dev.vars.example ]] && target="${example%.example}"; [[ -e "$target" ]] || cp "$example" "$target"; done
-(cd "$ROOT" && dotnet restore src/Kautuka.slnx && pnpm install && dotnet tool restore && uv sync --project mcps/kautuka-web-tools && pnpm --dir src/frontend/web build && dotnet build src/Kautuka.slnx --no-restore)
+(cd "$ROOT" && dotnet restore src/Kautuka.slnx && pnpm install && uv sync --project mcps/kautuka-web-tools && pnpm --dir src/frontend/web build && dotnet build src/Kautuka.slnx --no-restore)
 if ! podman image exists localhost/kautuka-base:latest; then
   echo 'Building the local Kautuka sandbox base image required by Manager.'
   (cd "$ROOT" && KAUTUKA_BASE_LOCAL_TAG=localhost/kautuka-base:latest bash scripts/build-kautuka-base.sh)
 fi
-(cd "$ROOT" && dotnet husky install)
+(cd "$ROOT" && git config --local core.hooksPath .husky)
 if [[ -f "$(dirname "$ROOT")/kautuka-auth/.dev.vars" ]]; then echo 'Review blank auth settings as needed: GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/SECRET, GOOGLE_LOGIN_CLIENT_ID/SECRET, MICROSOFT_LOGIN_CLIENT_ID/SECRET, AUTH_TICKET_HMAC_KEY, REFRESH_TOKEN_KEYS, REFRESH_TOKEN_ACTIVE_KID.'; fi
 echo 'Kautuka provider credentials are entered in the first-run settings UI; setup never retrieves them.'
 if command -v code >/dev/null 2>&1 && [[ -t 0 ]]; then read -r -p 'Install VS Code recommended extensions now? [y/N] ' answer; if [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]; then while IFS= read -r ext; do [[ -n "$ext" ]] && code --install-extension "$ext"; done < <(node -e "for (const id of require('$ROOT/.vscode/extensions.json').recommendations) console.log(id)"); fi; fi
