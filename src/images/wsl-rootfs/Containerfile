@@ -1,0 +1,4 @@
+FROM scratch
+LABEL org.opencontainers.image.source="https://github.com/devkrity/kautuka" \
+      org.opencontainers.image.description="Generic Fedora root filesystem layered into Kautuka WSL releases"
+COPY kautuka-wsl-rootfs.tar.gz /kautuka-wsl-rootfs.tar.gz

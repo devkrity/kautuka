@@ -292,8 +292,13 @@ fi
 
 container_runtime="${KAUTUKA_RELEASE_CONTAINER_RUNTIME:-podman}"
 dotnet_sdk_version="$(bash "$repo_root/scripts/resolve-release-dotnet-sdk.sh" "$repo_root/global.json")"
-node_build_image="${KAUTUKA_RELEASE_NODE_IMAGE:-quay.io/fedora/fedora:44}"
-node_version="${KAUTUKA_RELEASE_NODE_VERSION:-26.3.0}"
+node_build_image="${KAUTUKA_RELEASE_NODE_IMAGE:-}"
+read_release_config() {
+  node -e 'const fs=require("node:fs");let value=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const key of process.argv[2].split("."))value=value?.[key];if(value===undefined||value===null)process.exit(2);process.stdout.write(String(value))' "$1" "$2"
+}
+release_toolchain_config="$repo_root/src/images/release-builder/toolchain.json"
+rootfs_config="$repo_root/src/images/wsl-rootfs/rootfs.json"
+node_version="${KAUTUKA_RELEASE_NODE_VERSION:-$(read_release_config "$release_toolchain_config" 'node.version')}"
 node_arch="${KAUTUKA_RELEASE_NODE_ARCH:-x64}"
 cache_root="${KAUTUKA_RELEASE_CACHE_ROOT:-$repo_root/.cache/release-build}"
 container_network_mode="${KAUTUKA_RELEASE_CONTAINER_NETWORK_MODE:-}"
@@ -573,9 +578,9 @@ fi
 pnpm_store_dir="$cache_root/pnpm-store"
 nuget_packages_dir="$cache_root/nuget/packages"
 rootfs_cache_dir="$cache_root/wsl-rootfs"
-rootfs_releasever='44'
-rootfs_arch='amd64'
-rootfs_image='quay.io/fedora/fedora:44'
+rootfs_releasever="$(read_release_config "$rootfs_config" releasever)"
+rootfs_arch="$(read_release_config "$rootfs_config" architecture)"
+rootfs_image="$(read_release_config "$rootfs_config" composeImage)"
 release_build_containerfile="$repo_root/src/images/release-builder/Containerfile"
 
 cleanup_work_dir() {
@@ -625,10 +630,21 @@ if ! command -v "$container_runtime" >/dev/null 2>&1; then
   exit 1
 fi
 
-release_build_image_hash="$(compute_hash "$(hash_file "$release_build_containerfile")" "$dotnet_sdk_version")"
-release_build_image="localhost/kautuka-release-build:${release_build_image_hash:0:16}"
+release_build_image_hash="$(compute_hash "$(hash_file "$release_build_containerfile")" "$(hash_file "$release_toolchain_config")" "$(hash_file "$repo_root/src/images/release-builder/npm-tools/package-lock.json")" "$dotnet_sdk_version")"
+release_build_image="${KAUTUKA_RELEASE_BUILD_IMAGE:-localhost/kautuka-release-build:${release_build_image_hash:0:16}}"
+node_build_image="${node_build_image:-$release_build_image}"
 
 ensure_release_build_image() {
+  if [[ -n "${KAUTUKA_RELEASE_BUILD_IMAGE:-}" ]]; then
+    if ! container_image_exists "$release_build_image"; then
+      printf 'Pulling pinned Linux release toolchain: %s\n' "$release_build_image"
+      "$container_runtime" pull "$release_build_image"
+    else
+      printf 'Using pinned Linux release toolchain: %s\n' "$release_build_image"
+    fi
+    return 0
+  fi
+
   if [[ "$rebuild_images" != 'true' ]] && container_image_exists "$release_build_image"; then
     printf 'Reusing cached Linux release build image: %s\n' "$release_build_image"
     return 0
@@ -640,7 +656,13 @@ ensure_release_build_image() {
     build
     -f "$release_build_containerfile"
     -t "$release_build_image"
+    --build-arg "FEDORA_BASE_IMAGE=$(read_release_config "$release_toolchain_config" baseImage)"
     --build-arg "DOTNET_SDK_VERSION=$dotnet_sdk_version"
+    --build-arg "NODE_VERSION=$node_version"
+    --build-arg "NODE_SHA256=$(read_release_config "$release_toolchain_config" node.linuxX64Sha256)"
+    --build-arg "PNPM_VERSION=$(read_release_config "$release_toolchain_config" pnpmVersion)"
+    --build-arg "UV_VERSION=$(read_release_config "$release_toolchain_config" uv.version)"
+    --build-arg "UV_SHA256=$(read_release_config "$release_toolchain_config" uv.linuxX64Sha256)"
   )
 
   if [[ "$rebuild_images" == 'true' ]]; then
@@ -665,14 +687,8 @@ run_build_container \
   "$node_build_image" \
   bash -lc "
     set -euo pipefail
-    dnf install -y --setopt=install_weak_deps=False curl tar xz libatomic git
-    curl -fSL \"https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz\" -o /tmp/node.tar.xz
-    tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz
-    rm -f /tmp/node.tar.xz
-    if ! command -v corepack >/dev/null 2>&1; then
-      npm install --global --force corepack@latest
-    fi
-    corepack enable
+    command -v node >/dev/null
+    command -v pnpm >/dev/null
     # Non-interactive: allow pnpm to replace an incompatible/stale modules dir
     # (e.g. Windows node_modules that leaked into the Linux source snapshot).
     export CI=true
@@ -698,21 +714,9 @@ run_build_container \
   "$node_build_image" \
   bash -lc "
     set -euo pipefail
-    dnf install -y --setopt=install_weak_deps=False curl tar xz libatomic
-    curl -fSL \"https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz\" -o /tmp/node.tar.xz
-    tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz
-    rm -f /tmp/node.tar.xz
-    uv_version=0.13.6
-    uv_archive=uv-x86_64-unknown-linux-gnu.tar.gz
-    uv_sha256=f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
-    curl --fail --show-error --location --retry 3 --retry-all-errors --silent \
-      \"https://releases.astral.sh/github/uv/releases/download/\${uv_version}/\${uv_archive}\" \
-      -o /tmp/uv.tar.gz
-    printf '%s  %s\n' \"\$uv_sha256\" /tmp/uv.tar.gz | sha256sum --check --status
-    tar -xzf /tmp/uv.tar.gz -C /tmp
-    install -m 0755 \"/tmp/uv-x86_64-unknown-linux-gnu/uv\" /usr/local/bin/uv
-    rm -rf /tmp/uv.tar.gz /tmp/uv-x86_64-unknown-linux-gnu
-    uv --version | grep -Fq \"uv \${uv_version} \"
+    command -v node >/dev/null
+    command -v uv >/dev/null
+    command -v mcpb >/dev/null
     bash scripts/stage-built-in-mcpb.sh --output /out/kautuka-web-tools.mcpb
   "
 
@@ -816,12 +820,9 @@ run_build_container \
   "$node_build_image" \
   bash -lc "
     set -euo pipefail
-    dnf install -y --setopt=install_weak_deps=False curl tar xz libatomic
-    curl -fSL \"https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz\" -o /tmp/node.tar.xz
-    tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz
-    rm -f /tmp/node.tar.xz
-    npx -y @anthropic-ai/mcpb validate /pack
-    npx -y @anthropic-ai/mcpb pack /pack /out/kautuka-m365-mail.mcpb
+    command -v node >/dev/null
+    mcpb validate /pack
+    mcpb pack /pack /out/kautuka-m365-mail.mcpb
   "
 normalize_owned_paths "$built_in_mcpb_stage_dir"
 mkdir -p "$stage_dir/services/gateway/built-in-mcpb"
@@ -841,12 +842,9 @@ run_build_container \
   "$node_build_image" \
   bash -lc "
     set -euo pipefail
-    dnf install -y --setopt=install_weak_deps=False curl tar xz libatomic
-    curl -fSL \"https://nodejs.org/dist/v${node_version}/node-v${node_version}-linux-${node_arch}.tar.xz\" -o /tmp/node.tar.xz
-    tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz
-    rm -f /tmp/node.tar.xz
-    npx -y @anthropic-ai/mcpb validate /pack
-    npx -y @anthropic-ai/mcpb pack /pack /out/kautuka-google-mail.mcpb
+    command -v node >/dev/null
+    mcpb validate /pack
+    mcpb pack /pack /out/kautuka-google-mail.mcpb
   "
 normalize_owned_paths "$built_in_mcpb_stage_dir"
 cp "$built_in_mcpb_stage_dir/kautuka-google-mail.mcpb" "$stage_dir/services/gateway/built-in-mcpb/kautuka-google-mail.mcpb"
@@ -895,7 +893,14 @@ rootfs_cache_key="$(compute_hash "$(hash_file "$source_root/scripts/build-wsl-ro
 base_rootfs="$rootfs_cache_dir/kautuka-wsl-rootfs-${rootfs_cache_key:0:16}.tar.gz"
 
 log_phase "Preparing cached WSL base rootfs"
-if [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
+if [[ -n "${KAUTUKA_RELEASE_WSL_ROOTFS_PATH:-}" ]]; then
+  if [[ ! -s "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" ]]; then
+    echo "error: pinned WSL rootfs archive is missing or empty: $KAUTUKA_RELEASE_WSL_ROOTFS_PATH" >&2
+    exit 1
+  fi
+  cp "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" "$base_rootfs"
+  printf 'Using the reviewed WSL base rootfs from %s\n' "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH"
+elif [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
   printf 'Building cached WSL base rootfs: %s\n' "$base_rootfs"
   bash "$source_root/scripts/build-wsl-rootfs.sh" \
     --releasever "$rootfs_releasever" \

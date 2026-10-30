@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "scheduledRefreshEnabled": false,
+  "releasever": "44",
+  "architecture": "amd64",
+  "composeImage": "quay.io/fedora/fedora:44",
+  "buildScript": "scripts/build-wsl-rootfs.sh"
+}

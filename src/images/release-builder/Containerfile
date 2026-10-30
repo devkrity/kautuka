@@ -1,10 +1,21 @@
-FROM quay.io/fedora/fedora-minimal:44
+ARG FEDORA_BASE_IMAGE=quay.io/fedora/fedora-minimal:44
+FROM ${FEDORA_BASE_IMAGE}
+
+LABEL org.opencontainers.image.source="https://github.com/devkrity/kautuka" \
+      org.opencontainers.image.description="Pinned Kautuka Linux release build toolchain"
 
 ARG DOTNET_SDK_VERSION
+ARG NODE_VERSION
+ARG NODE_SHA256
+ARG PNPM_VERSION
+ARG UV_VERSION
+ARG UV_SHA256
 
-ENV PATH=/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PATH=/opt/release-tools/node_modules/.bin:/opt/dotnet:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV CC=clang
 ENV CXX=clang++
+
+COPY npm-tools/package.json npm-tools/package-lock.json /opt/release-tools/
 
 RUN microdnf install -y \
     bash \
@@ -15,12 +26,15 @@ RUN microdnf install -y \
     findutils \
     gcc \
     gcc-c++ \
+    git \
     glibc-devel \
     libicu \
     libicu-devel \
     lld \
     make \
+    libatomic \
     tar \
+    xz \
     zlib-devel \
     && microdnf clean all \
     && test -n "$DOTNET_SDK_VERSION" \
@@ -28,4 +42,23 @@ RUN microdnf install -y \
     && chmod +x /tmp/dotnet-install.sh \
     && /tmp/dotnet-install.sh --version "$DOTNET_SDK_VERSION" --install-dir /opt/dotnet --no-path \
     && ln -sf /opt/dotnet/dotnet /usr/local/bin/dotnet \
-    && rm -f /tmp/dotnet-install.sh
+    && rm -f /tmp/dotnet-install.sh \
+    && test -n "$NODE_VERSION" && test -n "$NODE_SHA256" \
+    && curl --fail --show-error --location --retry 5 --retry-all-errors --retry-delay 2 --silent "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && printf '%s  %s\n' "$NODE_SHA256" /tmp/node.tar.xz | sha256sum --check --status \
+    && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
+    && rm -f /tmp/node.tar.xz \
+    && npm ci --prefix /opt/release-tools --no-audit --no-fund \
+    && corepack enable \
+    && corepack prepare "pnpm@${PNPM_VERSION}" --activate \
+    && npm cache clean --force \
+    && test -n "$UV_VERSION" && test -n "$UV_SHA256" \
+    && curl --fail --show-error --location --retry 5 --retry-all-errors --retry-delay 2 --silent "https://releases.astral.sh/github/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/uv.tar.gz \
+    && printf '%s  %s\n' "$UV_SHA256" /tmp/uv.tar.gz | sha256sum --check --status \
+    && tar -xzf /tmp/uv.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv \
+    && rm -rf /tmp/uv.tar.gz /tmp/uv-x86_64-unknown-linux-gnu \
+    && node --version | grep -Fq "v${NODE_VERSION}" \
+    && pnpm --version | grep -Fq "${PNPM_VERSION}" \
+    && mcpb --version | grep -Fq "$(node -p 'require("/opt/release-tools/package.json").dependencies["@anthropic-ai/mcpb"]')" \
+    && uv --version | grep -Fq "uv ${UV_VERSION} "

@@ -177,8 +177,8 @@ try {
     'Linux Preview builds must pass the base product version; the builder appends the channel version suffix itself');
   assert.match(linuxBuildJob, /KAUTUKA_BASE_IMAGE:\s*\$\{\{\s*inputs\.kautuka_base_image\s*\}\}/u,
     'Linux release packaging must report the separately pinned base image in its component inventory');
-  assert.match(windowsBuildJob, /node-version:\s*["']26["']/u,
-    'Windows release build must use the supported Node 26 line');
+  assert.doesNotMatch(windowsBuildJob, /Pin the released sandbox image|Setup Node for frontend release notices|Install frozen frontend dependency graph for release notices|Generate release third-party notices and inventory/u,
+    'Windows installer job must not repeat platform-image pinning or frontend compliance setup already handled by the Linux platform asset job');
   assert.match(windowsBuildJob, /-p:InformationalVersion="\$\{PRODUCT_VERSION\}\+\$\{SOURCE_SHA:0:7\}"[ \t]*\\\r?\n\s+-p:IncludeSourceRevisionInInformationalVersion=false/u,
     'Windows installer metadata must keep the explicit short SHA without the SDK appending it again');
   assert.match(windowsBuildJob, /-p:UseAppHost=true/u,

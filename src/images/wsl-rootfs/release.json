@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "image": "",
+  "description": "Reviewed GHCR digest for the generic Fedora WSL base rootfs. Release-specific Kautuka binaries and configuration are layered later."
+}

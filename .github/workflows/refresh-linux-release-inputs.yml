@@ -1,0 +1,174 @@
+name: Refresh Linux Release Inputs
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which reusable input to build
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - release-builder
+          - wsl-rootfs
+      candidate_version:
+        description: Optional unique GHCR tag; leave blank to use a timestamp and source SHA
+        type: string
+        required: false
+  schedule:
+    - cron: "23 3 * * 0"
+
+concurrency:
+  group: refresh-linux-release-inputs-${{ inputs.target || 'scheduled' }}-${{ inputs.candidate_version || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-builder:
+    name: Build reusable Linux release toolchain
+    if: ${{ github.event_name == 'schedule' || inputs.target == 'both' || inputs.target == 'release-builder' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Decide whether the scheduled refresh is enabled
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [[ "$(jq -r '.scheduledRefreshEnabled' src/images/release-builder/toolchain.json)" != true ]]; then
+            echo 'Scheduled release-builder refresh is disabled in toolchain.json.'
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+        id: schedule
+
+      - name: Select a unique candidate tag
+        id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then tag="candidate-$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"; fi
+          [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo 'Invalid GHCR tag.' >&2; exit 1; }
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and publish candidate image
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-release-builder:$TAG"
+          config=src/images/release-builder/toolchain.json
+          [[ "$(jq -r '.schemaVersion' "$config")" == 1 ]]
+          if docker manifest inspect "$image" >/dev/null 2>&1; then echo "Refusing to overwrite existing candidate $image" >&2; exit 1; fi
+          sdk="$(jq -r '.sdk.version' global.json)"
+          docker build \
+            --build-arg "FEDORA_BASE_IMAGE=$(jq -r '.baseImage' "$config")" \
+            --build-arg "DOTNET_SDK_VERSION=$sdk" \
+            --build-arg "NODE_VERSION=$(jq -r '.node.version' "$config")" \
+            --build-arg "NODE_SHA256=$(jq -r '.node.linuxX64Sha256' "$config")" \
+            --build-arg "PNPM_VERSION=$(jq -r '.pnpmVersion' "$config")" \
+            --build-arg "UV_VERSION=$(jq -r '.uv.version' "$config")" \
+            --build-arg "UV_SHA256=$(jq -r '.uv.linuxX64Sha256' "$config")" \
+            -f src/images/release-builder/Containerfile -t "$image" src/images/release-builder
+          docker push "$image"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep -F "ghcr.io/${GITHUB_REPOSITORY,,}-release-builder@sha256:" | head -n 1)"
+          [[ "$digest" =~ ^ghcr\.io/devkrity/kautuka-release-builder@sha256:[0-9a-f]{64}$ ]]
+          echo "candidate=$digest" >> "$GITHUB_OUTPUT"
+          echo "### Release builder candidate" >> "$GITHUB_STEP_SUMMARY"
+          printf '`%s`\n' "$digest" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Review this digest, then update `src/images/release-builder/release.json` in a PR to promote it.' >> "$GITHUB_STEP_SUMMARY"
+        id: publish
+
+  wsl-rootfs:
+    name: Build generic WSL rootfs image
+    if: ${{ github.event_name == 'schedule' || inputs.target == 'both' || inputs.target == 'wsl-rootfs' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Decide whether the scheduled refresh is enabled
+        if: ${{ github.event_name == 'schedule' }}
+        id: schedule
+        run: |
+          if [[ "$(jq -r '.scheduledRefreshEnabled' src/images/wsl-rootfs/rootfs.json)" != true ]]; then
+            echo 'Scheduled WSL rootfs refresh is disabled in rootfs.json.'
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Select a unique candidate tag
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then tag="candidate-$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA:0:7}"; fi
+          [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo 'Invalid GHCR tag.' >&2; exit 1; }
+          echo "value=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Compose generic Fedora rootfs
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        env:
+          CONFIG: src/images/wsl-rootfs/rootfs.json
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/kautuka-wsl-rootfs.tar.gz"
+          bash "$(jq -r '.buildScript' "$CONFIG")" \
+            --releasever "$(jq -r '.releasever' "$CONFIG")" \
+            --arch "$(jq -r '.architecture' "$CONFIG")" \
+            --image "$(jq -r '.composeImage' "$CONFIG")" \
+            --container-runtime docker \
+            --output "$output"
+          test -s "$output"
+          cp "$output" src/images/wsl-rootfs/kautuka-wsl-rootfs.tar.gz
+
+      - name: Build and publish candidate image
+        if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
+        env:
+          TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-wsl-rootfs:$TAG"
+          if docker manifest inspect "$image" >/dev/null 2>&1; then echo "Refusing to overwrite existing candidate $image" >&2; exit 1; fi
+          docker build -f src/images/wsl-rootfs/Containerfile -t "$image" src/images/wsl-rootfs
+          docker push "$image"
+          digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep -F "ghcr.io/${GITHUB_REPOSITORY,,}-wsl-rootfs@sha256:" | head -n 1)"
+          [[ "$digest" =~ ^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:[0-9a-f]{64}$ ]]
+          echo "### WSL rootfs candidate" >> "$GITHUB_STEP_SUMMARY"
+          printf '`%s`\n' "$digest" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Review this digest, then update `src/images/wsl-rootfs/release.json` in a PR to promote it.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up generated rootfs archive
+        if: ${{ always() }}
+        run: rm -f src/images/wsl-rootfs/kautuka-wsl-rootfs.tar.gz

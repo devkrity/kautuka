@@ -28,6 +28,16 @@ on:
         description: Immutable digest resolved from the separately released kautuka-base stable selector.
         required: true
         type: string
+      release_builder_image:
+        description: Reviewed private GHCR digest; empty uses the temporary local-build fallback.
+        required: false
+        type: string
+        default: ''
+      wsl_rootfs_image:
+        description: Reviewed private GHCR digest; empty rebuilds the generic WSL rootfs locally.
+        required: false
+        type: string
+        default: ''
     secrets:
       release_manifest_private_key:
         required: true
@@ -39,10 +49,51 @@ jobs:
       name: ${{ inputs.channel }}
     permissions:
       contents: read
+      packages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
+
+      - name: Log in to GHCR for approved build inputs
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull and validate pinned reusable build inputs
+        env:
+          RELEASE_BUILDER_IMAGE: ${{ inputs.release_builder_image }}
+          WSL_ROOTFS_IMAGE: ${{ inputs.wsl_rootfs_image }}
+          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
+        run: |
+          set -euo pipefail
+          [[ "$KAUTUKA_BASE_IMAGE" =~ ^ghcr\.io/devkrity/kautuka-base@sha256:[0-9a-f]{64}$ ]]
+          docker pull "$KAUTUKA_BASE_IMAGE"
+          resolved="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$KAUTUKA_BASE_IMAGE" | grep '^ghcr\.io/devkrity/kautuka-base@sha256:' | head -n 1)"
+          [[ "$resolved" == "$KAUTUKA_BASE_IMAGE" ]]
+          if [[ -n "$RELEASE_BUILDER_IMAGE" ]]; then
+            [[ "$RELEASE_BUILDER_IMAGE" =~ ^ghcr\.io/devkrity/kautuka-release-builder@sha256:[0-9a-f]{64}$ ]]
+            docker pull "$RELEASE_BUILDER_IMAGE"
+            resolved="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$RELEASE_BUILDER_IMAGE" | grep '^ghcr\.io/devkrity/kautuka-release-builder@sha256:' | head -n 1)"
+            [[ "$resolved" == "$RELEASE_BUILDER_IMAGE" ]]
+          else
+            echo 'No promoted release-builder digest; using local build fallback.'
+          fi
+          if [[ -n "$WSL_ROOTFS_IMAGE" ]]; then
+            [[ "$WSL_ROOTFS_IMAGE" =~ ^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:[0-9a-f]{64}$ ]]
+            docker pull "$WSL_ROOTFS_IMAGE"
+            resolved="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$WSL_ROOTFS_IMAGE" | grep '^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:' | head -n 1)"
+            [[ "$resolved" == "$WSL_ROOTFS_IMAGE" ]]
+            container="$(docker create "$WSL_ROOTFS_IMAGE")"
+            mkdir -p .cache/release-build/wsl-rootfs
+            docker cp "$container:/kautuka-wsl-rootfs.tar.gz" .cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz
+            docker rm "$container" >/dev/null
+            test -s .cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz
+          else
+            echo 'No promoted WSL rootfs digest; using local build fallback.'
+          fi
 
       - name: Pin the released sandbox image
         env:
@@ -68,16 +119,29 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Restore frontend and NuGet release build caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: |
+            .cache/release-build/pnpm-store
+            .cache/release-build/nuget/packages
+          key: kautuka-release-deps-v1-${{ hashFiles('global.json', 'pnpm-lock.yaml', 'src/**/*.csproj', 'src/Directory.Packages.props') }}
+          restore-keys: |
+            kautuka-release-deps-v1-
 
       - name: Install frozen frontend dependency graph for release notices
         run: corepack enable && corepack prepare pnpm@11.5.2 --activate && pnpm --dir src/frontend install --frozen-lockfile
 
-      # Bump the explicit v1 cache epoch when intentionally refreshing the Fedora 44 base.
+      # The key includes the rootfs script and config so input changes invalidate the cache.
       - name: Restore cached WSL base rootfs
+        if: ${{ inputs.wsl_rootfs_image == '' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
         with:
           path: .cache/release-build/wsl-rootfs/*.tar.gz
-          key: kautuka-wsl-rootfs-fedora44-amd64-v1-${{ hashFiles('scripts/build-wsl-rootfs.sh') }}
+          key: kautuka-wsl-rootfs-${{ hashFiles('scripts/build-wsl-rootfs.sh', 'src/images/wsl-rootfs/rootfs.json') }}
 
       - name: Write manifest signing key
         env:
@@ -100,6 +164,8 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           KAUTUKA_RELEASE_CONTAINER_RUNTIME: docker
+          KAUTUKA_RELEASE_BUILD_IMAGE: ${{ inputs.release_builder_image }}
+          KAUTUKA_RELEASE_WSL_ROOTFS_PATH: ${{ inputs.wsl_rootfs_image != '' && '.cache/release-build/wsl-rootfs/pinned-rootfs.tar.gz' || '' }}
           KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
         run: |
           set -euo pipefail
@@ -204,24 +270,6 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
 
-      - name: Setup Node for frontend release notices
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: "26"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install frozen frontend dependency graph for release notices
-        shell: bash
-        run: corepack enable && corepack prepare pnpm@11.5.2 --activate && pnpm --dir src/frontend install --frozen-lockfile
-
-      - name: Pin the released sandbox image
-        if: ${{ inputs.dry_run != 'true' }}
-        shell: bash
-        env:
-          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
-        run: python scripts/pin-released-sandbox-image.py src/backend/Kautuka.Manager/runtime-images.json "$KAUTUKA_BASE_IMAGE"
-
       - name: Normalize artifact scope
         id: scope
         shell: bash
@@ -318,17 +366,6 @@ jobs:
         run: |
           Copy-Item -LiteralPath LICENSE -Destination publish/windows-installer/LICENSE
           Copy-Item -LiteralPath NOTICE -Destination publish/windows-installer/NOTICE
-
-      - name: Generate release third-party notices and inventory
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          KAUTUKA_BASE_IMAGE: ${{ inputs.kautuka_base_image }}
-        run: |
-          node scripts/generate-third-party-compliance.mjs \
-            --output-dir publish/windows-installer \
-            --release-tag "$RELEASE_TAG" \
-            --base-image "$KAUTUKA_BASE_IMAGE"
 
       - name: Sign Windows appliance installer
         shell: pwsh

@@ -23,6 +23,10 @@ on:
       - "Feature/**"
       - "feature/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-mcp:
     name: MCP Tests
@@ -34,11 +38,15 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: mcps/kautuka-mcp-diagnostics/package-lock.json
 
       - name: Install uv
         uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
         with:
           version: 0.13.6
+          enable-cache: true
+          cache-dependency-glob: mcps/kautuka-web-tools/uv.lock
 
       - name: Test Python MCP web tools
         working-directory: mcps/kautuka-web-tools
@@ -53,8 +61,8 @@ jobs:
           npm --prefix mcps/kautuka-mcp-diagnostics run check
           npm --prefix mcps/kautuka-mcp-diagnostics test
 
-  quality-automation:
-    name: Release and Repository Checks
+  quality-repository-hygiene:
+    name: Repository Hygiene and Docs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -63,19 +71,26 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
-
-      - name: Install Narad validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
 
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
 
       - name: Test tracked hygiene rejection paths
         run: node ./scripts/test-tracked-hygiene.mjs
+
+      - name: Validate documentation
+        run: node ./scripts/validate-docs.mjs
+
+  quality-release-regressions:
+    name: Release Regression Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
 
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
@@ -113,8 +128,21 @@ jobs:
       - name: Test release immutability preflight
         run: node ./scripts/test-release-immutability-preflight.mjs
 
-      - name: Validate documentation
-        run: node ./scripts/validate-docs.mjs
+  quality-narad:
+    name: Narad Validation and Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Narad validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
 
       - name: Validate Narad
         run: pnpm narad:check
@@ -158,13 +186,13 @@ jobs:
         with:
           global-json-file: global.json
           cache: true
-          cache-dependency-path: src/**/*.csproj
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
 
       - name: Restore
         run: dotnet restore src/Kautuka.slnx
-
-      - name: Verify formatting
-        run: dotnet format src/Kautuka.slnx --verify-no-changes
 
       - name: Build
         run: dotnet build src/Kautuka.slnx --no-restore
@@ -172,8 +200,23 @@ jobs:
       - name: Test
         run: dotnet test --solution src/Kautuka.slnx --no-build
 
-      - name: Narad security and performance gates
-        run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
+  quality-format:
+    name: .NET Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            global.json
+            src/**/*.csproj
+            src/Directory.Packages.props
+      - name: Restore for formatting workspace
+        run: dotnet restore src/Kautuka.slnx
+      - name: Verify formatting
+        run: dotnet format src/Kautuka.slnx --no-restore --verify-no-changes
 
   quality:
     name: Format, Build, Test
@@ -181,22 +224,30 @@ jobs:
     if: ${{ always() }}
     needs:
       - quality-mcp
-      - quality-automation
+      - quality-repository-hygiene
+      - quality-release-regressions
+      - quality-narad
       - quality-frontend
       - quality-dotnet
+      - quality-format
     steps:
       - name: Require all parallel quality jobs to pass
         env:
           MCP_RESULT: ${{ needs.quality-mcp.result }}
-          AUTOMATION_RESULT: ${{ needs.quality-automation.result }}
+          HYGIENE_RESULT: ${{ needs.quality-repository-hygiene.result }}
+          RELEASE_RESULT: ${{ needs.quality-release-regressions.result }}
+          NARAD_RESULT: ${{ needs.quality-narad.result }}
           FRONTEND_RESULT: ${{ needs.quality-frontend.result }}
           DOTNET_RESULT: ${{ needs.quality-dotnet.result }}
+          FORMAT_RESULT: ${{ needs.quality-format.result }}
         run: |
           set -euo pipefail
-          printf 'MCP: %s\nAutomation: %s\nFrontend: %s\nBackend: %s\n' \
-            "$MCP_RESULT" "$AUTOMATION_RESULT" "$FRONTEND_RESULT" "$DOTNET_RESULT"
-          [[ "$MCP_RESULT" == success && "$AUTOMATION_RESULT" == success \
-            && "$FRONTEND_RESULT" == success && "$DOTNET_RESULT" == success ]]
+          printf 'MCP: %s\nHygiene/docs: %s\nRelease checks: %s\nNarad: %s\nFrontend: %s\nBackend: %s\nFormat: %s\n' \
+            "$MCP_RESULT" "$HYGIENE_RESULT" "$RELEASE_RESULT" "$NARAD_RESULT" "$FRONTEND_RESULT" "$DOTNET_RESULT" "$FORMAT_RESULT"
+          [[ "$MCP_RESULT" == success && "$HYGIENE_RESULT" == success \
+            && "$RELEASE_RESULT" == success && "$NARAD_RESULT" == success \
+            && "$FRONTEND_RESULT" == success && "$DOTNET_RESULT" == success \
+            && "$FORMAT_RESULT" == success ]]
 
   packaging-smoke:
     name: Packaging Smoke Checks
