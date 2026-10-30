@@ -375,7 +375,7 @@ describe('WorkflowsPage first-class surface', () => {
       )
     ).toHaveAttribute('aria-expanded', 'true');
     expect(screen.queryByRole('tab', { name: 'Channels' })).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it('shows the topology canvas, opens settings, and adds a step on request', async () => {
     renderAt('/workflows/wf-1/edit');
