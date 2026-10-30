@@ -25,6 +25,7 @@ try {
     readFile(path.join(root, 'src/images/release-builder/Containerfile'), 'utf8'),
     readFile(path.join(root, 'global.json'), 'utf8'),
   ]);
+  const refreshInputsWorkflow = await readFile(path.join(root, '.github/workflows/refresh-linux-release-inputs.yml'), 'utf8');
   const toolchain = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/toolchain.json'), 'utf8'));
   const npmTools = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package.json'), 'utf8'));
   const npmToolsLock = JSON.parse(await readFile(path.join(root, 'src/images/release-builder/npm-tools/package-lock.json'), 'utf8'));
@@ -53,6 +54,7 @@ try {
   assert.equal(npmToolsLock.packages['node_modules/corepack'].version, npmTools.dependencies.corepack);
   assert.equal(rootfsConfig.releasever, '44');
   assert.equal(rootfsConfig.architecture, 'amd64');
+  assert.match(refreshInputsWorkflow, /docker build --provenance=false -f src\/images\/wsl-rootfs\/Containerfile/, 'single-platform rootfs publish must upload a plain manifest whose digest can be pinned');
 
   const mcpStage = normalizedBuilder.split('log_phase "Building built-in MCP bundles"')[1]?.split('normalize_owned_paths "$built_in_mcpb_stage_dir"')[0];
   assert.ok(mcpStage, 'builder must retain the built-in MCP build stage');

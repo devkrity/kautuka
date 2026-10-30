@@ -161,7 +161,11 @@ jobs:
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}-wsl-rootfs:$TAG"
           if docker manifest inspect "$image" >/dev/null 2>&1; then echo "Refusing to overwrite existing candidate $image" >&2; exit 1; fi
-          docker build -f src/images/wsl-rootfs/Containerfile -t "$image" src/images/wsl-rootfs
+          # This is a single-platform scratch image. Disable BuildKit's extra
+          # provenance index so GHCR receives the plain image manifest whose
+          # digest release jobs pin. The workflow run remains linked to the
+          # exact source commit and records the resulting image digest.
+          docker build --provenance=false -f src/images/wsl-rootfs/Containerfile -t "$image" src/images/wsl-rootfs
           docker push "$image"
           digest="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$image" | grep -F "ghcr.io/${GITHUB_REPOSITORY,,}-wsl-rootfs@sha256:" | head -n 1)"
           [[ "$digest" =~ ^ghcr\.io/devkrity/kautuka-wsl-rootfs@sha256:[0-9a-f]{64}$ ]]
