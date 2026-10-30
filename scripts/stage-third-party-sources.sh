@@ -108,22 +108,43 @@ cp "$work_dir/fedora-srpm-list.txt" "$source_dir/Fedora-SOURCE-RPMS.txt"
 (cd "$work_dir/srpms" && sha256sum *.src.rpm) > "$source_dir/Fedora-SOURCE-RPMS.sha256"
 tar -czf "$source_dir/Fedora-SOURCE-RPMS.tar.gz" -C "$work_dir/srpms" .
 
-cat > "$source_dir/SOURCE_ARCHIVES.md" <<'EOF'
-# Release source archives
-
-These archives accompany this release's distributed binaries and container
-images. The Git snapshots are pinned to the exact source commits recorded in
-`../THIRD_PARTY_COMPONENTS.json`. The Fedora archive contains the source RPMs
-for the complete installed package sets in the release's WSL rootfs and exact
-`kautuka-base` image digest. `Fedora-SOURCE-RPMS.txt` names each source RPM and
-`Fedora-SOURCE-RPMS.sha256` verifies the source RPM files within the archive.
-
-The OpenObserve and git-pkgs/proxy snapshots are complete source repository
-archives from the commits used for the release's pinned OCI images. The elkjs
-snapshots cover both the direct frontend 0.12.0 dependency and the transitive
-0.9.3 Mermaid dependency. Their EPL-2.0 license records require source
-availability and reasonable retrieval directions for distributed programs;
-see the adjacent Kautuka third-party notices and component inventory.
-EOF
+node - "$repo_root/compliance/third-party-components.json" "$source_dir/SOURCE_ARCHIVES.md" <<'NODE'
+const fs = require('node:fs');
+const catalog = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const output = process.argv[3];
+const licenseFiles = {
+  openobserve: 'LICENSE-openobserve.txt',
+  'git-pkgs-proxy': 'LICENSE-proxy.txt',
+  elkjs: 'LICENSE-EPL-2.0-elkjs.md',
+  'elkjs-mermaid': 'LICENSE-EPL-2.0-elkjs-0.9.3.md',
+};
+const ids = ['openobserve', 'git-pkgs-proxy', 'elkjs', 'elkjs-mermaid'];
+const components = new Map(catalog.components.map((component) => [component.id, component]));
+const rows = ids.map((id) => {
+  const component = components.get(id);
+  if (!component?.sourceCommit || !component.source || !licenseFiles[id]) {
+    throw new Error(`Missing source, commit, or distribution license mapping for ${id}`);
+  }
+  const archive = `${id}-${component.sourceCommit}.tar.gz`;
+  return `| ${id} | ${component.version} | ${component.licenseExpression} | ${component.image ?? 'Frontend source dependency'} | \`${archive}\` | \`${licenseFiles[id]}\` | ${component.source} @ \`${component.sourceCommit}\` |`;
+});
+const text = [
+  '# Release source archives',
+  '',
+  'This file is included in `kautuka-third-party-sources.zip`. It maps distributed upstream images and frontend components to the complete source archive staged at the exact reviewed commit.',
+  '',
+  '| Component | Version | License | Distributed image | Source archive | License text in `kautuka-licenses.zip` | Upstream source and commit |',
+  '|---|---|---|---|---|---|---|',
+  ...rows,
+  '',
+  'The companion `THIRD_PARTY_COMPONENTS.json` release asset records the machine-readable image digests, source URLs, commits, and license expressions. `THIRD_PARTY_NOTICES.txt` gives the human-readable notices. License texts named above are in the companion `kautuka-licenses.zip` release asset.',
+  '',
+  'The Fedora archive contains source RPMs for the complete installed package sets in the release WSL rootfs and exact `kautuka-base` image digest. `Fedora-SOURCE-RPMS.txt` names each source RPM and `Fedora-SOURCE-RPMS.sha256` verifies the source RPM files within the archive.',
+  '',
+  '`SHA256SUMS` verifies these Git source snapshots, the Fedora source RPM archive, and its source manifest.',
+  '',
+].join('\n');
+fs.writeFileSync(output, text);
+NODE
 (cd "$source_dir" && sha256sum openobserve-*.tar.gz git-pkgs-proxy-*.tar.gz elkjs-*.tar.gz Fedora-SOURCE-RPMS.tar.gz Fedora-SOURCE-RPMS.txt Fedora-SOURCE-RPMS.sha256 SOURCE_ARCHIVES.md > SHA256SUMS)
 printf 'Staged source archives in %s\n' "$source_dir"

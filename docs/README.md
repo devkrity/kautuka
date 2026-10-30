@@ -27,8 +27,9 @@ Read these in order:
 16. [Telegram channel UX](operations/telegram-channel-ux.md) — single-chat agent/session routing and legacy topic retirement.
 17. [Agent workspace](operations/agent-workspace.md) — session labels, ordering and timestamp display.
 18. [Third-party release compliance](operations/third-party-release-compliance.md) — component inventory, license notices, upstream source references, and per-release SBOMs.
-19. [Maintainer process](operations/maintainers.md) — issue triage, dependency updates, and release handling.
-20. [Support policy](../SUPPORT.md) — supported Stable baseline and best-effort Preview policy.
+19. [Runtime image mirrors](operations/runtime-image-mirrors.md) — GHCR packages, upstream sources, licenses, and source archives.
+20. [Maintainer process](operations/maintainers.md) — issue triage, dependency updates, and release handling.
+21. [Support policy](../SUPPORT.md) — supported Stable baseline and best-effort Preview policy.
 
 ## Authority map
 
