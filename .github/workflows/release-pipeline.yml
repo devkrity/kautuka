@@ -301,11 +301,24 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
 
       - name: Install Narad validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Validate Narad
         run: pnpm narad:check
@@ -325,6 +338,29 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node for Narad conformance fixtures
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
+
+      - name: Install Narad conformance fixtures
+        run: pnpm install --frozen-lockfile
 
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -386,11 +422,24 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Enable pinned pnpm and configure its cache
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm config set store-dir "$GITHUB_WORKSPACE/.cache/pnpm-store"
+          mkdir -p "$GITHUB_WORKSPACE/.cache/pnpm-store"
+
+      - name: Restore pnpm package store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.0.0
+        with:
+          path: .cache/pnpm-store
+          key: kautuka-pnpm-${{ runner.os }}-11.5.2-${{ hashFiles('pnpm-lock.yaml', 'src/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            kautuka-pnpm-${{ runner.os }}-11.5.2-
 
       - name: Install frontend validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
