@@ -243,6 +243,9 @@ jobs:
       - name: Verify release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 
+      - name: Verify Fedora source RPM archive fallback
+        run: node ./scripts/test-stage-third-party-sources.mjs
+
       - name: Verify release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
