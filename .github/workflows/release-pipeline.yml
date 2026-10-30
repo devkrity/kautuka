@@ -403,7 +403,7 @@ jobs:
       - name: Restore for formatting workspace
         run: dotnet restore src/Kautuka.slnx
       - name: Verify formatting
-        run: dotnet format src/Kautuka.slnx --no-restore --verify-no-changes
+        run: dotnet format whitespace src/Kautuka.slnx --no-restore --verify-no-changes
 
   validate-release-frontend:
     name: Release Frontend and Contract Tests

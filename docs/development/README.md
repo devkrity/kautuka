@@ -74,7 +74,7 @@ Run the checks relevant to the files and behavior changed:
 | Area | Command |
 |---|---|
 | Backend build and tests | `dotnet test src/Kautuka.slnx` |
-| .NET formatting | `dotnet format src/Kautuka.slnx --verify-no-changes` |
+| .NET whitespace formatting | `dotnet format whitespace src/Kautuka.slnx --verify-no-changes` |
 | Frontend unit tests | `pnpm --dir src/frontend/web test` |
 | Frontend browser tests | `pnpm --dir src/frontend/web test:e2e` |
 | Frontend lint | `pnpm --dir src/frontend/web lint` |

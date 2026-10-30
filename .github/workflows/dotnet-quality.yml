@@ -24,33 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  quality-change-scope:
-    name: Classify PR validation scope
-    runs-on: ubuntu-latest
-    outputs:
-      scope: ${{ steps.classify.outputs.scope }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Test scope classifier
-        run: node ./scripts/test-quality-scope.mjs
-
-      - name: Fetch pull request base commit
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
-
-      - name: Classify changed files (unknown changes run everything)
-        id: classify
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: node ./scripts/classify-quality-scope.mjs
-
   quality-mcp:
     name: MCP Tests
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,13 +74,14 @@ jobs:
       - name: Test tracked hygiene rejection paths
         run: node ./scripts/test-tracked-hygiene.mjs
 
+      - name: Require full-repository quality validation
+        run: node ./scripts/test-full-quality-workflow.mjs
+
       - name: Validate documentation
         run: node ./scripts/validate-docs.mjs
 
   quality-release-regressions:
     name: Release Regression Checks
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -156,8 +132,6 @@ jobs:
 
   quality-narad:
     name: Narad Validation and Audit
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,8 +167,6 @@ jobs:
 
   quality-frontend:
     name: Frontend Verification
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' || needs.quality-change-scope.outputs.scope == 'frontend' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -233,8 +205,6 @@ jobs:
 
   quality-dotnet:
     name: Backend Build and Tests
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -283,8 +253,6 @@ jobs:
 
   quality-format:
     name: .NET Formatting
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -300,14 +268,13 @@ jobs:
       - name: Restore for formatting workspace
         run: dotnet restore src/Kautuka.slnx
       - name: Verify formatting
-        run: dotnet format src/Kautuka.slnx --no-restore --verify-no-changes
+        run: dotnet format whitespace src/Kautuka.slnx --no-restore --verify-no-changes
 
   quality:
     name: Format, Build, Test
     runs-on: ubuntu-latest
     if: ${{ always() }}
     needs:
-      - quality-change-scope
       - quality-mcp
       - quality-repository-hygiene
       - quality-release-regressions
@@ -322,8 +289,6 @@ jobs:
     steps:
       - name: Require all parallel quality jobs to pass
         env:
-          SCOPE: ${{ needs.quality-change-scope.outputs.scope }}
-          SCOPE_RESULT: ${{ needs.quality-change-scope.result }}
           MCP_RESULT: ${{ needs.quality-mcp.result }}
           HYGIENE_RESULT: ${{ needs.quality-repository-hygiene.result }}
           RELEASE_RESULT: ${{ needs.quality-release-regressions.result }}
@@ -337,43 +302,18 @@ jobs:
           ACCEPTANCE_RESULT: ${{ needs.acceptance-contract.result }}
         run: |
           set -euo pipefail
-          printf 'Scope: %s (%s)\nMCP: %s\nHygiene/docs: %s\nRelease checks: %s\nNarad: %s\nFrontend: %s\nBackend: %s\nFormat: %s\nPackaging: %s\nCredentials: %s\nGateway AOT: %s\nAcceptance: %s\n' \
-            "$SCOPE" "$SCOPE_RESULT" \
+          printf 'MCP: %s\nHygiene/docs: %s\nRelease checks: %s\nNarad: %s\nFrontend: %s\nBackend: %s\nFormat: %s\nPackaging: %s\nCredentials: %s\nGateway AOT: %s\nAcceptance: %s\n' \
             "$MCP_RESULT" "$HYGIENE_RESULT" "$RELEASE_RESULT" "$NARAD_RESULT" "$FRONTEND_RESULT" "$DOTNET_RESULT" "$FORMAT_RESULT" \
             "$PACKAGING_RESULT" "$CREDENTIALS_RESULT" "$GATEWAY_AOT_RESULT" "$ACCEPTANCE_RESULT"
-          [[ "$SCOPE_RESULT" == success && "$HYGIENE_RESULT" == success ]]
-          case "$SCOPE" in
-            full)
-              [[ "$MCP_RESULT" == success && "$RELEASE_RESULT" == success \
-                && "$NARAD_RESULT" == success && "$FRONTEND_RESULT" == success \
-                && "$DOTNET_RESULT" == success && "$FORMAT_RESULT" == success \
-                && "$PACKAGING_RESULT" == success && "$CREDENTIALS_RESULT" == success \
-                && "$GATEWAY_AOT_RESULT" == success && "$ACCEPTANCE_RESULT" == success ]]
-              ;;
-            frontend)
-              [[ "$FRONTEND_RESULT" == success && "$MCP_RESULT" == skipped \
-                && "$RELEASE_RESULT" == skipped && "$NARAD_RESULT" == skipped \
-                && "$DOTNET_RESULT" == skipped && "$FORMAT_RESULT" == skipped \
-                && "$PACKAGING_RESULT" == skipped && "$CREDENTIALS_RESULT" == skipped \
-                && "$GATEWAY_AOT_RESULT" == skipped && "$ACCEPTANCE_RESULT" == success ]]
-              ;;
-            docs)
-              [[ "$MCP_RESULT" == skipped && "$RELEASE_RESULT" == skipped \
-                && "$NARAD_RESULT" == skipped && "$FRONTEND_RESULT" == skipped \
-                && "$DOTNET_RESULT" == skipped && "$FORMAT_RESULT" == skipped \
-                && "$PACKAGING_RESULT" == skipped && "$CREDENTIALS_RESULT" == skipped \
-                && "$GATEWAY_AOT_RESULT" == skipped && "$ACCEPTANCE_RESULT" == skipped ]]
-              ;;
-            *)
-              echo "error: unknown quality scope '$SCOPE'; failing closed." >&2
-              exit 1
-              ;;
-          esac
+          [[ "$HYGIENE_RESULT" == success && \
+            "$MCP_RESULT" == success && "$RELEASE_RESULT" == success && \
+            "$NARAD_RESULT" == success && "$FRONTEND_RESULT" == success && \
+            "$DOTNET_RESULT" == success && "$FORMAT_RESULT" == success && \
+            "$PACKAGING_RESULT" == success && "$CREDENTIALS_RESULT" == success && \
+            "$GATEWAY_AOT_RESULT" == success && "$ACCEPTANCE_RESULT" == success ]]
 
   packaging-smoke:
     name: Packaging Smoke Checks
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -400,8 +340,6 @@ jobs:
 
   credentials-published-boundary:
     name: Credentials Published Boundary (${{ matrix.runtime }})
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     strategy:
       fail-fast: false
       matrix:
@@ -434,8 +372,6 @@ jobs:
 
   gateway-native-aot:
     name: Gateway Native AOT (linux-x64)
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -457,8 +393,6 @@ jobs:
 
   acceptance-contract:
     name: Playwright Contract
-    needs: quality-change-scope
-    if: ${{ needs.quality-change-scope.outputs.scope == 'full' || needs.quality-change-scope.outputs.scope == 'frontend' }}
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
