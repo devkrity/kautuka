@@ -48,7 +48,7 @@ RUN microdnf install -y \
     && printf '%s  %s\n' "$NODE_SHA256" /tmp/node.tar.xz | sha256sum --check --status \
     && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
     && rm -f /tmp/node.tar.xz \
-    && npm ci --prefix /opt/release-tools --no-audit --no-fund \
+    && npm ci --prefix /opt/release-tools --ignore-scripts --no-audit --no-fund \
     && corepack enable \
     && corepack prepare "pnpm@${PNPM_VERSION}" --activate \
     && npm cache clean --force \

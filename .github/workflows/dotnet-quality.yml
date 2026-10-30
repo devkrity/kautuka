@@ -115,6 +115,9 @@ jobs:
       - name: Test release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
+      - name: Audit pinned Linux release-builder npm tools
+        run: npm audit --prefix src/images/release-builder/npm-tools --audit-level=low
+
       - name: Test parallel .NET build settings
         run: node ./scripts/test-dotnet-parallel-build.mjs
 

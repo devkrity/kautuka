@@ -46,7 +46,7 @@ try {
   assert.match(image, /test -n "\$DOTNET_SDK_VERSION"/, 'image build must reject a missing SDK argument');
   assert.match(image, /sha256sum --check --status/, 'toolchain dependencies must be hash-verified while the image is built');
   assert.match(image, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/, 'the builder image must pre-install the configured pnpm version');
-  assert.match(image, /npm ci --prefix \/opt\/release-tools/, 'the builder image must install the locked release tool dependencies');
+  assert.match(image, /npm ci --prefix \/opt\/release-tools --ignore-scripts/, 'the builder image must install locked release tools without running dependency lifecycle scripts');
   assert.match(image, /mcpb --version \| grep -Fq/, 'the builder image must check its bundled MCP bundle CLI');
   assert.equal(toolchain.node.version, '26.3.0');
   assert.equal(toolchain.uv.version, '0.13.6');
