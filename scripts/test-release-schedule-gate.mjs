@@ -38,6 +38,10 @@ if (!resolve.includes('PUBLISH_PREVIEW_NOW: ${{ inputs.publish_preview_now }}')
   || !resolve.includes('if [[ "$DRY_RUN" != \'false\' ]]')) {
   throw new Error('Immediate Preview publication must be manually opted into and require dry_run=false.');
 }
+if (!resolve.includes("git config user.name 'github-actions[bot]'")
+  || !resolve.includes("git config user.email '41898282+github-actions[bot]@users.noreply.github.com'")) {
+  throw new Error('Preview tags must be created with the GitHub Actions bot identity.');
+}
 
 const scheduleGateAllows = (event, enabled) => event === 'workflow_dispatch' || enabled === 'true';
 for (const [event, enabled, expected] of [
