@@ -98,4 +98,12 @@ if (!publishBaseIf.includes('always()') ||
   throw new Error('The explicit always() publisher must still require successful release validation and a non-skipped resolver.');
 }
 
+const publishBase = jobs.get('publish-kautuka-base') ?? '';
+if (!publishBase.includes("local_image_id=\"$(docker image inspect --format '{{.Id}}' \"$LOCAL_TAG\")\"")
+  || !publishBase.includes("pushed_image_id=\"$(docker image inspect --format '{{.Id}}' \"$PUSH_TAG\")\"")
+  || !publishBase.includes('"$local_image_id" != "$pushed_image_id"')
+  || publishBase.includes("{{index .RepoTags 0}}")) {
+  throw new Error('The container publish step must verify the requested tag by image ID, not arbitrary RepoTags ordering.');
+}
+
 console.log('scheduled release gate defaults off; manual dispatch remains usable; all downstream jobs require the resolver; always() publisher requires successful validation');
