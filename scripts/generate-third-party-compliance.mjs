@@ -5,6 +5,7 @@ import { readFile, mkdir, writeFile, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateFrontendLicenseCatalog, validateFrontendSupplementLock } from './validate-frontend-license-catalog.mjs';
+import { validateReleaseRuntimeImages } from './validate-release-runtime-images.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = Object.fromEntries(process.argv.slice(2).reduce((all, value, index, values) => {
@@ -19,19 +20,7 @@ if (!args['output-dir'] || !args['release-tag']) {
 const readJson = async (file) => JSON.parse(await readFile(path.join(root, file), 'utf8'));
 const catalog = await readJson('compliance/third-party-components.json');
 const runtime = await readJson('src/backend/Kautuka.Manager/runtime-images.json');
-const byId = new Map(catalog.components.map((component) => [component.id, component]));
-for (const image of runtime.images) {
-  const component = byId.get(image.id);
-  if (!component || component.image !== image.image) {
-    throw new Error(`Third-party catalog is missing or stale for runtime image ${image.id}; update compliance/third-party-components.json with verified source/license evidence.`);
-  }
-}
-if (runtime.images.length !== 2 || !byId.has('openobserve') || !byId.has('git-pkgs-proxy')) {
-  throw new Error('Runtime image inventory changed; review and update the third-party component catalog.');
-}
-if (args['base-image'] && !/^ghcr\.io\/devkrity\/kautuka-base@sha256:[a-f0-9]{64}$/.test(args['base-image'])) {
-  throw new Error(`Release base image must be an immutable ghcr.io/devkrity/kautuka-base digest, got: ${args['base-image']}`);
-}
+validateReleaseRuntimeImages(runtime.images, catalog.components, args['base-image']);
 
 for (const component of catalog.components) {
   for (const [relative, expected] of Object.entries(component.artifacts ?? {})) {

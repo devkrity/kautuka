@@ -246,6 +246,9 @@ jobs:
       - name: Verify release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
+      - name: Verify pinned base-image compliance inventory
+        run: node ./scripts/test-release-runtime-image-inventory.mjs
+
       - name: Verify signed release signature URL routing
         run: node ./scripts/test-release-manifest-signature-url.mjs
 
