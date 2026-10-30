@@ -1,6 +1,7 @@
 name: Dotnet Quality
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches:
@@ -23,10 +24,9 @@ on:
       - "feature/**"
 
 jobs:
-  quality:
-    name: Format, Build, Test
+  quality-mcp:
+    name: MCP Tests
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -34,9 +34,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-
-      - name: Install Narad validation dependencies
-        run: corepack enable && pnpm install --frozen-lockfile
 
       - name: Install uv
         uses: astral-sh/setup-uv@3259c6206f993105e3a61b142c2d97bf4b9ef83d # v10.3.2
@@ -55,6 +52,24 @@ jobs:
           npm ci --ignore-scripts --prefix mcps/kautuka-mcp-diagnostics
           npm --prefix mcps/kautuka-mcp-diagnostics run check
           npm --prefix mcps/kautuka-mcp-diagnostics test
+
+  quality-automation:
+    name: Release and Repository Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Narad validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
 
       - name: Validate tracked hygiene
         run: node ./scripts/validate-tracked-hygiene.mjs
@@ -89,6 +104,9 @@ jobs:
       - name: Test signed release signature URL routing
         run: node ./scripts/test-release-manifest-signature-url.mjs
 
+      - name: Test release asset packaging and public allow-list
+        run: node ./scripts/test-release-assets.mjs
+
       - name: Test local release feed signature routes
         run: node ./scripts/test-serve-release-smoke.mjs
 
@@ -104,10 +122,43 @@ jobs:
       - name: Narad dependency audit
         run: node ./scripts/audit-dependencies.mjs
 
+  quality-frontend:
+    name: Frontend Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install Narad validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
+      - name: Frontend Narad verify
+        run: pnpm --dir src/frontend verify
+
+      - name: Install Playwright Chromium
+        run: pnpm --dir src/frontend/web exec playwright install --with-deps chromium
+
+      - name: Run workflow canvas browser tests
+        run: pnpm --dir src/frontend/web test:e2e
+
+  quality-dotnet:
+    name: Backend Build and Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: src/**/*.csproj
 
       - name: Restore
         run: dotnet restore src/Kautuka.slnx
@@ -124,14 +175,28 @@ jobs:
       - name: Narad security and performance gates
         run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
 
-      - name: Frontend Narad verify
-        run: pnpm --dir src/frontend verify
-
-      - name: Install Playwright Chromium
-        run: pnpm --dir src/frontend/web exec playwright install --with-deps chromium
-
-      - name: Run workflow canvas browser tests
-        run: pnpm --dir src/frontend/web test:e2e
+  quality:
+    name: Format, Build, Test
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs:
+      - quality-mcp
+      - quality-automation
+      - quality-frontend
+      - quality-dotnet
+    steps:
+      - name: Require all parallel quality jobs to pass
+        env:
+          MCP_RESULT: ${{ needs.quality-mcp.result }}
+          AUTOMATION_RESULT: ${{ needs.quality-automation.result }}
+          FRONTEND_RESULT: ${{ needs.quality-frontend.result }}
+          DOTNET_RESULT: ${{ needs.quality-dotnet.result }}
+        run: |
+          set -euo pipefail
+          printf 'MCP: %s\nAutomation: %s\nFrontend: %s\nBackend: %s\n' \
+            "$MCP_RESULT" "$AUTOMATION_RESULT" "$FRONTEND_RESULT" "$DOTNET_RESULT"
+          [[ "$MCP_RESULT" == success && "$AUTOMATION_RESULT" == success \
+            && "$FRONTEND_RESULT" == success && "$DOTNET_RESULT" == success ]]
 
   packaging-smoke:
     name: Packaging Smoke Checks

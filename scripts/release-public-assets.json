@@ -1,0 +1,10 @@
+[
+  "Kautuka.Installer.exe",
+  "kautuka-install-linux.sh",
+  "kautuka-linux-amd64.tar.gz",
+  "kautuka-wsl-appliance.tar.gz",
+  "kautuka-platform-release.json",
+  "kautuka-platform-release.sig",
+  "kautuka-release-support.zip",
+  "SIGNING-STATUS.txt"
+]

@@ -186,8 +186,8 @@ jobs:
           node scripts/resolve-release.mjs "$release_tag" "$source_sha" "$dry_run"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-  validate-release:
-    name: Validate Release Inputs
+  validate-release-automation:
+    name: Release Automation Checks
     needs: resolve-channel
     if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
@@ -203,6 +203,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install Narad validation dependencies
         run: corepack enable && pnpm install --frozen-lockfile
@@ -270,10 +272,32 @@ jobs:
       - name: Narad dependency audit
         run: node ./scripts/audit-dependencies.mjs
 
+      - name: Secrets scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            detect --source /repo --verbose --redact --no-banner
+
+  validate-release-dotnet:
+    name: Release Backend Build and Tests
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
       - name: Setup .NET
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
+          cache: true
+          cache-dependency-path: src/**/*.csproj
 
       - name: Restore
         run: dotnet restore src/Kautuka.slnx
@@ -290,6 +314,29 @@ jobs:
       - name: Narad security and performance gates
         run: dotnet test --solution src/Kautuka.slnx --no-build --filter "FullyQualifiedName~NaradSecurityTests|FullyQualifiedName~NaradPerformanceTests" -- --ignore-exit-code 8
 
+  validate-release-frontend:
+    name: Release Frontend and Contract Tests
+    needs: resolve-channel
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-channel.outputs.source_sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend validation dependencies
+        run: corepack enable && pnpm install --frozen-lockfile
+
       - name: Frontend Narad verify
         run: pnpm --dir src/frontend verify
 
@@ -303,12 +350,28 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: pnpm test:contract
 
-      - name: Secrets scan
+  validate-release:
+    name: Validate Release Gate
+    needs:
+      - resolve-channel
+      - validate-release-automation
+      - validate-release-dotnet
+      - validate-release-frontend
+    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.resolve-channel.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all parallel release validations to pass
+        env:
+          AUTOMATION_RESULT: ${{ needs.validate-release-automation.result }}
+          DOTNET_RESULT: ${{ needs.validate-release-dotnet.result }}
+          FRONTEND_RESULT: ${{ needs.validate-release-frontend.result }}
         run: |
-          docker run --rm \
-            -v "$PWD:/repo" \
-            ghcr.io/gitleaks/gitleaks:v8.30.1 \
-            detect --source /repo --verbose --redact --no-banner
+          set -euo pipefail
+          printf 'Automation: %s\nBackend: %s\nFrontend: %s\n' \
+            "$AUTOMATION_RESULT" "$DOTNET_RESULT" "$FRONTEND_RESULT"
+          [[ "$AUTOMATION_RESULT" == success \
+            && "$DOTNET_RESULT" == success \
+            && "$FRONTEND_RESULT" == success ]]
 
   # Hosted runners cannot wsl --import. This job is skipped unless
   # KAUTUKA_SMOKE_BASE_URL points at a live WebHost (self-hosted appliance).
@@ -364,8 +427,7 @@ jobs:
     name: Resolve approved kautuka-base digest
     needs:
       - resolve-channel
-      - validate-release
-    if: ${{ needs.resolve-channel.outputs.skip != 'true' && needs.validate-release.result == 'success' }}
+    if: ${{ needs.resolve-channel.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     permissions:
       packages: read

@@ -9,14 +9,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, '..');
 const tag = 'v0.1.20-preview.1';
 const releaseDir = await mkdtemp(path.join(os.tmpdir(), 'kautuka-flat-release-assets-'));
-const required = [
-  'kautuka-install-linux.sh', 'Kautuka.Installer.exe', 'kautuka-linux-amd64.tar.gz',
-  'kautuka-wsl-appliance.tar.gz', 'kautuka-platform-release.json', 'kautuka-platform-release.sig',
-  'LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_COMPONENTS.json',
-  'FRONTEND_DEPENDENCIES.json',
-  'CREDITS.md', 'kautuka-licenses.zip', 'kautuka-third-party-sources.zip',
-  'kautuka-linux-amd64.spdx.json', 'kautuka-wsl-appliance.spdx.json',
-];
+const required = JSON.parse(await readFile(path.join(scriptDir, 'release-public-assets.json'), 'utf8'));
 
 try {
   for (const name of required) await writeFile(path.join(releaseDir, name), `fixture:${name}\n`);
@@ -27,10 +20,10 @@ try {
   ], { cwd: root, stdio: 'inherit' });
   execFileSync(process.execPath, [path.join(scriptDir, 'verify-release-assets.mjs'), '--directory', releaseDir, '--tag', tag], { cwd: root, stdio: 'inherit' });
 
-  await writeFile(path.join(releaseDir, 'kautuka-licenses.zip'), 'tampered after checksums');
+  await writeFile(path.join(releaseDir, 'kautuka-release-support.zip'), 'tampered after checksums');
   const tampered = spawnSync(process.execPath, [path.join(scriptDir, 'verify-release-assets.mjs'), '--directory', releaseDir, '--tag', tag], { cwd: root, encoding: 'utf8' });
   if (tampered.status === 0) throw new Error('asset verifier accepted a changed release asset');
-  await writeFile(path.join(releaseDir, 'kautuka-licenses.zip'), 'fixture:kautuka-licenses.zip\n');
+  await writeFile(path.join(releaseDir, 'kautuka-release-support.zip'), 'fixture:kautuka-release-support.zip\n');
   execFileSync(process.execPath, [path.join(scriptDir, 'generate-release-asset-manifest.mjs'), '--directory', releaseDir, '--relative-prefix', `releases/${tag}`], { cwd: root, stdio: 'ignore' });
   await mkdir(path.join(releaseDir, 'licenses'));
   const nested = spawnSync(process.execPath, [path.join(scriptDir, 'verify-release-assets.mjs'), '--directory', releaseDir, '--tag', tag], { cwd: root, encoding: 'utf8' });

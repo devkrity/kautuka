@@ -12,6 +12,14 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const generator = path.join(repoRoot, "scripts", "generate-release-manifest.mjs");
 const buildAssets = await fs.readFile(path.join(repoRoot, "scripts", "build-release-assets.sh"), "utf8");
 const localRelease = await fs.readFile(path.join(repoRoot, "scripts", "local-release.sh"), "utf8");
+const windowsInstaller = await fs.readFile(
+  path.join(repoRoot, "src", "installer", "Kautuka.Installer.Windows", "Installation", "WindowsApplianceInstaller.cs"),
+  "utf8",
+);
+const windowsRelease = await fs.readFile(
+  path.join(repoRoot, "src", "installer", "Kautuka.Installer.Windows", "Installation", "WindowsApplianceInstaller.Release.cs"),
+  "utf8",
+);
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "kautuka-release-signature-url-"));
 
 try {
@@ -55,7 +63,40 @@ try {
   manifest = JSON.parse(manifestBytes.toString("utf8"));
   signature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
   assert.equal(manifest.signature.url, "http://127.0.0.1:20300/kautuka-platform-release.sig", "default remains the release-asset URL");
+  assert.equal(manifest.signature.path, "kautuka-platform-release.sig", "signature asset has the published flat filename");
   assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "default release manifest signature remains valid");
+
+  const signatureAssetName = windowsInstaller.match(/releaseManifestSignatureAssetName = "([^"]+)"/u)?.[1];
+  assert.equal(signatureAssetName, manifest.signature.path, "Windows installer trusts the manifest's actual signature asset name");
+  assert.match(
+    windowsRelease,
+    /expectedSignatureUrl = \$"\{releaseBase\}\/\{releaseManifestSignatureAssetName\}"/u,
+    "Windows installer binds the signature URL to the exact release tag and the actual .sig asset name",
+  );
+  assert.match(
+    windowsRelease,
+    /manifest\.Signature\?\.Path, releaseManifestSignatureAssetName/u,
+    "Windows installer validates the manifest signature path against the actual .sig asset name",
+  );
+  assert.doesNotMatch(
+    windowsRelease,
+    /releaseManifestAssetName\}\.sig/u,
+    "Windows installer must not expect the nonexistent .json.sig asset",
+  );
+  const exactTagSignatureUrl = `https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/${signatureAssetName}`;
+  const wrongSignatureUrl = `https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/${manifest.signature.path}.json.sig`;
+  assert.notEqual(wrongSignatureUrl, exactTagSignatureUrl, "a .json.sig URL is rejected as a different release asset");
+
+  const exactReleaseBase = "https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1";
+  generate(["--artifact-base-url", exactReleaseBase]);
+  manifestBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  manifest = JSON.parse(manifestBytes.toString("utf8"));
+  signature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  assert.equal(manifest.signature.path, "kautuka-platform-release.sig");
+  assert.equal(manifest.signature.url, `${exactReleaseBase}/kautuka-platform-release.sig`);
+  assert.equal(manifest.artifacts.find((asset) => asset.platform === "wsl-amd64").url, `${exactReleaseBase}/kautuka-wsl-appliance.tar.gz`);
+  assert.equal(manifest.artifacts.find((asset) => asset.platform === "linux-x64").url, `${exactReleaseBase}/kautuka-linux-amd64.tar.gz`);
+  assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "exact-tag artifact and signature URLs remain covered by the manifest signature");
 
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");
   assert.match(buildAssets, /manifest_args\+\=\(--signature-url "\$signature_url"\)/, "release builder passes the explicit URL into the signed manifest generator");
