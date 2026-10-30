@@ -70,3 +70,5 @@ flowchart LR
 ## License
 
 Kautuka is available under the [Apache License 2.0](LICENSE).
+
+Kautuka also distributes two separately licensed runtime images through [GHCR](docs/operations/runtime-image-mirrors.md): OpenObserve (`AGPL-3.0`) and git-pkgs/proxy (`GPL-3.0-or-later`). Those licenses apply to the respective images, not to Kautuka. Kautuka release downloads include the third-party notices, component inventory, license texts, and exact source snapshots for both images. See [third-party release compliance](docs/operations/third-party-release-compliance.md).
