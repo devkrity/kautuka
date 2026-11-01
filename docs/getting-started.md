@@ -21,7 +21,7 @@ This guide is for administrators installing and configuring Kautuka. For source 
 
 On a new installation, complete the first-run flow:
 
-1. Create the initial administrator account. This account manages Kautuka configuration and access.
+1. Create the initial administrator account. During install, copy the one-time setup token shown by the installer and acknowledge the prompt. Enter it in Kautuka's first-run setup page. The token authorizes creation of the first account, which manages Kautuka configuration and access; it is removed after successful use. Keep it private and do not include it in logs or support reports. If you closed the installer, use its documented token-recovery command.
 2. Continue through onboarding or choose manual configuration.
 3. Configure an AI provider and save a model supported by that provider. The onboarding presets include Gemini, Ollama, and OpenRouter; the manual provider catalog may include additional options.
 4. Create an agent and assign the configured model to it.

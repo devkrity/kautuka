@@ -14,6 +14,7 @@ if ! KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   id() { printf "1001\\n"; }
   get_service_user_home() { printf "/home/kautuka\\n"; }
   run_as_service_user() { shift 3; "$@"; }
+  confirm_first_admin_setup() { echo "FIRST-RUN SETUP acknowledgement requested for $1"; }
   journalctl() {
     printf "%s\\n" "Built-in MCP metadata refresh start. connectorId=kautuka-google-mail bundleChanged=False metadataMissing=True"
   }
@@ -77,5 +78,6 @@ grep -Fq 'updates=activating' "$output"
 grep -Fq 'Preparing first-use connector runtime (an image may need to download): kautuka-google-mail' "$output"
 grep -Fq 'Core runtime is ready (lifecycle=agents_pending; manager=healthy).' "$output"
 grep -Fq 'Verified web UI at: http://127.0.0.1:20229' "$output"
+grep -Fq 'FIRST-RUN SETUP acknowledgement requested for http://127.0.0.1:20229' "$output"
 
 echo 'Linux installer readiness wait passed (HTTP availability did not bypass core readiness).'

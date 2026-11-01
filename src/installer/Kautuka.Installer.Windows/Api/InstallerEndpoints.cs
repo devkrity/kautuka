@@ -51,6 +51,29 @@ internal static class InstallerEndpoints
             }
         });
 
+        app.MapPost("/api/appliance/setup-token", async (HttpContext ctx) =>
+        {
+            if (!HasActionToken(ctx))
+            {
+                return Results.StatusCode(StatusCodes.Status403Forbidden);
+            }
+
+            var request = await ctx.Request.ReadFromJsonAsync(
+                InstallerJsonContext.Default.InstallerSetupTokenRequest,
+                ctx.RequestAborted).ConfigureAwait(false)
+                ?? new InstallerSetupTokenRequest();
+
+            string? token = await WindowsApplianceInstaller.ReadFirstRunSetupTokenAsync(
+                request.DistroName,
+                ctx.RequestAborted).ConfigureAwait(false);
+
+            ctx.Response.Headers.CacheControl = "no-store, no-cache";
+            ctx.Response.Headers.Pragma = "no-cache";
+            return Results.Json(
+                new InstallerSetupTokenResponse(token is not null, token),
+                InstallerJsonContext.Default.InstallerSetupTokenResponse);
+        });
+
         app.MapPost("/api/appliance/run-install", RunWindowsApplianceInstallSse);
 
         app.MapPost("/api/appliance/uninstall", async (HttpContext ctx) =>

@@ -22,4 +22,5 @@ jobs:
           KAUTUKA_SMOKE_BASE_URL: ${{ vars.KAUTUKA_SMOKE_BASE_URL }}
           KAUTUKA_SMOKE_USERNAME: ${{ vars.KAUTUKA_SMOKE_USERNAME }}
           KAUTUKA_SMOKE_PASSWORD: ${{ secrets.KAUTUKA_SMOKE_PASSWORD }}
+          KAUTUKA_SMOKE_SETUP_TOKEN: ${{ secrets.KAUTUKA_SMOKE_SETUP_TOKEN }}
         run: bash scripts/installed-linux-smoke.sh --skip-systemd

@@ -546,6 +546,28 @@
             The installer action completed successfully.
           </p>
         </section>
+
+        <section id="firstRunSetupBox" class="done-box">
+          <h3>First-run setup: copy your one-time token</h3>
+          <p class="done-copy">
+            Enter this token on Kautuka's setup page to create your first
+            administrator, who controls Kautuka configuration and access.
+            Kautuka deletes the token after successful use. Keep it private.
+          </p>
+          <code
+            id="firstRunSetupToken"
+            style="display: block; margin: 12px 0; padding: 12px; overflow-wrap: anywhere; user-select: all"
+          ></code>
+          <div class="action-row">
+            <button id="copyFirstRunSetupTokenBtn" class="btn btn-secondary" type="button">
+              Copy token
+            </button>
+            <button id="ackFirstRunSetupTokenBtn" class="btn btn-primary" type="button">
+              I copied it and understand it creates my first administrator on the setup page
+            </button>
+          </div>
+          <p id="firstRunSetupTokenStatus" class="done-copy" aria-live="polite"></p>
+        </section>
       </div>
     </div>
 
@@ -556,6 +578,7 @@
         uninstallDefaults: null,
         actionToken: "",
         running: false,
+        setupTokenAckResolver: null,
       };
       const $ = (id) => document.getElementById(id);
 
@@ -805,6 +828,10 @@
           ? "Resuming install"
           : `Installing ${request.releaseChannel} release`;
         setRunning(true, label, "Streaming appliance installer progress...");
+        $("doneBox").classList.remove("show");
+        $("firstRunSetupBox").classList.remove("show");
+        $("firstRunSetupToken").textContent = "";
+        $("firstRunSetupTokenStatus").textContent = "";
         appendLog(
           request.resume
             ? "Resuming from the previous checkpoint..."
@@ -840,9 +867,38 @@
           }
         }
 
+        const setupTokenResponse = await fetch("/api/appliance/setup-token", {
+          method: "POST",
+          headers: actionHeaders({ "Content-Type": "application/json" }),
+          body: JSON.stringify({ distroName: request.distroName || "kautuka" }),
+          cache: "no-store",
+        });
+        const setupTokenState = await setupTokenResponse.json().catch(() => ({}));
+        if (!setupTokenResponse.ok) {
+          const recoveryDistro = request.distroName || "kautuka";
+          throw new Error(
+            `Kautuka installed, but the installer could not read the first-run token. In PowerShell run: wsl.exe -d ${recoveryDistro} -u root -- cat /var/lib/kautuka/setup-token`,
+          );
+        }
+
+        if (setupTokenState.needsSetup === true) {
+          if (typeof setupTokenState.token !== "string" || !/^[A-F0-9]{64}$/.test(setupTokenState.token)) {
+            throw new Error("Kautuka installed, but its first-run setup token was missing or invalid.");
+          }
+
+          $("firstRunSetupToken").textContent = setupTokenState.token;
+          $("firstRunSetupBox").classList.add("show");
+          setRunning(true, "Setup token required", "Copy the token and acknowledge before continuing...");
+          await new Promise((resolve) => {
+            state.setupTokenAckResolver = resolve;
+          });
+          state.setupTokenAckResolver = null;
+          $("firstRunSetupTokenStatus").textContent = "Acknowledged. Enter the copied token in Kautuka's first-run setup page.";
+        }
+
         $("doneBox").classList.add("show");
         $("doneMessage").textContent =
-          "Installation complete. If a reboot was needed for WSL prerequisites, reopen the installer and click Resume.";
+          "Installation complete. Open Kautuka and enter the copied one-time token to create your first administrator. If a reboot was needed for WSL prerequisites, reopen the installer and click Resume.";
         setRunning(false, "Done", "Idle.");
         await refreshStatus();
       }
@@ -873,6 +929,17 @@
       }
 
       function wireEvents() {
+        $("copyFirstRunSetupTokenBtn").addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText($("firstRunSetupToken").textContent);
+            $("firstRunSetupTokenStatus").textContent = "Token copied to clipboard. Now acknowledge to continue.";
+          } catch {
+            $("firstRunSetupTokenStatus").textContent = "Clipboard access was unavailable. Select the token above and copy it, then acknowledge to continue.";
+          }
+        });
+        $("ackFirstRunSetupTokenBtn").addEventListener("click", () => {
+          state.setupTokenAckResolver?.();
+        });
         $("releaseChannel").addEventListener("change", () => {
           $("releaseChannelNote").textContent = $("releaseChannel").value === "preview"
             ? "Preview builds are for testing new features early and may have bugs."

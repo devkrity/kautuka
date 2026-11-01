@@ -65,7 +65,7 @@ internal static partial class WindowsApplianceInstaller
 
         await EnsureDistroImportedAsync(state, log, cancellationToken).ConfigureAwait(false);
         await ConfigureDistroAsync(state, log, cancellationToken).ConfigureAwait(false);
-        await WaitForWebUiReadyAsync(log, cancellationToken).ConfigureAwait(false);
+        await WaitForWebUiReadyAsync(state.DistroName, log, cancellationToken).ConfigureAwait(false);
         await ApplyLanChoiceAsync(state.AllowLanAccess, log, cancellationToken).ConfigureAwait(false);
 
         PlatformInstaller.RegisterWindowsApplianceUninstall(

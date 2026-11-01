@@ -159,14 +159,19 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 
     private static async Task WaitForWebUiReadyAsync(
+        string distroName,
         Func<string, Task> log,
         CancellationToken cancellationToken)
     {
-        var timeout = TimeSpan.FromMinutes(3);
+        var timeout = TimeSpan.FromMinutes(10);
         var pollInterval = TimeSpan.FromSeconds(2);
         var progressLogInterval = TimeSpan.FromSeconds(10);
+        var heartbeatInterval = TimeSpan.FromSeconds(30);
         var deadlineUtc = DateTime.UtcNow + timeout;
         var nextProgressLogUtc = DateTime.UtcNow + progressLogInterval;
+        var nextHeartbeatUtc = DateTime.UtcNow + heartbeatInterval;
+        var startupUtc = DateTimeOffset.UtcNow;
+        string? previousProgress = null;
         Exception? lastError = null;
 
         using var client = new HttpClient
@@ -174,7 +179,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             Timeout = TimeSpan.FromSeconds(5),
         };
 
-        await log($"Finalizing appliance startup. Waiting for {webUrl}...").ConfigureAwait(false);
+        await log($"Finalizing appliance startup. Waiting for Gateway and the setup page at {webUrl}...").ConfigureAwait(false);
 
         while (DateTime.UtcNow < deadlineUtc)
         {
@@ -182,40 +187,176 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
             try
             {
-                using var response = await client.GetAsync(
-                    new Uri(webUrl),
+                using var healthResponse = await client.GetAsync(
+                    new Uri($"{webUrl}/api/runtime/system-health"),
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
 
-                if (response.IsSuccessStatusCode)
+                if (!healthResponse.IsSuccessStatusCode)
                 {
-                    await log($"Verified web UI at {webUrl}.").ConfigureAwait(false);
-                    return;
+                    lastError = new InvalidOperationException(
+                        $"Gateway health endpoint returned HTTP {(int)healthResponse.StatusCode} ({healthResponse.ReasonPhrase ?? "unknown"}).");
                 }
+                else
+                {
+                    using Stream healthStream = await healthResponse.Content
+                        .ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                    using JsonDocument healthDocument = await JsonDocument.ParseAsync(
+                        healthStream,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
 
-                lastError = new InvalidOperationException(
-                    $"HTTP {(int)response.StatusCode} ({response.ReasonPhrase ?? "unknown"})");
+                    JsonElement health = healthDocument.RootElement;
+                    bool coreReady = health.TryGetProperty("lifecycle", out JsonElement lifecycle)
+                        && lifecycle.TryGetProperty("coreReady", out JsonElement coreReadyValue)
+                        && coreReadyValue.ValueKind == JsonValueKind.True;
+                    bool managerHealthy = health.TryGetProperty("workspace", out JsonElement workspace)
+                        && workspace.TryGetProperty("status", out JsonElement managerStatus)
+                        && string.Equals(managerStatus.GetString(), "healthy", StringComparison.OrdinalIgnoreCase);
+                    string lifecycleStatus = health.TryGetProperty("lifecycle", out lifecycle)
+                        && lifecycle.TryGetProperty("status", out JsonElement lifecycleValue)
+                            ? lifecycleValue.GetString() ?? "unknown"
+                            : "unknown";
+
+                    if (coreReady && managerHealthy)
+                    {
+                        using var setupResponse = await client.GetAsync(
+                            new Uri($"{webUrl}/api/auth/setup/status"),
+                            HttpCompletionOption.ResponseHeadersRead,
+                            cancellationToken).ConfigureAwait(false);
+                        if (setupResponse.IsSuccessStatusCode)
+                        {
+                            using Stream setupStream = await setupResponse.Content
+                                .ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                            using JsonDocument setupDocument = await JsonDocument.ParseAsync(
+                                setupStream,
+                                cancellationToken: cancellationToken).ConfigureAwait(false);
+                            if (setupDocument.RootElement.TryGetProperty("needsSetup", out JsonElement needsSetup)
+                                && needsSetup.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                            {
+                                string firstRun = needsSetup.GetBoolean() ? "administrator setup is required" : "administrator setup is already complete";
+                                await log($"Gateway core is ready; {firstRun}. Web UI: {webUrl}.").ConfigureAwait(false);
+                                return;
+                            }
+
+                            lastError = new InvalidOperationException("The setup endpoint returned an invalid readiness response.");
+                        }
+                        else
+                        {
+                            lastError = new InvalidOperationException(
+                                $"The setup endpoint returned HTTP {(int)setupResponse.StatusCode} ({setupResponse.ReasonPhrase ?? "unknown"}).");
+                        }
+                    }
+                    else
+                    {
+                        lastError = new InvalidOperationException(
+                            $"Gateway is still starting (lifecycle={lifecycleStatus}; manager={(managerHealthy ? "healthy" : "unhealthy")}).");
+                    }
+                }
             }
             catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                lastError = new TimeoutException("The web UI probe timed out.");
+                lastError = new TimeoutException("The Gateway health probe timed out.");
             }
             catch (HttpRequestException ex)
             {
                 lastError = ex;
             }
-
-            if (DateTime.UtcNow >= nextProgressLogUtc)
+            catch (JsonException ex)
             {
-                await log($"Still finalizing appliance startup. Waiting for {webUrl}...").ConfigureAwait(false);
+                lastError = new InvalidDataException("The Gateway readiness endpoint returned invalid JSON.", ex);
+            }
+
+            DateTime nowUtc = DateTime.UtcNow;
+            string progress = lastError?.Message ?? "Gateway is starting";
+            if (nowUtc >= nextProgressLogUtc && (progress != previousProgress || nowUtc >= nextHeartbeatUtc))
+            {
+                string connectorProgress = await ReadGatewayStartupProgressAsync(distroName, startupUtc, cancellationToken)
+                    .ConfigureAwait(false);
+                await log($"Startup progress: {progress}{(string.IsNullOrWhiteSpace(connectorProgress) ? string.Empty : $"; {connectorProgress}")}")
+                    .ConfigureAwait(false);
+                previousProgress = progress;
                 nextProgressLogUtc = DateTime.UtcNow + progressLogInterval;
+                nextHeartbeatUtc = DateTime.UtcNow + heartbeatInterval;
             }
 
             await Task.Delay(pollInterval, cancellationToken).ConfigureAwait(false);
         }
 
         throw new InvalidOperationException(
-            $"The appliance services started, but {webUrl} did not become reachable within {timeout.TotalMinutes:0} minutes. Last probe result: {lastError?.Message ?? "unknown"}.");
+            $"The appliance did not become ready within {timeout.TotalMinutes:0} minutes. Last probe result: {lastError?.Message ?? "unknown"}.");
+    }
+
+    private static async Task<string> ReadGatewayStartupProgressAsync(
+        string distroName,
+        DateTimeOffset startupUtc,
+        CancellationToken cancellationToken)
+    {
+        string since = startupUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        ProcessResult result = await RunProcessAsync(
+            "wsl.exe",
+            ["-d", distroName, "-u", "root", "--", "journalctl", "--unit=kautuka-gateway.service", $"--since={since}", "--no-pager", "--output=cat"],
+            allowFailure: true,
+            cancellationToken).ConfigureAwait(false);
+
+        string? line = result.StandardOutput
+            .Split(newLineSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .LastOrDefault(static candidate => candidate.Contains("Built-in MCP bootstrap start.", StringComparison.Ordinal)
+                || candidate.Contains("Built-in MCP bootstrap completed.", StringComparison.Ordinal)
+                || candidate.Contains("Built-in MCP metadata refresh start.", StringComparison.Ordinal)
+                || candidate.Contains("Built-in MCP metadata refresh completed.", StringComparison.Ordinal));
+        if (line is null)
+        {
+            return string.Empty;
+        }
+
+        if (line.Contains("metadata refresh start.", StringComparison.Ordinal))
+        {
+            return $"preparing the first-use connector runtime (an image may need to download): {AfterMarker(line, "connectorId=")}; discovering its tools";
+        }
+
+        if (line.Contains("metadata refresh completed.", StringComparison.Ordinal))
+        {
+            return $"connector tools initialized: {AfterMarker(line, "connectorId=")}";
+        }
+
+        if (line.Contains("bootstrap start.", StringComparison.Ordinal))
+        {
+            return $"loading built-in connector bundle {Path.GetFileName(AfterMarker(line, "bundlePath="))}";
+        }
+
+        return $"built-in connector initialized: {AfterMarker(line, "connectorId=")}";
+    }
+
+    private static string AfterMarker(string value, string marker)
+    {
+        int index = value.LastIndexOf(marker, StringComparison.Ordinal);
+        return index < 0 ? "unknown" : value[(index + marker.Length)..].Split(' ', 2)[0];
+    }
+
+    public static async Task<string?> ReadFirstRunSetupTokenAsync(
+        string distroName,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(distroName);
+
+        ProcessResult result = await RunProcessAsync(
+            "wsl.exe",
+            ["-d", distroName, "-u", "root", "--exec", "/bin/cat", "/var/lib/kautuka/setup-token"],
+            allowFailure: true,
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        string token = result.StandardOutput.Trim();
+        if (token.Length != 64 || token.Any(static character => !Uri.IsHexDigit(character)))
+        {
+            throw new InvalidDataException("The first-run setup token has an unexpected format.");
+        }
+
+        return token;
     }
 
     private static async Task<ProcessResult> RunProcessAsync(

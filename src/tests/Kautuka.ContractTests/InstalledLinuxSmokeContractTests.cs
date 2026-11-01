@@ -11,6 +11,25 @@ public sealed class InstalledLinuxSmokeContractTests
         Assert.Contains("assert_unit_active system kautuka-gateway.service", source, StringComparison.Ordinal);
         Assert.Contains("assert_unit_active user kautuka-updateservice.service", source, StringComparison.Ordinal);
         Assert.Contains("activating auto-restart is a crash loop", source, StringComparison.Ordinal);
+        Assert.Contains("KAUTUKA_SMOKE_SETUP_TOKEN", source, StringComparison.Ordinal);
+        Assert.Contains("\"setupToken\":sys.argv[3]", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowsInstallerShowsTheSetupTokenOnlyAfterProtectedExplicitRequestAndWaitsForAcknowledgement()
+    {
+        string projectRoot = FindProjectRoot();
+        string endpoint = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Api", "InstallerEndpoints.cs"));
+        string ui = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "wwwroot", "index.html"));
+
+        Assert.Contains("app.MapPost(\"/api/appliance/setup-token\"", endpoint, StringComparison.Ordinal);
+        Assert.Contains("if (!HasActionToken(ctx))", endpoint, StringComparison.Ordinal);
+        Assert.Contains("CacheControl = \"no-store, no-cache\"", endpoint, StringComparison.Ordinal);
+        Assert.Contains("/api/appliance/setup-token", ui, StringComparison.Ordinal);
+        Assert.Contains("Copy token", ui, StringComparison.Ordinal);
+        Assert.Contains("I copied it and understand it creates my first administrator on the setup page", ui, StringComparison.Ordinal);
+        Assert.Contains("state.setupTokenAckResolver", ui, StringComparison.Ordinal);
+        Assert.DoesNotContain("appendLog(setupTokenState.token", ui, StringComparison.Ordinal);
     }
 
     private static string FindProjectRoot()

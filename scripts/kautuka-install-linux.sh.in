@@ -1843,6 +1843,7 @@ wait_for_web_ui() {
     local startup_started_at=''
     local http_status=''
     local setup_http_status=''
+    local setup_needs_setup='unknown'
     local connector_progress=''
     local credentials_state=''
     local channelhost_state=''
@@ -1902,11 +1903,32 @@ PY
             local readiness lifecycle_status manager_health
             IFS=$'\t' read -r readiness lifecycle_status manager_health <<< "$health_summary"
             setup_http_status="$(curl --silent --show-error --max-time 5 --output "$health_file" --write-out '%{http_code}' "$setup_status_url" 2>"$curl_error_file" || true)"
-            if [[ "$readiness" == 'ready' && "$setup_http_status" == '200' && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
+            setup_needs_setup='unknown'
+            if [[ "$setup_http_status" == '200' ]]; then
+                setup_needs_setup="$(python3 - "$health_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        setup = json.load(stream)
+    needs_setup = setup.get("needsSetup")
+    print("true" if needs_setup is True else "false" if needs_setup is False else "unknown")
+except (OSError, ValueError, AttributeError, TypeError):
+    print("unknown")
+PY
+                )"
+            fi
+            if [[ "$readiness" == 'ready' && "$setup_http_status" == '200' \
+                && ( "$setup_needs_setup" == 'true' || "$setup_needs_setup" == 'false' ) \
+                && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
                 && "$channelhost_state" == 'active' && "$manager_state" == 'active' \
                 && "$webhost_state" == 'active' && "$updateservice_state" == 'active' ]]; then
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
+                if [[ "$setup_needs_setup" == 'true' ]]; then
+                    confirm_first_admin_setup "$url" || fail 'first-run administrator setup token was not acknowledged'
+                fi
                 rm -f "$health_file"
                 rm -f "$curl_error_file"
                 return 0
@@ -1970,6 +1992,46 @@ PY
     echo '  sudo journalctl -b -u kautuka-gateway.service -u kautuka-channelhost.service -u kautuka-credentialshost.service --no-pager -n 80' >&2
     echo "  sudo journalctl -b _UID=$(id -u "$service_user") --no-pager -n 80" >&2
     fail "the installer has not declared success; the UI may respond while core services are still unavailable"
+}
+
+confirm_first_admin_setup() {
+    local url="$1"
+    local token_file='/var/lib/kautuka/setup-token'
+    local setup_token=''
+    local acknowledgment=''
+
+    if [[ ! -r /dev/tty || ! -w /dev/tty ]]; then
+        echo 'error: the app is ready, but first-run administrator setup needs a secure interactive terminal.' >&2
+        echo 'Run this installer from a terminal to view and acknowledge the one-time setup token.' >&2
+        echo "Token recovery command: sudo cat ${token_file}" >&2
+        return 1
+    fi
+
+    [[ -r "$token_file" ]] || fail "the setup token is not available at ${token_file}"
+    setup_token="$(cat "$token_file")"
+    [[ "$setup_token" =~ ^[A-F0-9]{64}$ ]] || fail 'the first-run setup token has an unexpected format'
+
+    {
+        echo
+        echo 'FIRST-RUN SETUP — ACTION REQUIRED'
+        echo "Open ${url} in your browser and enter this one-time token to create your first Kautuka administrator."
+        echo 'The administrator account controls Kautuka configuration and access. The token is deleted after successful use.'
+        echo 'Copy the token now. Do not share it or include it in support logs.'
+        printf 'Setup token: %s\n' "$setup_token"
+        echo 'Recovery command if you close this terminal: sudo cat /var/lib/kautuka/setup-token'
+    } > /dev/tty
+
+    while true; do
+        printf 'Type COPIED after copying the token and understanding that it creates your first administrator on the Kautuka setup page: ' > /dev/tty
+        IFS= read -r acknowledgment < /dev/tty || return 1
+        if [[ "$acknowledgment" == 'COPIED' ]]; then
+            break
+        fi
+        echo 'Acknowledgement not received. Copy the token, then type COPIED to finish installation.' > /dev/tty
+    done
+
+    unset setup_token acknowledgment
+    echo 'First-run setup token copied and acknowledged. Continue in the Kautuka setup page.'
 }
 
 resolve_web_ui_port() {
