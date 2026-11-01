@@ -41,6 +41,6 @@ pre-push:
           - name: frontend-lint
             run: pnpm --dir src/frontend/web exec eslint src --ext .ts,.tsx
           - name: frontend-tests
-            run: pnpm --dir src/frontend/web exec vitest run
+            run: pnpm --dir src/frontend/web exec vitest run --maxWorkers=4
           - name: frontend-build
             run: pnpm --dir src/frontend/web exec vite build
