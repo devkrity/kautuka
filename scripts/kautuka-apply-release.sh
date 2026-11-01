@@ -115,6 +115,28 @@ user_units=(kautuka-manager.service kautuka-webhost.service)
 system_units=(kautuka-credentialshost.service kautuka-channelhost.service kautuka-gateway.service)
 service_user='kautuka'
 
+ensure_selinux_runtime_exec_policy() {
+    local selinux_state=''
+    if ! command -v getenforce >/dev/null 2>&1; then
+        return 0
+    fi
+    selinux_state="$(getenforce 2>/dev/null || true)"
+    if [[ "$selinux_state" == 'Disabled' || -z "$selinux_state" ]]; then
+        return 0
+    fi
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        echo 'error: SELinux is enabled; install policycoreutils-python-utils and policycoreutils to label Kautuka service executables' >&2
+        exit 1
+    fi
+    local rule='/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+'
+    if ! semanage fcontext -a -t bin_t "$rule" >/dev/null 2>&1; then
+        semanage fcontext -m -t bin_t "$rule" >/dev/null 2>&1 || {
+            echo 'error: could not register SELinux executable labeling rule for Kautuka' >&2
+            exit 1
+        }
+    fi
+}
+
 stage_version_roots() {
     local artifact_path="$1"
     local target_version="$2"
@@ -122,6 +144,8 @@ stage_version_roots() {
     extract_root="$(mktemp -d /tmp/kautuka-apply-XXXXXX)"
     trap 'rm -rf "$extract_root"' RETURN
     tar -xzf "$artifact_path" -C "$extract_root"
+
+    ensure_selinux_runtime_exec_policy
 
     local manager_source="$extract_root"
     if [[ -d "$extract_root/bin" ]]; then
@@ -150,7 +174,14 @@ install_version_root() {
 
     rm -rf "$version_root"
     mkdir -p "$version_root"
-    cp -a "$source_root/." "$version_root/"
+    cp -a --no-preserve=context "$source_root/." "$version_root/"
+    local selinux_state=''
+    if command -v getenforce >/dev/null 2>&1; then
+        selinux_state="$(getenforce 2>/dev/null || true)"
+    fi
+    if command -v restorecon >/dev/null 2>&1 && [[ "$selinux_state" != 'Disabled' ]]; then
+        restorecon -RF "$version_root"
+    fi
     if [[ -f "$version_root/$executable_name" ]]; then
         chmod +x "$version_root/$executable_name"
     fi

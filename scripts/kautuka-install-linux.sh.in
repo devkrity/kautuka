@@ -148,7 +148,7 @@ write_update_source_document() {
     mkdir -p "$(dirname "$destination")"
 
     if [[ -z "$manifest_url" ]]; then
-        echo "warning: skipping empty update-source.json; UpdateService stays unprovisioned" >&2
+        echo "info: no pinned update source written; UpdateService discovers signed GitHub releases by channel" >&2
         return 0
     fi
 
@@ -199,6 +199,47 @@ chown_if_service_account() {
     shift 2
     if id "$service_user" >/dev/null 2>&1 && getent group "$service_group" >/dev/null 2>&1; then
         chown "$service_user:$service_group" "$@"
+    fi
+}
+
+copy_runtime_payload() {
+    local source_root="$1"
+    local destination_root="$2"
+
+    # Payload files are extracted below a temporary directory. Do not copy that
+    # directory's SELinux label into /opt: systemd may then refuse to exec the
+    # service with status 203/EXEC. Let the destination inherit its policy label,
+    # then apply the host's configured file contexts when restorecon is available.
+    cp -a --no-preserve=context "$source_root/." "$destination_root/"
+    local selinux_state=''
+    if command -v getenforce >/dev/null 2>&1; then
+        selinux_state="$(getenforce 2>/dev/null || true)"
+    fi
+    if command -v restorecon >/dev/null 2>&1 && [[ "$selinux_state" != 'Disabled' ]]; then
+        restorecon -RF "$destination_root"
+    fi
+}
+
+ensure_selinux_runtime_exec_policy() {
+    local selinux_state=''
+    if ! command -v getenforce >/dev/null 2>&1; then
+        return 0
+    fi
+    selinux_state="$(getenforce 2>/dev/null || true)"
+    if [[ "$selinux_state" == 'Disabled' || -z "$selinux_state" ]]; then
+        return 0
+    fi
+
+    if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
+        fail "SELinux is enabled; install policycoreutils-python-utils and policycoreutils to label Kautuka service executables"
+    fi
+
+    # Fedora's default /opt label is usr_t, which systemd cannot execute as a
+    # service under enforcing SELinux. Give only versioned Kautuka executables
+    # the standard executable type and persist the mapping for later updates.
+    local rule='/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+'
+    if ! semanage fcontext -a -t bin_t "$rule" >/dev/null 2>&1; then
+        semanage fcontext -m -t bin_t "$rule" >/dev/null 2>&1 || fail "could not register SELinux executable labeling rule for Kautuka; install policycoreutils-python-utils and check SELinux policy permissions"
     fi
 }
 
@@ -674,7 +715,7 @@ install_host_service_user() {
 
     rm -rf "$version_root"
     mkdir -p "$version_root" "$log_dir"
-    cp -a "$source_root/." "$version_root/"
+    copy_runtime_payload "$source_root" "$version_root"
     chmod +x "$version_root/$executable_name"
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
@@ -765,7 +806,7 @@ install_isolated_channel_service_system() {
 
     rm -rf "$version_root"
     mkdir -p "$version_root" "$log_dir"
-    cp -a "$source_root/." "$version_root/"
+    copy_runtime_payload "$source_root" "$version_root"
     chmod +x "$version_root/$executable_name"
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
@@ -867,7 +908,7 @@ install_isolated_credentials_service_system() {
 
     rm -rf "$version_root"
     mkdir -p "$version_root" "$log_dir" "$credentials_root/vault" "$credentials_root/transport" "$credentials_state_root/vault" "$credentials_state_root/transport"
-    cp -a "$source_root/." "$version_root/"
+    copy_runtime_payload "$source_root" "$version_root"
     chmod +x "$version_root/kautuka-credentialshost"
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
@@ -1459,6 +1500,21 @@ normalize_sidecar_data_permissions() {
     done
 }
 
+prepare_gateway_database_owner() {
+    local internal_state_root="$1"
+    local database_file="$internal_state_root/kautuka.db"
+    local database_sidecar=''
+
+    # Gateway applies owner-only permissions to the database and its SQLite
+    # sidecars during startup. Make it the owner before the unit starts, even
+    # when a prior manager install created the shared state tree as `kautuka`.
+    for database_sidecar in "$database_file" "$database_file-wal" "$database_file-shm"; do
+        [[ -e "$database_sidecar" ]] || continue
+        chown "kautuka-gateway:kautuka" "$database_sidecar"
+        chmod 0600 "$database_sidecar"
+    done
+}
+
 best_effort_systemctl() {
     if ! command -v systemctl >/dev/null 2>&1; then
         return 0
@@ -1504,6 +1560,34 @@ best_effort_user_systemctl() {
         done
         su -s /bin/sh "$service_user" -c "$quoted_command" >/dev/null 2>&1 || true
     fi
+}
+
+stop_existing_kautuka_runtime() {
+    local service_user="$1"
+    local service_home="$2"
+    local xdg_runtime_dir="$3"
+    local dbus_session_bus_address="unix:path=${xdg_runtime_dir}/bus"
+    local unit=''
+
+    # Stop user-scope services before replacing their WorkingDirectory tree. A
+    # running Manager whose current directory is removed cannot spawn Podman
+    # (Process.Start fails in getcwd), leaving package sidecars and setup broken.
+    if command -v runuser >/dev/null 2>&1 && id "$service_user" >/dev/null 2>&1; then
+        for unit in kautuka.target kautuka-manager.service kautuka-webhost.service kautuka-updateservice.service; do
+            if runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address" systemctl --user cat "$unit" >/dev/null 2>&1; then
+                runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address" systemctl --user stop "$unit" \
+                    || fail "could not stop existing $unit before replacing installed binaries"
+            fi
+        done
+    fi
+
+    # Stop the system-scope services that execute binaries from the same version
+    # tree before it is removed. Missing units are expected on a fresh install.
+    for unit in kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service; do
+        if command -v systemctl >/dev/null 2>&1 && systemctl cat "$unit" >/dev/null 2>&1; then
+            systemctl stop "$unit" || fail "could not stop existing $unit before replacing installed binaries"
+        fi
+    done
 }
 
 remove_subid_entry() {
@@ -2096,6 +2180,9 @@ PY
         verify_linux_release "${verification_args[@]}"
     fi
 
+    # Do not alter SELinux policy until the signed manifest and archive pass.
+    ensure_selinux_runtime_exec_policy
+
     # Local-feed installers need a preview/stable runtime policy, but must not
     # persist that policy until the signed manifest and archive digest have passed.
     if [[ "${KAUTUKA_INSTALL_LOCAL_RELEASE_DEFAULTS:-0}" == '1' ]]; then
@@ -2169,9 +2256,11 @@ PY
         content_root="$tmp_root/extracted/bin"
     fi
 
+    stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+
     rm -rf "$version_root"
     mkdir -p "$version_root"
-    cp -a "$content_root/." "$version_root/"
+    copy_runtime_payload "$content_root" "$version_root"
     chmod +x "$version_root/kautuka-manager"
 
     chown -R "$service_user:$service_group" "$install_root"
@@ -2183,6 +2272,7 @@ PY
     grant_shared_group_write_excluding "$internal_state_root" "$service_group" "$channel_security_root"
     prepare_isolated_service_ancestors "$internal_state_root" "$visible_root" "$service_group"
     normalize_sidecar_data_permissions "$internal_state_root"
+    prepare_gateway_database_owner "$internal_state_root"
     prepare_mcpb_bundle_share "$internal_state_root" "$service_group"
 
     ln -sfn "$version_root" "$next_link"

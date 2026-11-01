@@ -27,6 +27,8 @@ Channel trust material lives under `/var/lib/kautuka/security/channel`:
 
 The bootstrap CA private key exists only in a root-owned temporary staging directory and is deleted by the released ChannelHost provisioning command. No runtime service receives it. On upgrade, the installer preserves the four inventories and validates exact filenames, owners, and modes before starting either service. A partial inventory, unexpected file, ownership drift, or relaxed private-key permission stops installation; the installer does not silently regenerate identity material. Repair the ownership or restore the complete inventory from a protected backup before retrying.
 
+The installer assigns the shared Gateway SQLite database and any existing WAL/SHM files to `kautuka-gateway` before starting Gateway. Gateway then applies owner-only permissions to those files. Rootless Podman sidecar bind mounts use private SELinux relabeling (`:Z`) so Fedora's enforcing policy permits the container to write its own data without disabling container isolation.
+
 The source-checkout convenience bootstrap is Development-only. It may create a shared local certificate layout for a single developer account, but production system units reject that fallback and require the four installer-owned inventories above. Do not copy development certificate directories into an appliance or set a production service to `Development` to bypass preflight.
 
 Place `/var/lib/kautuka` on LUKS/dm-crypt or equivalently encrypted managed storage when file encryption at rest is required. Encrypt backups and snapshots separately; filesystem permissions alone are not encryption.
