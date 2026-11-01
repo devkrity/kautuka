@@ -8,6 +8,8 @@ Use [Development workflow](../development/workflow.md) for a source checkout. De
 
 `Kautuka.Installer.exe` is the supported Windows entry point. It checks/enables WSL prerequisites, preserves reboot-resume state, resolves a release, imports the appliance into the selected Windows directory, starts the appliance, and waits for `http://localhost:20229` before reporting success.
 
+After installation, the Windows installer displays the one-time setup token in its local window and waits for the user to copy it and acknowledge that it is needed to create the first administrator in Kautuka's setup page. The token is deleted after successful use. If the installer window was closed, run `wsl.exe -d <distro-name> -u root -- cat /var/lib/kautuka/setup-token` in PowerShell, substituting the selected distro name.
+
 The selected Windows directory stores the WSL distribution. Runtime paths remain inside the imported appliance. Uninstall unregisters the distribution and may remove the selected data when requested.
 
 Select a location protected by BitLocker when agent files, uploaded attachments, or conversation data require encryption at rest. Kautuka does not application-encrypt workspace files and cannot infer whether the containing Windows volume is protected.
@@ -31,7 +33,9 @@ The installer assigns the shared Gateway SQLite database and any existing WAL/SH
 
 The source-checkout convenience bootstrap is Development-only. It may create a shared local certificate layout for a single developer account, but production system units reject that fallback and require the four installer-owned inventories above. Do not copy development certificate directories into an appliance or set a production service to `Development` to bypass preflight.
 
-After starting services, the Linux installer waits up to ten minutes for the Web UI, all required system and user services, and Gateway's `lifecycle.coreReady` health signal before reporting success. It prints service and lifecycle progress every ten seconds. A timeout leaves the installation in place for diagnosis and prints the relevant `systemctl` and journal commands; rerunning the installer after correcting the reported service issue is safe.
+After starting services, the Linux installer waits up to ten minutes for the Web UI, the first-run setup endpoint, all required system and user services, and Gateway's `lifecycle.coreReady` health signal before reporting success. Progress names the current startup condition and, while Gateway initializes built-in connectors, reports which connector is being checked and whether its first-use runtime may be downloading an image. Repeated unchanged status is shown every thirty seconds. A timeout leaves the installation in place for diagnosis and prints the relevant `systemctl` and journal commands; rerunning the installer after correcting the reported service issue is safe.
+
+When first-run setup is required, the Linux installer displays the one-time token only in the controlling terminal and waits for the user to type `COPIED`. It explains that the token is needed to create the first administrator in Kautuka's setup page. If the terminal was closed, retrieve it with `sudo cat /var/lib/kautuka/setup-token`. The file remains owner-only; the token is deleted after successful use. Never include it in logs or support reports.
 
 Place `/var/lib/kautuka` on LUKS/dm-crypt or equivalently encrypted managed storage when file encryption at rest is required. Encrypt backups and snapshots separately; filesystem permissions alone are not encryption.
 

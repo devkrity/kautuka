@@ -10,6 +10,7 @@ timeout_seconds="${KAUTUKA_SMOKE_TIMEOUT_SECONDS:-180}"
 service_user="${KAUTUKA_SMOKE_SERVICE_USER:-kautuka}"
 setup_username="${KAUTUKA_SMOKE_USERNAME:-smoke-admin}"
 setup_password="${KAUTUKA_SMOKE_PASSWORD:-}"
+setup_token="${KAUTUKA_SMOKE_SETUP_TOKEN:-}"
 
 usage() {
   cat <<'EOF'
@@ -23,9 +24,10 @@ Options:
   -h, --help           Show this help.
 
 Environment:
-  KAUTUKA_SMOKE_USERNAME / KAUTUKA_SMOKE_PASSWORD
+  KAUTUKA_SMOKE_USERNAME / KAUTUKA_SMOKE_PASSWORD / KAUTUKA_SMOKE_SETUP_TOKEN
       First-admin credentials to create, or existing login when setup is done.
-      A password is generated when unset.
+      A password is generated when unset. The setup token is read from the
+      owner-only local file when this script runs as root and no value is set.
 EOF
 }
 
@@ -164,9 +166,14 @@ setup_status="$(curl --silent --show-error --fail --max-time 10 "${base_url}/api
 needs_setup="$(printf '%s' "$setup_status" | json_get needsSetup)"
 
 if [[ "$needs_setup" == "true" ]]; then
+  if [[ -z "$setup_token" && -r /var/lib/kautuka/setup-token ]]; then
+    setup_token="$(cat /var/lib/kautuka/setup-token)"
+  fi
+  [[ -n "$setup_token" ]] || fail "first-admin setup requires the one-time token; set KAUTUKA_SMOKE_SETUP_TOKEN or run this smoke test as root on the appliance"
+
   setup_code="$(curl --silent --show-error --output /tmp/kautuka-smoke-setup.json --write-out '%{http_code}' --max-time 10 \
     -H 'Content-Type: application/json' \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2]}))' "$setup_username" "$setup_password")" \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2],"setupToken":sys.argv[3]}))' "$setup_username" "$setup_password" "$setup_token")" \
     "${base_url}/api/auth/setup")"
   [[ "$setup_code" == "200" ]] || fail "POST /api/auth/setup returned ${setup_code}: $(cat /tmp/kautuka-smoke-setup.json)"
   echo "created first admin ${setup_username}"
@@ -175,6 +182,7 @@ elif [[ "$needs_setup" == "false" ]]; then
 else
   fail "unexpected setup status: ${setup_status}"
 fi
+unset setup_token
 
 login_body="$(python3 -c 'import json,sys; print(json.dumps({"username":sys.argv[1],"password":sys.argv[2]}))' "$setup_username" "$setup_password")"
 login_code="$(curl --silent --show-error --output /tmp/kautuka-smoke-login.json --write-out '%{http_code}' --max-time 10 \
