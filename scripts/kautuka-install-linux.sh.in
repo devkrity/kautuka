@@ -1829,12 +1829,17 @@ uninstall_release() {
 wait_for_web_ui() {
     local service_user="${1:-kautuka}"
     local url="${2:-}"
-    local timeout_seconds="${3:-180}"
+    local timeout_seconds="${3:-${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}}"
     local elapsed=0
-    local probe_host='127.0.0.1'
-    local probe_port=''
     local service_uid=''
     local xdg_runtime_dir=''
+    local last_status=''
+    local health_url=''
+    local health_file=''
+    local health_summary=''
+    local credentials_state=''
+    local channelhost_state=''
+    local updateservice_state=''
 
     service_uid="$(id -u "$service_user")"
     xdg_runtime_dir="/run/user/${service_uid}"
@@ -1845,43 +1850,77 @@ wait_for_web_ui() {
         url="http://127.0.0.1:${web_port}"
     fi
 
-    if [[ "$url" =~ ^https?://([^/:]+)(:([0-9]+))? ]]; then
-        probe_host="${BASH_REMATCH[1]}"
-        probe_port="${BASH_REMATCH[3]:-}"
-    fi
+    [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || fail 'installer readiness timeout must be a positive integer'
 
-    if [[ -z "$probe_port" ]]; then
-        probe_port="$(resolve_web_ui_port)"
-    fi
+    health_url="${url%/}/api/runtime/system-health"
+    health_file="$(mktemp)"
 
-    echo "Finalizing appliance startup. Waiting for web UI at: $url"
+    echo "Installation files are in place. Starting Kautuka services..."
+    echo "Waiting for the web UI and core runtime readiness at: $url"
+    echo "The first start can take several minutes while required runtime components initialize."
 
     while (( elapsed < timeout_seconds )); do
-        if systemctl is-active --quiet kautuka-gateway.service \
-            && run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
-                systemctl --user is-active --quiet kautuka-webhost.service; then
-            if command -v curl >/dev/null 2>&1; then
-                if curl --silent --show-error --fail --max-time 2 --head "$url" >/dev/null 2>&1 \
-                    || curl --silent --show-error --fail --max-time 2 "$url" >/dev/null 2>&1; then
-                    echo "Verified web UI at: $url"
-                    return 0
-                fi
-            elif exec 3<>"/dev/tcp/${probe_host}/${probe_port}" 2>/dev/null; then
-                exec 3>&-
+        local gateway_state manager_state webhost_state
+        gateway_state="$(systemctl show -p ActiveState --value kautuka-gateway.service 2>/dev/null || true)"
+        credentials_state="$(systemctl show -p ActiveState --value kautuka-credentialshost.service 2>/dev/null || true)"
+        channelhost_state="$(systemctl show -p ActiveState --value kautuka-channelhost.service 2>/dev/null || true)"
+        manager_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+            systemctl --user show -p ActiveState --value kautuka-manager.service 2>/dev/null || true)"
+        webhost_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+            systemctl --user show -p ActiveState --value kautuka-webhost.service 2>/dev/null || true)"
+        updateservice_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+            systemctl --user show -p ActiveState --value kautuka-updateservice.service 2>/dev/null || true)"
+
+        if curl --silent --show-error --fail --max-time 5 --output "$health_file" "$health_url" 2>/dev/null; then
+            health_summary="$(python3 - "$health_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        health = json.load(stream)
+    lifecycle = health.get("lifecycle") or {}
+    manager = health.get("manager") or {}
+    ready = lifecycle.get("coreReady") is True and manager.get("status") == "healthy"
+    status = lifecycle.get("status") or "unknown"
+    print(("ready" if ready else "waiting") + "\t" + str(status) + "\t" + str(manager.get("status") or "unknown"))
+except (OSError, ValueError, AttributeError, TypeError):
+    print("waiting\tinvalid-health-response\tunknown")
+PY
+        )"
+            local readiness lifecycle_status manager_health
+            IFS=$'\t' read -r readiness lifecycle_status manager_health <<< "$health_summary"
+            if [[ "$readiness" == 'ready' && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
+                && "$channelhost_state" == 'active' && "$manager_state" == 'active' \
+                && "$webhost_state" == 'active' && "$updateservice_state" == 'active' ]]; then
+                echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
+                rm -f "$health_file"
                 return 0
             fi
+            last_status="lifecycle=${lifecycle_status}; manager=${manager_health}"
+        else
+            last_status='health endpoint not responding yet'
         fi
 
-        if (( elapsed > 0 && elapsed % 10 == 0 )); then
-            echo "Still finalizing appliance startup. Waiting for web UI at: $url"
+        if (( elapsed % 10 == 0 )); then
+            printf 'Startup progress (%ss/%ss): gateway=%s, credentials=%s, channels=%s, manager=%s, webhost=%s, updates=%s; %s\n' \
+                "$elapsed" "$timeout_seconds" "${gateway_state:-unknown}" "${credentials_state:-unknown}" \
+                "${channelhost_state:-unknown}" "${manager_state:-unknown}" "${webhost_state:-unknown}" \
+                "${updateservice_state:-unknown}" "$last_status"
         fi
 
         sleep 2
         elapsed=$((elapsed + 2))
     done
 
-    fail "the appliance service started, but the web UI at $url did not become reachable within $timeout_seconds seconds"
+    rm -f "$health_file"
+    printf 'error: Kautuka did not become ready within %s seconds (%s).\n' "$timeout_seconds" "$last_status" >&2
+    echo 'Check service details with:' >&2
+    echo '  sudo systemctl status kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service --no-pager -l' >&2
+    echo '  sudo journalctl -b -u kautuka-gateway.service -u kautuka-channelhost.service -u kautuka-credentialshost.service --no-pager -n 80' >&2
+    echo "  sudo journalctl -b _UID=$(id -u "$service_user") --no-pager -n 80" >&2
+    fail "the installer has not declared success; the UI may respond while core services are still unavailable"
 }
 
 resolve_web_ui_port() {

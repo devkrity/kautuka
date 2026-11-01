@@ -31,6 +31,8 @@ The installer assigns the shared Gateway SQLite database and any existing WAL/SH
 
 The source-checkout convenience bootstrap is Development-only. It may create a shared local certificate layout for a single developer account, but production system units reject that fallback and require the four installer-owned inventories above. Do not copy development certificate directories into an appliance or set a production service to `Development` to bypass preflight.
 
+After starting services, the Linux installer waits up to ten minutes for the Web UI, all required system and user services, and Gateway's `lifecycle.coreReady` health signal before reporting success. It prints service and lifecycle progress every ten seconds. A timeout leaves the installation in place for diagnosis and prints the relevant `systemctl` and journal commands; rerunning the installer after correcting the reported service issue is safe.
+
 Place `/var/lib/kautuka` on LUKS/dm-crypt or equivalently encrypted managed storage when file encryption at rest is required. Encrypt backups and snapshots separately; filesystem permissions alone are not encryption.
 
 Do not document generated installer flags independently of the script's argument parser. Inspect the generated asset or run it with `--help` for the current interface.

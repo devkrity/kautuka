@@ -78,6 +78,10 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("chown -R \"kautuka-gateway:$service_group\" \"$bundle_root\"", source, StringComparison.Ordinal);
         Assert.Contains("no pinned update source written; UpdateService discovers signed GitHub releases by channel", source, StringComparison.Ordinal);
         Assert.Contains("wait_for_web_ui \"$service_user\"", source, StringComparison.Ordinal);
+        Assert.Contains("${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}", source, StringComparison.Ordinal);
+        Assert.Contains("lifecycle.get(\"coreReady\") is True", source, StringComparison.Ordinal);
+        Assert.Contains("Startup progress (%ss/%ss)", source, StringComparison.Ordinal);
+        Assert.Contains("Kautuka did not become ready within %s seconds", source, StringComparison.Ordinal);
         Assert.Contains("ensure_dotnet_host_libraries", source, StringComparison.Ordinal);
         Assert.Contains("libicu is required to run Kautuka host services", source, StringComparison.Ordinal);
         Assert.Contains("dnf install -y libicu", source, StringComparison.Ordinal);
