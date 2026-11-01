@@ -1835,8 +1835,15 @@ wait_for_web_ui() {
     local xdg_runtime_dir=''
     local last_status=''
     local health_url=''
+    local setup_status_url=''
     local health_file=''
+    local curl_error_file=''
     local health_summary=''
+    local previous_progress=''
+    local startup_started_at=''
+    local http_status=''
+    local setup_http_status=''
+    local connector_progress=''
     local credentials_state=''
     local channelhost_state=''
     local updateservice_state=''
@@ -1853,7 +1860,10 @@ wait_for_web_ui() {
     [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || fail 'installer readiness timeout must be a positive integer'
 
     health_url="${url%/}/api/runtime/system-health"
+    setup_status_url="${url%/}/api/auth/setup/status"
     health_file="$(mktemp)"
+    curl_error_file="$(mktemp)"
+    startup_started_at="$(date --iso-8601=seconds)"
 
     echo "Installation files are in place. Starting Kautuka services..."
     echo "Waiting for the web UI and core runtime readiness at: $url"
@@ -1871,7 +1881,8 @@ wait_for_web_ui() {
         updateservice_state="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
             systemctl --user show -p ActiveState --value kautuka-updateservice.service 2>/dev/null || true)"
 
-        if curl --silent --show-error --fail --max-time 5 --output "$health_file" "$health_url" 2>/dev/null; then
+        http_status="$(curl --silent --show-error --max-time 5 --output "$health_file" --write-out '%{http_code}' "$health_url" 2>"$curl_error_file" || true)"
+        if [[ "$http_status" == '200' ]]; then
             health_summary="$(python3 - "$health_file" <<'PY'
 import json
 import sys
@@ -1880,7 +1891,7 @@ try:
     with open(sys.argv[1], encoding="utf-8") as stream:
         health = json.load(stream)
     lifecycle = health.get("lifecycle") or {}
-    manager = health.get("manager") or {}
+    manager = health.get("workspace") or {}
     ready = lifecycle.get("coreReady") is True and manager.get("status") == "healthy"
     status = lifecycle.get("status") or "unknown"
     print(("ready" if ready else "waiting") + "\t" + str(status) + "\t" + str(manager.get("status") or "unknown"))
@@ -1890,24 +1901,61 @@ PY
         )"
             local readiness lifecycle_status manager_health
             IFS=$'\t' read -r readiness lifecycle_status manager_health <<< "$health_summary"
-            if [[ "$readiness" == 'ready' && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
+            setup_http_status="$(curl --silent --show-error --max-time 5 --output "$health_file" --write-out '%{http_code}' "$setup_status_url" 2>"$curl_error_file" || true)"
+            if [[ "$readiness" == 'ready' && "$setup_http_status" == '200' && "$gateway_state" == 'active' && "$credentials_state" == 'active' \
                 && "$channelhost_state" == 'active' && "$manager_state" == 'active' \
                 && "$webhost_state" == 'active' && "$updateservice_state" == 'active' ]]; then
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
                 rm -f "$health_file"
+                rm -f "$curl_error_file"
                 return 0
             fi
             last_status="lifecycle=${lifecycle_status}; manager=${manager_health}"
+            if [[ "$setup_http_status" != '200' ]]; then
+                last_status+="; first-run endpoint HTTP ${setup_http_status:-unknown}"
+            fi
         else
-            last_status='health endpoint not responding yet'
+            if [[ "$http_status" =~ ^[0-9]{3}$ && "$http_status" != '000' ]]; then
+                last_status="health endpoint returned HTTP $http_status"
+                [[ "$http_status" == '502' ]] && last_status+=' (WebHost cannot reach Gateway yet)'
+            else
+                local curl_detail
+                curl_detail="$(tr '\n' ' ' < "$curl_error_file" | sed -E 's/ +/ /g' | cut -c1-180)"
+                last_status="WebHost is not answering HTTP yet${curl_detail:+: $curl_detail}"
+            fi
         fi
 
         if (( elapsed % 10 == 0 )); then
-            printf 'Startup progress (%ss/%ss): gateway=%s, credentials=%s, channels=%s, manager=%s, webhost=%s, updates=%s; %s\n' \
-                "$elapsed" "$timeout_seconds" "${gateway_state:-unknown}" "${credentials_state:-unknown}" \
-                "${channelhost_state:-unknown}" "${manager_state:-unknown}" "${webhost_state:-unknown}" \
-                "${updateservice_state:-unknown}" "$last_status"
+            connector_progress="$(journalctl --unit=kautuka-gateway.service --since="$startup_started_at" --no-pager --output=cat 2>/dev/null \
+                | grep -E 'Built-in MCP (bootstrap start|bootstrap completed|metadata refresh start|metadata refresh completed)' \
+                | tail -n 1 || true)"
+            case "$connector_progress" in
+                *'metadata refresh start.'*)
+                    connector_progress="Preparing first-use connector runtime (an image may need to download): ${connector_progress##*connectorId=}; waiting for its tools to initialize."
+                    ;;
+                *'metadata refresh completed.'*)
+                    connector_progress="Connector tools initialized: ${connector_progress##*connectorId=}."
+                    ;;
+                *'bootstrap start.'*)
+                    connector_progress="Loading built-in connector bundle: ${connector_progress##*/}"
+                    ;;
+                *'bootstrap completed.'*)
+                    connector_progress="Built-in connector initialized: ${connector_progress##*connectorId=}."
+                    ;;
+                *)
+                    connector_progress=''
+                    ;;
+            esac
+            local progress_message="$last_status"
+            [[ -n "$connector_progress" ]] && progress_message+="; $connector_progress"
+            if [[ "$progress_message" != "$previous_progress" ]] || (( elapsed % 30 == 0 )); then
+                printf 'Startup progress (%ss/%ss): services gateway=%s, credentials=%s, channels=%s, manager=%s, webhost=%s, updates=%s; %s\n' \
+                    "$elapsed" "$timeout_seconds" "${gateway_state:-unknown}" "${credentials_state:-unknown}" \
+                    "${channelhost_state:-unknown}" "${manager_state:-unknown}" "${webhost_state:-unknown}" \
+                    "${updateservice_state:-unknown}" "$progress_message"
+                previous_progress="$progress_message"
+            fi
         fi
 
         sleep 2
@@ -1915,6 +1963,7 @@ PY
     done
 
     rm -f "$health_file"
+    rm -f "$curl_error_file"
     printf 'error: Kautuka did not become ready within %s seconds (%s).\n' "$timeout_seconds" "$last_status" >&2
     echo 'Check service details with:' >&2
     echo '  sudo systemctl status kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service --no-pager -l' >&2
