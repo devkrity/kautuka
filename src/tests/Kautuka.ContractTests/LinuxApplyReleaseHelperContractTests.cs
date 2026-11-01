@@ -33,6 +33,11 @@ public sealed class LinuxApplyReleaseHelperContractTests
         Assert.Contains("activation failed; restoring current pointers", source, StringComparison.Ordinal);
         Assert.Contains("activation failed after revert", source, StringComparison.Ordinal);
         Assert.Contains("current pointer mismatch", source, StringComparison.Ordinal);
+        Assert.Contains("cp -a --no-preserve=context \"$source_root/.\" \"$version_root/\"", source, StringComparison.Ordinal);
+        Assert.Contains("restorecon -RF \"$version_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("ensure_selinux_runtime_exec_policy() {", source, StringComparison.Ordinal);
+        Assert.Contains("semanage fcontext -a -t bin_t \"$rule\"", source, StringComparison.Ordinal);
+        Assert.Contains("tar -xzf \"$artifact_path\" -C \"$extract_root\"\n\n    ensure_selinux_runtime_exec_policy", source, StringComparison.Ordinal);
         Assert.Contains("current_manager_version", source, StringComparison.Ordinal);
         Assert.Contains("kautuka-apply.rollback", source, StringComparison.Ordinal);
         Assert.Contains("heal_incomplete_apply_if_needed", source, StringComparison.Ordinal);

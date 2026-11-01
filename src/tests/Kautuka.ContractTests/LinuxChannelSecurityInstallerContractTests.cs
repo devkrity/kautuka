@@ -14,6 +14,20 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("ensure_isolated_service_account kautuka-gateway kautuka-gateway", source, StringComparison.Ordinal);
         Assert.Contains("ensure_isolated_service_account kautuka-channelhost kautuka-channelhost", source, StringComparison.Ordinal);
         Assert.Contains("ensure_isolated_service_account kautuka-credentials kautuka-credentials", source, StringComparison.Ordinal);
+        Assert.Contains("copy_runtime_payload() {", source, StringComparison.Ordinal);
+        Assert.Contains("cp -a --no-preserve=context \"$source_root/.\" \"$destination_root/\"", source, StringComparison.Ordinal);
+        Assert.Contains("restorecon -RF \"$destination_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("ensure_selinux_runtime_exec_policy() {", source, StringComparison.Ordinal);
+        Assert.Contains("semanage fcontext -a -t bin_t \"$rule\"", source, StringComparison.Ordinal);
+        Assert.Contains("/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+", source, StringComparison.Ordinal);
+        Assert.Contains("stop_existing_kautuka_runtime() {", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "stop_existing_kautuka_runtime \"$service_user\" \"$service_home\" \"$xdg_runtime_dir\"\n\n    rm -rf \"$version_root\"",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("could not stop existing $unit before replacing installed binaries", source, StringComparison.Ordinal);
+        Assert.Contains("copy_runtime_payload \"$source_root\" \"$version_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("# Do not alter SELinux policy until the signed manifest and archive pass.", source, StringComparison.Ordinal);
         Assert.Contains("socket directory owner $owner does not exist yet", source, StringComparison.Ordinal);
         Assert.DoesNotContain("systemd-tmpfiles --create \"$tmpfiles_path\" >/dev/null 2>&1 || true", source, StringComparison.Ordinal);
 
@@ -57,9 +71,17 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("Gateway can read CredentialsHost vault", source, StringComparison.Ordinal);
         Assert.Contains("ReadWritePaths=${credentials_root} ${credentials_state_root} ${log_dir}", source, StringComparison.Ordinal);
         Assert.Contains("prepare_mcpb_bundle_share", source, StringComparison.Ordinal);
+        Assert.Contains("prepare_gateway_database_owner() {", source, StringComparison.Ordinal);
+        Assert.Contains("chown \"kautuka-gateway:kautuka\" \"$database_sidecar\"", source, StringComparison.Ordinal);
+        Assert.Contains("chmod 0600 \"$database_sidecar\"", source, StringComparison.Ordinal);
+        Assert.Contains("normalize_sidecar_data_permissions \"$internal_state_root\"\n    prepare_gateway_database_owner \"$internal_state_root\"", source, StringComparison.Ordinal);
         Assert.Contains("chown -R \"kautuka-gateway:$service_group\" \"$bundle_root\"", source, StringComparison.Ordinal);
-        Assert.Contains("skipping empty update-source.json; UpdateService stays unprovisioned", source, StringComparison.Ordinal);
+        Assert.Contains("no pinned update source written; UpdateService discovers signed GitHub releases by channel", source, StringComparison.Ordinal);
         Assert.Contains("wait_for_web_ui \"$service_user\"", source, StringComparison.Ordinal);
+        Assert.Contains("${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}", source, StringComparison.Ordinal);
+        Assert.Contains("lifecycle.get(\"coreReady\") is True", source, StringComparison.Ordinal);
+        Assert.Contains("Startup progress (%ss/%ss)", source, StringComparison.Ordinal);
+        Assert.Contains("Kautuka did not become ready within %s seconds", source, StringComparison.Ordinal);
         Assert.Contains("ensure_dotnet_host_libraries", source, StringComparison.Ordinal);
         Assert.Contains("libicu is required to run Kautuka host services", source, StringComparison.Ordinal);
         Assert.Contains("dnf install -y libicu", source, StringComparison.Ordinal);

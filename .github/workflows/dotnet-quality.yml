@@ -103,6 +103,9 @@ jobs:
       - name: Test Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 
+      - name: Test Linux installer readiness wait
+        run: bash ./scripts/test-linux-installer-readiness.sh
+
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 

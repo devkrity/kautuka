@@ -589,10 +589,10 @@ public sealed class WorkspaceSidecarSupervisor(
             // Avoid recursively chowning its growing data directory on each recreation.
             // Non-root sidecars such as the package proxy still require :U.
             args.Add(volume.ReadOnly
-                ? $"{volume.HostPath}:{volume.ContainerPath}:ro"
+                ? $"{volume.HostPath}:{volume.ContainerPath}:ro,Z"
                 : string.Equals(sidecar.Name, "kautuka-openobserve", StringComparison.Ordinal)
-                    ? $"{volume.HostPath}:{volume.ContainerPath}"
-                    : $"{volume.HostPath}:{volume.ContainerPath}:U");
+                    ? $"{volume.HostPath}:{volume.ContainerPath}:Z"
+                    : $"{volume.HostPath}:{volume.ContainerPath}:U,Z");
         }
 
         foreach (KeyValuePair<string, string> kv in sidecar.Environment)

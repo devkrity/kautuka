@@ -67,9 +67,9 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
     }
 
     [Theory]
-    [InlineData("kautuka-pkgs-proxy", ":U")]
-    [InlineData("kautuka-openobserve", "")]
-    public void BuildRunArgumentsUsesPodmanUFlagOnlyForSidecarsRequiringOwnershipChanges(string name, string writableSuffix)
+    [InlineData("kautuka-pkgs-proxy", ":U,Z")]
+    [InlineData("kautuka-openobserve", ":Z")]
+    public void BuildRunArgumentsRelabelsSidecarDataForSELinux(string name, string writableSuffix)
     {
         WorkspaceSidecarDefinition sidecar = new(
             Name: name,
@@ -99,7 +99,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         }
 
         Assert.Contains("/var/lib/kautuka/proxy/pkgs/data:/data" + writableSuffix, volumeSpecs);
-        Assert.Contains("/var/lib/kautuka/proxy/pkgs/conf:/conf:ro", volumeSpecs);
+        Assert.Contains("/var/lib/kautuka/proxy/pkgs/conf:/conf:ro,Z", volumeSpecs);
     }
 
     [Fact]
