@@ -12,7 +12,8 @@ public class McpbBundleLifecycleTests
     [Fact]
     public void RuntimeImageNodeServerTypeMapsToNodeSlimImage()
     {
-        Assert.Equal(ReleasedSandboxImage.LocalImage, McpCommandTransportMapper.NodeImage);
+        Assert.Equal(ReleasedSandboxImage.Current, McpCommandTransportMapper.NodeImage);
+        Assert.StartsWith("ghcr.io/devkrity/kautuka-base@sha256:", McpCommandTransportMapper.NodeImage, StringComparison.Ordinal);
         Assert.DoesNotContain("quay.io/fedora", McpCommandTransportMapper.NodeImage, StringComparison.Ordinal);
         const string released = "ghcr.io/devkrity/kautuka-base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         Assert.Equal(released, ReleasedSandboxImage.Select(released, "quay.io/fedora/fedora-minimal:44", "node"));
