@@ -239,7 +239,7 @@ jobs:
               docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
               docker-archive:"/src/sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name" \
               -o spdx-json="/src/$release_dir/kautuka-${image_id}-image.spdx.json"
-          done < <(jq -r '.images[] | [.id, .archive] | @tsv' src/backend/Kautuka.Manager/runtime-images.json)
+          done < <(node scripts/list-runtime-image-archives.mjs)
           base_image="$(jq -r '.baseImage // empty' "$release_dir/THIRD_PARTY_COMPONENTS.json")"
           if [[ -z "$base_image" ]]; then
             echo 'error: release component inventory has no immutable kautuka-base image digest.' >&2
