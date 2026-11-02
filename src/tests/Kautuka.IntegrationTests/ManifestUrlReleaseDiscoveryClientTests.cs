@@ -252,7 +252,6 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
             RepositoryOwner = "devkrity",
             RepositoryName = "kautuka",
             ManifestPublicKeyPath = publicKeyPath,
-            PlatformAssetName = "kautuka-linux-amd64.tar.gz",
             PlatformReleaseAssetName = "kautuka-platform-release.json",
             PlatformReleaseSignatureAssetName = "kautuka-platform-release.sig",
         }), NullLogger<ManifestUrlReleaseDiscoveryClient>.Instance);

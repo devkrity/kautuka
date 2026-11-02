@@ -202,6 +202,22 @@ chown_if_service_account() {
     fi
 }
 
+write_initial_update_runtime_policy() {
+    local state_root="$1"
+    local release_channel="$2"
+    local service_user="$3"
+    local service_group="$4"
+    local policy_path="$state_root/updateService/update-runtime-policy.json"
+
+    [[ "$release_channel" == 'stable' || "$release_channel" == 'preview' ]] || fail "unsupported release channel for initial update policy: $release_channel"
+    [[ -e "$policy_path" ]] && return 0
+
+    mkdir -p "$(dirname "$policy_path")"
+    printf '{\n  "schemaVersion": 1,\n  "releaseChannel": "%s"\n}\n' "$release_channel" > "$policy_path"
+    chmod 640 "$policy_path"
+    chown_if_service_account "$service_user" "$service_group" "$policy_path"
+}
+
 copy_runtime_payload() {
     local source_root="$1"
     local destination_root="$2"
@@ -2554,19 +2570,10 @@ PY
     # Do not alter SELinux policy until the signed manifest and archive pass.
     ensure_selinux_runtime_exec_policy
 
-    # Local-feed installers need a preview/stable runtime policy, but must not
-    # persist that policy until the signed manifest and archive digest have passed.
-    if [[ "${KAUTUKA_INSTALL_LOCAL_RELEASE_DEFAULTS:-0}" == '1' ]]; then
-        local local_policy_path="$internal_state_root/updateService/update-runtime-policy.json"
-        mkdir -p "$(dirname "$local_policy_path")"
-        printf '{\n  "schemaVersion": 1,\n  "releaseChannel": "%s"\n}\n' "$release_channel" > "$local_policy_path"
-        chmod 640 "$local_policy_path"
-        if id "$service_user" >/dev/null 2>&1 && getent group "$service_group" >/dev/null 2>&1; then
-            chown "$service_user:$service_group" "$local_policy_path"
-        fi
-    fi
-
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"
+    # Seed the installed release's channel only on a fresh install. Preserve any
+    # channel the user has already chosen when reinstalling or upgrading.
+    write_initial_update_runtime_policy "$internal_state_root" "$release_channel" "$service_user" "$service_group"
     ensure_isolated_service_account kautuka-gateway kautuka-gateway
     ensure_isolated_service_account kautuka-channelhost kautuka-channelhost
     ensure_isolated_service_account kautuka-credentials kautuka-credentials

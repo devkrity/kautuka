@@ -428,8 +428,8 @@ run_generated_main_with_installer \
 valid_local_status=$?
 set -e
 valid_local_mutation="$(head -n 1 "$tmp/main-mutations.log" 2>/dev/null || true)"
-[[ "$valid_local_status" -eq 98 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$valid_local_mutation" == "mkdir -p $tmp/local-test-state/updateService"* ]] || {
-  echo "error: valid local-feed installer did not reach the deferred runtime-policy mutation boundary (status=$valid_local_status; mutation=$valid_local_mutation)." >&2
+[[ "$valid_local_status" -eq 97 && "$(wc -l < "$tmp/main-mutations.log")" -eq 1 && "$valid_local_mutation" == "groupadd --system kautuka-installer-test-"* ]] || {
+  echo "error: valid local-feed installer did not reach its first post-validation system mutation (status=$valid_local_status; mutation=$valid_local_mutation)." >&2
   cat "$local_valid_log" >&2
   exit 1
 }
