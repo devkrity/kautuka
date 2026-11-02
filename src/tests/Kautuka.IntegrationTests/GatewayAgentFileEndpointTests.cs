@@ -24,6 +24,7 @@ using Xunit.Sdk;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class GatewayAgentFileEndpointTests
 {
     [Fact]

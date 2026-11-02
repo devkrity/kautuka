@@ -8,6 +8,7 @@ using Kautuka.M365Mail;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class MicrosoftMailConnectorTests
 {
     [Fact]

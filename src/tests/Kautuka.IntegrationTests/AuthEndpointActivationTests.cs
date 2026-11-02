@@ -28,6 +28,7 @@ using Xunit.Sdk;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed partial class AuthEndpointActivationTests
 {
     [Fact]

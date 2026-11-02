@@ -31,6 +31,7 @@ namespace Kautuka.IntegrationTests;
 // Full-fixture HTTP tests — provider CRUD
 // ─────────────────────────────────────────────────────────────────────────────
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ProviderSettingsEndpointTests
 {
     [Fact]
@@ -351,6 +352,7 @@ public sealed class ProviderSettingsEndpointTests
 // Full-fixture HTTP tests — model CRUD
 // ─────────────────────────────────────────────────────────────────────────────
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ModelSettingsEndpointTests
 {
     [Fact]
@@ -424,6 +426,7 @@ public sealed class ModelSettingsEndpointTests
 // avoiding the full GatewayAppBootstrap startup time.
 // ─────────────────────────────────────────────────────────────────────────────
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ModelDiscoveryEndpointTests
 {
     private static readonly JsonSerializerOptions jsonOpts = new()

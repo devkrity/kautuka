@@ -28,6 +28,7 @@ using Xunit.Sdk;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class AutopilotEndpointTests
 {
     private static GatewayWorkflowDefinition CreateAutopilotWorkflow(string id, string ownerUserId, JsonObject schema)

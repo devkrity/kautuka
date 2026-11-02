@@ -77,6 +77,11 @@ artifact_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautu
 signature_url="https://github.com/devkrity/kautuka/releases/download/${tag}/kautuka-platform-release.sig"
 source_sha='0123456789abcdef0123456789abcdef01234567'
 
+redirect_installer_lock_to_tmp() {
+  local installer="$1"
+  sed -i "s|/run/kautuka-apply.lock|$tmp/kautuka-apply.lock|" "$installer"
+}
+
 write_manifest() {
   local output="$1" manifest_version="${2:-$version}" manifest_channel="${3:-$channel}" manifest_tag="${4:-$tag}" manifest_url="$artifact_url" manifest_signature_url="$signature_url" manifest_source_sha="${7:-$source_sha}"
   if [[ -n "${5:-}" ]]; then manifest_url="$5"; fi
@@ -166,6 +171,7 @@ bash "$script_dir/generate-linux-installer.sh" \
   --artifact-url "$artifact_url" \
   --manifest-url "$main_manifest_url" \
   --manifest-public-key "$tmp/public.pem"
+redirect_installer_lock_to_tmp "$tmp/generated-main-installer.sh"
 bash -n "$tmp/generated-main-installer.sh"
 
 main_mock_bin="$tmp/main-mock-bin"
@@ -333,6 +339,7 @@ bash "$script_dir/generate-linux-installer.sh" \
   --version "$version" \
   --release-channel "$channel" \
   --manifest-public-key "$tmp/public.pem"
+redirect_installer_lock_to_tmp "$tmp/generated-github-installer.sh"
 bash -n "$tmp/generated-github-installer.sh"
 write_manifest "$tmp/main-github-valid-manifest.json"
 openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/main-github-valid-signature.der" "$tmp/main-github-valid-manifest.json"
@@ -381,6 +388,7 @@ bash "$script_dir/generate-linux-installer.sh" \
   --feed-base-url "$local_feed_base" \
   --manifest-public-key "$tmp/public.pem" \
   --local-feed-defaults
+redirect_installer_lock_to_tmp "$tmp/generated-local-feed-installer.sh"
 bash -n "$tmp/generated-local-feed-installer.sh"
 write_manifest "$tmp/local-valid-manifest.json" "$version" "$channel" "$tag" "$local_artifact_url" "$local_signature_url"
 openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/local-valid-signature.der" "$tmp/local-valid-manifest.json"
