@@ -1690,6 +1690,8 @@ prepare_gateway_database_owner() {
     local database_file="$internal_state_root/kautuka.db"
     local database_sidecar=''
     local gateway_secret=''
+    local agent_database_root="$internal_state_root/agents"
+    local agent_database=''
 
     # Gateway applies owner-only permissions to the database and its SQLite
     # sidecars during startup. Make it the owner before the unit starts, even
@@ -1698,6 +1700,19 @@ prepare_gateway_database_owner() {
         [[ -e "$database_sidecar" ]] || continue
         chown "kautuka-gateway:kautuka" "$database_sidecar"
         chmod 0600 "$database_sidecar"
+    done
+
+    # Gateway also owns each per-agent SQLite store. Existing installations may
+    # have these files owned by `kautuka`; Gateway must own them to apply the
+    # owner-only mode during startup. Transfer only the database and its SQLite
+    # sidecars; the contents and containing directories remain untouched.
+    for agent_database in \
+        "$agent_database_root"/*/agent.db \
+        "$agent_database_root"/*/agent.db-wal \
+        "$agent_database_root"/*/agent.db-shm; do
+        [[ -e "$agent_database" ]] || continue
+        chown "kautuka-gateway:kautuka" "$agent_database"
+        chmod 0600 "$agent_database"
     done
 
     # Previous releases created these under the shared `kautuka` account.
