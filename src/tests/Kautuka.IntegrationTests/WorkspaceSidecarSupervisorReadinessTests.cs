@@ -143,7 +143,76 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         Assert.False(ready);
     }
 
+    [Fact]
+    public async Task ExistingSidecarImageIsRebuiltWhenItsPinnedBuildContextChanges()
+    {
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-sidecar-source-" + Guid.NewGuid().ToString("N"));
+        string context = Path.Combine(root, "context");
+        Directory.CreateDirectory(context);
+        string dockerfile = Path.Combine(context, "Dockerfile");
+        await File.WriteAllTextAsync(dockerfile, "FROM example.test/proxy@sha256:abc\n", cancellationToken).ConfigureAwait(false);
+        string expectedHash = WorkspaceSidecarSupervisor.ComputeBuildContextSourceHash(context, dockerfile);
+        List<string>? buildArguments = null;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "exists")
+            {
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty));
+            }
+
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect")
+            {
+                return Task.FromResult(new PodmanCommandResult(0, "old-source-hash", string.Empty));
+            }
+
+            if (args.Count > 0 && args[0] == "build")
+            {
+                buildArguments = [.. args];
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty));
+            }
+
+            throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
+        });
+        WorkspaceSidecarDefinition sidecar = new(
+            Name: "kautuka-pkgs-proxy",
+            Image: "localhost/kautuka-pkgs-proxy:local",
+            Ports: [],
+            Environment: new Dictionary<string, string>(),
+            Command: [],
+            BuildContext: context,
+            Dockerfile: dockerfile,
+            HealthCheck: null,
+            RequiredForReady: true,
+            Policy: "always");
+        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(sidecar, podman);
+
+        try
+        {
+            MethodInfo ensureImage = typeof(WorkspaceSidecarSupervisor)
+                .GetMethod("EnsureImageAvailableAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("EnsureImageAvailableAsync method was not found.");
+            Task<bool> pending = Assert.IsType<Task<bool>>(ensureImage.Invoke(supervisor, [sidecar, cancellationToken]));
+
+            Assert.True(await pending.ConfigureAwait(true));
+            Assert.NotNull(buildArguments);
+            int labelIndex = buildArguments.IndexOf("--label");
+            Assert.True(labelIndex >= 0);
+            Assert.Equal($"io.kautuka.sidecar.source-hash={expectedHash}", buildArguments[labelIndex + 1]);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static WorkspaceSidecarSupervisor CreateSupervisor(WorkspaceSidecarDefinition sidecar)
+        => CreateSupervisor(sidecar, new PodmanCommandRunner());
+
+    private static WorkspaceSidecarSupervisor CreateSupervisor(WorkspaceSidecarDefinition sidecar, PodmanCommandRunner podman)
     {
         ServiceCollection services = new();
         services.AddHttpClient("manager.sidecars");
@@ -153,7 +222,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         return new WorkspaceSidecarSupervisor(
             new WorkspaceSidecarCatalog([sidecar]),
             provider.GetRequiredService<IHttpClientFactory>(),
-            new PodmanCommandRunner(),
+            podman,
             Options.Create(new ManagerContainerStartupOptions()),
             NullLogger<WorkspaceSidecarSupervisor>.Instance);
     }

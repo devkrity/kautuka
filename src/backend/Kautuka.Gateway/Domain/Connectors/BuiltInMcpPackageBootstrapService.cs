@@ -7,7 +7,7 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
     IGatewayCatalogStore catalog,
     IMcpbPackageService mcpbPackageService,
     IMcpConnectorTestService mcpConnectorTestService,
-    ILogger<BuiltInMcpPackageBootstrapService> logger) : IHostedService
+    ILogger<BuiltInMcpPackageBootstrapService> logger) : BackgroundService
 {
     private const string builtInBundleDirectoryName = "built-in-mcpb";
     private const string solutionRelativePath = "src/Kautuka.slnx";
@@ -51,8 +51,13 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
         Message = "Built-in MCP metadata refresh failed. connectorId={ConnectorId} message={Message}")]
     private static partial void LogMetadataRefreshFailed(ILogger logger, string connectorId, string message);
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
+        // Connector inspection can start containers and probe external runtimes. Keep it
+        // out of Generic Host's synchronous startup path so Gateway binds its API socket
+        // before first-run connector setup begins.
+        await Task.Yield();
+
         foreach ((string fileName, string connectorId) in builtInBundles)
         {
             await ImportBundleAsync(fileName, connectorId, cancellationToken).ConfigureAwait(false);
@@ -105,13 +110,11 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
 
             LogBootstrapCompleted(logger, connectorId);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
         {
             LogImportFailed(logger, ex, bundlePath);
         }
     }
-
-    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
     private string ResolveBundlePath(string fileName, string connectorId)
     {

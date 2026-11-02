@@ -57,7 +57,7 @@ Architecture tests under `src/tests/Kautuka.ContractTests` and focused integrati
 
 Gateway activates and validates the mandatory shared database before mapping endpoints. Empty stores receive the current baseline; non-empty incompatible schemas fail rather than migrate through compatibility paths. Per-agent stores follow the same current-schema rule. The usage database is optional for startup and reports unavailable when activation fails.
 
-Built-in MCP and Skill bootstraps are awaited hosted startup work and can delay readiness; MCP import/metadata refresh can trigger Manager materialization. Execution/outbox, approval continuation, channel approval, memory, usage, and desired-state recovery continue through background workers after startup.
+Built-in Skill import remains awaited startup work. Built-in MCP import and metadata refresh run in a background hosted service after Gateway startup because connector probes can materialize containers through Manager and must not delay the Gateway API socket. Connector discovery may therefore finish after the API is available. Execution/outbox, approval continuation, channel approval, memory, usage, and desired-state recovery also continue through background workers after startup.
 
 Manager reloads its desired-state ledger and reconciles accepted work after restart. CredentialsHost initializes its isolated schema before serving. ChannelHost initializes its attachment database before accepting RPCs.
 

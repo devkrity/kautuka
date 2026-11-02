@@ -53,7 +53,7 @@
       "command": [],
       "buildContext": "sidecar-assets/pkgs-proxy",
       "dockerfile": null,
-      "requiredForReady": false,
+      "requiredForReady": true,
       "managerInfrastructure": true,
       "policy": "always",
       "healthCheck": null

@@ -215,6 +215,12 @@ jobs:
       - name: Verify Linux installer trust preflight regressions
         run: bash ./scripts/test-linux-installer-security.sh
 
+      - name: Verify Linux installer uninstall confirmation
+        run: bash ./scripts/test-linux-installer-uninstall.sh
+
+      - name: Verify Linux installer image preparation
+        run: bash ./scripts/test-linux-installer-images.sh
+
       - name: Verify Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 

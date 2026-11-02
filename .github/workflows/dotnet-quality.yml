@@ -106,6 +106,12 @@ jobs:
       - name: Test Linux installer readiness wait
         run: bash ./scripts/test-linux-installer-readiness.sh
 
+      - name: Test Linux installer uninstall confirmation
+        run: bash ./scripts/test-linux-installer-uninstall.sh
+
+      - name: Test Linux installer image preparation
+        run: bash ./scripts/test-linux-installer-images.sh
+
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 
