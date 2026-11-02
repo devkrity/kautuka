@@ -1,6 +1,7 @@
 using System.Text.Json;
 
 using Kautuka.Manager.RuntimeContainer.Hosting;
+
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests;
