@@ -97,9 +97,54 @@ grep -F 'podman pull quay.io/fedora/fedora-minimal:44' "$test_root/fallback-podm
   exit 1
 }
 
+rootless_state="$test_root/rootless-podman"
+rootless_home="$rootless_state/home"
+rootless_runtime="$rootless_state/run"
+mkdir -p "$rootless_home" "$rootless_runtime"
+MOCK_ROOTLESS_CHOWN_LOG="$test_root/rootless-chown.log" \
+  KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+    source "$1/scripts/kautuka-install-linux.sh.in"
+    ensure_subid_entry() { :; }
+    ensure_rootless_idmap_helpers() { :; }
+    validate_linger_enabled() { :; }
+    install_user_manager_restart_dropin() { :; }
+    loginctl() { :; }
+    systemctl() { :; }
+    id() { [[ "$1" == "-u" ]] && { printf "956\\n"; return 0; }; return 0; }
+    run_as_service_user() { return 0; }
+    chown() { printf "%s\\n" "$*" >> "$MOCK_ROOTLESS_CHOWN_LOG"; }
+    ensure_rootless_podman_ready kautuka kautuka "$2" "$3"
+  ' _ "$repo_root" "$rootless_home" "$rootless_runtime"
+
+for protected_podman_path in \
+  "$rootless_home/.local" \
+  "$rootless_home/.local/share" \
+  "$rootless_home/.local/share/containers" \
+  "$rootless_home/.local/share/containers/storage" \
+  "$rootless_runtime/containers"; do
+  grep -F "$protected_podman_path" "$test_root/rootless-chown.log" >/dev/null || {
+    echo "Rootless Podman parent directory was not assigned to the service user: $protected_podman_path" >&2
+    exit 1
+  }
+done
+if ! grep -F "kautuka:kautuka $rootless_home/.local " "$test_root/rootless-chown.log" >/dev/null; then
+  echo 'Rootless Podman parent directories must be assigned directly to the service user.' >&2
+  exit 1
+fi
+if ! grep -F "kautuka:kautuka $rootless_runtime/containers" "$test_root/rootless-chown.log" >/dev/null; then
+  echo 'Rootless Podman runroot must be assigned directly to the service user.' >&2
+  exit 1
+fi
+if grep -E -- '-R .*\.local| -R .*containers/storage| -R .*containers$| -R .*run/containers' \
+  "$test_root/rootless-chown.log" >/dev/null; then
+  echo 'Installer must not recursively chown the rootless Podman store or runroot; image layers use subordinate IDs.' >&2
+  exit 1
+fi
 gateway_state="$test_root/gateway-state"
 mkdir -p "$gateway_state/agents/agent-test"
 touch "$gateway_state/kautuka.db" "$gateway_state/kautuka.db-wal" \
+  "$gateway_state/kautuka-usage.db" "$gateway_state/kautuka-usage.db-wal" \
+  "$gateway_state/kautuka-usage.db-shm" \
   "$gateway_state/gateway-auth.key" "$gateway_state/setup-token" \
   "$gateway_state/agents/agent-test/agent.db" \
   "$gateway_state/agents/agent-test/agent.db-wal" \
@@ -121,6 +166,19 @@ for gateway_secret in gateway-auth.key setup-token; do
   grep -F "chmod 0600 $gateway_state/$gateway_secret" \
     "$test_root/gateway-state-permissions.log" >/dev/null || {
     echo "Existing Gateway secret was not restricted to owner-only access: $gateway_secret" >&2
+    exit 1
+  }
+done
+
+for usage_database in kautuka-usage.db kautuka-usage.db-wal kautuka-usage.db-shm; do
+  grep -F "chown kautuka-gateway:kautuka $gateway_state/$usage_database" \
+    "$test_root/gateway-state-permissions.log" >/dev/null || {
+    echo "Existing Gateway usage database was not transferred to its service owner: $usage_database" >&2
+    exit 1
+  }
+  grep -F "chmod 0600 $gateway_state/$usage_database" \
+    "$test_root/gateway-state-permissions.log" >/dev/null || {
+    echo "Existing Gateway usage database was not restricted to owner-only access: $usage_database" >&2
     exit 1
   }
 done
