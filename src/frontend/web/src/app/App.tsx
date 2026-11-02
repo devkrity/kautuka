@@ -119,7 +119,10 @@ function AppShell() {
 
       const observedState = nextStatus.state.toLowerCase();
       const observedVersion = nextStatus.currentRelease?.version ?? nextStatus.managerVersion;
-      if (observedState === 'current' && observedVersion === pendingRollbackVersion) {
+      if (
+        (observedState === 'current' || observedState === 'available') &&
+        observedVersion === pendingRollbackVersion
+      ) {
         setRollbackCompletedVersion(pendingRollbackVersion);
         setPendingRollbackVersion(null);
       }

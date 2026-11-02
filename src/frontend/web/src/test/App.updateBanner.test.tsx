@@ -813,6 +813,26 @@ describe('App update banner', () => {
     expect(screen.queryByTitle('Dismiss update notice')).not.toBeInTheDocument();
   });
 
+  it('shows rollback complete when a newer release is immediately available', async () => {
+    sessionStorageMock.getItem.mockImplementation((key: string) =>
+      key === 'kautuka-pending-rollback-version' ? '0.1.20-preview.17' : null
+    );
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: true,
+      state: 'Available',
+      currentRelease: { version: '0.1.20-preview.17' },
+      availableRelease: { version: '0.1.20-preview.19' },
+      managerVersion: '0.1.20-preview.17',
+      hostReady: true,
+      activeExecCount: 0,
+      lastError: null,
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByText('Rollback complete')).toBeInTheDocument());
+  });
+
   it('requires confirmation before rollback and shows rollback complete after the previous release returns', async () => {
     const sessionStorageData = new Map<string, string>();
     sessionStorageMock.getItem.mockImplementation(
