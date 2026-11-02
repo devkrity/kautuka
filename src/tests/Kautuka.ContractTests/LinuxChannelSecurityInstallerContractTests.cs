@@ -22,7 +22,7 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+", source, StringComparison.Ordinal);
         Assert.Contains("stop_existing_kautuka_runtime() {", source, StringComparison.Ordinal);
         Assert.Contains(
-            "stop_existing_kautuka_runtime \"$service_user\" \"$service_home\" \"$xdg_runtime_dir\"\n\n    rm -rf \"$version_root\"",
+            "stop_existing_kautuka_runtime \"$service_user\" \"$service_home\" \"$xdg_runtime_dir\"\n\n    # Clear generated workspace runtime state only after the old services stop.\n    clear_generated_agent_workspace_state \"$visible_root\"\n\n    rm -rf \"$version_root\"",
             source,
             StringComparison.Ordinal);
         Assert.Contains("could not stop existing $unit before replacing installed binaries", source, StringComparison.Ordinal);
