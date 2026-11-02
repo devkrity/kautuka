@@ -18,7 +18,7 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceContainerSupervisorReadinessTests
 {
     [Fact]
-    public async Task SandboxImagePreparationDoesNotCloseTheRuntimeGate()
+    public async Task RuntimeGateWaitsForInitialSandboxImagePreparation()
     {
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         string root = Path.Combine(Path.GetTempPath(), "kautuka-readiness-" + Guid.NewGuid().ToString("N"));
@@ -40,7 +40,7 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
             await worker.StartAsync(cancellationToken).ConfigureAwait(true);
             await adapter.FirstImageEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(true);
 
-            Assert.True(gate.IsReady);
+            Assert.False(gate.IsReady);
 
             store.ApplyDesiredState(
                 2,

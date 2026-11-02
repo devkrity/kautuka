@@ -38,7 +38,7 @@ Options:
   --service-group <name>    Service account group (default: same as user)
     --uninstall               Remove installed Kautuka Linux services and binaries
         --delete-data             Also delete preserved Kautuka databases and agent workspace files during uninstall
-        --yes                     Skip the interactive uninstall confirmation prompt
+        --yes                     Skip prompts and confirm deletion, including databases and workspace files
     --skip-enable             Install files but do not enable/start the user systemd target
   --help                    Show this help
 
@@ -288,32 +288,52 @@ ensure_subid_entry() {
         return 0
     fi
 
-    local next_start='100000'
-    local computed_start=''
-    computed_start="$(awk -F: '
-        BEGIN { max_end = 100000 }
-        NF >= 3 {
-            start = $2 + 0
-            count = $3 + 0
-            end = start + count
-            if (end > max_end) {
-                max_end = end
-            }
-        }
-        END { print max_end }
-    ' "$file_path" 2>/dev/null || true)"
+    local next_start=100000
+    local computed_start=100000
+    local line=''
+    local start=''
+    local count=''
+    local numeric_start=0
+    local numeric_count=0
+    local end=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        IFS=: read -r _ start count _ <<<"$line"
+        [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] \
+            || fail "invalid subordinate-ID range in $file_path"
+        while [[ ${#start} -gt 1 && "${start:0:1}" == '0' ]]; do start="${start:1}"; done
+        while [[ ${#count} -gt 1 && "${count:0:1}" == '0' ]]; do count="${count:1}"; done
+        [[ ${#start} -le 10 && ${#count} -le 10 ]] \
+            || fail "subordinate-ID range exceeds the Linux ID limit in $file_path"
+        numeric_start=$((10#$start))
+        numeric_count=$((10#$count))
+        end=$((numeric_start + numeric_count))
+        (( numeric_start <= 4294967294 && numeric_count > 0 && numeric_count <= 4294967295 && end <= 4294967295 )) \
+            || fail "subordinate-ID range exceeds the Linux ID limit in $file_path"
+        if (( end > computed_start )); then
+            computed_start="$end"
+        fi
+    done < "$file_path"
+    (( computed_start <= 4294967295 - 65536 )) \
+        || fail "no free 65536-ID subordinate range remains in $file_path"
+    next_start="$computed_start"
 
-    if [[ "$computed_start" =~ ^[0-9]+$ ]]; then
-        next_start="$computed_start"
+    # A final record without a newline is valid input; separate the new entry so it
+    # does not concatenate with that record and become an invalid sub-ID line.
+    if [[ -s "$file_path" ]]; then
+        local last_character=''
+        IFS= read -r -n 1 last_character < <(tail -c 1 "$file_path") || true
+        if [[ -n "$last_character" ]]; then
+            printf '\n' >> "$file_path"
+        fi
     fi
-
     printf '%s:%s:65536\n' "$user" "$next_start" >> "$file_path"
 }
 
 get_service_user_home() {
     local service_user="$1"
     local service_home=''
-    service_home="$(getent passwd "$service_user" | awk -F: '{ print $6 }')"
+    IFS=: read -r _ _ _ _ _ service_home _ < <(getent passwd "$service_user")
     [[ -n "$service_home" ]] || fail "could not resolve home directory for service user: $service_user"
     printf '%s\n' "$service_home"
 }
@@ -1339,6 +1359,18 @@ best_effort_remove_tree() {
     fi
 }
 
+remove_data_tree_or_fail() {
+    local path="$1"
+
+    if [[ -e "$path" || -L "$path" ]]; then
+        rm -rf -- "$path" || fail "could not delete Kautuka data path: $path"
+        [[ ! -e "$path" && ! -L "$path" ]] || fail "Kautuka data remains after deletion attempt: $path"
+        printf 'Deleted Kautuka data: %s\n' "$path"
+    else
+        printf 'No Kautuka data found at: %s\n' "$path"
+    fi
+}
+
 best_effort_remove_dir_if_empty() {
     local path="$1"
 
@@ -1383,9 +1415,9 @@ prompt_yes_no() {
 
     while true; do
         if [[ "$default_answer" == 'yes' ]]; then
-            printf '%s [Y/n]: ' "$prompt_message"
+            printf '%s [Y/n]: ' "$prompt_message" >&2
         else
-            printf '%s [y/N]: ' "$prompt_message"
+            printf '%s [y/N]: ' "$prompt_message" >&2
         fi
 
         read -r response || return 1
@@ -1405,7 +1437,7 @@ prompt_yes_no() {
                 ;;
         esac
 
-        echo 'Please answer yes or no.'
+        echo 'Please answer yes or no.' >&2
     done
 }
 
@@ -1464,26 +1496,163 @@ restore_preserved_uninstall_state() {
 confirm_uninstall() {
     local delete_data="$1"
 
-    echo 'Warning: this uninstall removes Kautuka services, service accounts, binaries, configuration, installers, and runtime support files.'
+    echo 'Warning: this uninstall removes Kautuka services, service accounts, binaries, configuration, installers, and runtime support files.' >&2
 
     if [[ "$delete_data" == 'true' ]]; then
-        echo 'The preserved Kautuka databases and agent workspace files will also be deleted.'
+        echo 'The preserved Kautuka databases and agent workspace files will also be deleted.' >&2
     else
-        echo 'By default, Kautuka databases and agent workspace files are preserved. You can remove them now or later by rerunning this script with --uninstall --delete-data.'
+        echo 'By default, Kautuka databases and agent workspace files are preserved. You can remove them now or later by rerunning this script with --uninstall --delete-data.' >&2
     fi
 
     if [[ "$delete_data" != 'true' ]] && prompt_yes_no 'Delete the preserved Kautuka databases and agent workspace files now as well?' 'no'; then
         delete_data='true'
     fi
 
-    echo
-    echo 'Type UNINSTALL to continue, or press Enter to cancel.'
+    echo >&2
+    echo 'Type UNINSTALL to continue, or press Enter to cancel.' >&2
 
     local confirmation=''
     read -r confirmation || fail 'uninstall cancelled'
     [[ "$confirmation" == 'UNINSTALL' ]] || fail 'uninstall cancelled'
 
     printf '%s\n' "$delete_data"
+}
+
+resolve_uninstall_delete_data() {
+    local delete_data="$1"
+    local assume_yes="$2"
+
+    # --yes answers every uninstall prompt affirmatively, including the data-removal
+    # prompt. Users who want to preserve data should omit --yes and --delete-data.
+    if [[ "$assume_yes" == 'true' ]]; then
+        delete_data='true'
+    fi
+
+    printf '%s\n' "$delete_data"
+}
+
+prepare_install_images() {
+    local content_root="$1"
+    local service_user="$2"
+    local service_home="$3"
+    local xdg_runtime_dir="$4"
+    local image_plan=''
+    local image_id=''
+    local image_ref=''
+    local sandbox_base_image=''
+    local has_released_kautuka_base='false'
+    local proxy_plan=''
+    local proxy_image=''
+    local proxy_context=''
+    local proxy_dockerfile=''
+    local proxy_upstream_image=''
+
+    image_plan="$(python3 - "${content_root}/runtime-images.json" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    document = json.load(stream)
+if document.get("schemaVersion") != 1 or not isinstance(document.get("images"), list):
+    raise SystemExit("invalid runtime-images.json schema")
+for image in document["images"]:
+    image_id = image.get("id")
+    image_ref = image.get("image")
+    if not isinstance(image_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", image_id):
+        raise SystemExit("runtime image has an invalid id")
+    if not isinstance(image_ref, str) or not re.search(r"@sha256:[0-9a-f]{64}$", image_ref):
+        raise SystemExit(f"runtime image {image_id!r} is not pinned by sha256 digest")
+    print(f"{image_id}\t{image_ref}")
+PY
+)" || fail 'could not read the signed runtime image list'
+
+    while IFS=$'\t' read -r image_id image_ref; do
+        [[ -n "$image_id" && -n "$image_ref" ]] || continue
+        [[ "$image_id" == 'kautuka-base' ]] && has_released_kautuka_base='true'
+        if run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman image exists "$image_ref" >/dev/null 2>&1; then
+            printf 'Runtime image ready: %s (already cached)\n' "$image_id"
+            continue
+        fi
+        printf '\n==> Downloading pinned runtime image: %s\n    %s\n' "$image_id" "$image_ref"
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman pull "$image_ref" \
+            || fail "failed to download required runtime image '$image_id'"
+        printf 'Runtime image ready: %s\n' "$image_id"
+    done <<< "$image_plan"
+
+    if [[ "$has_released_kautuka_base" != 'true' ]]; then
+        [[ -f "${content_root}/sandbox/Dockerfile" ]] || fail 'signed release is missing the Kautuka sandbox Dockerfile'
+        sandbox_base_image="$(python3 - "${content_root}/sandbox/Dockerfile" <<'PY'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"(?m)^ARG\s+FEDORA_IMAGE=(\S+)\s*$", text)
+if not match:
+    raise SystemExit("sandbox Dockerfile does not declare FEDORA_IMAGE")
+print(match.group(1))
+PY
+        )" || fail 'could not resolve the Kautuka sandbox base image input'
+        if ! run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman image exists "$sandbox_base_image" >/dev/null 2>&1; then
+            printf '\n==> Downloading Kautuka sandbox base image input: %s\n' "$sandbox_base_image"
+            run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman pull "$sandbox_base_image" \
+                || fail 'failed to download the Kautuka sandbox base image input'
+        else
+            printf 'Kautuka sandbox base image input ready: %s (already cached)\n' "$sandbox_base_image"
+        fi
+    else
+        printf 'Kautuka sandbox base image ready: pinned release image was downloaded or already cached.\n'
+    fi
+
+proxy_plan="$(python3 - "${content_root}/sidecars.json" "$content_root" "${content_root}/runtime-images.json" <<'PY'
+import json
+import os
+import re
+import sys
+
+path, root, runtime_path = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    document = json.load(stream)
+with open(runtime_path, encoding="utf-8") as stream:
+    runtime_images = {entry.get("image") for entry in json.load(stream).get("images", [])}
+sidecars = document.get("sidecars")
+if not isinstance(sidecars, list):
+    raise SystemExit("invalid sidecars.json schema")
+matches = [entry for entry in sidecars if entry.get("name") == "kautuka-pkgs-proxy"]
+if len(matches) != 1:
+    raise SystemExit("expected one kautuka-pkgs-proxy sidecar")
+sidecar = matches[0]
+image = sidecar.get("image")
+context = sidecar.get("buildContext")
+dockerfile = sidecar.get("dockerfile")
+if not isinstance(image, str) or not image.startswith("localhost/"):
+    raise SystemExit("package proxy sidecar must use its local wrapper image")
+if not isinstance(context, str) or not context:
+    raise SystemExit("package proxy sidecar has no build context")
+context_path = os.path.normpath(os.path.join(root, context))
+if os.path.commonpath([root, context_path]) != os.path.normpath(root):
+    raise SystemExit("package proxy build context escapes release payload")
+dockerfile_path = os.path.normpath(os.path.join(root, dockerfile)) if dockerfile else os.path.join(context_path, "Dockerfile")
+if os.path.commonpath([root, dockerfile_path]) != os.path.normpath(root):
+    raise SystemExit("package proxy Dockerfile escapes release payload")
+with open(dockerfile_path, encoding="utf-8") as stream:
+    from_lines = [line.strip() for line in stream if line.lstrip().upper().startswith("FROM ")]
+if len(from_lines) != 1:
+    raise SystemExit("package proxy Dockerfile must have one pinned base image")
+match = re.fullmatch(r"FROM\s+(\S+)", from_lines[0], flags=re.IGNORECASE)
+upstream_image = match.group(1) if match else None
+if not isinstance(upstream_image, str) or not re.search(r"@sha256:[0-9a-f]{64}$", upstream_image):
+    raise SystemExit("package proxy Dockerfile base image is not pinned by sha256 digest")
+if upstream_image not in runtime_images:
+    raise SystemExit("package proxy Dockerfile image is absent from the signed runtime image list")
+print("\t".join((image, context_path, dockerfile_path, upstream_image)))
+PY
+)" || fail 'could not resolve the signed package proxy image configuration'
+    IFS=$'\t' read -r proxy_image proxy_context proxy_dockerfile proxy_upstream_image <<< "$proxy_plan"
+    [[ -d "$proxy_context" && -f "$proxy_dockerfile" ]] || fail 'signed package proxy build files are missing'
+    printf 'Package proxy runtime image ready: %s\n' "$proxy_upstream_image"
+    printf 'Manager will validate or build the local health-check wrapper: %s\n' "$proxy_image"
 }
 
 normalize_sidecar_data_permissions() {
@@ -1598,7 +1767,11 @@ remove_subid_entry() {
 
     local tmp_file=''
     tmp_file="$(mktemp)"
-    awk -F: -v target_user="$user" '$1 != target_user { print $0 }' "$file_path" > "$tmp_file"
+    local line=''
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "${line%%:*}" == "$user" ]] && continue
+        printf '%s\n' "$line"
+    done < "$file_path" > "$tmp_file"
     cat "$tmp_file" > "$file_path"
     rm -f "$tmp_file"
 }
@@ -1801,9 +1974,12 @@ uninstall_release() {
     fi
 
     if [[ "$delete_data" == 'true' ]]; then
+        echo 'Deleting Kautuka configuration, databases, credentials, security material, logs, and agent workspaces.'
         best_effort_remove_tree '/etc/kautuka'
-        best_effort_remove_tree "$internal_state_root"
-        best_effort_remove_tree "$visible_root"
+        remove_data_tree_or_fail "$internal_state_root"
+        if [[ "$visible_root" != "$internal_state_root" ]]; then
+            remove_data_tree_or_fail "$visible_root"
+        fi
         clear_package_import_temp_state
     else
         preserved_state_root="$(preserve_uninstall_state "$internal_state_root" "$visible_root")"
@@ -1820,9 +1996,13 @@ uninstall_release() {
 
     echo 'Removed Kautuka Linux services and installed binaries.'
     if [[ "$delete_data" == 'true' ]]; then
-        echo "Deleted preserved data from: $internal_state_root $visible_root"
+        echo 'Kautuka uninstall completed with data deletion.'
     else
-        echo "Preserved Kautuka databases and agent workspace files under: $internal_state_root $visible_root"
+        if [[ "$visible_root" == "$internal_state_root" ]]; then
+            echo "Preserved Kautuka databases and agent workspace files under: $internal_state_root"
+        else
+            echo "Preserved Kautuka databases and agent workspace files under: $internal_state_root and $visible_root"
+        fi
     fi
 }
 
@@ -1845,6 +2025,7 @@ wait_for_web_ui() {
     local setup_http_status=''
     local setup_needs_setup='unknown'
     local connector_progress=''
+    local image_progress=''
     local credentials_state=''
     local channelhost_state=''
     local updateservice_state=''
@@ -1969,8 +2150,36 @@ PY
                     connector_progress=''
                     ;;
             esac
+            image_progress="$(run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+                journalctl --user-unit=kautuka-manager.service --since="$startup_started_at" --no-pager --output=cat 2>/dev/null \
+                | grep -E 'Loading OCI archive|Pulling sidecar image|Building sidecar image|Sidecar kautuka-pkgs-proxy is ready|Sandbox image .*Building from|sandbox-image.*completed' \
+                | tail -n 1 || true)"
+            case "$image_progress" in
+                *'Loading OCI archive'*)
+                    image_progress="Loading a bundled runtime image: ${image_progress##*Loading OCI archive }"
+                    ;;
+                *'Pulling sidecar image'*)
+                    image_progress="Downloading a required service image: ${image_progress##*Pulling sidecar image }"
+                    ;;
+                *'Building sidecar image'*)
+                    image_progress='Building the package-proxy service image from the pinned Devkrity mirror.'
+                    ;;
+                *'Sidecar kautuka-pkgs-proxy is ready'*)
+                    image_progress='The package-proxy service image is running and ready.'
+                    ;;
+                *Sandbox*image*Building*from*)
+                    image_progress='Preparing the Kautuka sandbox base image from the Fedora 44 base and installing its runtime tools.'
+                    ;;
+                *'sandbox-image'*'completed'*)
+                    image_progress='Kautuka sandbox base image preparation completed.'
+                    ;;
+                *)
+                    image_progress=''
+                    ;;
+            esac
             local progress_message="$last_status"
             [[ -n "$connector_progress" ]] && progress_message+="; $connector_progress"
+            [[ -n "$image_progress" ]] && progress_message+="; $image_progress"
             if [[ "$progress_message" != "$previous_progress" ]] || (( elapsed % 30 == 0 )); then
                 printf 'Startup progress (%ss/%ss): services gateway=%s, credentials=%s, channels=%s, manager=%s, webhost=%s, updates=%s; %s\n' \
                     "$elapsed" "$timeout_seconds" "${gateway_state:-unknown}" "${credentials_state:-unknown}" \
@@ -2144,6 +2353,9 @@ main() {
         if [[ "$assume_yes" != 'true' ]]; then
             [[ -t 0 ]] || fail "uninstall requires an interactive terminal unless --yes is provided"
             delete_data="$(confirm_uninstall "$delete_data")"
+        else
+            delete_data="$(resolve_uninstall_delete_data "$delete_data" "$assume_yes")"
+            echo '--yes supplied: confirming uninstall and deletion of Kautuka data.'
         fi
 
         uninstall_release "$install_root" "$internal_state_root" "$visible_root" "$unit_name" "$service_user" "$delete_data"
@@ -2217,7 +2429,6 @@ main() {
         require_command openssl
         require_command base64
         require_command sha256sum
-        require_command awk
     fi
 
     local tmp_root
@@ -2405,6 +2616,9 @@ PY
     if [[ -d "$tmp_root/extracted/bin" ]]; then
         content_root="$tmp_root/extracted/bin"
     fi
+
+    echo 'Preparing Kautuka images with the service account rootless Podman before starting services.'
+    prepare_install_images "$content_root" "$service_user" "$service_home" "$xdg_runtime_dir"
 
     stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
 

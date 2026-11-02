@@ -1,4 +1,8 @@
+using System.Text.Json;
+
 using Kautuka.Manager.RuntimeContainer.Hosting;
+
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests;
 
@@ -78,10 +82,19 @@ public sealed class RuntimeImageAllowlistTests
     {
         RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
         string repoRoot = FindRepoRoot();
+        using JsonDocument baseRelease = JsonDocument.Parse(
+            File.ReadAllText(Path.Combine(repoRoot, "src", "images", "kautuka-base", "release.json")));
+        string releasedBaseImage = baseRelease.RootElement.GetProperty("image").GetString()!;
+        RuntimeImageEntry baseEntry = Assert.Single(allowlist.Images, entry => entry.Id == "kautuka-base");
         string dockerfile = File.ReadAllText(Path.Combine(repoRoot, "src", "images", "kautuka-base", "Dockerfile"));
+        string setupScript = File.ReadAllText(Path.Combine(repoRoot, "scripts", "setup-world.sh"));
         string pkgsProxy = File.ReadAllText(Path.Combine(repoRoot, "src", "images", "kautuka-pkgs-proxy", "Dockerfile"));
         string sidecarsJson = File.ReadAllText(Path.Combine(repoRoot, "src", "backend", "Kautuka.Manager", "sidecars.json"));
 
+        Assert.Equal(releasedBaseImage, baseEntry.Image);
+        Assert.Null(baseEntry.Archive);
+        Assert.Equal(releasedBaseImage, allowlist.SelectReleasedSandboxImage("localhost/kautuka-base:latest"));
+        Assert.DoesNotContain("build-kautuka-base.sh", setupScript, StringComparison.Ordinal);
         Assert.Contains("ARG FEDORA_IMAGE=quay.io/fedora/fedora-minimal:44", dockerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("quay.io/fedora/fedora-minimal@sha256:", dockerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("pip install", dockerfile, StringComparison.Ordinal);
@@ -90,6 +103,37 @@ public sealed class RuntimeImageAllowlistTests
         Assert.DoesNotContain(allowlist.Images, entry => entry.Id == "fedora-minimal");
         Assert.Contains(allowlist.Images, entry => pkgsProxy.Contains(entry.Image, StringComparison.Ordinal));
         Assert.Contains(allowlist.Images, entry => sidecarsJson.Contains(entry.Image, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MissingReleasedSandboxBaseIsPulledByItsPinnedDigest()
+    {
+        RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
+        string releasedBaseImage = Assert.Single(allowlist.Images, entry => entry.Id == "kautuka-base").Image;
+        var commands = new List<string[]>();
+        var podman = new PodmanCommandRunner((arguments, _) =>
+        {
+            string[] captured = arguments.ToArray();
+            commands.Add(captured);
+            PodmanCommandResult result = captured.SequenceEqual(["image", "exists", releasedBaseImage])
+                ? new PodmanCommandResult(1, string.Empty, string.Empty, ProcessTerminationReason.NonZeroExit)
+                : new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed);
+            return Task.FromResult(result);
+        });
+        var adapter = new ManagerRuntimeAdapter(
+            podman,
+            new AlwaysAvailableHealthProbe(),
+            NullLogger<ManagerRuntimeAdapter>.Instance,
+            allowlist);
+
+        string? error = await adapter.PrepareSandboxImageAsync(
+            new Kautuka.Manager.RuntimeContainer.Configuration.SandboxRuntimeDefinition { Image = "localhost/kautuka-base:latest" },
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(error);
+        Assert.Contains(commands, command => command.SequenceEqual(["image", "exists", releasedBaseImage]));
+        Assert.Contains(commands, command => command.SequenceEqual(["pull", releasedBaseImage]));
+        Assert.DoesNotContain(commands, command => command.Contains("build", StringComparer.Ordinal));
     }
 
     [Fact]
@@ -152,5 +196,12 @@ public sealed class RuntimeImageAllowlistTests
         }
 
         throw new InvalidOperationException("Repository root was not found.");
+    }
+
+    private sealed class AlwaysAvailableHealthProbe : IManagerRuntimeHealthProbe
+    {
+        public Task<bool> IsAvailableAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+
+        public Task<bool> RefreshAsync(CancellationToken cancellationToken) => Task.FromResult(true);
     }
 }

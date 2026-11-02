@@ -2,6 +2,11 @@
   "schemaVersion": 1,
   "images": [
     {
+      "id": "kautuka-base",
+      "image": "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+      "archive": null
+    },
+    {
       "id": "openobserve",
       "image": "ghcr.io/devkrity/kautuka-observability@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
       "archive": "openobserve.tar"

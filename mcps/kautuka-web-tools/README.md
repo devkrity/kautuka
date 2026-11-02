@@ -4,12 +4,13 @@ A collection of tools for Kautuka to perform various web-related tasks.
 
 The importable MCPB bundle follows the standard MCPB `uv` runtime layout: bundle metadata in `manifest.json`, Python project metadata in `pyproject.toml`, source in `src/`, and no custom vendored runtime bootstrap.
 
-Python 3.12.13 is pinned in `.python-version`; the supported range is declared
-in `pyproject.toml`. Runtime dependency versions are pinned there, and
-`uv.lock` locks the complete resolved runtime and development dependency graph
-for reproducible builds. The MCPB bundle uses the lock during packaging and
-carries it as release provenance, while launch follows the standard MCPB `uv`
-runtime layout.
+Python 3.14 is selected by minor version in `.python-version`; the supported
+range is declared in both `pyproject.toml` and `manifest.json`. Runtime
+dependency versions are pinned in `pyproject.toml`, and `uv.lock` locks the
+resolved runtime and development dependency graph used by repository CI and
+development. The MCPB bundle excludes `uv.lock`; its runtime resolves the
+pinned project dependencies when the bundle is materialized, then launches
+through the standard MCPB `uv` runtime layout.
 
 The default fetch profile is `browser_http`: a browser-like HTTP client profile built on `httpx` with richer navigation headers and HTTP/2 enabled. `fetchMode: "http"` remains a compatibility alias for the same profile.
 
@@ -58,7 +59,7 @@ The server also publishes MCP-native `instructions`, and the tool advertises an 
 
 ```bash
 cd mcps/kautuka-web-tools
-uv run --python 3.12 kautuka-web-tools
+uv run --python 3.14 kautuka-web-tools
 ```
 
 ## Example Connector Command
@@ -200,6 +201,6 @@ Treat these as examples only; the authoritative continuation arguments are the o
 
 ```bash
 cd mcps/kautuka-web-tools
-uv run --python 3.12 pytest
+uv run --python 3.14 pytest
 npx -y @anthropic-ai/mcpb validate .
 ```

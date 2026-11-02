@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 using Kautuka.Manager.RuntimeContainer.Configuration;
@@ -30,6 +32,7 @@ public sealed class WorkspaceSidecarSupervisor(
     private readonly PodmanImageArchiveStore? imageArchives = imageArchives;
     private const string managedLabel = "kautuka.managed=manager";
     private const string sidecarRoleLabel = "kautuka.role=sidecar";
+    private const string sidecarSourceHashLabel = "io.kautuka.sidecar.source-hash";
     private const string sandboxNetworkName = "kautuka-sandbox";
     private const string telemetryNetworkName = "kautuka-telemetry";
     private const string telemetrySidecarName = "kautuka-openobserve";
@@ -225,6 +228,7 @@ public sealed class WorkspaceSidecarSupervisor(
             string? drift = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
             if (drift is null)
             {
+                logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
                 return true;
             }
 
@@ -274,7 +278,12 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        return await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false);
+        bool ready = await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false);
+        if (ready)
+        {
+            logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
+        }
+        return ready;
     }
 
     private async Task<string?> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)
@@ -439,14 +448,28 @@ public sealed class WorkspaceSidecarSupervisor(
             await this.imageArchives.TryEnsureImageAsync(sidecar.Image, cancellationToken).ConfigureAwait(false);
         }
 
+        if (!string.IsNullOrWhiteSpace(sidecar.BuildContext))
+        {
+            string dockerfile = !string.IsNullOrWhiteSpace(sidecar.Dockerfile)
+                ? sidecar.Dockerfile
+                : Path.Combine(sidecar.BuildContext, "Dockerfile");
+            string expectedSourceHash = ComputeBuildContextSourceHash(sidecar.BuildContext, dockerfile);
+            bool imageExists = await ImageExistsAsync(sidecar.Image, cancellationToken).ConfigureAwait(false);
+            if (imageExists)
+            {
+                string? currentSourceHash = await TryReadBuildContextSourceHashAsync(sidecar.Image, cancellationToken).ConfigureAwait(false);
+                if (string.Equals(currentSourceHash, expectedSourceHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return await BuildImageAsync(sidecar, dockerfile, expectedSourceHash, cancellationToken).ConfigureAwait(false);
+        }
+
         if (await ImageExistsAsync(sidecar.Image, cancellationToken).ConfigureAwait(false))
         {
             return true;
-        }
-
-        if (!string.IsNullOrWhiteSpace(sidecar.BuildContext))
-        {
-            return await BuildImageAsync(sidecar, cancellationToken).ConfigureAwait(false);
         }
 
         if (IsFullyQualifiedImage(sidecar.Image))
@@ -460,7 +483,11 @@ public sealed class WorkspaceSidecarSupervisor(
         return false;
     }
 
-    private async Task<bool> BuildImageAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
+    private async Task<bool> BuildImageAsync(
+        WorkspaceSidecarDefinition sidecar,
+        string dockerfile,
+        string sourceHash,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(sidecar.BuildContext) || !Directory.Exists(sidecar.BuildContext))
         {
@@ -471,14 +498,15 @@ public sealed class WorkspaceSidecarSupervisor(
         List<string> args =
         [
             "build",
+            "--label", $"{sidecarSourceHashLabel}={sourceHash}",
             "-t", sidecar.Image,
-            "-f", !string.IsNullOrWhiteSpace(sidecar.Dockerfile) ? sidecar.Dockerfile : Path.Combine(sidecar.BuildContext, "Dockerfile"),
+            "-f", dockerfile,
             sidecar.BuildContext
         ];
 
         if (logger.IsEnabled(LogLevel.Information))
         {
-            logger.LogInformation("Building sidecar image {Image} from {BuildContext}.", sidecar.Image, sidecar.BuildContext);
+            logger.LogInformation("Building sidecar image {Image} from {BuildContext}; build input hash is {SourceHash}.", sidecar.Image, sidecar.BuildContext, sourceHash);
         }
         PodmanCommandResult buildResult = await this.podmanCommandRunner.RunAsync(args, 300, cancellationToken).ConfigureAwait(false);
         if (buildResult.ExitCode == 0)
@@ -488,6 +516,62 @@ public sealed class WorkspaceSidecarSupervisor(
 
         logger.LogWarning("Failed to build sidecar image {Image}: {Reason}", sidecar.Image, PodmanFailureFormatter.FormatDetails(buildResult));
         return false;
+    }
+
+    internal static string ComputeBuildContextSourceHash(string buildContext, string dockerfile)
+    {
+        if (!Directory.Exists(buildContext))
+        {
+            throw new DirectoryNotFoundException($"Sidecar build context '{buildContext}' was not found.");
+        }
+
+        if (!File.Exists(dockerfile))
+        {
+            throw new FileNotFoundException("Sidecar Dockerfile was not found.", dockerfile);
+        }
+
+        string root = Path.GetFullPath(buildContext);
+        string dockerfilePath = Path.GetFullPath(dockerfile);
+        string[] files = [.. Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Select(Path.GetFullPath)
+            .Append(dockerfilePath)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static path => path, StringComparer.Ordinal)];
+
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (string file in files)
+        {
+            string relativePath = Path.GetRelativePath(root, file).Replace('\\', '/');
+            hash.AppendData(Encoding.UTF8.GetBytes(relativePath));
+            hash.AppendData([0]);
+            using FileStream stream = File.OpenRead(file);
+            byte[] buffer = new byte[64 * 1024];
+            int bytesRead;
+            while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                hash.AppendData(buffer, 0, bytesRead);
+            }
+            hash.AppendData([0]);
+        }
+
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private async Task<string?> TryReadBuildContextSourceHashAsync(string image, CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspectResult = await this.podmanCommandRunner.RunAsync(
+            ["image", "inspect", "--format", $"{{{{ index .Config.Labels \"{sidecarSourceHashLabel}\" }}}}", image],
+            15,
+            cancellationToken).ConfigureAwait(false);
+        if (inspectResult.ExitCode != 0)
+        {
+            return null;
+        }
+
+        string value = inspectResult.StdOut.Trim();
+        return string.IsNullOrWhiteSpace(value) || string.Equals(value, "<no value>", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : value;
     }
 
     private async Task<bool> PullImageAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)

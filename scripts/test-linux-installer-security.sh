@@ -449,8 +449,20 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
   source "$GENERATED_SOCKET_INSTALLER"
   declare -A known_accounts=([kautuka]=1 [kautuka-gateway]=1 [kautuka-channelhost]=1 [kautuka-credentials]=1)
   declare -A known_groups=([kautuka-credentials-client]=1)
+  awk() { echo "installer helper unexpectedly required awk" >&2; return 97; }
   id() { [[ -n "${known_accounts[$1]:-}" ]] || { echo "test account lookup missing $1" >&2; return 1; }; }
-  getent() { [[ "$1" == group && -n "${known_groups[$2]:-}" ]] || { echo "test group lookup missing $2" >&2; return 1; }; }
+  getent() {
+    case "$1" in
+      group)
+        [[ -n "${known_groups[$2]:-}" ]] || { echo "test group lookup missing $2" >&2; return 1; }
+        ;;
+      passwd)
+        [[ "$2" == kautuka ]] || { echo "test passwd lookup missing $2" >&2; return 1; }
+        printf "kautuka:x:990:989::/var/lib/kautuka:/usr/sbin/nologin\n"
+        ;;
+      *) return 1 ;;
+    esac
+  }
   groupadd() { known_groups["$2"]=1; }
   usermod() { [[ -n "${known_groups[$3]:-}" ]] || { echo "test usermod missing group $3" >&2; return 1; }; }
   install() { :; }
@@ -459,6 +471,40 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
   for group in kautuka-manager-client kautuka-updateservice-client kautuka-gateway-client kautuka-channelhost-client; do
     [[ -n "${known_groups[$group]:-}" ]] || { echo "missing created client group $group" >&2; exit 1; }
   done
+  subid_file="$(mktemp)"
+  printf "alice:0000000000000100000:000000000000065536\nbob:165536:65536\nbob-extra:231072:65536" > "$subid_file"
+  ensure_subid_entry "$subid_file" new-user
+  [[ "$(cat "$subid_file")" == "$(printf "alice:0000000000000100000:000000000000065536\nbob:165536:65536\nbob-extra:231072:65536\nnew-user:296608:65536")" ]] \
+    || { echo "sub-ID allocation mishandled ranges, long leading zeros, or an unterminated final line" >&2; cat "$subid_file" >&2; exit 1; }
+  remove_subid_entry "$subid_file" bob
+  [[ "$(cat "$subid_file")" == "$(printf "alice:0000000000000100000:000000000000065536\nbob-extra:231072:65536\nnew-user:296608:65536")" ]] \
+    || { echo "sub-ID removal did not preserve similarly named users" >&2; cat "$subid_file" >&2; exit 1; }
+  rm -f "$subid_file"
+  boundary_file="$(mktemp)"
+  printf "last-valid-range:4294836224:65536" > "$boundary_file"
+  boundary_before_file="$(mktemp)"
+  cp "$boundary_file" "$boundary_before_file"
+  if (ensure_subid_entry "$boundary_file" no-room) >/dev/null 2>&1; then
+    echo "sub-ID allocation should reject a range that would include the reserved all-ones ID" >&2
+    exit 1
+  fi
+  cmp -s "$boundary_file" "$boundary_before_file" \
+    || { echo "sub-ID exhaustion failure modified the allocation file" >&2; cat "$boundary_file" >&2; exit 1; }
+  printf "invalid-range:4294901760:65536" > "$boundary_file"
+  cp "$boundary_file" "$boundary_before_file"
+  if (ensure_subid_entry "$boundary_file" no-room) >/dev/null 2>&1; then
+    echo "sub-ID allocation should reject an existing range that includes the reserved all-ones ID" >&2
+    exit 1
+  fi
+  cmp -s "$boundary_file" "$boundary_before_file" \
+    || { echo "invalid sub-ID range failure modified the allocation file" >&2; cat "$boundary_file" >&2; exit 1; }
+  removal_file="$(mktemp)"
+  printf "keep:100000:65536\nbob-extra:165536:65536\nbob:231072:65536" > "$removal_file"
+  remove_subid_entry "$removal_file" bob
+  [[ "$(cat "$removal_file")" == "$(printf "keep:100000:65536\nbob-extra:165536:65536")" ]] \
+    || { echo "sub-ID removal mishandled an unterminated final record" >&2; cat "$removal_file" >&2; exit 1; }
+  rm -f "$boundary_file" "$boundary_before_file" "$removal_file"
+  [[ "$(get_service_user_home kautuka)" == /var/lib/kautuka ]] || { echo "passwd home parsing failed" >&2; exit 1; }
   grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
 '; then

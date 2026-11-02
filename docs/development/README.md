@@ -42,7 +42,7 @@ On Windows PowerShell:
 ./setup_the_world.ps1
 ```
 
-The script reads expected versions from the repository, checks or installs missing prerequisites, clones missing sibling repositories, restores dependencies, and builds the solution. When Podman does not already have `localhost/kautuka-base:latest`, setup builds and verifies the local sandbox image used by Manager. This step downloads its Fedora base image and the checksummed Node and uv archives. Setup copies local configuration from checked-in examples only when the destination file does not exist. Review each generated local configuration file and supply only the credentials required for the integrations you intend to use; setup does not retrieve or display secrets.
+The script reads expected versions from the repository, checks or installs missing prerequisites, clones missing sibling repositories, restores dependencies, and builds the solution. Manager uses the immutable `kautuka-base` digest in its runtime image inventory and pulls that GHCR image on first startup when it is not already present. The base image has a separate release cycle; ordinary development setup does not rebuild it from Fedora sources. Setup copies local configuration from checked-in examples only when the destination file does not exist. Review each generated local configuration file and supply only the credentials required for the integrations you intend to use; setup does not retrieve or display secrets.
 
 Available options:
 

@@ -218,10 +218,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        // Connector tool listing starts its own container. It does not wait for every
-        // agent sandbox, or for the sandbox image build that follows.
-        SignalRuntimeReady();
-
         Stopwatch sandboxImageStopwatch = Stopwatch.StartNew();
         string? sandboxImageError = await runtimeAdapter.PrepareSandboxImageAsync(runtimeSettings.Sandbox, cancellationToken).ConfigureAwait(false);
         sandboxImageStopwatch.Stop();
@@ -232,6 +228,11 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             MarkFailed(snapshot, "sandbox_image_failed");
             return;
         }
+
+        // Installation readiness includes the pinned sandbox base image and its
+        // package-proxy-backed setup. Do not report the Manager runtime healthy while
+        // first-run image preparation is still downloading or building containers.
+        SignalRuntimeReady();
 
         ContainerContext[] desiredWorkspaces = [.. snapshot.DesiredWorkspaces
             .GroupBy(
