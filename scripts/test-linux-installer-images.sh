@@ -97,4 +97,29 @@ grep -F 'podman pull quay.io/fedora/fedora-minimal:44' "$test_root/fallback-podm
   exit 1
 }
 
+gateway_state="$test_root/gateway-state"
+mkdir -p "$gateway_state"
+touch "$gateway_state/kautuka.db" "$gateway_state/kautuka.db-wal" \
+  "$gateway_state/gateway-auth.key" "$gateway_state/setup-token"
+MOCK_STATE_PERMISSIONS_LOG="$test_root/gateway-state-permissions.log" \
+  KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+    source "$1/scripts/kautuka-install-linux.sh.in"
+    chown() { printf "chown %s %s\n" "$1" "$2" >> "$MOCK_STATE_PERMISSIONS_LOG"; }
+    chmod() { printf "chmod %s %s\n" "$1" "$2" >> "$MOCK_STATE_PERMISSIONS_LOG"; }
+    prepare_gateway_database_owner "$2"
+  ' _ "$repo_root" "$gateway_state"
+
+for gateway_secret in gateway-auth.key setup-token; do
+  grep -F "chown kautuka-gateway:kautuka $gateway_state/$gateway_secret" \
+    "$test_root/gateway-state-permissions.log" >/dev/null || {
+    echo "Existing Gateway secret was not transferred to its service owner: $gateway_secret" >&2
+    exit 1
+  }
+  grep -F "chmod 0600 $gateway_state/$gateway_secret" \
+    "$test_root/gateway-state-permissions.log" >/dev/null || {
+    echo "Existing Gateway secret was not restricted to owner-only access: $gateway_secret" >&2
+    exit 1
+  }
+done
+
 echo 'Linux installer image preparation tests passed.'
