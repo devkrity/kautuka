@@ -21,6 +21,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests;
 
+[Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class WorkspaceDesiredStatePublicationTests
 {
     [Fact]
