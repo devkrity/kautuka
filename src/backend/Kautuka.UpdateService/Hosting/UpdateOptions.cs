@@ -13,7 +13,7 @@ public sealed class UpdateOptions
     // Runtime policy store uses this as the initial/default channel only.
     public string ReleaseChannel { get; set; } = "stable";
 
-    public string PlatformAssetName { get; set; } = "kautuka-platform-linux-x64.tar.gz";
+    public string PlatformAssetName { get; set; } = "kautuka-linux-amd64.tar.gz";
 
     public string PlatformReleaseAssetName { get; set; } = "kautuka-platform-release.json";
 

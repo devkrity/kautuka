@@ -122,4 +122,34 @@ for gateway_secret in gateway-auth.key setup-token; do
   }
 done
 
+policy_state="$test_root/preview-policy-state"
+MOCK_POLICY_PERMISSIONS_LOG="$test_root/preview-policy-permissions.log" \
+  KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+    source "$1/scripts/kautuka-install-linux.sh.in"
+    id() { return 0; }
+    getent() { return 0; }
+    chown() { printf "chown %s %s\n" "$1" "$2" >> "$MOCK_POLICY_PERMISSIONS_LOG"; }
+    write_initial_update_runtime_policy "$2" preview kautuka kautuka
+  ' _ "$repo_root" "$policy_state"
+grep -F '"releaseChannel": "preview"' "$policy_state/updateService/update-runtime-policy.json" >/dev/null || {
+  echo 'A fresh Preview install must seed UpdateService with the Preview channel.' >&2
+  exit 1
+}
+grep -F "chown kautuka:kautuka $policy_state/updateService/update-runtime-policy.json" \
+  "$test_root/preview-policy-permissions.log" >/dev/null || {
+  echo 'The initial update policy must be readable by UpdateService.' >&2
+  exit 1
+}
+
+printf '{\n  "schemaVersion": 1,\n  "releaseChannel": "stable"\n}\n' \
+  > "$policy_state/updateService/update-runtime-policy.json"
+KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+  source "$1/scripts/kautuka-install-linux.sh.in"
+  write_initial_update_runtime_policy "$2" preview kautuka kautuka
+' _ "$repo_root" "$policy_state"
+grep -F '"releaseChannel": "stable"' "$policy_state/updateService/update-runtime-policy.json" >/dev/null || {
+  echo 'Reinstalling must preserve the user-selected update channel.' >&2
+  exit 1
+}
+
 echo 'Linux installer image preparation tests passed.'
