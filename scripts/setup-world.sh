@@ -122,10 +122,9 @@ for repo in "${REPOS[@]}"; do case "$repo" in kautuka-auth|narad) url="https://g
 for repo in "${new_repos[@]:-}"; do [[ -n "$repo" ]] || continue; dest="$(dirname "$ROOT")/$repo"; case "$repo" in kautuka-auth) if node -e "process.exit(require('$dest/package.json').scripts && require('$dest/package.json').scripts.setup ? 0 : 1)"; then npm --prefix "$dest" run setup; else npm --prefix "$dest" ci; fi;; narad) if node -e "process.exit(require('$dest/package.json').scripts && require('$dest/package.json').scripts.setup ? 0 : 1)"; then pnpm --dir "$dest" run setup; else pnpm --dir "$dest" install --frozen-lockfile; fi;; esac; done
 for example in "$ROOT"/.env.example "$ROOT"/src/backend/Kautuka.Gateway/.env.example "$(dirname "$ROOT")/kautuka-auth/.dev.vars.example"; do [[ -f "$example" ]] || continue; target="${example%.example}.local"; [[ "$example" == */.dev.vars.example ]] && target="${example%.example}"; [[ -e "$target" ]] || cp "$example" "$target"; done
 (cd "$ROOT" && dotnet restore src/Kautuka.slnx && pnpm install && uv sync --project mcps/kautuka-web-tools && pnpm --dir src/frontend/web build && dotnet build src/Kautuka.slnx --no-restore)
-if ! podman image exists localhost/kautuka-base:latest; then
-  echo 'Building the local Kautuka sandbox base image required by Manager.'
-  (cd "$ROOT" && KAUTUKA_BASE_LOCAL_TAG=localhost/kautuka-base:latest bash scripts/build-kautuka-base.sh)
-fi
+# Manager reads the pinned kautuka-base digest from runtime-images.json and pulls
+# it from GHCR on first startup when the image is not already present. The base
+# image has its own release cycle; developer setup must not rebuild it from source.
 (cd "$ROOT" && git config --local core.hooksPath .husky)
 if [[ -f "$(dirname "$ROOT")/kautuka-auth/.dev.vars" ]]; then echo 'Review blank auth settings as needed: GOOGLE_CLIENT_ID/SECRET, MICROSOFT_CLIENT_ID/SECRET, GOOGLE_LOGIN_CLIENT_ID/SECRET, MICROSOFT_LOGIN_CLIENT_ID/SECRET, AUTH_TICKET_HMAC_KEY, REFRESH_TOKEN_KEYS, REFRESH_TOKEN_ACTIVE_KID.'; fi
 echo 'Kautuka provider credentials are entered in the first-run settings UI; setup never retrieves them.'

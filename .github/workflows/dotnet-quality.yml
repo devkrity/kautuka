@@ -47,7 +47,7 @@ jobs:
       - name: Test Python MCP web tools
         working-directory: mcps/kautuka-web-tools
         run: |
-          uv python install 3.12
+          uv python install 3.14
           uv sync --locked
           uv run --locked pytest
 

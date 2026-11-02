@@ -288,32 +288,52 @@ ensure_subid_entry() {
         return 0
     fi
 
-    local next_start='100000'
-    local computed_start=''
-    computed_start="$(awk -F: '
-        BEGIN { max_end = 100000 }
-        NF >= 3 {
-            start = $2 + 0
-            count = $3 + 0
-            end = start + count
-            if (end > max_end) {
-                max_end = end
-            }
-        }
-        END { print max_end }
-    ' "$file_path" 2>/dev/null || true)"
+    local next_start=100000
+    local computed_start=100000
+    local line=''
+    local start=''
+    local count=''
+    local numeric_start=0
+    local numeric_count=0
+    local end=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        IFS=: read -r _ start count _ <<<"$line"
+        [[ "$start" =~ ^[0-9]+$ && "$count" =~ ^[0-9]+$ ]] \
+            || fail "invalid subordinate-ID range in $file_path"
+        while [[ ${#start} -gt 1 && "${start:0:1}" == '0' ]]; do start="${start:1}"; done
+        while [[ ${#count} -gt 1 && "${count:0:1}" == '0' ]]; do count="${count:1}"; done
+        [[ ${#start} -le 10 && ${#count} -le 10 ]] \
+            || fail "subordinate-ID range exceeds the Linux ID limit in $file_path"
+        numeric_start=$((10#$start))
+        numeric_count=$((10#$count))
+        end=$((numeric_start + numeric_count))
+        (( numeric_start <= 4294967294 && numeric_count > 0 && numeric_count <= 4294967295 && end <= 4294967295 )) \
+            || fail "subordinate-ID range exceeds the Linux ID limit in $file_path"
+        if (( end > computed_start )); then
+            computed_start="$end"
+        fi
+    done < "$file_path"
+    (( computed_start <= 4294967295 - 65536 )) \
+        || fail "no free 65536-ID subordinate range remains in $file_path"
+    next_start="$computed_start"
 
-    if [[ "$computed_start" =~ ^[0-9]+$ ]]; then
-        next_start="$computed_start"
+    # A final record without a newline is valid input; separate the new entry so it
+    # does not concatenate with that record and become an invalid sub-ID line.
+    if [[ -s "$file_path" ]]; then
+        local last_character=''
+        IFS= read -r -n 1 last_character < <(tail -c 1 "$file_path") || true
+        if [[ -n "$last_character" ]]; then
+            printf '\n' >> "$file_path"
+        fi
     fi
-
     printf '%s:%s:65536\n' "$user" "$next_start" >> "$file_path"
 }
 
 get_service_user_home() {
     local service_user="$1"
     local service_home=''
-    service_home="$(getent passwd "$service_user" | awk -F: '{ print $6 }')"
+    IFS=: read -r _ _ _ _ _ service_home _ < <(getent passwd "$service_user")
     [[ -n "$service_home" ]] || fail "could not resolve home directory for service user: $service_user"
     printf '%s\n' "$service_home"
 }
@@ -1747,7 +1767,11 @@ remove_subid_entry() {
 
     local tmp_file=''
     tmp_file="$(mktemp)"
-    awk -F: -v target_user="$user" '$1 != target_user { print $0 }' "$file_path" > "$tmp_file"
+    local line=''
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "${line%%:*}" == "$user" ]] && continue
+        printf '%s\n' "$line"
+    done < "$file_path" > "$tmp_file"
     cat "$tmp_file" > "$file_path"
     rm -f "$tmp_file"
 }
@@ -2405,7 +2429,6 @@ main() {
         require_command openssl
         require_command base64
         require_command sha256sum
-        require_command awk
     fi
 
     local tmp_root

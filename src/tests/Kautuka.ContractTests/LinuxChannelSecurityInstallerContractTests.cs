@@ -31,6 +31,12 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("socket directory owner $owner does not exist yet", source, StringComparison.Ordinal);
         Assert.DoesNotContain("systemd-tmpfiles --create \"$tmpfiles_path\" >/dev/null 2>&1 || true", source, StringComparison.Ordinal);
 
+        int socketRuntimeDirs = source.IndexOf("install_socket_runtime_dirs() {", StringComparison.Ordinal);
+        int socketClientGroupSetup = source.IndexOf("grant_socket_group_membership \"$service_user\" kautuka-gateway-client", socketRuntimeDirs, StringComparison.Ordinal);
+        int socketGroupValidation = source.IndexOf("getent group \"$group\" >/dev/null 2>&1 || fail", socketRuntimeDirs, StringComparison.Ordinal);
+        Assert.True(socketRuntimeDirs >= 0 && socketClientGroupSetup > socketRuntimeDirs && socketClientGroupSetup < socketGroupValidation,
+            "Fresh installs must create client groups before validating socket tmpfiles entries.");
+
         int credentialsAccount = source.IndexOf("ensure_isolated_service_account kautuka-credentials kautuka-credentials", StringComparison.Ordinal);
         int socketDirs = source.IndexOf("install_socket_runtime_dirs \"$service_user\"", StringComparison.Ordinal);
         Assert.True(credentialsAccount >= 0 && credentialsAccount < socketDirs, "CredentialsHost account must exist before socket tmpfiles are written.");
