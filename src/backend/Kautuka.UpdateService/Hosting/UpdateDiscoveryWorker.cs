@@ -1,4 +1,5 @@
 using Kautuka.UpdateService.Abstractions;
+using Kautuka.UpdateService.Models;
 
 using Microsoft.Extensions.Options;
 
@@ -25,7 +26,10 @@ internal sealed class UpdateDiscoveryWorker(
 
         try
         {
-            _ = await updateCoordinator.GetStatusAsync(stoppingToken).ConfigureAwait(false);
+            // The updater may restart before Manager has finished coming up.
+            // Reconcile pending activation independently of UI polling rather
+            // than waiting for the next daily discovery interval.
+            await ReconcilePendingActivationAsync(updateCoordinator, options.HostServiceActivationTimeout, TimeSpan.FromSeconds(5), stoppingToken, logger).ConfigureAwait(false);
             await updateCoordinator.RefreshDiscoveryAsync(stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -51,6 +55,30 @@ internal sealed class UpdateDiscoveryWorker(
             {
                 logger.LogWarning(ex, "Manager update discovery attempt failed.");
             }
+        }
+    }
+
+    internal static async Task ReconcilePendingActivationAsync(
+        IUpdateCoordinator coordinator, TimeSpan timeout, TimeSpan interval, CancellationToken cancellationToken,
+        ILogger? logger = null)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            try
+            {
+                UpdateStatusSnapshot status = await coordinator.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+                if (status.State != UpdateWorkflowState.Applying)
+                {
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(ex, "Update activation observation failed; retrying while the runtime starts.");
+            }
+
+            await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
         }
     }
 }

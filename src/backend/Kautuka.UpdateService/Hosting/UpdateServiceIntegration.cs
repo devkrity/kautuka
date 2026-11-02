@@ -77,7 +77,8 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
-        (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerVersion);
+        (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerReleaseId);
+        bool updaterRunningCurrent = IsRunningCurrentUpdateService(AppContext.BaseDirectory);
 
         return new UpdateServiceContext(
             runtimePaths.RuntimeRoot,
@@ -88,7 +89,8 @@ public sealed class UpdateServiceIntegration(
             activeExecCount,
             hostStatusObserved,
             unitsActive,
-            pointersConsistent);
+            pointersConsistent,
+            updaterRunningCurrent);
     }
 
     public ValueTask RequestSupervisorReconcileAsync(CancellationToken cancellationToken)
@@ -287,6 +289,8 @@ public sealed class UpdateServiceIntegration(
         await RunApplyReleaseHelperAsync(
             ["--artifact", preparedArtifacts.PlatformPackagePath, "--version", preparedArtifacts.TargetReleaseId],
             cancellationToken).ConfigureAwait(false);
+
+        RequestRestartForSwitchedUpdateService("apply", preparedArtifacts.TargetReleaseId);
     }
 
     public async ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)
@@ -302,6 +306,8 @@ public sealed class UpdateServiceIntegration(
         await RunApplyReleaseHelperAsync(
             ["--revert", release.ReleaseId],
             cancellationToken).ConfigureAwait(false);
+
+        RequestRestartForSwitchedUpdateService("rollback", release.ReleaseId);
     }
 
     public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken)
@@ -326,6 +332,65 @@ public sealed class UpdateServiceIntegration(
             releaseId,
             updateRestartExitCode);
         applicationLifetime.StopApplication();
+    }
+
+    private void RequestRestartForSwitchedUpdateService(string operation, string releaseId)
+    {
+        // The helper has completed outside the user service's cgroup. Stop only
+        // after it returns, so systemd can start the new updater via current.
+        if (OperatingSystem.IsLinux() && !IsRunningCurrentUpdateService(AppContext.BaseDirectory))
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("INVOCATION_ID")))
+            {
+                logger.LogWarning("The updater is not running the current release but no systemd supervisor was detected; restart UpdateService to complete {Operation} of {ReleaseId}.", operation, releaseId);
+                return;
+            }
+
+            RequestHostRestart(operation, releaseId);
+        }
+    }
+
+    internal static bool IsRunningCurrentUpdateService(string baseDirectory)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return true;
+        }
+
+        string? executable = new FileInfo("/proc/self/exe").LinkTarget;
+        string applianceRoot = ResolveApplianceRoot(ResolveServiceInstallRoot(baseDirectory));
+        string managedRoot = Path.Combine(applianceRoot, "updateservice");
+        // Development/test processes are not launched from the appliance tree.
+        if (!Path.GetFullPath(baseDirectory).StartsWith(managedRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return IsExecutableInCurrentVersion(executable, Path.Combine(managedRoot, "current"));
+    }
+
+    internal static bool IsExecutableInCurrentVersion(string? executable, string current)
+    {
+        if (string.IsNullOrWhiteSpace(executable) || executable.EndsWith(" (deleted)", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            FileSystemInfo? target = Directory.ResolveLinkTarget(current, returnFinalTarget: true);
+            return target is not null
+                && string.Equals(Path.GetDirectoryName(executable), target.FullName, StringComparison.Ordinal)
+                && string.Equals(Path.GetFileName(executable), "kautuka-updateservice", StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     private async ValueTask ContinuePreparedActivationAsync(string baseDirectory, string operation, string releaseId, string? platformExtractedPath, CancellationToken cancellationToken)
@@ -422,9 +487,15 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
-        return resolved.Contains(
-            $"{Path.DirectorySeparatorChar}versions{Path.DirectorySeparatorChar}{expectedVersion}",
-            StringComparison.Ordinal);
+        DirectoryInfo directory = new(Path.TrimEndingDirectorySeparator(resolved));
+        string? serviceRoot = Path.GetDirectoryName(Path.GetFullPath(currentPath));
+        if (serviceRoot is null)
+        {
+            return false;
+        }
+
+        return string.Equals(directory.Name, expectedVersion, StringComparison.Ordinal)
+            && string.Equals(directory.Parent?.FullName, Path.Combine(serviceRoot, "versions"), StringComparison.Ordinal);
     }
 
     internal static string ResolveManagerInstallRoot(string baseDirectory)

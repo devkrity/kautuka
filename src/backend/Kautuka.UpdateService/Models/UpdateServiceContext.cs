@@ -9,4 +9,5 @@ public sealed record UpdateServiceContext(
     int ActiveExecCount,
     bool HostStatusObserved = true,
     bool RuntimeUnitsActive = true,
-    bool CurrentPointersConsistent = true);
+    bool CurrentPointersConsistent = true,
+    bool UpdateServiceRunningCurrent = true);

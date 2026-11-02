@@ -36,8 +36,24 @@ internal sealed class UpdateCoordinator(
     public async ValueTask<UpdateStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
     {
         UpdateRuntimePolicy policy = await runtimePolicyStore.GetAsync(cancellationToken).ConfigureAwait(false);
-        (UpdateStateRecord state, UpdateServiceContext hostContext) = await GetResolvedStateAsync(policy.ReleaseChannel, cancellationToken).ConfigureAwait(false);
-        return CreateSnapshot(state, hostContext);
+        if (!await discoveryGate.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        {
+            // Apply and discovery own the state while they run. Report their
+            // persisted progress without racing them with reconciliation writes.
+            UpdateStateRecord inFlight = await stateStore.GetAsync(cancellationToken).ConfigureAwait(false);
+            UpdateServiceContext observedHost = await hostIntegration.GetHostContextAsync(cancellationToken).ConfigureAwait(false);
+            return CreateSnapshot(inFlight, observedHost);
+        }
+
+        try
+        {
+            (UpdateStateRecord state, UpdateServiceContext hostContext) = await GetResolvedStateAsync(policy.ReleaseChannel, cancellationToken).ConfigureAwait(false);
+            return CreateSnapshot(state, hostContext);
+        }
+        finally
+        {
+            discoveryGate.Release();
+        }
     }
 
     public async ValueTask<UpdateStatusSnapshot> ApplyUpdatePolicyAsync(string releaseChannel, CancellationToken cancellationToken = default)
@@ -170,15 +186,18 @@ internal sealed class UpdateCoordinator(
                 PreparedArtifacts = preparedArtifacts,
                 LastKnownGoodRelease = state.CurrentRelease ?? state.LastKnownGoodRelease,
                 State = UpdateWorkflowState.Applying,
+                PendingOperation = "apply",
                 StateChangedAtUtc = DateTimeOffset.UtcNow,
                 LastError = null,
             };
 
             await stateStore.SaveAsync(nextState, CancellationToken.None).ConfigureAwait(false);
 
+            bool helperCompleted = false;
             try
             {
                 await hostIntegration.ActivatePreparedUpdateAsync(preparedArtifacts, CancellationToken.None).ConfigureAwait(false);
+                helperCompleted = true;
                 UpdateServiceContext freshHost = await hostIntegration.GetHostContextAsync(CancellationToken.None).ConfigureAwait(false);
                 if (TryFinalizeAppliedRelease(nextState, freshHost, out UpdateStateRecord? finalizedState))
                 {
@@ -195,6 +214,11 @@ internal sealed class UpdateCoordinator(
 
                 // Helper succeeded; leave Applying so the next status read can finalize once units settle.
                 return CreateSnapshot(nextState, freshHost);
+            }
+            catch (Exception ex) when (helperCompleted)
+            {
+                logger.LogWarning(ex, "The update helper completed, but post-activation observation failed; preserving the in-flight release for reconciliation.");
+                return CreateSnapshot(nextState, hostContext);
             }
             catch (Exception ex)
             {
@@ -260,15 +284,18 @@ internal sealed class UpdateCoordinator(
                 StagedRelease = state.LastKnownGoodRelease,
                 LastKnownGoodRelease = state.CurrentRelease ?? state.LastKnownGoodRelease,
                 State = UpdateWorkflowState.Applying,
+                PendingOperation = "rollback",
                 StateChangedAtUtc = DateTimeOffset.UtcNow,
                 LastError = null,
             };
 
             await stateStore.SaveAsync(nextState, CancellationToken.None).ConfigureAwait(false);
 
+            bool helperCompleted = false;
             try
             {
                 await hostIntegration.ActivateRollbackAsync(state.LastKnownGoodRelease, CancellationToken.None).ConfigureAwait(false);
+                helperCompleted = true;
                 UpdateServiceContext freshHost = await hostIntegration.GetHostContextAsync(CancellationToken.None).ConfigureAwait(false);
                 if (TryFinalizeAppliedRelease(nextState, freshHost, out UpdateStateRecord? finalizedState))
                 {
@@ -283,14 +310,12 @@ internal sealed class UpdateCoordinator(
                     return CreateSnapshot(finalizedState, freshHost);
                 }
 
-                await operationStore.AppendAsync(new UpdateOperationRecord(
-                    OperationType: "rollback",
-                    CompletedAtUtc: DateTimeOffset.UtcNow,
-                    FromVersion: state.CurrentRelease?.Version,
-                    ToVersion: state.LastKnownGoodRelease.Version,
-                    Succeeded: true,
-                    ErrorMessage: null), CancellationToken.None).ConfigureAwait(false);
                 return CreateSnapshot(nextState, freshHost);
+            }
+            catch (Exception ex) when (helperCompleted)
+            {
+                logger.LogWarning(ex, "The rollback helper completed, but post-activation observation failed; preserving the in-flight release for reconciliation.");
+                return CreateSnapshot(nextState, hostContext);
             }
             catch (Exception ex)
             {
@@ -301,6 +326,7 @@ internal sealed class UpdateCoordinator(
                     StagedRelease = null,
                     PreparedArtifacts = null,
                     State = UpdateWorkflowState.Current,
+                    PendingOperation = null,
                     StateChangedAtUtc = DateTimeOffset.UtcNow,
                     LastError = ex.Message,
                 };
@@ -415,7 +441,8 @@ internal sealed class UpdateCoordinator(
 
         UpdateReleaseReference? stagedRelease = state.StagedRelease;
         UpdatePreparedArtifacts? preparedArtifacts = state.PreparedArtifacts;
-        if (ShouldInvalidateStagedRelease(stagedRelease, availableRelease, state.CurrentRelease))
+        if (state.State != UpdateWorkflowState.Applying
+            && ShouldInvalidateStagedRelease(stagedRelease, availableRelease, state.CurrentRelease))
         {
             stagedRelease = null;
             preparedArtifacts = null;
@@ -429,7 +456,8 @@ internal sealed class UpdateCoordinator(
             AvailableRelease = result.NotModified && !policyChanged ? availableRelease : availableRelease,
             StagedRelease = stagedRelease,
             PreparedArtifacts = preparedArtifacts,
-            LastError = result.FailureReason ?? untrustedSourceUrl,
+            LastError = result.FailureReason ?? untrustedSourceUrl
+                ?? (state.State == UpdateWorkflowState.Applying ? state.LastError : null),
             EligibilityState = eligibilityState,
             EligibilityReason = eligibilityReason,
             State = ResolveWorkflowState(state, result, availableRelease),
@@ -459,7 +487,10 @@ internal sealed class UpdateCoordinator(
             EffectiveReleaseChannel = string.IsNullOrWhiteSpace(persistedState.EffectiveReleaseChannel)
                 ? effectiveReleaseChannel
                 : persistedState.EffectiveReleaseChannel,
-            CurrentRelease = currentRelease,
+            // Keep the source release until an in-flight activation is proven.
+            CurrentRelease = persistedState.State == UpdateWorkflowState.Applying && persistedState.CurrentRelease is not null
+                ? persistedState.CurrentRelease
+                : currentRelease,
         };
         bool shouldPersistState = persistedState.SchemaVersion != UpdateStateRecord.CurrentSchemaVersion;
 
@@ -479,7 +510,7 @@ internal sealed class UpdateCoordinator(
         {
             await stateStore.SaveAsync(finalizedState, cancellationToken).ConfigureAwait(false);
             await operationStore.AppendAsync(new UpdateOperationRecord(
-                OperationType: "apply",
+                OperationType: state.PendingOperation ?? "apply",
                 CompletedAtUtc: DateTimeOffset.UtcNow,
                 FromVersion: persistedState.CurrentRelease?.Version ?? persistedState.LastKnownGoodRelease?.Version,
                 ToVersion: state.StagedRelease!.Version,
@@ -488,17 +519,55 @@ internal sealed class UpdateCoordinator(
             return (finalizedState, hostContext);
         }
 
+        if (TryRecoverOrphanedApplyingState(state, currentRelease, hostContext, out UpdateStateRecord recoveredOrphan))
+        {
+            logger.LogWarning("Recovered an interrupted update whose staged release metadata was lost; the installed release {ReleaseId} and all runtime services are healthy.", hostContext.ManagerReleaseId);
+            await stateStore.SaveAsync(recoveredOrphan, cancellationToken).ConfigureAwait(false);
+            await operationStore.AppendAsync(new UpdateOperationRecord(
+                OperationType: "recovery",
+                CompletedAtUtc: DateTimeOffset.UtcNow,
+                FromVersion: state.LastKnownGoodRelease?.Version,
+                ToVersion: hostContext.ManagerVersion,
+                Succeeded: false,
+                ErrorMessage: "The staged release record was missing; the installed runtime was reconciled, but the original update outcome could not be verified."), CancellationToken.None).ConfigureAwait(false);
+            return (recoveredOrphan, hostContext);
+        }
+
+        if (state.State == UpdateWorkflowState.Applying && state.StagedRelease is null
+            && string.IsNullOrWhiteSpace(state.LastError))
+        {
+            state = state with
+            {
+                LastError = "Update recovery is waiting for consistent service versions and a healthy runtime because the staged release record is missing.",
+            };
+            shouldPersistState = true;
+        }
+
         if (TryRecoverStuckApplyingState(state, hostContext, out UpdateStateRecord reconciledState))
         {
             await stateStore.SaveAsync(reconciledState, cancellationToken).ConfigureAwait(false);
             await operationStore.AppendAsync(new UpdateOperationRecord(
-                OperationType: "apply",
+                OperationType: state.PendingOperation ?? "apply",
                 CompletedAtUtc: DateTimeOffset.UtcNow,
                 FromVersion: state.CurrentRelease?.Version,
                 ToVersion: state.StagedRelease!.Version,
                 Succeeded: false,
                 ErrorMessage: reconciledState.LastError), CancellationToken.None).ConfigureAwait(false);
             return (reconciledState, hostContext);
+        }
+
+        if (state.State == UpdateWorkflowState.Applying && state.StagedRelease is not null
+            && state.StateChangedAtUtc is not null
+            && DateTimeOffset.UtcNow - state.StateChangedAtUtc > GetApplyingRecoveryThreshold()
+            && (!hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
+                || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent
+                || (state.CurrentRelease is not null
+                    && !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)))
+            && string.IsNullOrWhiteSpace(state.LastError))
+        {
+            state = state with { LastError = "Update activation has not converged. Check the service versions and runtime health before retrying." };
+            shouldPersistState = true;
         }
 
         if (!TryNormalizeOutOfBandHostVersion(persistedState, state, currentRelease, hostContext, out UpdateStateRecord normalizedState))
@@ -522,6 +591,12 @@ internal sealed class UpdateCoordinator(
         UpdateServiceContext hostContext,
         out UpdateStateRecord normalizedState)
     {
+        if (state.State == UpdateWorkflowState.Applying)
+        {
+            normalizedState = state;
+            return false;
+        }
+
         bool persistedCurrentMatchesHost = persistedState.CurrentRelease is not null
             && string.Equals(persistedState.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase);
         bool stagedReleaseMatchesHost = persistedState.StagedRelease is not null
@@ -558,6 +633,7 @@ internal sealed class UpdateCoordinator(
             StagedRelease = null,
             PreparedArtifacts = null,
             LastKnownGoodRelease = preservedRollbackTarget,
+            PendingOperation = null,
             EligibilityState = UpdateEligibilityState.None,
             EligibilityReason = UpdateEligibilityReason.None,
             LastError = null,
@@ -666,8 +742,10 @@ internal sealed class UpdateCoordinator(
         if (state.State != UpdateWorkflowState.Applying
             || state.StagedRelease is null
             || !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady
             || !hostContext.CurrentPointersConsistent
-            || !hostContext.RuntimeUnitsActive)
+            || !hostContext.RuntimeUnitsActive
+            || !hostContext.UpdateServiceRunningCurrent)
         {
             finalizedState = state;
             return false;
@@ -681,6 +759,7 @@ internal sealed class UpdateCoordinator(
             AvailableRelease = null,
             StagedRelease = null,
             PreparedArtifacts = null,
+            PendingOperation = null,
             LastError = null,
         };
 
@@ -712,23 +791,71 @@ internal sealed class UpdateCoordinator(
             return false;
         }
 
-        string message = $"Update apply for release {state.StagedRelease.Version} did not complete. The current release is still active, so the update was reset and can be retried.";
+        // A timed-out operation is only safe to retry when the whole runtime
+        // is coherently back on the current release, not after a partial switch.
+        if (state.CurrentRelease is null
+            || !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
+            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+        {
+            recoveredState = state;
+            return false;
+        }
+
+        bool rollback = string.Equals(state.PendingOperation, "rollback", StringComparison.Ordinal);
+        string operation = rollback ? "rollback" : "update apply";
+        string message = $"The {operation} for release {state.StagedRelease.Version} did not complete. The current release is still active, so the operation was reset and can be retried.";
 
         logger.LogWarning(
-            "Recovering stuck update apply state for target release {ReleaseId} while manager version remains {ManagerVersion}.",
+            "Recovering stuck {Operation} state for target release {ReleaseId} while manager version remains {ManagerVersion}.",
+            operation,
             state.StagedRelease.ReleaseId,
             hostContext.ManagerVersion);
 
         recoveredState = state with
         {
-            State = UpdateWorkflowState.Available,
+            State = rollback ? UpdateWorkflowState.Current : UpdateWorkflowState.Available,
             StateChangedAtUtc = DateTimeOffset.UtcNow,
-            AvailableRelease = state.AvailableRelease ?? state.StagedRelease,
+            AvailableRelease = rollback ? state.AvailableRelease : state.AvailableRelease ?? state.StagedRelease,
+            LastKnownGoodRelease = rollback ? state.StagedRelease : state.LastKnownGoodRelease,
             StagedRelease = null,
             PreparedArtifacts = null,
+            PendingOperation = null,
             LastError = message,
         };
 
+        return true;
+    }
+
+    private static bool TryRecoverOrphanedApplyingState(
+        UpdateStateRecord state,
+        UpdateReleaseReference observedRelease,
+        UpdateServiceContext hostContext,
+        out UpdateStateRecord recoveredState)
+    {
+        if (state.State != UpdateWorkflowState.Applying || state.StagedRelease is not null
+            || state.CurrentRelease is null
+            || !string.Equals(observedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
+            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+        {
+            recoveredState = state;
+            return false;
+        }
+
+        recoveredState = state with
+        {
+            State = UpdateWorkflowState.Current,
+            StateChangedAtUtc = DateTimeOffset.UtcNow,
+            CurrentRelease = observedRelease,
+            AvailableRelease = null,
+            PreparedArtifacts = null,
+            PendingOperation = null,
+            LastError = state.LastKnownGoodRelease is null
+                || string.Equals(state.LastKnownGoodRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
+                ? "A previous update was interrupted and its target record was lost. The current runtime is healthy; check for updates again."
+                : null,
+        };
         return true;
     }
 
@@ -740,6 +867,11 @@ internal sealed class UpdateCoordinator(
         ReleaseDiscoveryResult result,
         UpdateReleaseReference? availableRelease)
     {
+        if (currentState.State == UpdateWorkflowState.Applying)
+        {
+            return UpdateWorkflowState.Applying;
+        }
+
         if (result.FailureReason is not null)
         {
             return result.IsUnsupported ? UpdateWorkflowState.Unsupported : currentState.State;

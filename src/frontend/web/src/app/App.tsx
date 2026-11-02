@@ -484,7 +484,7 @@ function AppShell() {
     }
 
     if (updateState === 'available') {
-      return `Release ${updateStatus.availableRelease?.version ?? 'unknown'} is available. Apply downloads, verifies, and requests activation. Apply does not restart UpdateService. Manager, WebHost, CredentialsHost, ChannelHost, and Gateway are restarted onto the new release.`;
+      return `Release ${updateStatus.availableRelease?.version ?? 'unknown'} is available. Apply downloads and verifies the release, then restarts Kautuka services to activate it.`;
     }
 
     if (updateState === 'staging') {
@@ -523,7 +523,7 @@ function AppShell() {
       : undefined;
   const sidebarUpdateDescription =
     sidebarUpdateTitle === updateCheckFeedback
-      ? `Checked just now. Version ${currentVersion} is current. Apply does not restart UpdateService. Manager, WebHost, CredentialsHost, ChannelHost, and Gateway are restarted onto the new release.`
+      ? `Checked just now. Version ${currentVersion} is current. Kautuka services restart when an update is applied.`
       : updateBannerDescription;
 
   return (
