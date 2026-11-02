@@ -242,6 +242,9 @@ jobs:
       - name: Verify read-only SBOM input cleanup
         run: node ./scripts/test-sbom-input-cleanup.mjs
 
+      - name: Verify runtime image SBOM archive selection
+        run: node ./scripts/test-runtime-image-archives.mjs
+
       - name: Verify release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
