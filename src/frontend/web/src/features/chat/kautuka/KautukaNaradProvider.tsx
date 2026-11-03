@@ -202,6 +202,7 @@ export const KautukaNaradProvider: React.FC<KautukaNaradProviderProps> = ({
     const coordinator = createAttachCoordinator(transport, publishingReducer, {
       sessionId,
       claimedProfiles: [...DEFAULT_CLAIMED_PROFILES],
+      historyPageSize: 500,
     });
     coordinatorRef.current = coordinator;
     coordinatorUnsubscribeRef.current = coordinator.subscribe(() => {
@@ -262,28 +263,29 @@ export const KautukaNaradProvider: React.FC<KautukaNaradProviderProps> = ({
       );
     }
     mountedRef.current = true;
-    void attachSessionRef.current();
-
     const watchAbort = new AbortController();
     const store = sessionBinding.store;
 
-    void consumeKautukaNaradWatchRevisions(
-      transportOptions,
-      sessionId,
-      () => store.getSnapshot().lastSessionSequence,
-      (record) => {
-        // Watch is a revision notification only — not authority delivery.
-        // Live carries sessionSequence-ordered domain events. Only fill history if apply
-        // latched a gap (or prior catch-up failed).
-        store.apply(record);
-        const snap = store.getSnapshot();
-        const coordinator = coordinatorRef.current;
-        if (snap.sessionGap || coordinator?.getSnapshot().resyncRequired) {
-          void requestRecoveryRef.current();
-        }
-      },
-      watchAbort.signal,
-    ).catch(() => undefined);
+    void attachSessionRef.current().finally(() => {
+      if (watchAbort.signal.aborted) return;
+      void consumeKautukaNaradWatchRevisions(
+        transportOptions,
+        sessionId,
+        () => store.getSnapshot().lastSessionSequence,
+        (record) => {
+          // Watch is a revision notification only — not authority delivery.
+          // Live carries sessionSequence-ordered domain events. Only fill history if apply
+          // latched a gap (or prior catch-up failed).
+          store.apply(record);
+          const snap = store.getSnapshot();
+          const coordinator = coordinatorRef.current;
+          if (snap.sessionGap || coordinator?.getSnapshot().resyncRequired) {
+            void requestRecoveryRef.current();
+          }
+        },
+        watchAbort.signal,
+      ).catch(() => undefined);
+    }).catch(() => undefined);
 
     return () => {
       mountedRef.current = false;

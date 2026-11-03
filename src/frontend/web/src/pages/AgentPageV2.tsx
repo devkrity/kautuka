@@ -438,6 +438,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
   const { localDeliveryPending, attachSnapshot } = useKautukaNaradContext();
   const connectionStatus = useKautukaNaradConnectionStatus();
   const intents = useKautukaNaradIntents();
+  const hasCompletedInitialAttach = React.useRef(false);
+  if (attachSnapshot.live) hasCompletedInitialAttach.current = true;
+  const initialHistoryLoading = !hasCompletedInitialAttach.current &&
+    (attachSnapshot.backfilling || connectionStatus === 'attaching');
   const turns = useKautukaTranscriptTurns();
   const liveText = useKautukaPartialAssistantText();
   const runSummary = useKautukaRunSummary();
@@ -628,8 +632,10 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
       : connectionStatus === 'unauthorized'
         ? 'Session access denied.'
         : 'Connecting to live session…';
-  const runActive = awaitingUserApproval || liveActive;
-  const runStatusLabel = awaitingUserApproval
+  const runActive = !initialHistoryLoading && (awaitingUserApproval || liveActive);
+  const runStatusLabel = initialHistoryLoading
+    ? 'Loading history'
+    : awaitingUserApproval
     ? 'Waiting for approval'
     : runSummary.isRunning || localDeliveryPending
       ? 'Working'
@@ -664,7 +670,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                 {resyncBannerMessage}
               </Alert>
             ) : null}
-            {executionGraphPresentation !== 'hidden' ? (
+            {!initialHistoryLoading && executionGraphPresentation !== 'hidden' ? (
               <ExecutionGraphPanel
                 graph={graphView.graph}
                 presentation={executionGraphPresentation}
@@ -677,7 +683,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                 onCommandError={(message) => setError(message)}
               />
             ) : null}
-            {turns.map((turn) => (
+            {!initialHistoryLoading && turns.map((turn) => (
               <TurnCard
                 key={turn.id}
                 turn={turn}
@@ -696,7 +702,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
             {runActive && !latestTurnId && !liveText.trim() ? (
               <PendingAssistantTurn liveText={liveText} runStatusLabel={runStatusLabel} agentName={selectedAgent.name} agentIcon={selectedAgent.persona?.icon ?? '🤖'} agentColor={selectedAgent.persona?.color ?? '#0F766E'} />
             ) : null}
-            {turns.length === 0 && !runActive ? (
+            {!initialHistoryLoading && turns.length === 0 && !runActive ? (
               <div className="rounded-3xl border border-dashed border-border px-6 py-10 text-center text-muted-foreground">
                 <p className="font-medium text-foreground">
                   Ask the agent to work, then review approvals and activity as a task timeline.
@@ -707,7 +713,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
           </div>
 
           <div className="sticky bottom-0 z-30 border-t border-border/60 bg-background/95 px-2 py-4 backdrop-blur">
-            {dockApprovals.length > 0 ? (
+            {!initialHistoryLoading && dockApprovals.length > 0 ? (
               <div className="mb-3">
                 <ApprovalDock
                   approvals={dockApprovals}
@@ -737,7 +743,7 @@ const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({
                 placeholder={`Message ${selectedAgent.name}...`}
                 className="max-h-40 min-h-12 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none disabled:opacity-60"
               />
-              {runSummary.isRunning || localDeliveryPending ? (
+              {!initialHistoryLoading && (runSummary.isRunning || localDeliveryPending) ? (
                 <Button
                   variant="destructive"
                   size="icon"
@@ -812,6 +818,7 @@ export const AgentPageV2: React.FC = () => {
   const [isFilesOpen, setIsFilesOpen] = React.useState(false);
   const [createAgentOpen, setCreateAgentOpen] = React.useState(false);
   const newSessionDraftRef = React.useRef(false);
+  const sessionRequestGenerationRef = React.useRef(0);
   const loadedAgentIdRef = React.useRef<string | null>(null);
   const dialogAgentIdRef = React.useRef<string | null>(null);
   const dialogSessionIdRef = React.useRef<string | null>(null);
@@ -850,29 +857,13 @@ export const AgentPageV2: React.FC = () => {
   }, [requestedSessionId]);
 
   const selectSession = React.useCallback((next: React.SetStateAction<string | null>) => {
+    sessionRequestGenerationRef.current += 1;
     setSessionId((current) => {
       const resolved = typeof next === 'function' ? next(current) : next;
       newSessionDraftRef.current = resolved === null;
       return resolved;
     });
   }, []);
-
-  const refreshSessions = React.useCallback(async (agentId: string) => {
-    const nextSessions = await listSessionsForAgent(agentId);
-    setSessions(nextSessions);
-    setSessionId((current) => {
-      if (newSessionDraftRef.current) {
-        return null;
-      }
-      if (requestedSessionId && nextSessions.some((session) => session.id === requestedSessionId)) {
-        return requestedSessionId;
-      }
-      if (current && nextSessions.some((session) => session.id === current)) {
-        return current;
-      }
-      return nextSessions[0]?.id ?? null;
-    });
-  }, [requestedSessionId]);
 
   React.useEffect(() => {
     if (!sessionId) {
@@ -906,22 +897,41 @@ export const AgentPageV2: React.FC = () => {
     }
     loadedAgentIdRef.current = agentId;
 
-    void refreshSessions(agentId).catch((err: unknown) =>
-      setError(err instanceof Error ? err.message : 'Failed to load sessions')
-    );
-  }, [refreshSessions, selectedAgent?.id]);
+    let cancelled = false;
+    const generation = ++sessionRequestGenerationRef.current;
+    void listSessionsForAgent(agentId).then((nextSessions) => {
+      if (cancelled || generation !== sessionRequestGenerationRef.current) return;
+      setSessions(nextSessions);
+      setSessionId((current) => {
+        if (newSessionDraftRef.current) return null;
+        if (requestedSessionId && nextSessions.some((session) => session.id === requestedSessionId)) {
+          return requestedSessionId;
+        }
+        if (current && nextSessions.some((session) => session.id === current)) return current;
+        return nextSessions[0]?.id ?? null;
+      });
+    }).catch((err: unknown) => {
+      if (!cancelled && generation === sessionRequestGenerationRef.current) {
+        setError(err instanceof Error ? err.message : 'Failed to load sessions');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [requestedSessionId, selectedAgent?.id]);
 
   const handleSelectAgent = (agentId: string) => {
     if (!agentId || agentId === selectedAgentId) {
       return;
     }
+    sessionRequestGenerationRef.current += 1;
     setSelectedAgentId(agentId);
     navigate({ pathname: `/workspace/${encodeURIComponent(agentId)}`, search: '' }, { replace: true });
   };
 
   const handleNewSession = React.useCallback(async () => {
     if (!selectedAgent) return;
+    const generation = ++sessionRequestGenerationRef.current;
     const session = await createSession('agent', selectedAgent.id);
+    if (generation !== sessionRequestGenerationRef.current) return;
     newSessionDraftRef.current = false;
     setSessions((current) => [session, ...current.filter((candidate) => candidate.id !== session.id)]);
     setSessionId(session.id);
@@ -1043,7 +1053,7 @@ export const AgentPageV2: React.FC = () => {
             </Alert>
           ) : null}
           {selectedAgent && sessionId ? (
-            <KautukaNaradProvider agentId={selectedAgent.id} sessionId={sessionId}>
+            <KautukaNaradProvider key={`${selectedAgent.id}:${sessionId}`} agentId={selectedAgent.id} sessionId={sessionId}>
               <AgentWorkspace
                 key={sessionId}
                 selectedAgent={selectedAgent}

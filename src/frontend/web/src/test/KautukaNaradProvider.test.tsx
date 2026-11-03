@@ -200,6 +200,28 @@ describe('KautukaNaradProvider', () => {
     expect(disposeMock).toHaveBeenCalled();
   });
 
+  it('starts the revision watch after history attachment and skips it if unmounted', async () => {
+    let finishAttach!: () => void;
+    attachMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishAttach = resolve; }));
+    const { unmount } = render(
+      <KautukaNaradProvider agentId="agent-1" sessionId="session-1"><Probe /></KautukaNaradProvider>
+    );
+    await waitFor(() => expect(attachMock).toHaveBeenCalled());
+    expect(consumeWatch).not.toHaveBeenCalled();
+    await act(async () => { finishAttach(); });
+    await waitFor(() => expect(consumeWatch).toHaveBeenCalledTimes(1));
+    unmount();
+
+    consumeWatch.mockClear();
+    attachMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishAttach = resolve; }));
+    const second = render(
+      <KautukaNaradProvider agentId="agent-1" sessionId="session-1"><Probe /></KautukaNaradProvider>
+    );
+    second.unmount();
+    await act(async () => { finishAttach(); });
+    expect(consumeWatch).not.toHaveBeenCalled();
+  });
+
   it('does not re-attach when the parent re-renders the same session', async () => {
     const { rerender } = render(
       <KautukaNaradProvider agentId="agent-1" sessionId="session-1">
