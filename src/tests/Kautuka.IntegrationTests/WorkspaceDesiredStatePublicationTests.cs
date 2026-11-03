@@ -2286,6 +2286,49 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public async Task SettingsUseEffectiveChannelAndCanSwitchFromPreviewToStableAsync()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        // A failed discovery does not invalidate the policy returned by UpdateService.
+        var updateService = new RecordingUpdateServiceGrpcService { EffectiveReleaseChannel = "preview", StatusOk = false };
+        var store = new GatewaySettingsStore(
+            state,
+            new KautukaLogLevelSwitch(LogLevel.Warning),
+            new RecordingDesiredStatePublisher(),
+            updateService,
+            CreateConfiguration(temp.SqlitePath),
+            new StaticPlatformConfigurationProvider(CreatePlatformConfiguration()));
+
+        Assert.Equal("stable", state.SystemSettings.ReleaseChannel);
+        Assert.Equal("preview", (await store.GetEffectiveSettingsAsync(TestContext.Current.CancellationToken)).System.Updates.ReleaseChannel);
+        Assert.Equal("preview", (await store.GetEffectiveAdvancedSettingsAsync(TestContext.Current.CancellationToken)).System.Updates.ReleaseChannel);
+
+        using JsonDocument body = JsonDocument.Parse("""{"system":{"updates":{"releaseChannel":"stable"}}}""");
+        await store.SaveAsync(body.RootElement, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, updateService.SetPolicyCalls);
+        Assert.Equal("stable", updateService.LastReleaseChannel);
+        Assert.Equal("stable", (await store.GetEffectiveSettingsAsync(TestContext.Current.CancellationToken)).System.Updates.ReleaseChannel);
+    }
+
+    [Fact]
+    public async Task SettingsRemainAvailableWhenUpdateServiceClientCannotInitializeAsync()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        var store = new GatewaySettingsStore(
+            state,
+            new KautukaLogLevelSwitch(LogLevel.Warning),
+            new RecordingDesiredStatePublisher(),
+            new RecordingUpdateServiceGrpcService { StatusUnavailable = true },
+            CreateConfiguration(temp.SqlitePath),
+            new StaticPlatformConfigurationProvider(CreatePlatformConfiguration()));
+
+        Assert.Equal("stable", (await store.GetEffectiveAdvancedSettingsAsync(TestContext.Current.CancellationToken)).System.Updates.ReleaseChannel);
+    }
+
+    [Fact]
     public async Task SaveSystemSettingsPersistsToolInvocationLimitsAndRoundTripsAsync()
     {
         using var temp = new TemporaryGatewayStateDirectory();
@@ -2775,6 +2818,9 @@ public sealed class WorkspaceDesiredStatePublicationTests
 
     private sealed class RecordingUpdateServiceGrpcService : IUpdateServiceGrpcService
     {
+        public string EffectiveReleaseChannel { get; set; } = string.Empty;
+        public bool StatusOk { get; set; } = true;
+        public bool StatusUnavailable { get; set; }
         public int SetPolicyCalls { get; private set; }
 
         public string? LastReleaseChannel { get; private set; }
@@ -2786,12 +2832,15 @@ public sealed class WorkspaceDesiredStatePublicationTests
             => Task.FromResult(new CatalogSnapshotResponse { Ok = true, Message = request.Message });
 
         public Task<UpdateStatusResponse> GetUpdateStatusAsync(UpdateServicePingRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new UpdateStatusResponse { Ok = true, Message = "ok", WorkflowState = "Current" });
+            => StatusUnavailable
+                ? Task.FromException<UpdateStatusResponse>(new InvalidOperationException("UpdateService certificates are unavailable."))
+                : Task.FromResult(new UpdateStatusResponse { Ok = StatusOk, Message = "ok", WorkflowState = "Current", EffectiveReleaseChannel = EffectiveReleaseChannel });
 
         public Task<UpdateStatusResponse> SetUpdatePolicyAsync(UpdatePolicyRequest request, CancellationToken cancellationToken = default)
         {
             SetPolicyCalls++;
             LastReleaseChannel = request.ReleaseChannel;
+            EffectiveReleaseChannel = request.ReleaseChannel;
             return Task.FromResult(new UpdateStatusResponse
             {
                 Ok = true,

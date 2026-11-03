@@ -8,7 +8,7 @@ internal static partial class GatewaySettingsEndpointMappings
 {
     private static void MapAdvancedSettingsEndpoints(WebApplication app)
     {
-        app.MapGet("/api/settings/advanced", (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/settings/advanced", async (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
@@ -17,7 +17,7 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             return Results.Json(
-                settings.GetAdvancedSettingsPayload(),
+                await settings.GetEffectiveAdvancedSettingsAsync(ct).ConfigureAwait(false),
                 KautukaJsonContext.Default.GatewayAdvancedSettingsResponse);
         });
 
@@ -39,7 +39,7 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             return Results.Json(
-                settings.GetAdvancedSettingsPayload(),
+                await settings.GetEffectiveAdvancedSettingsAsync(ct).ConfigureAwait(false),
                 KautukaJsonContext.Default.GatewayAdvancedSettingsResponse);
         });
     }

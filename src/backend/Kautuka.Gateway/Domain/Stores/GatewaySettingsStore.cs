@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+using Grpc.Core;
+
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.UpdateService.Protos;
@@ -138,6 +140,15 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
         }
 
         bool updatePolicyChanged = !string.Equals(releaseChannel, state.SystemSettings.ReleaseChannel, StringComparison.Ordinal);
+        if (body.TryGetProperty("system", out JsonElement suppliedSystem)
+            && suppliedSystem.ValueKind == JsonValueKind.Object
+            && suppliedSystem.TryGetProperty("updates", out JsonElement suppliedUpdates)
+            && suppliedUpdates.ValueKind == JsonValueKind.Object
+            && suppliedUpdates.TryGetProperty("releaseChannel", out _))
+        {
+            string effectiveChannel = await GetEffectiveReleaseChannelAsync(cancellationToken).ConfigureAwait(false);
+            updatePolicyChanged |= !string.Equals(releaseChannel, effectiveChannel, StringComparison.Ordinal);
+        }
         if (updatePolicyChanged)
         {
             UpdateStatusResponse policyResponse = await updateServiceGrpcService.SetUpdatePolicyAsync(
@@ -259,6 +270,49 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
                 state.SystemSettings.DocumentIngestionParseRequiredExtensions,
                 state.SystemSettings.DocumentIngestionPdfImageFallbackEnabled,
                 state.SystemSettings.DocumentIngestionVisionRouteAllowed)));
+
+    public async Task<GatewaySystemSettingsResponse> GetEffectiveSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        GatewaySystemSettingsResponse payload = GetPayload();
+        string effectiveChannel = await GetEffectiveReleaseChannelAsync(cancellationToken).ConfigureAwait(false);
+        return payload with { System = payload.System with { Updates = new GatewayUpdateSettingsPayload(effectiveChannel) } };
+    }
+
+    public async Task<GatewayAdvancedSettingsResponse> GetEffectiveAdvancedSettingsAsync(CancellationToken cancellationToken = default)
+    {
+        GatewayAdvancedSettingsResponse payload = GetAdvancedSettingsPayload();
+        string effectiveChannel = await GetEffectiveReleaseChannelAsync(cancellationToken).ConfigureAwait(false);
+        return payload with { System = payload.System with { Updates = new GatewayUpdateSettingsPayload(effectiveChannel) } };
+    }
+
+    private async Task<string> GetEffectiveReleaseChannelAsync(CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            UpdateStatusResponse status = await updateServiceGrpcService.GetUpdateStatusAsync(
+                new UpdateServicePingRequest { Message = "settings-update-channel" }, timeout.Token).ConfigureAwait(false);
+            if (status.EffectiveReleaseChannel == "preview" || status.EffectiveReleaseChannel == "stable")
+            {
+                return status.EffectiveReleaseChannel;
+            }
+        }
+        catch (RpcException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Preserve the last saved setting when UpdateService is temporarily unavailable.
+        }
+        catch (InvalidOperationException)
+        {
+            // The UpdateService client cannot initialize until its certificates are available.
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A slow UpdateService should not block unrelated settings.
+        }
+
+        return state.SystemSettings.ReleaseChannel;
+    }
 
     public GatewayAdvancedSettingsResponse GetAdvancedSettingsPayload()
     {
