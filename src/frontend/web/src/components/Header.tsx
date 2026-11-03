@@ -43,9 +43,6 @@ interface HeaderProps {
   canApplyUpdate?: boolean;
   isApplyingUpdate?: boolean;
   onApplyUpdate?: () => void;
-  canRollbackUpdate?: boolean;
-  isRollingBackUpdate?: boolean;
-  onRollbackUpdate?: () => void;
 }
 
 const navItems: Array<{
@@ -84,9 +81,6 @@ export function Header({
   canApplyUpdate = false,
   isApplyingUpdate = false,
   onApplyUpdate,
-  canRollbackUpdate = false,
-  isRollingBackUpdate = false,
-  onRollbackUpdate,
 }: Readonly<HeaderProps>) {
   const [collapsed, setCollapsed] = React.useState(false);
   const location = useLocation();
@@ -260,9 +254,6 @@ export function Header({
                 canApplyUpdate={canApplyUpdate}
                 isApplyingUpdate={isApplyingUpdate}
                 onApplyUpdate={onApplyUpdate}
-                canRollbackUpdate={canRollbackUpdate}
-                isRollingBackUpdate={isRollingBackUpdate}
-                onRollbackUpdate={onRollbackUpdate}
               />
             ) : null}
           </div>

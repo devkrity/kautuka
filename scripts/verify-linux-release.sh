@@ -29,7 +29,7 @@ for variable in manifest signature public_key archive version channel tag artifa
   [[ -n "${!variable:-}" ]] || usage
 done
 
-for command_name in python3 openssl sha256sum stat awk; do
+for command_name in python3 openssl sha256sum stat; do
   command -v "$command_name" >/dev/null 2>&1 || {
     echo "error: required command not found: $command_name" >&2
     exit 1
@@ -89,7 +89,8 @@ openssl dgst -sha256 -verify "$public_key" -signature "$signature_der" "$manifes
   exit 1
 }
 
-actual_hash="$(sha256sum "$archive" | awk '{print $1}')"
+actual_hash="$(sha256sum "$archive")"
+actual_hash="${actual_hash%% *}"
 actual_size="$(stat -c '%s' "$archive")"
 [[ "${actual_hash,,}" == "${expected_hash,,}" ]] || {
   echo 'error: platform archive SHA-256 does not match the signed release manifest.' >&2

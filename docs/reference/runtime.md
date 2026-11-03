@@ -37,7 +37,9 @@ Important files include:
 - UpdateService state/catalog/history JSON, written by unique same-directory temporary files, flushed to stable storage, and atomically replaced;
 - workspace directories and attachment files.
 
-Rollback backups explicitly include `gateway-auth.key` with `kautuka.db` and `kautuka.key`. Restore replaces the signing key with the backed-up identity so access-token verification remains consistent with the restored authentication state.
+Linux update recovery snapshots only the supported SQLite databases and matching authentication/certificate keys after their host writers stop. A durable maintenance fence blocks application requests, dispatch, channel polling, workflow execution, and Manager reconciliation until target readiness is verified and UpdateService commits. An uncommitted failure restores those databases, keys, and service pointers from the operation-bound verified snapshot; a reboot repeats that recovery safely. Once committed, updates are repaired forward. There is no user-facing release rollback path. Workspace files, attachments, container state, images, and other file stores are outside the snapshot and are never restored by update recovery. Legacy helpers and unsupported custom production roots fail closed and require a current signed installer bootstrap.
+
+Accepting connector desired state does not build connector images. Manager materializes the required runtime and sandbox images when a connector is used, reusing content-addressed local images and serializing concurrent builds. A failed first-use build is reported to that operation; it does not prevent Gateway from starting.
 
 ## Provider types
 

@@ -10,6 +10,9 @@ using Kautuka.Telemetry.Security;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 
+using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
+    Environment.GetEnvironmentVariable("Kautuka__Mode"));
+
 KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
 
 var builder = WebApplication.CreateSlimBuilder(args);
@@ -92,6 +95,7 @@ builder.Services.AddSingleton<CredentialAuditStore>();
 builder.Services.AddSingleton<CredentialRepository>();
 builder.Services.AddSingleton<CredentialsGrpcService>();
 builder.Services.AddHealthChecks().AddCheck<CredentialReadinessHealthCheck>("credentials-ready");
+KautukaMaintenanceMode.SuppressApplicationHostedServices(builder.Services);
 
 // -----------------------------------------------------------------------
 // Kestrel: HTTP/2 with mTLS — TLS is mandatory, NO unencrypted support.
@@ -118,6 +122,8 @@ builder.WebHost.ConfigureKestrel(kestrel =>
 var app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(credentialsEndpoint);
+
+app.UseAdmissionFence();
 
 // Schema initializer runs synchronously at startup — safe because nothing else is running yet.
 CredentialsSchemaInitializer.EnsureReady(app.Services.GetRequiredService<CredentialsDatabase>());

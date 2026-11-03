@@ -63,6 +63,11 @@ gatewayClient.ConfigurePrimaryHttpMessageHandler(() =>
 
 using WebApplication app = builder.Build();
 
+app.UseWebHostMaintenancePage();
+
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/alive", () => Results.Ok(new { status = "alive" }));
+
 app.Use(async (context, next) =>
 {
     context.Response.OnStarting(static state =>

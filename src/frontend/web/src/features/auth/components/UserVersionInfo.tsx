@@ -1,7 +1,7 @@
 import React from 'react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { ChevronDown, Loader2, RefreshCw, RotateCcw, UploadCloud } from 'lucide-react';
+import { ChevronDown, Loader2, RefreshCw, UploadCloud } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface UserVersionInfoProps {
@@ -17,9 +17,6 @@ interface UserVersionInfoProps {
   canApplyUpdate?: boolean;
   isApplyingUpdate?: boolean;
   onApplyUpdate?: () => void;
-  canRollbackUpdate?: boolean;
-  isRollingBackUpdate?: boolean;
-  onRollbackUpdate?: () => void;
   className?: string;
 }
 
@@ -36,9 +33,6 @@ export function UserVersionInfo({
   canApplyUpdate = false,
   isApplyingUpdate = false,
   onApplyUpdate,
-  canRollbackUpdate = false,
-  isRollingBackUpdate = false,
-  onRollbackUpdate,
   className,
 }: Readonly<UserVersionInfoProps>) {
   const buildVersion = import.meta.env.VITE_KAUTUKA_VERSION || '0.1.20-dev';
@@ -88,23 +82,6 @@ export function UserVersionInfo({
                       <UploadCloud className="mr-1 h-3 w-3" />
                     )}
                     Apply
-                  </Button>
-                ) : null}
-                {canRollbackUpdate && onRollbackUpdate ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={onRollbackUpdate}
-                    disabled={isRollingBackUpdate}
-                    className="h-7 px-2 text-[11px]"
-                  >
-                    {isRollingBackUpdate ? (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    ) : (
-                      <RotateCcw className="mr-1 h-3 w-3" />
-                    )}
-                    Roll back
                   </Button>
                 ) : null}
               </div>

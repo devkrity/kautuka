@@ -361,6 +361,9 @@ internal static partial class GatewayAppBootstrap
                 new DeadlineCallInvoker(credChannel.CreateCallInvoker()));
         }, LazyThreadSafetyMode.PublicationOnly));
         builder.AddGatewayModules();
+        KautukaMaintenanceMode.SuppressApplicationHostedServices(
+            builder.Services,
+            typeof(WorkspaceDesiredStateStartupService));
     }
 
     public static void ConfigureApp(WebApplication app, KautukaDatabase database)
@@ -411,6 +414,10 @@ internal static partial class GatewayAppBootstrap
                 KautukaJsonContext.Default.GatewayErrorResponse);
             await ctx.Response.WriteAsync(payload, ctx.RequestAborted).ConfigureAwait(false);
         }));
+
+        // The updater probes core readiness over the local Gateway socket while
+        // public WebHost admission remains fenced.
+        app.UseAdmissionFence(static path => path.Equals("/api/runtime/system-health", StringComparison.OrdinalIgnoreCase));
 
         app.UseKautukaRequestCorrelation();
         app.UseRateLimiter();

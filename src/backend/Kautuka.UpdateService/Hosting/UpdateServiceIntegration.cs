@@ -6,7 +6,6 @@ using System.Text.Json;
 
 using Grpc.Core;
 
-using Kautuka.Hosting.Hosting;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
 
@@ -16,13 +15,11 @@ namespace Kautuka.UpdateService.Hosting;
 
 public sealed class UpdateServiceIntegration(
     UpdateServiceRuntimePaths runtimePaths,
-    IConfiguration configuration,
     IOptions<UpdateOptions> updateOptions,
     IManagerStatusClient managerStatusClient,
     IHostApplicationLifetime applicationLifetime,
     ILogger<UpdateServiceIntegration> logger) : IUpdateServiceIntegration
 {
-    private const string backupsRelativePath = "updates/backups";
     private const string activationLauncherRelativePath = "updates/activate-updateservice.sh";
     private const string activationRequestRelativePath = "updates/activation-request.env";
     private const string pendingActivationRequestRelativePath = "updates/pending-activation.env";
@@ -35,9 +32,10 @@ public sealed class UpdateServiceIntegration(
     private const string systemctlExecutablePath = "/usr/bin/systemctl";
     private const string privilegedUnitRestartHelperPath = "/usr/local/lib/kautuka/restart-system-units";
     private const string updateServiceUnitName = "kautuka-updateservice.service";
+    private const string recoveryJournalPath = "/var/lib/kautuka-recovery/operation.json";
+    private const string recoveryMaintenancePath = "/var/lib/kautuka-recovery/maintenance.json";
     private const int updateRestartExitCode = 75;
     private const int terminatedBySigTermExitCode = 143;
-    private const int rollbackBackupRetentionCount = 1;
     private static readonly string provisionedConfigRelativeRoot = Path.Combine("provisioning", "etc", "kautuka");
     private static readonly string[] orderedRuntimeServiceUnits =
     [
@@ -48,8 +46,6 @@ public sealed class UpdateServiceIntegration(
         "kautuka-webhost.service",
     ];
 
-    private readonly string sharedDataRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(configuration);
-    private readonly string visibleRoot = KautukaHostPathPolicy.Resolve(configuration).VisibleRoot;
     private readonly UpdateOptions updateOptions = updateOptions.Value;
 
     public async ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
@@ -77,8 +73,10 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
-        (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerVersion);
+        (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerReleaseId);
+        bool updaterRunningCurrent = IsRunningCurrentUpdateService(AppContext.BaseDirectory);
 
+        RecoveryJournal? recoveryJournal = ReadRecoveryJournal();
         return new UpdateServiceContext(
             runtimePaths.RuntimeRoot,
             managerInstallRoot,
@@ -88,7 +86,14 @@ public sealed class UpdateServiceIntegration(
             activeExecCount,
             hostStatusObserved,
             unitsActive,
-            pointersConsistent);
+            pointersConsistent,
+            updaterRunningCurrent,
+            OperatingSystem.IsLinux() && File.Exists(recoveryMaintenancePath),
+            recoveryJournal?.OperationId,
+            recoveryJournal?.Phase,
+            recoveryJournal?.SourceRelease,
+            recoveryJournal?.TargetRelease,
+            recoveryJournal?.Snapshot);
     }
 
     public ValueTask RequestSupervisorReconcileAsync(CancellationToken cancellationToken)
@@ -97,7 +102,7 @@ public sealed class UpdateServiceIntegration(
         return ValueTask.CompletedTask;
     }
 
-    private async Task RunApplyReleaseHelperAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+    private async Task<string> RunApplyReleaseHelperAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(updateOptions.ApplyReleaseHelperPath))
         {
@@ -172,13 +177,14 @@ public sealed class UpdateServiceIntegration(
                     process.ExitCode,
                     expectedVersion,
                     stdErr.Trim());
-                return;
+                return stdOut;
             }
 
             throw new InvalidOperationException($"Apply-release helper failed with exit code {process.ExitCode}: {stdErr}");
         }
 
         logger.LogInformation("Apply-release helper completed. StdOut: {StdOut}", stdOut.Trim());
+        return stdOut;
     }
 
     private static string? TryResolveExpectedVersion(IReadOnlyList<string> arguments)
@@ -186,7 +192,7 @@ public sealed class UpdateServiceIntegration(
         for (int i = 0; i < arguments.Count - 1; i++)
         {
             if (string.Equals(arguments[i], "--version", StringComparison.Ordinal)
-                || string.Equals(arguments[i], "--revert", StringComparison.Ordinal))
+                || string.Equals(arguments[i], "--complete-recovery", StringComparison.Ordinal))
             {
                 return arguments[i + 1];
             }
@@ -194,6 +200,150 @@ public sealed class UpdateServiceIntegration(
 
         return null;
     }
+
+    private static RecoveryJournal? ReadRecoveryJournal()
+    {
+        if (!OperatingSystem.IsLinux() || !File.Exists(recoveryJournalPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(File.ReadAllText(recoveryJournalPath));
+            JsonElement root = document.RootElement;
+            return new RecoveryJournal(
+                ReadString(root, "operationId"),
+                ReadString(root, "phase"),
+                ReadString(root, "sourceRelease"),
+                ReadString(root, "targetRelease"),
+                ReadString(root, "snapshot"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadString(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out JsonElement value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private async ValueTask<bool> ContinueSafeRecoveryAsync(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsLinux() || !File.Exists(recoveryMaintenancePath))
+        {
+            return false;
+        }
+
+        RecoveryJournal? journal = ReadRecoveryJournal();
+        if (journal is null || string.IsNullOrWhiteSpace(journal.Phase))
+        {
+            logger.LogError("Safe update recovery marker exists but its durable journal is unreadable; keeping the appliance in maintenance.");
+            return false;
+        }
+
+        if (string.Equals(journal.Phase, "verifying", StringComparison.Ordinal)
+            || string.Equals(journal.Phase, "committed", StringComparison.Ordinal))
+        {
+            if (await WaitForReleaseHealthAsync(journal.TargetRelease, requireCurrentUpdater: true, cancellationToken).ConfigureAwait(false))
+            {
+                await RunApplyReleaseHelperAsync(["--commit", "--version", journal.TargetRelease!], cancellationToken).ConfigureAwait(false);
+                RequestHostRestart("committed update", journal.TargetRelease!);
+                return true;
+            }
+
+            if (string.Equals(journal.Phase, "committed", StringComparison.Ordinal))
+            {
+                logger.LogError("Committed release {ReleaseId} is not healthy. Keeping maintenance enabled; committed updates are repaired by rolling forward.", journal.TargetRelease);
+                return false;
+            }
+
+            logger.LogWarning("Target release {ReleaseId} did not pass readiness before the safe recovery deadline; restoring the verified pre-update snapshot.", journal.TargetRelease);
+            await RecoverAndHandoffToSourceAsync(journal.SourceRelease, cancellationToken).ConfigureAwait(false);
+            journal = ReadRecoveryJournal();
+        }
+        else if (!string.Equals(journal.Phase, "recovered", StringComparison.Ordinal))
+        {
+            await RecoverAndHandoffToSourceAsync(journal.SourceRelease, cancellationToken).ConfigureAwait(false);
+            journal = ReadRecoveryJournal();
+        }
+
+        if (journal is not null
+            && string.Equals(journal.Phase, "recovered", StringComparison.Ordinal)
+            && !IsRunningCurrentUpdateService(AppContext.BaseDirectory)
+            && RequestRestartForSwitchedUpdateService("safe recovery", journal.SourceRelease ?? string.Empty))
+        {
+            return true;
+        }
+
+        if (journal is null || !string.Equals(journal.Phase, "recovered", StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(journal.SourceRelease))
+        {
+            return false;
+        }
+
+        if (!await WaitForReleaseHealthAsync(journal.SourceRelease, requireCurrentUpdater: true, cancellationToken).ConfigureAwait(false))
+        {
+            logger.LogError("Restored source release {ReleaseId} did not become healthy; maintenance remains enabled.", journal.SourceRelease);
+            return false;
+        }
+
+        await RunApplyReleaseHelperAsync(["--complete-recovery", "--version", journal.SourceRelease], cancellationToken).ConfigureAwait(false);
+        RequestHostRestart("completed safe recovery", journal.SourceRelease);
+        return true;
+    }
+
+    private async ValueTask RecoverAndHandoffToSourceAsync(string? sourceRelease, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await RunApplyReleaseHelperAsync(["--recover"], cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A failed recovery attempt may still have restored and verified the
+            // source pointers but remain fenced while Gateway republishes Manager
+            // desired state. Re-enter the source updater so it can retry completion.
+            RecoveryJournal? journal = ReadRecoveryJournal();
+            if (journal is not null && !string.IsNullOrWhiteSpace(sourceRelease)
+                && string.Equals(journal.SourceRelease, sourceRelease, StringComparison.Ordinal))
+            {
+                RequestRestartForSwitchedUpdateService("safe recovery", sourceRelease);
+            }
+        }
+    }
+
+    private async Task<bool> WaitForReleaseHealthAsync(string? releaseId, bool requireCurrentUpdater, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(releaseId))
+        {
+            return false;
+        }
+
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(90);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            UpdateServiceContext context = await GetHostContextAsync(cancellationToken).ConfigureAwait(false);
+            if (string.Equals(context.ManagerReleaseId, releaseId, StringComparison.OrdinalIgnoreCase)
+                && context.HostStatusObserved
+                && context.IsReady
+                && context.RuntimeUnitsActive
+                && context.CurrentPointersConsistent
+                && (!requireCurrentUpdater || context.UpdateServiceRunningCurrent))
+            {
+                return true;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private sealed record RecoveryJournal(string? OperationId, string? Phase, string? SourceRelease, string? TargetRelease, string? Snapshot);
 
     private (bool PointersConsistent, bool UnitsActive) ObserveReleaseHealth(string expectedVersion)
     {
@@ -284,30 +434,54 @@ public sealed class UpdateServiceIntegration(
             updateOptions.ApplyReleaseHelperPath,
             preparedArtifacts.PlatformPackagePath);
 
-        await RunApplyReleaseHelperAsync(
-            ["--artifact", preparedArtifacts.PlatformPackagePath, "--version", preparedArtifacts.TargetReleaseId],
-            cancellationToken).ConfigureAwait(false);
+        string capability = await RunApplyReleaseHelperAsync(["--capabilities"], cancellationToken).ConfigureAwait(false);
+        if (!capability.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Any(line => string.Equals(line.Trim(), "safe-state-recovery-v5", StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("Installed apply-release helper does not support verified database snapshots and maintenance fencing. Run the current signed Linux installer bootstrap before updating.");
+        }
+
+        try
+        {
+            await RunApplyReleaseHelperAsync(
+                ["--artifact", preparedArtifacts.PlatformPackagePath, "--version", preparedArtifacts.TargetReleaseId],
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception applyException)
+        {
+            if (File.Exists(recoveryMaintenancePath))
+            {
+                try
+                {
+                    bool recoveryCompleted = await ContinueSafeRecoveryAsync(CancellationToken.None).ConfigureAwait(false);
+                    if (!recoveryCompleted)
+                    {
+                        logger.LogError(applyException, "Update apply failed and automatic database recovery remains fenced for boot-time continuation.");
+                    }
+                }
+                catch (Exception recoveryException)
+                {
+                    logger.LogError(recoveryException, "Automatic pre-commit recovery failed; maintenance remains enabled.");
+                }
+            }
+
+            throw;
+        }
+
+        RequestRestartForSwitchedUpdateService("apply", preparedArtifacts.TargetReleaseId);
     }
 
-    public async ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)
+    public ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(release);
+        _ = release;
         cancellationToken.ThrowIfCancellationRequested();
-
-        logger.LogInformation(
-            "Delegating rollback to {ReleaseId} to apply-release helper {HelperPath}.",
-            release.ReleaseId,
-            updateOptions.ApplyReleaseHelperPath);
-
-        await RunApplyReleaseHelperAsync(
-            ["--revert", release.ReleaseId],
-            cancellationToken).ConfigureAwait(false);
+        throw new InvalidOperationException("User requested release rollback is disabled. Apply a forward update to repair the installed release.");
     }
 
     public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.FromResult(false);
+        return ContinueSafeRecoveryAsync(cancellationToken);
     }
 
     internal ValueTask<bool> TryContinuePendingActivationAsync(string baseDirectory, CancellationToken cancellationToken)
@@ -328,6 +502,68 @@ public sealed class UpdateServiceIntegration(
         applicationLifetime.StopApplication();
     }
 
+    private bool RequestRestartForSwitchedUpdateService(string operation, string releaseId)
+    {
+        // The helper has completed outside the user service's cgroup. Stop only
+        // after it returns, so systemd can start the new updater via current.
+        if (OperatingSystem.IsLinux() && !IsRunningCurrentUpdateService(AppContext.BaseDirectory))
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("INVOCATION_ID")))
+            {
+                logger.LogWarning("The updater is not running the current release but no systemd supervisor was detected; restart UpdateService to complete {Operation} of {ReleaseId}.", operation, releaseId);
+                return false;
+            }
+
+            RequestHostRestart(operation, releaseId);
+            return true;
+        }
+
+        return false;
+    }
+
+    internal static bool IsRunningCurrentUpdateService(string baseDirectory)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return true;
+        }
+
+        string? executable = new FileInfo("/proc/self/exe").LinkTarget;
+        string applianceRoot = ResolveApplianceRoot(ResolveServiceInstallRoot(baseDirectory));
+        string managedRoot = Path.Combine(applianceRoot, "updateservice");
+        // Development/test processes are not launched from the appliance tree.
+        if (!Path.GetFullPath(baseDirectory).StartsWith(managedRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return IsExecutableInCurrentVersion(executable, Path.Combine(managedRoot, "current"));
+    }
+
+    internal static bool IsExecutableInCurrentVersion(string? executable, string current)
+    {
+        if (string.IsNullOrWhiteSpace(executable) || executable.EndsWith(" (deleted)", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            FileSystemInfo? target = Directory.ResolveLinkTarget(current, returnFinalTarget: true);
+            return target is not null
+                && string.Equals(Path.GetDirectoryName(executable), target.FullName, StringComparison.Ordinal)
+                && string.Equals(Path.GetFileName(executable), "kautuka-updateservice", StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     private async ValueTask ContinuePreparedActivationAsync(string baseDirectory, string operation, string releaseId, string? platformExtractedPath, CancellationToken cancellationToken)
     {
         string managerInstallRoot = ResolveManagerInstallRoot(baseDirectory);
@@ -345,7 +581,6 @@ public sealed class UpdateServiceIntegration(
             logger);
         SyncProvisionedConfiguration(platformExtractedPath, updateSourceDocumentPath, manifestPublicKeyPath, logger);
 
-        ClearGeneratedAgentWorkspaceState(visibleRoot, logger);
         LogResolvedInstallRoots(baseDirectory, releaseId);
         ClearPendingActivationRequest();
 
@@ -422,9 +657,15 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
-        return resolved.Contains(
-            $"{Path.DirectorySeparatorChar}versions{Path.DirectorySeparatorChar}{expectedVersion}",
-            StringComparison.Ordinal);
+        DirectoryInfo directory = new(Path.TrimEndingDirectorySeparator(resolved));
+        string? serviceRoot = Path.GetDirectoryName(Path.GetFullPath(currentPath));
+        if (serviceRoot is null)
+        {
+            return false;
+        }
+
+        return string.Equals(directory.Name, expectedVersion, StringComparison.Ordinal)
+            && string.Equals(directory.Parent?.FullName, Path.Combine(serviceRoot, "versions"), StringComparison.Ordinal);
     }
 
     internal static string ResolveManagerInstallRoot(string baseDirectory)
@@ -504,158 +745,6 @@ public sealed class UpdateServiceIntegration(
         }
 
         return ResolveRunningVersion();
-    }
-
-    private async Task<string> CreateRollbackBackupAsync(string targetReleaseId, CancellationToken cancellationToken)
-    {
-        ReleaseTrustPolicy.EnsureSafeReleaseId(targetReleaseId);
-        string timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        string backupRoot = Path.Combine(runtimePaths.RuntimeRoot, backupsRelativePath, $"{timestamp}-{targetReleaseId}");
-        string dataBackupRoot = Path.Combine(backupRoot, "data");
-        string configBackupRoot = Path.Combine(backupRoot, "config", "etc", "kautuka");
-        Directory.CreateDirectory(dataBackupRoot);
-
-        CopyFileIfExists(Path.Combine(sharedDataRoot, "kautuka.db"), Path.Combine(dataBackupRoot, "kautuka.db"));
-        CopyFileIfExists(Path.Combine(sharedDataRoot, "kautuka.key"), Path.Combine(dataBackupRoot, "kautuka.key"));
-        CopyFileIfExists(Path.Combine(sharedDataRoot, "gateway-auth.key"), Path.Combine(dataBackupRoot, "gateway-auth.key"));
-        CopyFileIfExists(updateSourceDocumentPath, Path.Combine(configBackupRoot, "update-source.json"));
-        CopyFileIfExists(manifestPublicKeyPath, Path.Combine(configBackupRoot, "manifest-public-key.pem"));
-
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "manager"), Path.Combine(dataBackupRoot, "manager"));
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "gateway"), Path.Combine(dataBackupRoot, "gateway"));
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "agents"), Path.Combine(dataBackupRoot, "agents"));
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "credentialsHost"), Path.Combine(dataBackupRoot, "credentialsHost"));
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "channelHost"), Path.Combine(dataBackupRoot, "channelHost"));
-        CopyDirectoryIfExists(Path.Combine(sharedDataRoot, "updateService"), Path.Combine(dataBackupRoot, "updateService"), "updates");
-
-        string manifestPath = Path.Combine(backupRoot, "backup-manifest.txt");
-        string[] manifestLines =
-        [
-            $"createdAtUtc={DateTimeOffset.UtcNow:O}",
-            $"targetReleaseId={targetReleaseId}",
-            $"sharedDataRoot={sharedDataRoot}",
-            "files=kautuka.db,kautuka.key,gateway-auth.key,/etc/kautuka/update-source.json,/etc/kautuka/manifest-public-key.pem",
-            "directories=manager,gateway,agents,credentialsHost,channelHost,updateService(excluding updates)"
-        ];
-
-        await File.WriteAllLinesAsync(manifestPath, manifestLines, cancellationToken).ConfigureAwait(false);
-        PruneRollbackBackups(backupRoot);
-        return backupRoot;
-    }
-
-    private void PruneRollbackBackups(string newestBackupRoot)
-    {
-        string backupsRoot = Path.GetDirectoryName(newestBackupRoot)
-            ?? throw new InvalidOperationException($"Backup root '{newestBackupRoot}' does not have a parent directory.");
-
-        if (!Directory.Exists(backupsRoot))
-        {
-            return;
-        }
-
-        string[] backupDirectories = Directory.GetDirectories(backupsRoot)
-            .OrderByDescending(static path => Path.GetFileName(path), StringComparer.Ordinal)
-            .ToArray();
-
-        if (backupDirectories.Length <= rollbackBackupRetentionCount)
-        {
-            return;
-        }
-
-        foreach (string backupDirectory in backupDirectories.Skip(rollbackBackupRetentionCount))
-        {
-            logger.LogInformation(
-                "Removing expired rollback backup {BackupDirectory}. RetentionCount={RetentionCount}",
-                backupDirectory,
-                rollbackBackupRetentionCount);
-            Directory.Delete(backupDirectory, recursive: true);
-        }
-    }
-
-    private void RestoreLatestRollbackBackup()
-    {
-        string backupRoot = ResolveLatestRollbackBackupRoot();
-        RestoreRollbackBackupSnapshot(backupRoot, sharedDataRoot, logger);
-    }
-
-    internal static void RestoreRollbackBackupSnapshot(string backupRoot, string sharedDataRoot, ILogger logger)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(backupRoot);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sharedDataRoot);
-        ArgumentNullException.ThrowIfNull(logger);
-
-        string dataBackupRoot = Path.Combine(backupRoot, "data");
-        string configBackupRoot = Path.Combine(backupRoot, "config", "etc", "kautuka");
-
-        if (!Directory.Exists(dataBackupRoot))
-        {
-            throw new InvalidOperationException($"Rollback backup '{backupRoot}' is missing its data directory.");
-        }
-
-        logger.LogInformation(
-            "Restoring shared state from rollback backup {BackupRoot}.",
-            backupRoot);
-
-        RestoreFileIfExists(Path.Combine(dataBackupRoot, "kautuka.db"), Path.Combine(sharedDataRoot, "kautuka.db"));
-        RestoreFileIfExists(Path.Combine(dataBackupRoot, "kautuka.key"), Path.Combine(sharedDataRoot, "kautuka.key"));
-        RestoreFileIfExists(Path.Combine(dataBackupRoot, "gateway-auth.key"), Path.Combine(sharedDataRoot, "gateway-auth.key"));
-        RestoreFileIfExists(Path.Combine(configBackupRoot, "update-source.json"), updateSourceDocumentPath);
-        RestoreFileIfExists(Path.Combine(configBackupRoot, "manifest-public-key.pem"), manifestPublicKeyPath);
-
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "manager"), Path.Combine(sharedDataRoot, "manager"));
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "gateway"), Path.Combine(sharedDataRoot, "gateway"));
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "agents"), Path.Combine(sharedDataRoot, "agents"));
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "credentialsHost"), Path.Combine(sharedDataRoot, "credentialsHost"));
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "channelHost"), Path.Combine(sharedDataRoot, "channelHost"));
-        RestoreDirectoryIfExists(Path.Combine(dataBackupRoot, "updateService"), Path.Combine(sharedDataRoot, "updateService"), "updates");
-
-        logger.LogInformation(
-            "Completed shared-state restore from rollback backup {BackupRoot}.",
-            backupRoot);
-    }
-
-    internal static void ClearGeneratedAgentWorkspaceState(string visibleRoot, ILogger logger)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(visibleRoot);
-        ArgumentNullException.ThrowIfNull(logger);
-
-        string agentsRoot = Path.Combine(Path.GetFullPath(visibleRoot), "workspaces", "agents");
-        if (!Directory.Exists(agentsRoot))
-        {
-            logger.LogInformation(
-                "Skipping generated workspace cleanup because agents root {AgentsRoot} does not exist.",
-                agentsRoot);
-            return;
-        }
-
-        foreach (string agentWorkspaceRoot in Directory.GetDirectories(agentsRoot))
-        {
-            string generatedStateRoot = Path.Combine(agentWorkspaceRoot, ".kautuka");
-
-            if (Directory.Exists(generatedStateRoot))
-            {
-                logger.LogInformation(
-                    "Clearing generated workspace state at {GeneratedStateRoot} during update activation.",
-                    generatedStateRoot);
-                Directory.Delete(generatedStateRoot, recursive: true);
-            }
-        }
-    }
-
-    private string ResolveLatestRollbackBackupRoot()
-    {
-        string backupsRoot = Path.Combine(runtimePaths.RuntimeRoot, backupsRelativePath);
-        if (!Directory.Exists(backupsRoot))
-        {
-            throw new InvalidOperationException($"Rollback backup root '{backupsRoot}' does not exist.");
-        }
-
-        string? latestBackupRoot = Directory.GetDirectories(backupsRoot)
-            .OrderByDescending(static path => Path.GetFileName(path), StringComparer.Ordinal)
-            .FirstOrDefault();
-
-        return latestBackupRoot
-            ?? throw new InvalidOperationException("No rollback backup is available to restore shared state.");
     }
 
     private async Task<bool> TryQueueSystemdActivationRequestAsync(string operation, string releaseId)
@@ -1449,120 +1538,5 @@ public sealed class UpdateServiceIntegration(
             destinationPath);
     }
 
-    private static void CopyFileIfExists(string sourcePath, string destinationPath)
-    {
-        if (!File.Exists(sourcePath))
-        {
-            return;
-        }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
-        File.Copy(sourcePath, destinationPath, overwrite: true);
-    }
-
-    private static void RestoreFileIfExists(string sourcePath, string destinationPath)
-        => CopyFileIfExists(sourcePath, destinationPath);
-
-    private static void CopyDirectoryIfExists(string sourceDirectory, string destinationDirectory, params string[] excludedRelativePaths)
-    {
-        if (!Directory.Exists(sourceDirectory))
-        {
-            return;
-        }
-
-        HashSet<string> excludedPathSet = excludedRelativePaths.Length == 0
-            ? []
-            : excludedRelativePaths
-                .Select(static path => path.Replace('\\', '/').Trim('/'))
-                .Where(static path => path.Length > 0)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        Directory.CreateDirectory(destinationDirectory);
-
-        foreach (string directory in Directory.GetDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
-        {
-            string relativePath = Path.GetRelativePath(sourceDirectory, directory).Replace('\\', '/');
-            if (ShouldExcludeRelativePath(relativePath, excludedPathSet))
-            {
-                continue;
-            }
-
-            Directory.CreateDirectory(Path.Combine(destinationDirectory, relativePath));
-        }
-
-        foreach (string file in Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories))
-        {
-            string relativePath = Path.GetRelativePath(sourceDirectory, file).Replace('\\', '/');
-            if (ShouldExcludeRelativePath(relativePath, excludedPathSet))
-            {
-                continue;
-            }
-
-            string destinationPath = Path.Combine(destinationDirectory, relativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
-            File.Copy(file, destinationPath, overwrite: true);
-        }
-    }
-
-    private static bool ShouldExcludeRelativePath(string relativePath, HashSet<string> excludedPathSet)
-    {
-        foreach (string excludedPath in excludedPathSet)
-        {
-            if (string.Equals(relativePath, excludedPath, StringComparison.OrdinalIgnoreCase)
-                || relativePath.StartsWith(excludedPath + "/", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static void RestoreDirectoryIfExists(string sourceDirectory, string destinationDirectory, params string[] preservedRelativePaths)
-    {
-        if (!Directory.Exists(sourceDirectory))
-        {
-            return;
-        }
-
-        HashSet<string> preservedPathSet = preservedRelativePaths.Length == 0
-            ? []
-            : preservedRelativePaths
-                .Select(static path => path.Replace('\\', '/').Trim('/'))
-                .Where(static path => path.Length > 0)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        if (preservedPathSet.Count == 0)
-        {
-            if (Directory.Exists(destinationDirectory))
-            {
-                Directory.Delete(destinationDirectory, recursive: true);
-            }
-
-            HostServiceVersionActivator.CopyDirectoryContents(sourceDirectory, destinationDirectory);
-            return;
-        }
-
-        Directory.CreateDirectory(destinationDirectory);
-
-        foreach (string filePath in Directory.GetFiles(destinationDirectory, "*", SearchOption.TopDirectoryOnly))
-        {
-            string relativePath = Path.GetFileName(filePath).Replace('\\', '/');
-            if (!ShouldExcludeRelativePath(relativePath, preservedPathSet))
-            {
-                File.Delete(filePath);
-            }
-        }
-
-        foreach (string directoryPath in Directory.GetDirectories(destinationDirectory, "*", SearchOption.TopDirectoryOnly))
-        {
-            string relativePath = Path.GetFileName(directoryPath).Replace('\\', '/');
-            if (!ShouldExcludeRelativePath(relativePath, preservedPathSet))
-            {
-                Directory.Delete(directoryPath, recursive: true);
-            }
-        }
-
-        HostServiceVersionActivator.CopyDirectoryContents(sourceDirectory, destinationDirectory);
-    }
 }

@@ -112,10 +112,9 @@ public sealed class UpdateServiceGrpcService(
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(context);
-
-        // Rollback is also a machine-local operation that should not be interrupted by a canceled client request.
-        UpdateStatusSnapshot status = await updateCoordinator.RevertToLastKnownGoodAsync(CancellationToken.None).ConfigureAwait(false);
-        return ToResponse(status, string.IsNullOrWhiteSpace(request.Message) ? "update-revert" : request.Message);
+        throw new RpcException(new Status(
+            StatusCode.FailedPrecondition,
+            "Release rollback is no longer supported. Apply a newer signed release to address a committed update issue."));
     }
 
     private static UpdateStatusResponse ToResponse(UpdateStatusSnapshot status, string message)

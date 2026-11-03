@@ -4,20 +4,11 @@ import { PageState } from '@/components/layout/PageState';
 import { StartupScreen } from '@/components/layout/StartupScreen';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { useCurrentUser } from '@/features/auth';
 import {
   applyUpdate,
   fetchUpdateStatus,
   refreshUpdateDiscovery,
-  revertUpdate,
   type UpdateStatusSummary,
 } from '@/features/dashboard';
 import { useOnboardingGuard } from '@/features/onboarding';
@@ -34,7 +25,6 @@ function AppShell() {
   captureLoginCallbackHash();
   const dismissedUpdateBannerStorageItemName = 'kautuka-dismissed-update-notice-key';
   const autoReloadVersionStorageItemName = 'kautuka-last-seen-ui-version';
-  const pendingRollbackVersionStorageItemName = 'kautuka-pending-rollback-version';
   const [theme, setTheme] = React.useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('kautuka-theme');
     return stored === 'light' || stored === 'dark' ? stored : 'light';
@@ -47,20 +37,9 @@ function AppShell() {
   const [updateStatus, setUpdateStatus] = React.useState<UpdateStatusSummary | null>(null);
   const [updateStatusLoading, setUpdateStatusLoading] = React.useState(false);
   const [updateActionPending, setUpdateActionPending] = React.useState<
-    'refresh' | 'apply' | 'revert' | null
+    'refresh' | 'apply' | null
   >(null);
   const [updateCheckFeedback, setUpdateCheckFeedback] = React.useState<string | null>(null);
-  const [rollbackConfirmOpen, setRollbackConfirmOpen] = React.useState(false);
-  const [pendingRollbackVersion, setPendingRollbackVersion] = React.useState<string | null>(() => {
-    try {
-      return globalThis.sessionStorage.getItem(pendingRollbackVersionStorageItemName);
-    } catch {
-      return null;
-    }
-  });
-  const [rollbackCompletedVersion, setRollbackCompletedVersion] = React.useState<string | null>(
-    null
-  );
   const [dismissedUpdateBannerKey, setDismissedUpdateBannerKey] = React.useState<string | null>(
     () => {
       try {
@@ -89,21 +68,6 @@ function AppShell() {
     }
   }, [dismissedUpdateBannerKey, dismissedUpdateBannerStorageItemName]);
 
-  React.useEffect(() => {
-    try {
-      if (pendingRollbackVersion) {
-        globalThis.sessionStorage.setItem(
-          pendingRollbackVersionStorageItemName,
-          pendingRollbackVersion
-        );
-      } else {
-        globalThis.sessionStorage.removeItem(pendingRollbackVersionStorageItemName);
-      }
-    } catch {
-      // Ignore storage failures and keep pending rollback state in memory.
-    }
-  }, [pendingRollbackVersion, pendingRollbackVersionStorageItemName]);
-
   const isAdmin = currentUser?.role?.toLowerCase() === ROLE_ADMIN.toLowerCase();
 
   // System Setup Guard
@@ -113,18 +77,8 @@ function AppShell() {
     (nextStatus: UpdateStatusSummary | null) => {
       setUpdateStatus(nextStatus);
 
-      if (!nextStatus || nextStatus.ok !== true || !pendingRollbackVersion) {
-        return;
-      }
-
-      const observedState = nextStatus.state.toLowerCase();
-      const observedVersion = nextStatus.currentRelease?.version ?? nextStatus.managerVersion;
-      if (observedState === 'current' && observedVersion === pendingRollbackVersion) {
-        setRollbackCompletedVersion(pendingRollbackVersion);
-        setPendingRollbackVersion(null);
-      }
     },
-    [pendingRollbackVersion]
+    []
   );
 
   const refreshUpdateStatus = React.useCallback(async () => {
@@ -180,15 +134,9 @@ function AppShell() {
   }, [applyObservedUpdateStatus, authenticated]);
 
   const runUpdateAction = React.useCallback(
-    async (action: 'refresh' | 'apply' | 'revert') => {
+    async (action: 'refresh' | 'apply') => {
       if (action === 'refresh') {
         setUpdateCheckFeedback(null);
-      }
-
-      if (action === 'revert') {
-        setRollbackConfirmOpen(false);
-        setRollbackCompletedVersion(null);
-        setPendingRollbackVersion(updateStatus?.lastKnownGoodRelease?.version ?? null);
       }
 
       setUpdateActionPending(action);
@@ -197,9 +145,7 @@ function AppShell() {
         const nextStatus =
           action === 'refresh'
             ? await refreshUpdateDiscovery()
-            : action === 'apply'
-              ? await applyUpdate()
-              : await revertUpdate();
+            : await applyUpdate();
         applyObservedUpdateStatus(nextStatus);
 
         if (
@@ -211,20 +157,13 @@ function AppShell() {
           setUpdateCheckFeedback('You’re up to date');
         }
 
-        if (action === 'revert' && nextStatus.ok !== true) {
-          setPendingRollbackVersion(null);
-        }
       } catch {
-        if (action === 'revert') {
-          setPendingRollbackVersion(null);
-        }
-
         await refreshUpdateStatus();
       } finally {
         setUpdateActionPending(null);
       }
     },
-    [applyObservedUpdateStatus, refreshUpdateStatus, updateStatus?.lastKnownGoodRelease?.version]
+    [applyObservedUpdateStatus, refreshUpdateStatus]
   );
 
   React.useEffect(() => {
@@ -239,14 +178,11 @@ function AppShell() {
   const updateState = updateStatus?.state.toLowerCase() ?? 'current';
   const updateEligibilityState = updateStatus?.eligibilityState?.toLowerCase() ?? 'none';
   const updateEligibilityReason = updateStatus?.eligibilityReason?.toLowerCase() ?? 'none';
-  const rollbackAvailable =
-    updateStatus?.currentRelease &&
-    updateStatus?.lastKnownGoodRelease &&
-    updateStatus.currentRelease.releaseId !== updateStatus.lastKnownGoodRelease.releaseId;
+  const hasPreviousRelease = Boolean(updateStatus?.currentRelease && updateStatus.lastKnownGoodRelease);
   const hasUpdateStatusFailure = updateStatus?.ok === false;
   const hasUpdateError =
     Boolean(updateStatus?.lastError) &&
-    !(updateStatus?.ok === true && updateState === 'current' && rollbackAvailable);
+    !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease);
   const hasPreflightFailure =
     updateState === 'available' &&
     (updateStatus?.lastError?.toLowerCase().startsWith('update preflight checks failed:') ?? false);
@@ -259,10 +195,6 @@ function AppShell() {
       updateStatus.availableRelease?.releaseId ??
       updateStatus.currentRelease?.releaseId ??
       updateStatus.managerVersion;
-
-    if (rollbackCompletedVersion) {
-      return `rollback-complete:${rollbackCompletedVersion}`;
-    }
 
     if (hasPreflightFailure) {
       return `error:preflight:${releaseId}`;
@@ -281,7 +213,6 @@ function AppShell() {
     hasPreflightFailure,
     hasUpdateError,
     hasUpdateStatusFailure,
-    rollbackCompletedVersion,
     updateState,
     updateStatus?.message,
     updateStatus?.availableRelease?.releaseId,
@@ -301,8 +232,7 @@ function AppShell() {
       updateState === 'staging' ||
       updateState === 'applying' ||
       updateState === 'unsupported' ||
-      updateState === 'verificationfailed' ||
-      rollbackCompletedVersion !== null);
+      updateState === 'verificationfailed');
 
   React.useEffect(() => {
     if (!dismissedUpdateBannerKey || !updateBannerKey) {
@@ -316,16 +246,6 @@ function AppShell() {
 
   const currentVersion =
     updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion ?? 'unknown';
-
-  React.useEffect(() => {
-    if (!rollbackCompletedVersion) {
-      return;
-    }
-
-    if (currentVersion !== rollbackCompletedVersion) {
-      setRollbackCompletedVersion(null);
-    }
-  }, [currentVersion, rollbackCompletedVersion]);
 
   React.useEffect(() => {
     const url = new URL(globalThis.location.href);
@@ -370,14 +290,10 @@ function AppShell() {
   ]);
 
   const dismissUpdateBanner = React.useCallback(() => {
-    if (rollbackCompletedVersion) {
-      setRollbackCompletedVersion(null);
-    }
-
     if (updateBannerKey) {
       setDismissedUpdateBannerKey(updateBannerKey);
     }
-  }, [rollbackCompletedVersion, updateBannerKey]);
+  }, [updateBannerKey]);
 
   if (!serviceReady) {
     return <StartupScreen mode={needsSetup === null ? 'starting' : 'reconnecting'} />;
@@ -392,18 +308,11 @@ function AppShell() {
   }
 
   const updateBannerTitle = (() => {
-    if (rollbackCompletedVersion && currentVersion === rollbackCompletedVersion) {
-      return 'Rollback complete';
-    }
-
     if (hasUpdateStatusFailure) {
       switch (updateStatus?.message) {
         case 'update-apply-failed':
         case 'update-apply-unavailable':
           return 'Update apply failed';
-        case 'update-revert-failed':
-        case 'update-revert-unavailable':
-          return 'Update rollback failed';
         case 'update-refresh-failed':
         case 'update-refresh-unavailable':
           return 'Update refresh failed';
@@ -416,6 +325,10 @@ function AppShell() {
 
     if (hasPreflightFailure) {
       return 'Update preflight checks failed';
+    }
+
+    if (hasUpdateError && (updateState === 'applying' || updateState === 'available')) {
+      return 'Update requires attention';
     }
 
     if (updateEligibilityState === 'blocked') {
@@ -437,13 +350,11 @@ function AppShell() {
       case 'available':
         return `Update ready: ${updateStatus?.availableRelease?.version ?? 'new release'}`;
       case 'applying':
-        return updateStatus?.message === 'update-revert-accepted'
-          ? 'Rollback is being applied'
-          : 'Update preflight checks in progress';
+        return 'Update preflight checks in progress';
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
       case 'current':
-        return rollbackAvailable
+        return hasPreviousRelease
           ? `Update applied: ${updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion}`
           : 'Manager update status';
       default:
@@ -456,16 +367,16 @@ function AppShell() {
       return '';
     }
 
-    if (rollbackCompletedVersion && currentVersion === rollbackCompletedVersion) {
-      return `Release ${rollbackCompletedVersion} is active again. The appliance restored the latest rollback backup, switched bundled services back to the previous release, and returned to normal operation.`;
-    }
-
     if (hasUpdateStatusFailure) {
       return updateStatus.lastError ?? updateStatus.message;
     }
 
     if (hasPreflightFailure) {
       return `${updateStatus.lastError} Fix the reported preflight issue and retry the update.`;
+    }
+
+    if (hasUpdateError && updateState === 'available') {
+      return updateStatus.lastError ?? updateStatus.message;
     }
 
     if (updateEligibilityState === 'blocked') {
@@ -484,21 +395,19 @@ function AppShell() {
     }
 
     if (updateState === 'available') {
-      return `Release ${updateStatus.availableRelease?.version ?? 'unknown'} is available. Apply downloads, verifies, and requests activation. Apply does not restart UpdateService. Manager, WebHost, CredentialsHost, ChannelHost, and Gateway are restarted onto the new release.`;
+      return `Release ${updateStatus.availableRelease?.version ?? 'unknown'} is available. Apply downloads and verifies the release, then restarts Kautuka services to activate it.`;
     }
 
     if (updateState === 'staging') {
       return 'The update package is being downloaded and validated before activation can continue.';
     }
 
-    if (updateState === 'applying') {
-      return updateStatus?.message === 'update-revert-accepted'
-        ? 'Rollback has been requested. Waiting for supervised restart and activation.'
-        : 'Apply has been requested. The staged updater is running preflight checks before it switches the appliance to the new release.';
+    if (updateState === 'applying' && updateStatus.lastError) {
+      return updateStatus.lastError;
     }
 
-    if (updateState === 'current' && rollbackAvailable) {
-      return `Preflight checks passed and release ${updateStatus?.currentRelease?.version ?? 'unknown'} is active. Roll back to ${updateStatus?.lastKnownGoodRelease?.version ?? 'the previous release'} if needed.`;
+    if (updateState === 'applying') {
+      return 'Apply has been requested. The staged updater is running preflight checks before it switches the appliance to the new release.';
     }
 
     return updateStatus.lastError ?? updateStatus.message;
@@ -517,48 +426,17 @@ function AppShell() {
           : 'neutral';
   const sidebarUpdateTitle =
     updateStatus && isAdmin && !shouldShowUpdateBanner
-      ? updateState === 'current' && !rollbackAvailable && updateEligibilityState !== 'blocked'
+      ? updateState === 'current' && !hasPreviousRelease && updateEligibilityState !== 'blocked'
         ? updateCheckFeedback
         : updateBannerTitle
       : undefined;
   const sidebarUpdateDescription =
     sidebarUpdateTitle === updateCheckFeedback
-      ? `Checked just now. Version ${currentVersion} is current. Apply does not restart UpdateService. Manager, WebHost, CredentialsHost, ChannelHost, and Gateway are restarted onto the new release.`
+      ? `Checked just now. Version ${currentVersion} is current. Kautuka services restart when an update is applied.`
       : updateBannerDescription;
 
   return (
     <div className="relative flex h-screen overflow-hidden bg-background text-foreground">
-      <Dialog open={rollbackConfirmOpen} onOpenChange={setRollbackConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Confirm rollback</DialogTitle>
-            <DialogDescription>
-              {`This will restore shared Kautuka state from the latest rollback backup, switch bundled services from ${updateStatus?.currentRelease?.version ?? currentVersion} back to ${updateStatus?.lastKnownGoodRelease?.version ?? 'the previous release'}, and restart the appliance services. The UI may disconnect briefly while the previous release comes back online.`}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setRollbackConfirmOpen(false)}
-              disabled={updateActionPending !== null}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => void runUpdateAction('revert')}
-              disabled={updateStatusLoading || updateActionPending !== null}
-            >
-              {updateActionPending === 'revert' ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : null}
-              Confirm rollback
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
       {authenticated && (
         <Header
           theme={theme}
@@ -579,9 +457,6 @@ function AppShell() {
           canApplyUpdate={isAdmin && updateState === 'available'}
           isApplyingUpdate={updateActionPending === 'apply'}
           onApplyUpdate={() => void runUpdateAction('apply')}
-          canRollbackUpdate={isAdmin && Boolean(rollbackAvailable)}
-          isRollingBackUpdate={updateActionPending === 'revert'}
-          onRollbackUpdate={() => setRollbackConfirmOpen(true)}
         />
       )}
 

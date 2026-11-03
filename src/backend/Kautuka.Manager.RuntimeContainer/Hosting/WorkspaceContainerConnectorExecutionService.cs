@@ -116,6 +116,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(previousConnectors);
         ArgumentNullException.ThrowIfNull(nextConnectors);
+        cancellationToken.ThrowIfCancellationRequested();
 
         Dictionary<string, WorkspaceMcpContainerConnectorDefinition> nextById = nextConnectors
             .ToDictionary(static connector => connector.ConnectorId, StringComparer.OrdinalIgnoreCase);
@@ -136,37 +137,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             await StopTrackedConnectorInstancesAsync(previousConnector.ConnectorId, "connector-updated").ConfigureAwait(false);
         }
 
-        foreach (WorkspaceMcpContainerConnectorDefinition connector in EnumerateBundleMaterializationCandidates(nextConnectors))
-        {
-            await EnsureConnectorArtifactsAsync(connector, cancellationToken).ConfigureAwait(false);
-        }
+        // Connector images are materialized on execution. Building every image while
+        // accepting desired state blocks Gateway startup on registry/build failures.
     }
-
-    private async Task EnsureConnectorArtifactsAsync(
-        WorkspaceMcpContainerConnectorDefinition connector,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(connector);
-
-        _ = await mcpbImageMaterializer.EnsureImageAsync(connector, cancellationToken).ConfigureAwait(false);
-
-        if (string.IsNullOrWhiteSpace(connector.BundlePath))
-        {
-            return;
-        }
-
-        _ = await mcpbImageMaterializer
-            .EnsureSandboxArtifactImageAsync(connector, AgentSandboxInstallContract.BuildInstallRoot(connector), cancellationToken)
-            .ConfigureAwait(false);
-    }
-
-    private static IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> EnumerateBundleMaterializationCandidates(
-        IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors)
-        => [.. connectors.Where(static connector =>
-            (!string.IsNullOrWhiteSpace(connector.BundlePath)
-             || !string.IsNullOrWhiteSpace(connector.ServerType)
-             || !string.IsNullOrWhiteSpace(McpbImageMaterializer.InferServerType(connector.Command)))
-            && !string.IsNullOrWhiteSpace(connector.Image))];
 
     public async Task<OciSandboxSession> EnsureAgentSandboxProvisionedAsync(
         ContainerContext workspaceContext,

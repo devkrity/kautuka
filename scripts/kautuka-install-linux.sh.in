@@ -52,6 +52,28 @@ principals and private-key inventories.
 EOF
 }
 
+# Called under the shared update lock. The helper can release that lock while
+# its durable transaction is still awaiting commit or recovery.
+assert_no_unresolved_update() {
+    local recovery_root="${1:-/var/lib/kautuka-recovery}"
+    local marker="$recovery_root/maintenance.json" journal="$recovery_root/operation.json"
+    [[ ! -e "$marker" && ! -L "$marker" ]] || fail 'an update requires completion or recovery before installation can proceed'
+    [[ ! -L "$journal" ]] || fail 'update journal is not a regular file; installation cannot proceed'
+    if [[ -e "$journal" ]]; then
+        [[ -f "$journal" ]] || fail 'update journal is not a regular file; installation cannot proceed'
+        python3 - "$journal" <<'PY' || fail 'an update requires completion or recovery before installation can proceed'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as stream:
+        journal = json.load(stream)
+    if not isinstance(journal, dict) or journal.get('phase') not in ('committed', 'completed', 'aborted'):
+        raise ValueError('unresolved update')
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+PY
+    fi
+}
+
 normalize_feed_base_url() {
     local raw_url="$1"
     local normalized="${raw_url%/}"
@@ -165,19 +187,25 @@ EOF
 
 write_trusted_manifest_public_key() {
     local public_key_pem="${1:-}"
-    local service_user="$2"
-    local service_group="$3"
+    local destination="${2:-/etc/kautuka/manifest-public-key.pem}"
 
     if [[ -z "$public_key_pem" ]]; then
         return
     fi
 
-    mkdir -p /etc/kautuka
-    cat > /etc/kautuka/manifest-public-key.pem <<EOF
+    local destination_dir
+    destination_dir="$(dirname "$destination")"
+    mkdir -p "$destination_dir"
+    chown root:root "$destination_dir"
+    chmod go-w "$destination_dir"
+    local temporary_key
+    temporary_key="$(mktemp "$destination_dir/.manifest-public-key.XXXXXX")"
+    cat > "$temporary_key" <<EOF
 ${public_key_pem}
 EOF
-    chmod 644 /etc/kautuka/manifest-public-key.pem
-    chown_if_service_account "$service_user" "$service_group" /etc/kautuka/manifest-public-key.pem
+    chmod 644 "$temporary_key"
+    chown root:root "$temporary_key"
+    mv -Tf "$temporary_key" "$destination"
 }
 
 require_trusted_manifest_public_key_for_network_install() {
@@ -699,6 +727,8 @@ PartOf=kautuka.target
 Type=exec
 WorkingDirectory=${install_root}/current
 ExecStart=${install_root}/current/kautuka-manager
+Environment=Kautuka__Mode=prod
+Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${visible_root}/logs/manager
 Restart=always
 RestartSec=5
@@ -798,6 +828,8 @@ PartOf=kautuka.target
 Type=exec
 WorkingDirectory=${install_root}/current
 ExecStart=${install_root}/current/${executable_name}
+Environment=Kautuka__Mode=prod
+Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${log_dir}
 ${extra_env}
 Restart=always
@@ -813,7 +845,9 @@ EOF
     mkdir -p "$(dirname "$wants_path")"
     ln -sfn "../${unit_name}" "$wants_path"
 
-    chown -R "$service_user:$service_group" "$install_root" "$log_dir" "$unit_dir"
+    chown -R root:root "$install_root"
+    chmod -R go-w "$install_root"
+    chown -R "$service_user:$service_group" "$log_dir" "$unit_dir"
     chmod 0644 "$unit_path"
     printf '%s\n' "$unit_name"
 }
@@ -885,6 +919,8 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=${gate
 [Unit]
 Description=Kautuka ${service_description}
 Wants=network-online.target
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
 Requires=kautuka-channelhost.service
 After=${dependencies}
 
@@ -963,7 +999,9 @@ install_isolated_credentials_service_system() {
     # credentialsHost/transport/.ca.key as kautuka:kautuka; CredentialsHost
     # then ABRT-looped on LocalCaMtlsBootstrap ReadAllBytes (EPERM). Directory
     # chown alone does not heal those files when prune skips the tree.
-    chown -R "$credential_user:$credential_user" "$install_root" "$credentials_root/vault" "$credentials_state_root/vault" "$credentials_root/transport" "$credentials_state_root/transport" "$log_dir"
+    chown -R root:root "$install_root"
+    chmod -R go-w "$install_root"
+    chown -R "$credential_user:$credential_user" "$credentials_root/vault" "$credentials_state_root/vault" "$credentials_root/transport" "$credentials_state_root/transport" "$log_dir"
     chown "$credential_user:$credential_group" "$credentials_root" "$credentials_root/transport" "$credentials_state_root" "$credentials_state_root/transport"
     # Gateway needs the client certificate and public CA, but never the CA key.
     # Recursive ownership repair above must preserve this existing access on upgrade.
@@ -981,7 +1019,8 @@ install_isolated_credentials_service_system() {
     cat > "$unit_path" <<EOF
 [Unit]
 Description=Kautuka CredentialsHost
-After=network.target
+After=network.target kautuka-update-recovery.service
+Requires=kautuka-update-recovery.service
 Before=kautuka-gateway.service
 
 [Service]
@@ -1048,7 +1087,8 @@ install_socket_runtime_dirs() {
             '# and members of its client group can reach the socket inside. The setgid bit' \
             '# makes bind() give the socket that client group instead of the service own' \
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
-            'd /run/kautuka 0755 root root -'
+            'd /run/kautuka 0755 root root -' \
+            'f /run/kautuka-db-writer.lock 0644 root root -'
 
         local entry
         local service_key
@@ -1082,6 +1122,40 @@ install_apply_release_helper() {
         install -m 0755 "$extracted_root/bin/kautuka-apply-release" /usr/local/lib/kautuka/apply-release
         sed -i 's/\r$//' /usr/local/lib/kautuka/apply-release
     fi
+    if [[ -f "$extracted_root/bin/kautuka-update-recovery" ]]; then
+        install -m 0755 "$extracted_root/bin/kautuka-update-recovery" /usr/local/lib/kautuka/update-recovery.py
+    fi
+    [[ -x /usr/local/lib/kautuka/apply-release && -x /usr/local/lib/kautuka/update-recovery.py ]] \
+        || fail 'this signed Linux package lacks safe update recovery support; refusing to install an update-capable appliance'
+    cat > /etc/systemd/system/kautuka-update-recovery.service <<'EOF'
+[Unit]
+Description=Kautuka pre-commit database recovery
+DefaultDependencies=no
+Requires=systemd-tmpfiles-setup.service
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=multi-user.target kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service
+Wants=local-fs.target
+ConditionPathExists=/usr/local/lib/kautuka/apply-release
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kautuka/apply-release --boot-recover
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 /etc/systemd/system/kautuka-update-recovery.service
+    local service_uid
+    service_uid="$(id -u kautuka)"
+    install -d -m 0755 "/etc/systemd/system/user@${service_uid}.service.d"
+    cat > "/etc/systemd/system/user@${service_uid}.service.d/10-kautuka-recovery.conf" <<'EOF'
+[Unit]
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
+EOF
+    chmod 0644 "/etc/systemd/system/user@${service_uid}.service.d/10-kautuka-recovery.conf"
     if [[ "$(readlink -f "$0")" != "$(readlink -f /usr/local/lib/kautuka/kautuka-install-linux.sh)" ]]; then
         install -m 0755 "$0" /usr/local/lib/kautuka/kautuka-install-linux.sh
     fi
@@ -1319,7 +1393,7 @@ provision_or_validate_channel_security_material() {
     mkdir -p "$channel_security_root"
     chown root:root "$internal_state_root/security" "$channel_security_root"
     chmod 0711 "$internal_state_root/security" "$channel_security_root"
-    "$channelhost_executable" --provision-channel-security \
+    Kautuka__Mode=prod "$channelhost_executable" --provision-channel-security \
         "$gateway_private_root" \
         "$gateway_trust_root" \
         "$channel_private_root" \
@@ -2627,6 +2701,7 @@ PY
     require_command flock
     exec 9>/run/kautuka-apply.lock
     flock -n 9 || fail 'another Kautuka update or installation is in progress; retry after it finishes'
+    assert_no_unresolved_update
     validate_existing_channel_security_inventory "$internal_state_root"
 
     if [[ -L "$install_root/current" && -x "$install_root/current/kautuka-manager" ]]; then
@@ -2688,7 +2763,7 @@ PY
             write_update_source_document "$manifest_url" "$service_user" "$service_group"
         fi
     fi
-    write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM" "$service_user" "$service_group"
+    write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
     write_service_scope_document "$service_user" 'kautuka.target'
 
     local content_root="$tmp_root/extracted"
@@ -2709,7 +2784,8 @@ PY
     copy_runtime_payload "$content_root" "$version_root"
     chmod +x "$version_root/kautuka-manager"
 
-    chown -R "$service_user:$service_group" "$install_root"
+    chown -R root:root "$install_root"
+    chmod -R go-w "$install_root"
     local channel_security_root="$internal_state_root/security"
     chown_tree_excluding "$internal_state_root" "$service_user:$service_group" "$channel_security_root"
     if [[ "$visible_root" != "$internal_state_root" ]]; then
@@ -2795,6 +2871,8 @@ PY
         echo "System systemd units written but not enabled or started: ${installed_system_units[*]}"
         exit 0
     fi
+
+    systemctl enable kautuka-update-recovery.service
 
     best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" enable "${installed_units[@]}"
     best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka-manager.service

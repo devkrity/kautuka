@@ -191,7 +191,22 @@ public sealed class UpdateServiceIntegrationTests
 
             Assert.True(UpdateServiceIntegration.CurrentPointerTargetsVersion(currentPath, "0.0.3-preview.1"));
             Assert.False(UpdateServiceIntegration.CurrentPointerTargetsVersion(currentPath, "0.0.2-preview.1"));
+            Assert.False(UpdateServiceIntegration.CurrentPointerTargetsVersion(currentPath, "0.0.3-preview"));
             Assert.False(UpdateServiceIntegration.CurrentPointerTargetsVersion(Path.Combine(applianceRoot, "missing", "current"), "0.0.3-preview.1"));
+
+            string updaterCurrent = CreateVersionedInstall(applianceRoot, "updateservice", "v0.0.3-preview.1", "kautuka-updateservice", "updater");
+            string updaterVersion = Path.Combine(applianceRoot, "updateservice", "versions", "v0.0.3-preview.1");
+            Assert.True(UpdateServiceIntegration.CurrentPointerTargetsVersion(updaterCurrent, "v0.0.3-preview.1"));
+            Assert.False(UpdateServiceIntegration.CurrentPointerTargetsVersion(updaterCurrent, "0.0.3-preview.1"));
+            Assert.True(UpdateServiceIntegration.IsExecutableInCurrentVersion(Path.Combine(updaterVersion, "kautuka-updateservice"), updaterCurrent));
+            Assert.False(UpdateServiceIntegration.IsExecutableInCurrentVersion(Path.Combine(applianceRoot, "updateservice", "versions", "v0.0.2-preview.1", "kautuka-updateservice"), updaterCurrent));
+            Assert.False(UpdateServiceIntegration.IsExecutableInCurrentVersion(Path.Combine(updaterVersion, "kautuka-updateservice") + " (deleted)", updaterCurrent));
+
+            string unrelatedService = Path.Combine(applianceRoot, "other");
+            Directory.CreateDirectory(unrelatedService);
+            string wrongServiceCurrent = Path.Combine(unrelatedService, "current");
+            Directory.CreateSymbolicLink(wrongServiceCurrent, updaterVersion);
+            Assert.False(UpdateServiceIntegration.CurrentPointerTargetsVersion(wrongServiceCurrent, "v0.0.3-preview.1"));
         }
         finally
         {
@@ -369,35 +384,6 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Fact]
-    public void ClearGeneratedAgentWorkspaceStateRemovesOnlyGeneratedRuntimeContent()
-    {
-        string tempRoot = CreateTempDirectory();
-
-        try
-        {
-            string visibleRoot = Path.Combine(tempRoot, "srv", "kautuka");
-            string agentWorkspace = Path.Combine(visibleRoot, "workspaces", "agents", "admin-general");
-            string generatedStateFile = Path.Combine(agentWorkspace, ".kautuka", "skills", "roll-dice", "scripts", "run.sh");
-            string userFile = Path.Combine(agentWorkspace, "uploads", "note.txt");
-            string otherWorkspace = Path.Combine(visibleRoot, "workspaces", "agents", "kautuka-kautuka");
-
-            WriteFile(generatedStateFile, "echo stale");
-            WriteFile(userFile, "keep me");
-            Directory.CreateDirectory(otherWorkspace);
-
-            UpdateServiceIntegration.ClearGeneratedAgentWorkspaceState(visibleRoot, NullLogger.Instance);
-
-            Assert.False(Directory.Exists(Path.Combine(agentWorkspace, ".kautuka")));
-            Assert.Equal("keep me", File.ReadAllText(userFile));
-            Assert.True(Directory.Exists(otherWorkspace));
-        }
-        finally
-        {
-            Directory.Delete(tempRoot, recursive: true);
-        }
-    }
-
-    [Fact]
     public async Task TryContinuePendingActivationAsyncDoesNotResumeCsharpDeploy()
     {
         string tempRoot = CreateTempDirectory();
@@ -451,7 +437,6 @@ public sealed class UpdateServiceIntegrationTests
             var runtimePaths = new UpdateServiceRuntimePaths(configuration);
             var integration = new UpdateServiceIntegration(
                 runtimePaths,
-                configuration,
                 Options.Create(new UpdateOptions()),
                 new RecordingManagerStatusClient(new ManagerStatusResponse()),
                 new TestHostApplicationLifetime(),
@@ -466,59 +451,6 @@ public sealed class UpdateServiceIntegrationTests
             Assert.Equal(
                 "gateway-current",
                 await File.ReadAllTextAsync(Path.Combine(applianceRoot, "gateway", "current", "kautuka-gateway"), TestContext.Current.CancellationToken).ConfigureAwait(true));
-        }
-        finally
-        {
-            Directory.Delete(tempRoot, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void RestoreRollbackBackupSnapshotRestoresSharedStateAndPreservesUpdaterCache()
-    {
-        string tempRoot = CreateTempDirectory();
-
-        try
-        {
-            string backupRoot = Path.Combine(tempRoot, "backups", "20260514010101-release-current");
-            string dataBackupRoot = Path.Combine(backupRoot, "data");
-            string sharedDataRoot = Path.Combine(tempRoot, "shared");
-
-            WriteFile(Path.Combine(dataBackupRoot, "kautuka.db"), "db-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "kautuka.key"), "key-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "gateway-auth.key"), "auth-key-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "manager", "manager.json"), "manager-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "gateway", "gateway.json"), "gateway-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "agents", "agent-a", "agent.db"), "agent-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "credentialsHost", "kautuka.credentials.db"), "credentials-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "channelHost", "channelhost.db"), "channel-from-backup");
-            WriteFile(Path.Combine(dataBackupRoot, "updateService", "settings.json"), "settings-from-backup");
-
-            WriteFile(Path.Combine(sharedDataRoot, "kautuka.db"), "db-live");
-            WriteFile(Path.Combine(sharedDataRoot, "kautuka.key"), "key-live");
-            WriteFile(Path.Combine(sharedDataRoot, "gateway-auth.key"), "auth-key-live");
-            WriteFile(Path.Combine(sharedDataRoot, "manager", "manager.json"), "manager-live");
-            WriteFile(Path.Combine(sharedDataRoot, "gateway", "gateway.json"), "gateway-live");
-            WriteFile(Path.Combine(sharedDataRoot, "agents", "agent-a", "agent.db"), "agent-live");
-            WriteFile(Path.Combine(sharedDataRoot, "credentialsHost", "kautuka.credentials.db"), "credentials-live");
-            WriteFile(Path.Combine(sharedDataRoot, "channelHost", "channelhost.db"), "channel-live");
-            WriteFile(Path.Combine(sharedDataRoot, "updateService", "settings.json"), "settings-live");
-            WriteFile(Path.Combine(sharedDataRoot, "updateService", "updates", "state.json"), "updates-live");
-            WriteFile(Path.Combine(sharedDataRoot, "updateService", "old.json"), "stale-live-file");
-
-            UpdateServiceIntegration.RestoreRollbackBackupSnapshot(backupRoot, sharedDataRoot, NullLogger.Instance);
-
-            Assert.Equal("db-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "kautuka.db")));
-            Assert.Equal("key-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "kautuka.key")));
-            Assert.Equal("auth-key-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "gateway-auth.key")));
-            Assert.Equal("manager-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "manager", "manager.json")));
-            Assert.Equal("gateway-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "gateway", "gateway.json")));
-            Assert.Equal("agent-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "agents", "agent-a", "agent.db")));
-            Assert.Equal("credentials-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "credentialsHost", "kautuka.credentials.db")));
-            Assert.Equal("channel-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "channelHost", "channelhost.db")));
-            Assert.Equal("settings-from-backup", File.ReadAllText(Path.Combine(sharedDataRoot, "updateService", "settings.json")));
-            Assert.Equal("updates-live", File.ReadAllText(Path.Combine(sharedDataRoot, "updateService", "updates", "state.json")));
-            Assert.False(File.Exists(Path.Combine(sharedDataRoot, "updateService", "old.json")));
         }
         finally
         {
@@ -615,7 +547,7 @@ public sealed class UpdateServiceIntegrationTests
             Assert.Equal(UpdateWorkflowState.Applying, applying.State);
             Assert.Equal(releaseId, hostIntegration.ActivatedReleaseId);
             Assert.True(File.Exists(hostIntegration.ActivatedPlatformPackagePath));
-            Assert.True(Directory.Exists(hostIntegration.ActivatedPlatformExtractedPath));
+            Assert.Equal(string.Empty, hostIntegration.ActivatedPlatformExtractedPath);
         }
         finally
         {
@@ -655,7 +587,6 @@ public sealed class UpdateServiceIntegrationTests
 
             var integration = new UpdateServiceIntegration(
                 runtimePaths,
-                configuration,
                 Options.Create(new UpdateOptions()),
                 managerStatusClient,
                 new TestHostApplicationLifetime(),
@@ -696,7 +627,6 @@ public sealed class UpdateServiceIntegrationTests
 
             var integration = new UpdateServiceIntegration(
                 new UpdateServiceRuntimePaths(configuration),
-                configuration,
                 Options.Create(new UpdateOptions()),
                 new ThrowingManagerStatusClient(),
                 new TestHostApplicationLifetime(),
@@ -779,11 +709,11 @@ public sealed class UpdateServiceIntegrationTests
                 : Path.Combine(tempRoot, "apply-release");
             if (OperatingSystem.IsWindows())
             {
-                await File.WriteAllTextAsync(helperPath, "@echo off\r\necho helper %*\r\nexit /b 0\r\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
+                await File.WriteAllTextAsync(helperPath, "@echo off\r\nif \"%1\"==\"--capabilities\" echo safe-state-recovery-v5\r\necho helper %*\r\nexit /b 0\r\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
             }
             else
             {
-                await File.WriteAllTextAsync(helperPath, "#!/bin/sh\necho helper \"$@\"\nexit 0\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
+                await File.WriteAllTextAsync(helperPath, "#!/bin/sh\nif [ \"$1\" = \"--capabilities\" ]; then echo safe-state-recovery-v5; exit 0; fi\necho helper \"$@\"\nexit 0\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
                 File.SetUnixFileMode(helperPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
@@ -806,7 +736,6 @@ public sealed class UpdateServiceIntegrationTests
 
             var integration = new UpdateServiceIntegration(
                 new UpdateServiceRuntimePaths(configuration),
-                configuration,
                 Options.Create(new UpdateOptions
                 {
                     ApplyReleaseHelperPath = helperPath,
@@ -826,6 +755,64 @@ public sealed class UpdateServiceIntegrationTests
 
             Assert.Equal("gateway-owned", await File.ReadAllTextAsync(dbPath, TestContext.Current.CancellationToken).ConfigureAwait(true));
             Assert.False(Directory.Exists(Path.Combine(tempRoot, "runtime", "updateService", "updates", "backups")));
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ActivatePreparedUpdateRejectsLegacyHelperWithoutRecoveryCapability()
+    {
+        string tempRoot = CreateTempDirectory();
+
+        try
+        {
+            string helperPath = OperatingSystem.IsWindows()
+                ? Path.Combine(tempRoot, "apply-release.cmd")
+                : Path.Combine(tempRoot, "apply-release");
+            string callsPath = Path.Combine(tempRoot, "calls.txt");
+            string helper = OperatingSystem.IsWindows()
+                ? $"@echo off\r\necho %* >> \"{callsPath}\"\r\necho legacy-helper\r\nexit /b 0\r\n"
+                : $"#!/bin/sh\necho \"$*\" >> '{callsPath}'\necho legacy-helper\nexit 0\n";
+            await File.WriteAllTextAsync(helperPath, helper, TestContext.Current.CancellationToken).ConfigureAwait(true);
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(helperPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            string artifactPath = Path.Combine(tempRoot, "kautuka-linux-amd64.tar.gz");
+            await File.WriteAllBytesAsync(artifactPath, [0x1f, 0x8b], TestContext.Current.CancellationToken).ConfigureAwait(true);
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Kautuka:Mode"] = "dev",
+                    ["Kautuka:HostPaths:VisibleRoot"] = Path.Combine(tempRoot, "visible"),
+                    ["Kautuka:HostPaths:InternalStateRoot"] = Path.Combine(tempRoot, "runtime"),
+                    ["Kautuka:HostPaths:LogsRoot"] = Path.Combine(tempRoot, "logs"),
+                    ["Kautuka:ContainerStateRoot"] = Path.Combine(tempRoot, "runtime"),
+                })
+                .Build();
+            var integration = new UpdateServiceIntegration(
+                new UpdateServiceRuntimePaths(configuration),
+                Options.Create(new UpdateOptions
+                {
+                    ApplyReleaseHelperPath = helperPath,
+                    ApplyReleaseHelperUseSudo = false,
+                    HostServiceActivationTimeout = TimeSpan.FromSeconds(15),
+                }),
+                new RecordingManagerStatusClient(new ManagerStatusResponse()),
+                new TestHostApplicationLifetime(),
+                NullLogger<UpdateServiceIntegration>.Instance);
+
+            InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await integration.ActivatePreparedUpdateAsync(
+                    new UpdatePreparedArtifacts("0.0.2-preview.1", artifactPath, Path.Combine(tempRoot, "extracted")),
+                    TestContext.Current.CancellationToken).ConfigureAwait(true)).ConfigureAwait(true);
+
+            Assert.Contains("current signed Linux installer bootstrap", error.Message, StringComparison.Ordinal);
+            Assert.Equal("--capabilities", (await File.ReadAllTextAsync(callsPath, TestContext.Current.CancellationToken).ConfigureAwait(true)).Trim());
         }
         finally
         {
@@ -885,7 +872,6 @@ public sealed class UpdateServiceIntegrationTests
 
             var integration = new UpdateServiceIntegration(
                 new UpdateServiceRuntimePaths(configuration),
-                configuration,
                 Options.Create(new UpdateOptions()),
                 new RecordingManagerStatusClient(new ManagerStatusResponse()),
                 new TestHostApplicationLifetime(),
@@ -1388,7 +1374,157 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Fact]
-    public async Task GetStatusAsyncRecordsSuccessfulApplyHistoryWithPreviousCurrentVersion()
+    public async Task DiscoveryDoesNotEraseAnApplyingTargetWhileOldUpdaterIsRunning()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var artifacts = new UpdatePreparedArtifacts(target.ReleaseId, "/tmp/release.tar.gz", "/tmp/release");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = source,
+            AvailableRelease = target,
+            StagedRelease = target,
+            PreparedArtifacts = artifacts,
+            LastKnownGoodRelease = source,
+            StateChangedAtUtc = DateTimeOffset.UtcNow,
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), target.Version,
+            updaterRunningCurrent: false);
+
+        UpdateStatusSnapshot status = await coordinator.ApplyUpdatePolicyAsync("preview", TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Applying, status.State);
+        Assert.Equal(source, persisted.CurrentRelease);
+        Assert.Equal(target, persisted.StagedRelease);
+        Assert.Equal(artifacts, persisted.PreparedArtifacts);
+        Assert.Equal(source, persisted.LastKnownGoodRelease);
+    }
+
+    [Fact]
+    public async Task StatusDuringDiscoveryDoesNotFinalizeOrOverwriteTheInFlightUpdate()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = source,
+            AvailableRelease = target,
+            StagedRelease = target,
+            PreparedArtifacts = new UpdatePreparedArtifacts(target.ReleaseId, "/tmp/release.tar.gz", "/tmp/release"),
+            StateChangedAtUtc = DateTimeOffset.UtcNow,
+        });
+        var integration = new MutableHostIntegration(source.Version, target.Version);
+        var discovery = new BlockingDiscoveryClient();
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            discovery, source.Version, integration: integration);
+
+        Task refresh = coordinator.RefreshDiscoveryAsync(TestContext.Current.CancellationToken);
+        await discovery.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken).ConfigureAwait(true);
+        integration.Activated = true;
+        UpdateStatusSnapshot duringApply = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Applying, duringApply.State);
+        Assert.Equal(target, (await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true)).StagedRelease);
+
+        discovery.Release.TrySetResult();
+        await refresh.ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Current, (await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true)).State);
+    }
+
+    [Theory]
+    [InlineData(true, true, UpdateWorkflowState.Current)]
+    [InlineData(false, true, UpdateWorkflowState.Applying)]
+    [InlineData(true, false, UpdateWorkflowState.Applying)]
+    public async Task OrphanedApplyingStateRecoversOnlyWhenInstalledRuntimeIsCoherent(
+        bool updaterRunningCurrent, bool pointersConsistent, UpdateWorkflowState expected)
+    {
+        UpdateReleaseReference previous = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference installed = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = installed,
+            LastKnownGoodRelease = previous,
+            StagedRelease = null,
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), installed.Version,
+            updaterRunningCurrent: updaterRunningCurrent, pointersConsistent: pointersConsistent);
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(expected, status.State);
+        if (expected == UpdateWorkflowState.Applying)
+        {
+            Assert.Contains("staged release record is missing", status.LastError, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Null(status.LastError);
+        }
+        Assert.Equal(previous, (await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true)).LastKnownGoodRelease);
+    }
+
+    [Fact]
+    public async Task OrphanedApplyingWithUnknownTargetDoesNotInventAnUpdateSuccess()
+    {
+        UpdateReleaseReference installed = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = installed,
+            StagedRelease = null,
+            LastKnownGoodRelease = null,
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), installed.Version);
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Current, status.State);
+        Assert.Contains("target record was lost", status.LastError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OrphanedApplyingCanRecoverWhenPersistedCurrentStillNamesTheSource()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = source,
+            LastKnownGoodRelease = source,
+            StagedRelease = null,
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), "0.2.0");
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Current, status.State);
+        Assert.Equal("0.2.0", status.CurrentRelease?.Version);
+        Assert.Equal(source, status.LastKnownGoodRelease);
+    }
+
+    [Fact]
+    public async Task StartupReconcilesApplyingUntilManagerBecomesReadyWithoutUiPolling()
+    {
+        var coordinator = new SequenceStatusCoordinator();
+        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(1), TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(3, coordinator.Calls);
+    }
+
+    [Fact]
+    public async Task StartupRetriesTransientObservationFailure()
+    {
+        var coordinator = new SequenceStatusCoordinator(failFirst: true);
+        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(1), TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(3, coordinator.Calls);
+    }
+
+    [Theory]
+    [InlineData(null, "apply")]
+    [InlineData("rollback", "rollback")]
+    public async Task GetStatusAsyncRecordsCompletedOperationOnlyAfterRuntimeConverges(string? pendingOperation, string expectedOperation)
     {
         UpdateReleaseReference current = CreateRelease("0.1.0", "preview");
         UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
@@ -1399,6 +1535,7 @@ public sealed class UpdateServiceIntegrationTests
                 StateChangedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
                 CurrentRelease = current,
                 StagedRelease = target,
+                PendingOperation = pendingOperation,
             });
 
         var services = new ServiceCollection();
@@ -1432,10 +1569,11 @@ public sealed class UpdateServiceIntegrationTests
 
         IReadOnlyList<UpdateOperationRecord> history = await operationStore.GetRecentAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
         UpdateOperationRecord success = Assert.Single(history);
-        Assert.Equal("apply", success.OperationType);
+        Assert.Equal(expectedOperation, success.OperationType);
         Assert.True(success.Succeeded);
         Assert.Equal(current.Version, success.FromVersion);
         Assert.Equal(target.Version, success.ToVersion);
+        Assert.Null((await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true)).PendingOperation);
     }
 
     [Fact]
@@ -1543,13 +1681,212 @@ public sealed class UpdateServiceIntegrationTests
         Assert.Equal(UpdateWorkflowState.Available, persisted.State);
     }
 
+    [Fact]
+    public async Task FailedRollbackRecoveryKeepsTheIntendedRollbackTarget()
+    {
+        UpdateReleaseReference source = CreateRelease("0.2.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.1.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "rollback",
+            CurrentRelease = source,
+            LastKnownGoodRelease = source,
+            StagedRelease = target,
+            StateChangedAtUtc = DateTimeOffset.UtcNow.AddHours(-1),
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version,
+            activationTimeout: TimeSpan.FromMinutes(1));
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Current, status.State);
+        Assert.Equal(target, persisted.LastKnownGoodRelease);
+        Assert.Null(persisted.PendingOperation);
+        Assert.Contains("rollback", status.LastError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TimedOutActivationDoesNotOfferRetryWhilePointersAreMixed()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "apply",
+            CurrentRelease = source,
+            LastKnownGoodRelease = source,
+            StagedRelease = target,
+            StateChangedAtUtc = DateTimeOffset.UtcNow.AddHours(-1),
+        });
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version,
+            activationTimeout: TimeSpan.FromMinutes(1), pointersConsistent: false);
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Applying, status.State);
+        Assert.Equal(target, persisted.StagedRelease);
+        Assert.Contains("has not converged", status.LastError, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("0.1.0", "release-0.2.0", UpdateWorkflowState.Available)]
+    [InlineData("0.1.0", "release-0.3.0", UpdateWorkflowState.Applying)]
+    [InlineData("0.3.0", "release-0.2.0", UpdateWorkflowState.Applying)]
+    public async Task CompletedRecoveryOnlyClearsTheMatchingApplyingOperation(
+        string journalSource, string journalTarget, UpdateWorkflowState expected)
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "apply",
+            CurrentRelease = source,
+            AvailableRelease = target,
+            StagedRelease = target,
+            StateChangedAtUtc = DateTimeOffset.UtcNow,
+        });
+        var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), source.Version,
+            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget);
+        var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(expected, status.State);
+    }
+
+    [Fact]
+    public async Task SuccessfulDiscoveryDoesNotEraseAnUpdateFailure()
+    {
+        const string failure = "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release.";
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Available,
+            CurrentRelease = source,
+            LastError = failure,
+        });
+        var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version);
+
+        await coordinator.RefreshDiscoveryAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await store.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(failure, persisted.LastError);
+    }
+
+    [Fact]
+    public async Task TimedOutActivationDoesNotDowngradeAnOutOfBandRelease()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "apply",
+            CurrentRelease = source,
+            StagedRelease = target,
+            StateChangedAtUtc = DateTimeOffset.UtcNow.AddHours(-1),
+        });
+        var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), "0.3.0");
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), "0.3.0",
+            activationTimeout: TimeSpan.FromMinutes(1), integration: integration);
+
+        UpdateStatusSnapshot status = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(UpdateWorkflowState.Applying, status.State);
+        Assert.Null(integration.ActivatedReleaseId);
+        Assert.Equal(target, (await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true)).StagedRelease);
+        Assert.Contains("has not converged", status.LastError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RecoveryMarkerPreventsFinalizationAndFurtherActivation()
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            CurrentRelease = source,
+            StagedRelease = target,
+            PendingOperation = "apply",
+            StateChangedAtUtc = DateTimeOffset.UtcNow.AddHours(-1),
+        });
+        var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), target.Version, recoveryRequired: true);
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), target.Version, integration: integration);
+
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStatusSnapshot retry = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+        Assert.Equal(UpdateWorkflowState.Applying, status.State);
+        Assert.Equal(UpdateWorkflowState.Applying, retry.State);
+        Assert.Equal(target, persisted.StagedRelease);
+        Assert.Null(integration.ActivatedReleaseId);
+        Assert.Contains("administrator recovery", status.LastError, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FailedActivationOffersRetryOnlyForAnObservedHealthyUnchangedSource()
+    {
+        var source = new UpdateServiceContext("/tmp", "/tmp", "v0.1.0", "0.1.0", true, 0);
+        Assert.True(UpdateCoordinator.CanRetryFailedActivation(source, source));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, null));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, source with { RecoveryRequired = true }));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, source with { CurrentPointersConsistent = false }));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, source with { HostStatusObserved = false }));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, source with { UpdateServiceRunningCurrent = false }));
+        Assert.False(UpdateCoordinator.CanRetryFailedActivation(source, source with { ManagerReleaseId = "v0.2.0" }));
+    }
+
+    [Fact]
+    public void DownloadSpaceCheckKeepsRecoveryReserve()
+    {
+        const long reserve = 256L * 1024 * 1024;
+        UpdateCoordinator.EnsureDownloadSpace(reserve + 200, 100);
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => UpdateCoordinator.EnsureDownloadSpace(reserve + 199, 100));
+        Assert.Contains("free space", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task FailedRollbackHelperPreservesPendingOperationForReconciliation()
+    {
+        UpdateReleaseReference source = CreateRelease("0.2.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.1.0", "preview");
+        var stateStore = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Current,
+            CurrentRelease = source,
+            LastKnownGoodRelease = target,
+        });
+        var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), source.Version, failActivation: true);
+        var coordinator = CreateCoordinator(stateStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+
+        UpdateStatusSnapshot status = await coordinator.RevertToLastKnownGoodAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        UpdateStateRecord persisted = await stateStore.GetAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+        Assert.True(status.State == UpdateWorkflowState.Applying, status.LastError);
+        Assert.Equal("rollback", persisted.PendingOperation);
+        Assert.Equal(target, persisted.StagedRelease);
+        Assert.Contains("verify the running release", status.LastError, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static UpdateCoordinator CreateCoordinator(
         IUpdateStateStore stateStore,
         IUpdateRuntimePolicyStore runtimePolicyStore,
         IReleaseDiscoveryClient discoveryClient,
         string managerVersion,
         string? managerReleaseId = null,
-        TimeSpan? activationTimeout = null)
+        TimeSpan? activationTimeout = null,
+        bool updaterRunningCurrent = true,
+        bool pointersConsistent = true,
+        IUpdateServiceIntegration? integration = null)
     {
         var services = new ServiceCollection();
         services.AddHttpClient("kautuka.updateservice.github");
@@ -1569,7 +1906,7 @@ public sealed class UpdateServiceIntegrationTests
             runtimePolicyStore,
             discoveryClient,
             httpClientFactory,
-            new RecordingUpdateServiceIntegration(CreateTempDirectory(), managerVersion, managerReleaseId),
+            integration ?? new RecordingUpdateServiceIntegration(CreateTempDirectory(), managerVersion, managerReleaseId, updaterRunningCurrent: updaterRunningCurrent, pointersConsistent: pointersConsistent),
             new UpdateOperationHistoryStore(updateOptions),
             updateOptions,
             NullLogger<UpdateCoordinator>.Instance);
@@ -1778,21 +2115,86 @@ public sealed class UpdateServiceIntegrationTests
             => throw new InvalidOperationException("manager unavailable");
     }
 
+    private sealed class MutableHostIntegration(string sourceVersion, string targetVersion) : IUpdateServiceIntegration
+    {
+        public bool Activated { get; set; }
+
+        public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
+        {
+            string version = Activated ? targetVersion : sourceVersion;
+            return ValueTask.FromResult(new UpdateServiceContext("/tmp", "/tmp", version, version, true, 0));
+        }
+
+        public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+
+        public ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask RequestSupervisorReconcileAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken) => ValueTask.FromResult(false);
+    }
+
+    private sealed class BlockingDiscoveryClient : IReleaseDiscoveryClient
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<ReleaseDiscoveryResult> DiscoverAsync(ReleaseDiscoveryRequest request, CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return ReleaseDiscoveryResult.NoRelease();
+        }
+    }
+
+    private sealed class SequenceStatusCoordinator(bool failFirst = false) : IUpdateCoordinator
+    {
+        public int Calls { get; private set; }
+        public ValueTask<UpdateStatusSnapshot> GetStatusAsync(CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            if (failFirst && Calls == 1)
+            {
+                throw new IOException("Manager is starting");
+            }
+            return ValueTask.FromResult(new UpdateStatusSnapshot(
+                Calls < 3 ? UpdateWorkflowState.Applying : UpdateWorkflowState.Current,
+                "preview", UpdateEligibilityState.None, UpdateEligibilityReason.None,
+                null, null, null, null, null, "0.1.0", true, 0, null));
+        }
+
+        public ValueTask<UpdateStatusSnapshot> ApplyUpdatePolicyAsync(string releaseChannel, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task RefreshDiscoveryAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public ValueTask<UpdateStatusSnapshot> ApplyPreparedReleaseAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public ValueTask<UpdateStatusSnapshot> RevertToLastKnownGoodAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public ValueTask RequestSupervisorReconcileAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
     private sealed class RecordingUpdateServiceIntegration(
         string runtimeRoot,
         string managerVersion = "0.0.0-test",
         string? managerReleaseId = null,
-        bool hostStatusObserved = true) : IUpdateServiceIntegration
+        bool hostStatusObserved = true,
+        bool updaterRunningCurrent = true,
+        bool pointersConsistent = true,
+        bool failActivation = false,
+        bool recoveryRequired = false,
+        string? recoveryPhase = null,
+        string? recoverySource = null,
+        string? recoveryTarget = null) : IUpdateServiceIntegration
     {
         public string? ActivatedReleaseId { get; private set; }
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {
+            if (failActivation)
+            {
+                throw new InvalidOperationException("test helper failed after switching");
+            }
+
             ActivatedReleaseId = preparedArtifacts.TargetReleaseId;
             ActivatedPlatformPackagePath = preparedArtifacts.PlatformPackagePath;
             ActivatedPlatformExtractedPath = preparedArtifacts.PlatformExtractedPath;
@@ -1800,7 +2202,9 @@ public sealed class UpdateServiceIntegrationTests
         }
 
         public ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)
-            => ValueTask.CompletedTask;
+            => failActivation
+                ? ValueTask.FromException(new InvalidOperationException("test helper failed after switching"))
+                : ValueTask.CompletedTask;
 
         public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken)
             => ValueTask.FromResult(false);

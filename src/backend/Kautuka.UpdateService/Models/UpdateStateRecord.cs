@@ -17,7 +17,8 @@ public sealed record UpdateStateRecord(
     string? LastError,
     DateTimeOffset? StateChangedAtUtc,
     string? SourceRepositoryOwner,
-    string? SourceRepositoryName)
+    string? SourceRepositoryName,
+    string? PendingOperation = null)
 {
     public const int CurrentSchemaVersion = 3;
 

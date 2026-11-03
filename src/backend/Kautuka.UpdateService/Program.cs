@@ -77,6 +77,10 @@ builder.Services.AddOptions<UpdateOptions>()
         }
     });
 
+KautukaMaintenanceMode.SuppressApplicationHostedServices(
+    builder.Services,
+    typeof(UpdateActivationWorker));
+
 KautukaEndpoint updateServiceEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).UpdateService;
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
@@ -99,6 +103,8 @@ builder.WebHost.ConfigureKestrel(kestrel =>
 var app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(updateServiceEndpoint);
+
+app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "Ping", "GetUpdateStatus"));
 
 app.MapDefaultEndpoints();
 app.MapGrpcService<UpdateServiceGrpcService>();

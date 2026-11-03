@@ -59,7 +59,7 @@ public sealed class GatewayRuntimeUpdateEndpointTests
     }
 
     [Fact]
-    public async Task RevertUpdateEndpointInvokesRollbackAction()
+    public async Task LegacyRevertEndpointFailsExplicitlyWithoutCallingUpdater()
     {
         var updateService = new RecordingUpdateServiceGrpcService();
         await using WebApplication app = await CreateAppAsync(updateService).ConfigureAwait(true);
@@ -69,12 +69,11 @@ public sealed class GatewayRuntimeUpdateEndpointTests
             content: null,
             TestContext.Current.CancellationToken).ConfigureAwait(true);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(1, updateService.RevertCalls);
+        Assert.Equal(HttpStatusCode.Gone, response.StatusCode);
+        Assert.Equal(0, updateService.RevertCalls);
 
         JsonNode? json = JsonNode.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken).ConfigureAwait(true));
-        Assert.Equal("Applying", json?["state"]?.GetValue<string>());
-        Assert.Equal("1.2.2", json?["lastKnownGoodRelease"]?["version"]?.GetValue<string>());
+        Assert.Equal("Release rollback is no longer supported", json?["title"]?.GetValue<string>());
     }
 
     [Fact]

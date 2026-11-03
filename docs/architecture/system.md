@@ -28,7 +28,7 @@ The fixed ports and loopback client addresses come from `src/shared/Kautuka.Host
 - **CredentialsHost** owns encrypted credential persistence and credential authorization. Gateway calls it over mTLS gRPC.
 - **Manager** owns durable desired workspace state, workspace path authority, Podman reconciliation, sandbox execution, and connector containers. Gateway currently performs attachment-file I/O inside Manager-resolved workspace paths.
 - **ChannelHost** owns external messaging transports and their attachment state.
-- **UpdateService** owns release discovery, staged update state, verification gates, apply/rollback orchestration via the root `apply-release` helper, and hosted catalog refresh.
+- **UpdateService** owns release discovery, staged update state, verification gates, apply and pre-commit recovery orchestration via the root `apply-release` helper, and hosted catalog refresh. Committed updates are repaired forward.
 - **WebHost** serves the built SPA and proxies `/api/**` to Gateway. It contains no domain state.
 - **The Windows installer** prepares/imports the WSL appliance and waits for WebHost readiness.
 
