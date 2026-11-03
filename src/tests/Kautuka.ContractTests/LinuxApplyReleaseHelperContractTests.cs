@@ -71,7 +71,7 @@ public sealed class LinuxApplyReleaseHelperContractTests
     }
 
     [Fact]
-    public void WindowsInstallerPageWarnsThatItIsUnsigned()
+    public void WindowsInstallerPageDoesNotRepeatDownloadWarnings()
     {
         string projectRoot = FindProjectRoot();
         string pagePath = Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "wwwroot", "index.html");
@@ -79,7 +79,7 @@ public sealed class LinuxApplyReleaseHelperContractTests
         Assert.True(File.Exists(pagePath), $"Expected Windows installer page to exist: {pagePath}");
         string source = File.ReadAllText(pagePath);
 
-        Assert.Contains("This Windows installer is not Authenticode-signed.", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("This Windows installer is not Authenticode-signed.", source, StringComparison.Ordinal);
         Assert.DoesNotContain("Windows residency after reboot is experimental.", source, StringComparison.Ordinal);
     }
 
