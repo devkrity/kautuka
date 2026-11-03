@@ -22,6 +22,7 @@ internal static partial class WindowsApplianceInstaller
 
         var wslFeaturesEnabled = isWindows && AreWslFeaturesEnabled(featureStates);
         var wslAvailable = isWindows && CommandAvailable("wsl.exe");
+        var verifiedExisting = isWindows ? GetVerifiedExistingDistroName() : null;
 
         return new WindowsApplianceStatusResponse
         {
@@ -31,6 +32,7 @@ internal static partial class WindowsApplianceInstaller
             WslFeaturesEnabled = wslFeaturesEnabled,
             WslReady = wslAvailable && wslFeaturesEnabled,
             ExistingDistro = isWindows && (IsDistroRegistered(distroName) || IsDistroRegistered(defaultDistroName) || WindowsApplianceStateStore.InstalledExists() || HasWindowsRegistration()),
+            CanOpenExisting = verifiedExisting is not null,
             HasResumeState = WindowsApplianceStateStore.Matches(distroName),
             DefaultKautukaRoot = defaultInstallDir,
             DefaultInstallDir = defaultInstallDir,
@@ -41,17 +43,30 @@ internal static partial class WindowsApplianceInstaller
     public static Task<string?> PickFolderForInstallAsync(string? initialPath, CancellationToken cancellationToken)
         => PickFolderAsync(initialPath, cancellationToken);
 
-    public static async Task StartExistingAsync(string distroName, CancellationToken cancellationToken)
+    internal static string? GetVerifiedExistingDistroName()
     {
-        var ownership = WindowsApplianceStateStore.LoadInstalled();
-        string? sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
-        string name = ownership.DistroName;
-        string path = ownership.InstallDir;
-        var registered = GetDistroRegistration(name);
-        if (!string.Equals(name, distroName, StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(path)
-            || registered is null || !PathsEqual(path, registered.Value.Path)
-            || !MatchesOwnedRegistration(ownership, sid, name, path, registered.Value.Id))
-            throw new InvalidOperationException("The existing environment does not match the Kautuka installation record.");
+        try
+        {
+            var ownership = WindowsApplianceStateStore.LoadInstalled();
+            string? sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
+            var registered = GetDistroRegistration(ownership.DistroName);
+            return ResolveVerifiedExistingDistroName(ownership, sid, registered);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    internal static string? ResolveVerifiedExistingDistroName(WindowsApplianceInstallState ownership, string? sid, (string Id, string Path)? registered)
+        => registered is not null && !string.IsNullOrWhiteSpace(ownership.InstallDir)
+            && MatchesOwnedRegistration(ownership, sid, ownership.DistroName, registered.Value.Path, registered.Value.Id)
+                ? ownership.DistroName : null;
+
+    public static async Task StartExistingAsync(CancellationToken cancellationToken)
+    {
+        string name = GetVerifiedExistingDistroName()
+            ?? throw new InvalidOperationException("This installation cannot be verified. Start it using its existing Kautuka Monitor.");
         await WaitForWebUiReadyAsync(name, _ => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
     }
 

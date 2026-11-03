@@ -81,7 +81,7 @@ internal static class InstallerEndpoints
             if (!HasActionToken(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
             try
             {
-                await WindowsApplianceInstaller.StartExistingAsync(launchOptions.InstallDefaults.DistroName, ctx.RequestAborted).ConfigureAwait(false);
+                await WindowsApplianceInstaller.StartExistingAsync(ctx.RequestAborted).ConfigureAwait(false);
                 return Results.Ok();
             }
             catch (InvalidOperationException ex) { return Results.Problem(ex.Message); }

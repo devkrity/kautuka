@@ -59,6 +59,7 @@ internal sealed record WindowsApplianceStatusResponse
     public required bool WslFeaturesEnabled { get; init; }
     public required bool WslReady { get; init; }
     public required bool ExistingDistro { get; init; }
+    public required bool CanOpenExisting { get; init; }
     public required bool HasResumeState { get; init; }
     public required string DefaultKautukaRoot { get; init; }
     public required string DefaultInstallDir { get; init; }

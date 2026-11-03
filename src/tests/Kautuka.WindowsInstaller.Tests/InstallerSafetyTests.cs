@@ -32,6 +32,16 @@ public sealed class InstallerSafetyTests
     }
 
     [Fact]
+    public void ExistingInstallationUsesVerifiedCustomNameAndRejectsReplacement()
+    {
+        string path = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "kautuka-custom-test"));
+        var ownership = State(path) with { DistroName = "custom-appliance" };
+        Assert.Equal("custom-appliance", WindowsApplianceInstaller.ResolveVerifiedExistingDistroName(ownership, ownership.OwnerSid, (ownership.RegistrationId!, path)));
+        Assert.Null(WindowsApplianceInstaller.ResolveVerifiedExistingDistroName(ownership, ownership.OwnerSid, ("{replacement}", path)));
+        Assert.Null(WindowsApplianceInstaller.ResolveVerifiedExistingDistroName(ownership, ownership.OwnerSid, null));
+    }
+
+    [Fact]
     public void ResumeRejectsArchiveFromUnprotectedDirectoryEvenWhenHashMatches()
     {
         if (!OperatingSystem.IsWindows()) return;

@@ -423,7 +423,7 @@
         <section id="existingBox" class="card" hidden>
           <div class="card-header"><h2>Existing installation found</h2></div>
           <div class="card-body">
-            <p class="done-copy">An environment with Kautuka's installation name already exists on this PC. If it is your Kautuka installation, open it to check for updates. Your existing data will be preserved.</p>
+            <p id="existingDescription" class="done-copy"></p>
             <p class="done-copy" style="margin-top: 12px">To uninstall Kautuka, use Add or remove programs in Windows Settings.</p>
             <div class="action-row action-row-end">
               <button id="existingExitBtn" class="btn btn-ghost" type="button">Exit</button>
@@ -693,6 +693,10 @@
         state.status = status;
         const showExisting = status.existingDistro && !status.hasResumeState && !state.finished;
         $("existingBox").hidden = !showExisting;
+        $("existingOpenBtn").hidden = !status.canOpenExisting;
+        $("existingDescription").textContent = status.canOpenExisting
+          ? "Kautuka is already installed. Open it to use it or check for updates. Your existing data will be preserved."
+          : "An existing environment was found, but this installer cannot verify it. If you installed an earlier version of Kautuka, start it using its existing Kautuka Monitor or open its usual web address. Your data has not been changed.";
         if (!state.finished) $("setupCard").hidden = showExisting;
         $("nextBtn").disabled = !status.isWindows || !status.wslAvailable || (!status.wslReady && !status.isAdministrator);
         $("readinessResult").textContent = !status.isWindows
