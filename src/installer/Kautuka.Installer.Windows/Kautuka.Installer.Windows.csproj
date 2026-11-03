@@ -74,6 +74,7 @@
   <!-- Single-exe default UI: embed index instead of requiring wwwroot at runtime. -->
   <ItemGroup>
     <EmbeddedResource Include="wwwroot\index.html" LogicalName="Kautuka.Installer.Windows.wwwroot.index.html" />
+    <InternalsVisibleTo Include="Kautuka.WindowsInstaller.Tests" />
   </ItemGroup>
 
   <Target Name="EmbedManifestPublicKey" BeforeTargets="PrepareForBuild" Condition="'$(InstallerManifestPublicKeyPath)' != ''">

@@ -86,11 +86,20 @@ internal static partial class WindowsApplianceInstaller
             log,
             cancellationToken).ConfigureAwait(false);
 
+        rootfsPath = WindowsApplianceStateStore.ProtectRootfs(rootfsPath);
+        try
+        {
+            ValidateDownloadedAsset(rootfsPath, ResolveManifestArtifact(releaseManifest, rootfsAssetName), requireVerification && releaseManifest is not null);
+        }
+        catch { File.Delete(rootfsPath); throw; }
+        string rootfsSha256 = WindowsApplianceStateStore.HashFile(rootfsPath);
+
         return new WindowsApplianceInstallState
         {
             ReleaseId = releaseId,
             ReleaseTag = resolvedReleaseTag,
             RootfsPath = rootfsPath,
+            RootfsSha256 = rootfsSha256,
             DistroName = string.IsNullOrWhiteSpace(request.DistroName) ? defaultDistroName : request.DistroName,
             KautukaRoot = ResolveWindowsPathWithStableCasing(kautukaRoot),
             InstallDir = ResolveWindowsPathWithStableCasing(installDir),

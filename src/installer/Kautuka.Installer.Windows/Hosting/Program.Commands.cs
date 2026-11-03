@@ -201,15 +201,32 @@ internal static partial class Program
             InstallerEndpoints.AddActionToken(requestMessage);
 
             using var response = http.Send(requestMessage);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                string body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                string detail = $"Windows returned HTTP {(int)response.StatusCode}.";
+                try
+                {
+                    using var problem = JsonDocument.Parse(body);
+                    if (problem.RootElement.TryGetProperty("detail", out var value) && value.ValueKind == JsonValueKind.String)
+                        detail = value.GetString() ?? detail;
+                }
+                catch (JsonException) { }
+                throw new InvalidOperationException(detail);
+            }
+            _ = MessageBoxW(IntPtr.Zero, "Kautuka has been uninstalled from this PC.", "Kautuka uninstall", 0x00000040);
         }
         catch (HttpRequestException ex)
         {
             ProgramLogMessages.UninstallRequestFailed(log, ex);
+            Environment.ExitCode = 1;
+            _ = MessageBoxW(IntPtr.Zero, $"Kautuka could not be fully removed. Some steps may have completed.\n\n{ex.Message}", "Kautuka uninstall", 0x00000010);
         }
         catch (InvalidOperationException ex)
         {
             ProgramLogMessages.UninstallRequestFailed(log, ex);
+            Environment.ExitCode = 1;
+            _ = MessageBoxW(IntPtr.Zero, $"Kautuka could not be fully removed. Some steps may have completed.\n\n{ex.Message}", "Kautuka uninstall", 0x00000010);
         }
 
         cts.Cancel();

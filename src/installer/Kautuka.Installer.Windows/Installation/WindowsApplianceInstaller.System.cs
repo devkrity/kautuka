@@ -187,6 +187,21 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
             try
             {
+                var inDistro = await RunProcessAsync("wsl.exe",
+                    ["-d", distroName, "-u", "root", "--", "curl", "-fsS", "--max-time", "3", "http://127.0.0.1:20229/api/runtime/system-health"],
+                    allowFailure: true, cancellationToken).ConfigureAwait(false);
+                if (inDistro.ExitCode != 0)
+                    throw new InvalidOperationException("The selected Kautuka environment is not ready yet.");
+                using (JsonDocument localHealth = JsonDocument.Parse(inDistro.StandardOutput.Replace("\0", "", StringComparison.Ordinal)))
+                {
+                    if (!localHealth.RootElement.TryGetProperty("lifecycle", out JsonElement localLifecycle)
+                        || !localLifecycle.TryGetProperty("coreReady", out JsonElement localCore)
+                        || localCore.ValueKind != JsonValueKind.True
+                        || !localHealth.RootElement.TryGetProperty("workspace", out JsonElement localWorkspace)
+                        || !localWorkspace.TryGetProperty("status", out JsonElement localStatus)
+                        || !string.Equals(localStatus.GetString(), "healthy", StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The selected Kautuka environment is still starting.");
+                }
                 using var healthResponse = await client.GetAsync(
                     new Uri($"{webUrl}/api/runtime/system-health"),
                     HttpCompletionOption.ResponseHeadersRead,
@@ -258,6 +273,10 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                 lastError = new TimeoutException("The Gateway health probe timed out.");
             }
             catch (HttpRequestException ex)
+            {
+                lastError = ex;
+            }
+            catch (InvalidOperationException ex)
             {
                 lastError = ex;
             }
@@ -442,21 +461,87 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 
-    private static class WindowsApplianceStateStore
+    internal static class WindowsApplianceStateStore
     {
         private static readonly string installerStateDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "Kautuka");
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Kautuka", "InstallerState",
+            System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+                ?? throw new InvalidOperationException("Could not identify the Windows user for installer state."));
         private static readonly string installerStatePath = Path.Combine(installerStateDir, "wsl-installer-state.json");
+        private static readonly string installedStatePath = Path.Combine(installerStateDir, "wsl-installed-state.json");
 
         public static bool Exists() => File.Exists(installerStatePath);
+        public static bool InstalledExists() => File.Exists(installedStatePath);
 
-        public static void Save(WindowsApplianceInstallState state)
+        private static void EnsureProtectedDirectory()
         {
             Directory.CreateDirectory(installerStateDir);
+            for (DirectoryInfo? dir = new(installerStateDir); dir is not null && !PathsEqual(dir.FullName, Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)); dir = dir.Parent)
+                if ((dir.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException("Installer state directory cannot contain links.");
+        }
+
+        public static string ProtectRootfs(string source)
+        {
+            EnsureProtectedDirectory();
+            string destination = Path.Combine(installerStateDir, $"rootfs-{Guid.NewGuid():N}.tar.gz");
+            try { File.Copy(source, destination, overwrite: false); return destination; }
+            catch { if (File.Exists(destination)) File.Delete(destination); throw; }
+        }
+
+        public static string HashFile(string path)
+        {
+            using FileStream stream = File.OpenRead(path);
+            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+        }
+
+        public static void VerifyRootfs(WindowsApplianceInstallState state)
+            => VerifyRootfsAt(state, installerStateDir);
+
+        internal static void VerifyRootfsAt(WindowsApplianceInstallState state, string expectedDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(state.RootfsSha256)
+                || !PathsEqual(Path.GetDirectoryName(state.RootfsPath) ?? "", expectedDirectory)
+                || !File.Exists(state.RootfsPath)
+                || !string.Equals(HashFile(state.RootfsPath), state.RootfsSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The saved installation archive is missing or changed. Restart setup to download it again.");
+        }
+
+        public static void DeleteRootfs(WindowsApplianceInstallState state)
+        {
+            if (PathsEqual(Path.GetDirectoryName(state.RootfsPath) ?? "", installerStateDir) && File.Exists(state.RootfsPath))
+                File.Delete(state.RootfsPath);
+        }
+
+        public static bool Matches(string distroName)
+        {
+            if (!Exists()) return false;
+            try
+            {
+                var state = Load();
+                string? currentSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
+                return currentSid is not null && string.Equals(state.OwnerSid, currentSid, StringComparison.Ordinal)
+                    && string.Equals(state.DistroName, distroName, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        public static void Save(WindowsApplianceInstallState state)
+            => SaveTo(installerStatePath, state);
+
+        public static void SaveInstalled(WindowsApplianceInstallState state)
+            => SaveTo(installedStatePath, state);
+
+        private static void SaveTo(string statePath, WindowsApplianceInstallState state)
+        {
+            EnsureProtectedDirectory();
             string tempPath = Path.Combine(
                 installerStateDir,
-                $".{Path.GetFileName(installerStatePath)}.{Guid.NewGuid():N}.tmp");
+                $".{Path.GetFileName(statePath)}.{Guid.NewGuid():N}.tmp");
 
             try
             {
@@ -475,7 +560,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     stream.Flush(flushToDisk: true);
                 }
 
-                File.Move(tempPath, installerStatePath, overwrite: true);
+                File.Move(tempPath, statePath, overwrite: true);
             }
             finally
             {
@@ -485,14 +570,20 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         }
 
         public static WindowsApplianceInstallState Load()
+            => LoadFrom(installerStatePath);
+
+        public static WindowsApplianceInstallState LoadInstalled()
+            => LoadFrom(installedStatePath);
+
+        private static WindowsApplianceInstallState LoadFrom(string statePath)
         {
-            if (!File.Exists(installerStatePath))
-                throw new InvalidOperationException($"Installer state not found: {installerStatePath}");
+            if (!File.Exists(statePath))
+                throw new InvalidOperationException("This installer cannot verify the existing Kautuka installation. If it was installed with an older version, use its Kautuka Monitor or the original uninstall entry.");
 
             try
             {
                 using FileStream stream = new(
-                    installerStatePath,
+                    statePath,
                     FileMode.Open,
                     FileAccess.Read,
                     FileShare.Read,
@@ -502,11 +593,11 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
                     stream,
                     InstallerJsonContext.Default.WindowsApplianceInstallState);
                 return state ?? throw new InvalidDataException(
-                    $"Installer state '{installerStatePath}' contains a JSON null value.");
+                    $"Installer state '{statePath}' contains a JSON null value.");
             }
             catch (JsonException ex)
             {
-                throw new InvalidDataException($"Installer state '{installerStatePath}' contains invalid JSON.", ex);
+                throw new InvalidDataException($"Installer state '{statePath}' contains invalid JSON.", ex);
             }
         }
 
@@ -514,6 +605,11 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         {
             if (File.Exists(installerStatePath))
                 File.Delete(installerStatePath);
+        }
+
+        public static void DeleteInstalled()
+        {
+            if (File.Exists(installedStatePath)) File.Delete(installedStatePath);
         }
     }
 }

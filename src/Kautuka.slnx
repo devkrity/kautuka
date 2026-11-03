@@ -32,6 +32,7 @@
     <Project Path="tests/Kautuka.ContractTests/Kautuka.ContractTests.csproj" />
     <Project Path="tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj" />
     <Project Path="tests/Kautuka.SecurityTests/Kautuka.SecurityTests.csproj" />
+    <Project Path="tests/Kautuka.WindowsInstaller.Tests/Kautuka.WindowsInstaller.Tests.csproj" />
     <Project Path="tests/Kautuka.ChannelHost.Tests/Kautuka.ChannelHost.Tests.csproj" />
     <Project Path="tests/Kautuka.ProviderSimulator.Tests/Kautuka.ProviderSimulator.Tests.csproj" />
   </Folder>

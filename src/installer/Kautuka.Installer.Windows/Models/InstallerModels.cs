@@ -58,6 +58,7 @@ internal sealed record WindowsApplianceStatusResponse
     public required bool WslAvailable { get; init; }
     public required bool WslFeaturesEnabled { get; init; }
     public required bool WslReady { get; init; }
+    public required bool ExistingDistro { get; init; }
     public required bool HasResumeState { get; init; }
     public required string DefaultKautukaRoot { get; init; }
     public required string DefaultInstallDir { get; init; }
@@ -112,6 +113,9 @@ internal sealed record InstallerPlatformReleaseArtifact
 
 internal sealed record WindowsApplianceInstallState
 {
+    public string? OwnerSid { get; init; }
+    public string? RegistrationId { get; init; }
+    public string? RootfsSha256 { get; init; }
     public required string ReleaseId { get; init; }
     public string? ReleaseTag { get; init; }
     public required string RootfsPath { get; init; }

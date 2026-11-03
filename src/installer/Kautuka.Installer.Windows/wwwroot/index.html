@@ -27,6 +27,9 @@
       * {
         box-sizing: border-box;
       }
+      [hidden] {
+        display: none !important;
+      }
       html,
       body {
         min-height: 100%;
@@ -60,13 +63,13 @@
       .page-shell {
         min-height: 100vh;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
-        padding: 32px 24px;
+        padding: 24px;
       }
 
       .installer-app {
-        width: min(540px, 100%);
+        width: min(760px, 100%);
         display: grid;
         gap: 16px;
       }
@@ -176,8 +179,10 @@
       /* Form */
       .form-grid {
         display: grid;
-        gap: 14px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 18px 24px;
       }
+      .field-wide { grid-column: 1 / -1; }
       .field {
         display: grid;
         gap: 6px;
@@ -285,7 +290,7 @@
         background: hsl(var(--primary));
         color: hsl(var(--primary-foreground));
         box-shadow: 0 6px 22px -12px hsl(var(--primary));
-        flex: 1;
+        min-width: 180px;
       }
       .btn-primary:hover:not(:disabled) {
         opacity: 0.92;
@@ -395,6 +400,8 @@
         .input-row {
           grid-template-columns: 1fr;
         }
+        .form-grid { grid-template-columns: 1fr; }
+        .field-wide { grid-column: auto; }
       }
     </style>
   </head>
@@ -411,25 +418,32 @@
           </div>
         </div>
 
-        <div class="banner warn show unsigned">
-          This Windows installer is not Authenticode-signed. SmartScreen will
-          warn.
-        </div>
-
         <div id="messageBanner" class="banner"></div>
 
-        <section class="card">
+        <section id="existingBox" class="card" hidden>
+          <div class="card-header"><h2>Existing installation found</h2></div>
+          <div class="card-body">
+            <p class="done-copy">An environment with Kautuka's installation name already exists on this PC. If it is your Kautuka installation, open it to check for updates. Your existing data will be preserved.</p>
+            <p class="done-copy" style="margin-top: 12px">To uninstall Kautuka, use Add or remove programs in Windows Settings.</p>
+            <div class="action-row action-row-end">
+              <button id="existingExitBtn" class="btn btn-ghost" type="button">Exit</button>
+              <button id="existingOpenBtn" class="btn btn-primary" type="button">Open Kautuka</button>
+            </div>
+          </div>
+        </section>
+
+        <section id="setupCard" class="card">
           <div class="card-header">
-            <h2>Setup</h2>
-            <p>
-              Pick the local folder and release channel. A GitHub token is only
-              needed for private GitHub releases.
-            </p>
+            <h2 id="wizardTitle">Checking your PC</h2>
+            <p id="wizardDescription">Kautuka uses a Linux environment to run on Windows.</p>
           </div>
           <div class="card-body">
-            <div class="form-grid">
-              <div class="field">
-                <label for="kautukaRoot">WSL install directory</label>
+            <div id="welcomeStep">
+              <p id="readinessResult" class="done-copy" role="status" aria-live="polite">Checking the required Windows components...</p>
+            </div>
+            <div id="locationStep" class="form-grid" hidden>
+              <div class="field field-wide">
+                <label for="kautukaRoot">Install folder</label>
                 <div class="input-row">
                   <input
                     id="kautukaRoot"
@@ -447,13 +461,11 @@
                   </button>
                 </div>
                 <p class="field-note">
-                  Folder where WSL should store the imported distro. The
-                  appliance is self-contained inside its WSL filesystem; no
-                  Windows bind mount is created.
+                  Kautuka's Linux appliance and its data are stored here.
                 </p>
               </div>
 
-              <div class="field">
+              <div class="field field-wide">
                 <label for="releaseServerUrl">Release server URL</label>
                 <input
                   id="releaseServerUrl"
@@ -469,6 +481,8 @@
                 </p>
               </div>
 
+            </div>
+            <div id="optionsStep" class="form-grid" hidden>
               <div id="releaseChannelField" class="field">
                 <label for="releaseChannel">Update channel</label>
                 <select id="releaseChannel" class="input">
@@ -486,18 +500,16 @@
                   <span>Allow other devices on this PC's local network to open Kautuka</span>
                 </label>
                 <p class="field-note">
-                  Off by default. The appliance only listens on localhost. Checking
-                  this adds a Windows Firewall rule for TCP 20229 on private
-                  networks and forwards that port to localhost. Public networks
-                  stay blocked, and the traffic is ordinary HTTP.
+                  Off by default. Allows unencrypted HTTP access on private networks
+                  and adds a Windows Firewall rule for port 20229.
                 </p>
               </div>
             </div>
 
-            <div class="action-row">
-              <button id="refreshStatusBtn" class="btn btn-ghost" type="button">
-                Check readiness
-              </button>
+            <div class="action-row action-row-end">
+              <button id="exitBtn" class="btn btn-ghost" type="button">Cancel</button>
+              <button id="backBtn" class="btn btn-ghost" type="button" hidden>Back</button>
+              <button id="nextBtn" class="btn btn-primary" type="button" disabled>Next</button>
               <button
                 id="resumeBtn"
                 class="btn btn-secondary"
@@ -506,20 +518,8 @@
               >
                 Resume
               </button>
-              <button id="installBtn" class="btn btn-primary" type="button">
+              <button id="installBtn" class="btn btn-primary" type="button" hidden>
                 Install Kautuka
-              </button>
-            </div>
-
-            <div class="action-row action-row-end" style="margin-top: 10px">
-              <button id="uninstallBtn" class="btn btn-danger" type="button">
-                Uninstall
-              </button>
-              <button id="openWebBtn" class="btn btn-ghost" type="button">
-                Open Kautuka
-              </button>
-              <button id="exitBtn" class="btn btn-ghost" type="button">
-                Exit
               </button>
             </div>
           </div>
@@ -541,10 +541,14 @@
         </section>
 
         <section id="doneBox" class="done-box">
-          <h3>Done</h3>
+          <h3 id="doneTitle">Done</h3>
           <p id="doneMessage" class="done-copy">
             The installer action completed successfully.
           </p>
+          <div id="doneActions" class="action-row" hidden>
+            <button id="doneOpenWebBtn" class="btn btn-primary" type="button">Open Kautuka</button>
+            <button id="doneExitBtn" class="btn btn-ghost" type="button">Exit</button>
+          </div>
         </section>
 
         <section id="firstRunSetupBox" class="done-box">
@@ -579,6 +583,8 @@
         actionToken: "",
         running: false,
         setupTokenAckResolver: null,
+        wizardStep: 0,
+        finished: false,
       };
       const $ = (id) => document.getElementById(id);
 
@@ -655,10 +661,10 @@
         state.running = active;
         $("installBtn").disabled = active || !state.status?.isWindows;
         $("resumeBtn").disabled = active || !state.status?.hasResumeState;
-        $("uninstallBtn").disabled = active;
         $("browseKautukaRootBtn").disabled = active || !state.status?.isWindows;
-        $("refreshStatusBtn").disabled = active;
         $("exitBtn").disabled = active;
+        $("backBtn").disabled = active;
+        $("nextBtn").disabled = active || !state.status?.isWindows || !state.status?.wslAvailable || (!state.status?.wslReady && !state.status?.isAdministrator);
         $("logCard").classList.toggle(
           "show",
           active || $("log").textContent.length > 0,
@@ -667,32 +673,51 @@
         $("logHint").textContent = hint;
       }
 
+      function showWizardStep(step) {
+        state.wizardStep = step;
+        $("welcomeStep").hidden = step !== 0;
+        $("locationStep").hidden = step !== 1;
+        $("optionsStep").hidden = step !== 2;
+        $("backBtn").hidden = step === 0;
+        $("nextBtn").hidden = step === 2;
+        $("installBtn").hidden = step !== 2;
+        $("wizardTitle").textContent = ["Checking your PC", "Choose an install folder", "Choose your settings"][step];
+        $("wizardDescription").textContent = [
+          "Kautuka uses a Linux environment to run on Windows.",
+          "Choose where Windows will store the Kautuka appliance.",
+          "Choose an update channel and network access.",
+        ][step];
+      }
+
       function renderStatus(status) {
         state.status = status;
+        const showExisting = status.existingDistro && !status.hasResumeState && !state.finished;
+        $("existingBox").hidden = !showExisting;
+        if (!state.finished) $("setupCard").hidden = showExisting;
+        $("nextBtn").disabled = !status.isWindows || !status.wslAvailable || (!status.wslReady && !status.isAdministrator);
+        $("readinessResult").textContent = !status.isWindows
+          ? "This installer requires Windows."
+          : !status.wslAvailable
+            ? "The Windows component needed to run Kautuka's Linux environment is missing. Install Windows Subsystem for Linux and reopen this installer."
+            : status.wslReady
+              ? "Your PC has the required Windows components. Select Next to continue."
+              : status.isAdministrator
+                ? "Some Windows components need to be enabled. The installer will enable them; your PC may need to restart."
+                : "Some Windows components need to be enabled. Run this installer as administrator to enable them.";
         $("resumeBtn").style.display = status.hasResumeState
           ? "inline-flex"
           : "none";
-
-        if (!status.isWindows) {
-          setBanner("This installer targets Windows only.", "error");
-        } else if (!status.isAdministrator && !status.wslReady) {
-          setBanner(
-            "Run as administrator so the installer can enable WSL prerequisites.",
-            "warn",
-          );
-        } else if (!status.wslReady) {
-          setBanner(
-            "WSL is not ready yet — the installer will enable the required Windows features before importing the appliance.",
-            "warn",
-          );
-        } else {
-          setBanner(
-            isDevelopmentProfile()
-              ? "Host is ready. Enter the release server URL and click Install."
-              : "Host is ready. Fill in the fields below and click Install.",
-            "ok",
-          );
+        $("resumeBtn").disabled = state.running || !status.hasResumeState || !status.isWindows;
+        if (status.hasResumeState && !state.finished) {
+          $("wizardTitle").textContent = "Resume installation";
+          $("wizardDescription").textContent = "A previous installation stopped before it finished.";
+          $("readinessResult").textContent = status.wslReady
+            ? "Your saved installation is ready to continue. Select Resume to finish setting up Kautuka."
+            : "Select Resume to continue the saved installation. Windows may need to restart if components were just enabled.";
+          $("nextBtn").hidden = true;
         }
+
+        setBanner("");
 
         $("releaseServerUrl").closest(".field").style.display =
           isDevelopmentProfile() ? "grid" : "none";
@@ -707,7 +732,7 @@
         $("installBtn").textContent = status.wslReady
           ? "Install Kautuka"
           : status.isAdministrator
-            ? "Enable WSL & continue"
+            ? "Enable components & continue"
             : "Run as administrator to continue";
         $("installBtn").disabled = !status.isWindows;
       }
@@ -886,6 +911,9 @@
             throw new Error("Kautuka installed, but its first-run setup token was missing or invalid.");
           }
 
+          $("setupCard").hidden = true;
+          $("messageBanner").hidden = true;
+          $("logCard").before($("firstRunSetupBox"));
           $("firstRunSetupToken").textContent = setupTokenState.token;
           $("firstRunSetupBox").classList.add("show");
           setRunning(true, "Setup token required", "Copy the token and acknowledge before continuing...");
@@ -893,12 +921,21 @@
             state.setupTokenAckResolver = resolve;
           });
           state.setupTokenAckResolver = null;
-          $("firstRunSetupTokenStatus").textContent = "Acknowledged. Enter the copied token in Kautuka's first-run setup page.";
+          $("firstRunSetupBox").classList.remove("show");
+          $("firstRunSetupToken").textContent = "";
         }
 
+        state.finished = true;
+        $("setupCard").hidden = true;
+        $("messageBanner").hidden = true;
+        $("doneTitle").textContent = "Installation complete";
         $("doneBox").classList.add("show");
+        $("logCard").before($("doneBox"));
+        $("doneActions").hidden = false;
         $("doneMessage").textContent =
-          "Installation complete. Open Kautuka and enter the copied one-time token to create your first administrator. If a reboot was needed for WSL prerequisites, reopen the installer and click Resume.";
+          setupTokenState.needsSetup === true
+            ? "Open Kautuka and enter your copied one-time token to create your first administrator."
+            : "Open Kautuka to continue.";
         setRunning(false, "Done", "Idle.");
         await refreshStatus();
       }
@@ -929,6 +966,13 @@
       }
 
       function wireEvents() {
+        $("backBtn").addEventListener("click", () => showWizardStep(Math.max(0, state.wizardStep - 1)));
+        $("nextBtn").addEventListener("click", () => {
+          try {
+            if (state.wizardStep === 1) validateInstallRequest(readRequest());
+            showWizardStep(Math.min(2, state.wizardStep + 1));
+          } catch (err) { setBanner(err.message || String(err), "error"); }
+        });
         $("copyFirstRunSetupTokenBtn").addEventListener("click", async () => {
           try {
             await navigator.clipboard.writeText($("firstRunSetupToken").textContent);
@@ -946,14 +990,6 @@
             : "Stable releases are recommended for everyday use.";
         });
 
-        $("refreshStatusBtn").addEventListener("click", async () => {
-          try {
-            await refreshStatus();
-            appendLog("Host readiness checked.");
-          } catch (err) {
-            setBanner(err.message || String(err), "error");
-          }
-        });
         $("browseKautukaRootBtn").addEventListener("click", async () => {
           try {
             await pickKautukaRoot();
@@ -979,21 +1015,44 @@
             appendLog(`ERROR: ${err.message || String(err)}`);
           }
         });
-        $("uninstallBtn").addEventListener("click", async () => {
-          try {
-            await runUninstall();
-          } catch (err) {
-            setRunning(false, "Uninstall failed", "Idle.");
-            setBanner(err.message || String(err), "error");
-            appendLog(`ERROR: ${err.message || String(err)}`);
-          }
-        });
-        $("openWebBtn").addEventListener("click", () => {
+        $("doneOpenWebBtn").addEventListener("click", () => {
           window.open("http://localhost:20229", "_blank", "noopener");
         });
-        $("exitBtn").addEventListener("click", async () => {
-          await fetch("/api/exit", { method: "POST", headers: actionHeaders() });
+        $("existingOpenBtn").addEventListener("click", async () => {
+          const button = $("existingOpenBtn");
+          button.disabled = true;
+          button.textContent = "Starting Kautuka...";
+          try {
+            const response = await fetch("/api/appliance/open-existing", { method: "POST", headers: actionHeaders() });
+            if (!response.ok) {
+              const error = await response.json().catch(() => ({}));
+              throw new Error(error.detail || "Could not start Kautuka.");
+            }
+            window.open("http://localhost:20229", "_blank", "noopener");
+          } catch (err) {
+            setBanner(err.message || String(err), "error");
+          } finally {
+            button.disabled = false;
+            button.textContent = "Open Kautuka";
+          }
         });
+        async function closeInstaller(button) {
+          const label = button.textContent;
+          button.disabled = true;
+          button.textContent = "Closing...";
+          try {
+            const response = await fetch("/api/exit", { method: "POST", headers: actionHeaders() });
+            if (!response.ok) throw new Error("Could not close the installer. Please use the window close button.");
+          } catch (err) {
+            button.disabled = false;
+            button.textContent = label;
+            setBanner(err.message || String(err), "error");
+            $("messageBanner").hidden = false;
+          }
+        }
+        $("doneExitBtn").addEventListener("click", () => closeInstaller($("doneExitBtn")));
+        $("exitBtn").addEventListener("click", () => closeInstaller($("exitBtn")));
+        $("existingExitBtn").addEventListener("click", () => closeInstaller($("existingExitBtn")));
       }
 
       async function init() {
@@ -1003,6 +1062,7 @@
           await loadBootstrap();
         } catch (err) {
           setBanner(err.message || String(err), "error");
+          $("readinessResult").textContent = "Could not check prerequisites. Close the installer and try again.";
         }
       }
 
