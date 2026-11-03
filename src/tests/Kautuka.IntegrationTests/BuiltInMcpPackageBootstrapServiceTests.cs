@@ -13,6 +13,35 @@ namespace Kautuka.IntegrationTests;
 public sealed class BuiltInMcpPackageBootstrapServiceTests
 {
     [Fact]
+    public async Task BootstrapWaitsForMaintenanceFenceBeforeImportingConnectors()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            string bundles = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(bundles);
+            await File.WriteAllTextAsync(Path.Combine(bundles, "kautuka-web-tools.mcpb"), "placeholder", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            var packageService = new FakeMcpbPackageService();
+            bool maintenance = true;
+            var service = new BuiltInMcpPackageBootstrapService(
+                new FakeWebHostEnvironment(root), new FakeCatalogStore(), packageService,
+                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                () => Volatile.Read(ref maintenance));
+            await service.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+            await Task.Delay(100, TestContext.Current.CancellationToken).ConfigureAwait(true);
+            Assert.Equal(0, packageService.InspectCallCount);
+            Volatile.Write(ref maintenance, false);
+            await service.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken).ConfigureAwait(true);
+            Assert.Equal(1, packageService.InspectCallCount);
+            await service.StopAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task StartAsyncDoesNotWaitForFirstRunConnectorProbe()
     {
         string root = CreateTempDirectory();

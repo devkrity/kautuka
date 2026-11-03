@@ -7,7 +7,8 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
     IGatewayCatalogStore catalog,
     IMcpbPackageService mcpbPackageService,
     IMcpConnectorTestService mcpConnectorTestService,
-    ILogger<BuiltInMcpPackageBootstrapService> logger) : BackgroundService
+    ILogger<BuiltInMcpPackageBootstrapService> logger,
+    Func<bool>? maintenanceActive = null) : BackgroundService
 {
     private const string builtInBundleDirectoryName = "built-in-mcpb";
     private const string solutionRelativePath = "src/Kautuka.slnx";
@@ -57,6 +58,14 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
         // out of Generic Host's synchronous startup path so Gateway binds its API socket
         // before first-run connector setup begins.
         await Task.Yield();
+
+        // The post-commit worker restart happens before the admission fence is
+        // removed. Starting a one-shot import here would hit fenced Manager
+        // RPCs and never retry after the appliance becomes available.
+        while (maintenanceActive?.Invoke() ?? KautukaMaintenanceMode.IsActive)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+        }
 
         foreach ((string fileName, string connectorId) in builtInBundles)
         {

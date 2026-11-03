@@ -25,6 +25,22 @@ function AppShell() {
   captureLoginCallbackHash();
   const dismissedUpdateBannerStorageItemName = 'kautuka-dismissed-update-notice-key';
   const autoReloadVersionStorageItemName = 'kautuka-last-seen-ui-version';
+  const updateRestartStorageItemName = 'kautuka-update-restart';
+  const updateRestartRef = React.useRef<{ until: number; targetVersion: string | null } | null>(null);
+  const updateRestartLoadedRef = React.useRef(false);
+  if (!updateRestartLoadedRef.current) {
+    updateRestartLoadedRef.current = true;
+    try {
+      const saved = sessionStorage.getItem(updateRestartStorageItemName);
+      const value: unknown = saved ? JSON.parse(saved) : null;
+      if (value && typeof value === 'object' && 'until' in value && typeof value.until === 'number' &&
+          'targetVersion' in value && (typeof value.targetVersion === 'string' || value.targetVersion === null)) {
+        updateRestartRef.current = { until: value.until, targetVersion: value.targetVersion };
+      }
+    } catch {
+      // The update status still works if session storage is unavailable.
+    }
+  }
   const [theme, setTheme] = React.useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('kautuka-theme');
     return stored === 'light' || stored === 'dark' ? stored : 'light';
@@ -75,8 +91,27 @@ function AppShell() {
 
   const applyObservedUpdateStatus = React.useCallback(
     (nextStatus: UpdateStatusSummary | null) => {
+      const restart = updateRestartRef.current;
+      if (restart && nextStatus?.message === 'update-status-unavailable' && Date.now() < restart.until) {
+        setUpdateStatus((previous) => ({
+          ...(previous ?? nextStatus),
+          ok: true,
+          state: 'Applying',
+          message: 'update-restarting',
+          lastError: null,
+        }));
+        return;
+      }
+      const state = nextStatus?.state.toLowerCase();
+      const version = nextStatus?.currentRelease?.version ?? nextStatus?.managerVersion;
+      if (restart && (Date.now() >= restart.until ||
+          (nextStatus?.ok === true && state === 'current' && version === restart.targetVersion) ||
+          (state === 'available' && Boolean(nextStatus?.lastError)) ||
+          (nextStatus?.ok === false && nextStatus.message !== 'update-status-unavailable'))) {
+        updateRestartRef.current = null;
+        try { sessionStorage.removeItem(updateRestartStorageItemName); } catch { /* Storage is optional. */ }
+      }
       setUpdateStatus(nextStatus);
-
     },
     []
   );
@@ -123,15 +158,16 @@ function AppShell() {
     };
 
     void poll();
+    const pollInterval = updateStatus?.state.toLowerCase() === 'applying' ? 3000 : 30000;
     const intervalId = window.setInterval(() => {
       void poll();
-    }, 30000);
+    }, pollInterval);
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [applyObservedUpdateStatus, authenticated]);
+  }, [applyObservedUpdateStatus, authenticated, updateStatus?.state]);
 
   const runUpdateAction = React.useCallback(
     async (action: 'refresh' | 'apply') => {
@@ -140,6 +176,12 @@ function AppShell() {
       }
 
       setUpdateActionPending(action);
+
+      if (action === 'apply') {
+        const restart = { until: Date.now() + 12 * 60 * 1000, targetVersion: updateStatus?.availableRelease?.version ?? null };
+        updateRestartRef.current = restart;
+        try { sessionStorage.setItem(updateRestartStorageItemName, JSON.stringify(restart)); } catch { /* Storage is optional. */ }
+      }
 
       try {
         const nextStatus =
@@ -163,7 +205,7 @@ function AppShell() {
         setUpdateActionPending(null);
       }
     },
-    [applyObservedUpdateStatus, refreshUpdateStatus]
+    [applyObservedUpdateStatus, refreshUpdateStatus, updateStatus?.availableRelease?.version]
   );
 
   React.useEffect(() => {
@@ -350,7 +392,9 @@ function AppShell() {
       case 'available':
         return `Update ready: ${updateStatus?.availableRelease?.version ?? 'new release'}`;
       case 'applying':
-        return 'Update preflight checks in progress';
+        return updateStatus?.message === 'update-restarting'
+          ? 'Update in progress'
+          : 'Update preflight checks in progress';
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
       case 'current':
@@ -407,6 +451,9 @@ function AppShell() {
     }
 
     if (updateState === 'applying') {
+      if (updateStatus.message === 'update-restarting') {
+        return 'Kautuka is restarting its services. This page will reconnect automatically.';
+      }
       return 'Apply has been requested. The staged updater is running preflight checks before it switches the appliance to the new release.';
     }
 

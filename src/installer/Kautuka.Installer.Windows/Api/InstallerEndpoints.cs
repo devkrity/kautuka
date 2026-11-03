@@ -19,7 +19,7 @@ internal static class InstallerEndpoints
         app.MapGet("/api/appliance/bootstrap", () =>
             Results.Ok(new WindowsApplianceBootstrapResponse
             {
-                Status = WindowsApplianceInstaller.GetStatus(),
+                Status = WindowsApplianceInstaller.GetStatus(launchOptions.InstallDefaults.DistroName),
                 InstallDefaults = launchOptions.InstallDefaults,
                 UninstallDefaults = launchOptions.UninstallDefaults,
                 // The token is not published here. Any local account can call this
@@ -28,7 +28,7 @@ internal static class InstallerEndpoints
             }));
 
         app.MapGet("/api/appliance/status", () =>
-            Results.Ok(WindowsApplianceInstaller.GetStatus()));
+            Results.Ok(WindowsApplianceInstaller.GetStatus(launchOptions.InstallDefaults.DistroName)));
 
         app.MapGet("/api/appliance/pick-folder", async (HttpContext ctx) =>
         {
@@ -76,6 +76,17 @@ internal static class InstallerEndpoints
 
         app.MapPost("/api/appliance/run-install", RunWindowsApplianceInstallSse);
 
+        app.MapPost("/api/appliance/open-existing", async (HttpContext ctx) =>
+        {
+            if (!HasActionToken(ctx)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+            try
+            {
+                await WindowsApplianceInstaller.StartExistingAsync(ctx.RequestAborted).ConfigureAwait(false);
+                return Results.Ok();
+            }
+            catch (InvalidOperationException ex) { return Results.Problem(ex.Message); }
+        });
+
         app.MapPost("/api/appliance/uninstall", async (HttpContext ctx) =>
         {
             if (!HasActionToken(ctx))
@@ -90,7 +101,7 @@ internal static class InstallerEndpoints
             try
             {
                 await WindowsApplianceInstaller.UninstallAsync(req, ctx.RequestAborted).ConfigureAwait(false);
-                return Results.Ok(new { message = "Appliance uninstall complete." });
+                return Results.NoContent();
             }
             catch (IOException ex)
             {
@@ -118,7 +129,7 @@ internal static class InstallerEndpoints
                 await Task.Delay(150).ConfigureAwait(false);
                 lifetime.StopApplication();
                 // Hard-exit fallback in case graceful shutdown stalls.
-                await Task.Delay(3000).ConfigureAwait(false);
+                await Task.Delay(500).ConfigureAwait(false);
                 Environment.Exit(0);
             });
 

@@ -119,15 +119,22 @@ internal static partial class WindowsApplianceInstaller
 
     private static void RegisterMonitorRunKey(string monitorExecutable, string arguments)
     {
-        using Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(runKeyPath, writable: true)
+        using Microsoft.Win32.RegistryKey hive = PlatformInstaller.OpenUserHive(writable: true);
+        using Microsoft.Win32.RegistryKey key = hive.CreateSubKey(runKeyPath, writable: true)
             ?? throw new InvalidOperationException("Could not open the current user's Run key.");
-        key.SetValue(ApplianceTaskPlan.RunValueName, $"\"{monitorExecutable}\" {arguments}");
+        string command = $"\"{monitorExecutable}\" {arguments}";
+        key.SetValue(ApplianceTaskPlan.RunValueName, command);
+        if (!string.Equals(key.GetValue(ApplianceTaskPlan.RunValueName) as string, command, StringComparison.Ordinal))
+            throw new InvalidOperationException("Could not verify the Kautuka monitor sign-in entry.");
     }
 
     private static void RemoveMonitorRunKey()
     {
-        using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(runKeyPath, writable: true);
+        using Microsoft.Win32.RegistryKey hive = PlatformInstaller.OpenUserHive(writable: true);
+        using Microsoft.Win32.RegistryKey? key = hive.OpenSubKey(runKeyPath, writable: true);
         key?.DeleteValue(ApplianceTaskPlan.RunValueName, throwOnMissingValue: false);
+        if (key?.GetValue(ApplianceTaskPlan.RunValueName) is not null)
+            throw new InvalidOperationException("Could not remove the Kautuka monitor sign-in entry.");
     }
 
     /// <summary>

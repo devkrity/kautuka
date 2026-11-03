@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Logging;
 
+using System.Runtime.InteropServices;
+
 namespace Kautuka.Installer.Windows.Hosting;
 
 internal static partial class Program
@@ -22,6 +24,11 @@ internal static partial class Program
 
         if (args.Contains("--uninstall"))
         {
+            var result = MessageBoxW(IntPtr.Zero,
+                $"Uninstall Kautuka? This permanently deletes the '{launchOptions.UninstallDefaults.DistroName}' Linux appliance and all data stored inside it, including accounts and databases. This cannot be undone.",
+                "Uninstall Kautuka", 0x00000004 | 0x00000030 | 0x00000100);
+            if (result != 6)
+                return;
             RunApplianceUninstall(log, launchOptions.UninstallDefaults);
             return;
         }
@@ -43,4 +50,8 @@ internal static partial class Program
 
         RunWithEmbeddedWindow(log, launchOptions);
     }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern int MessageBoxW(IntPtr window, string text, string caption, uint type);
 }

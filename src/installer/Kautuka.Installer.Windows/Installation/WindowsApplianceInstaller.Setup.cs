@@ -2,6 +2,45 @@ namespace Kautuka.Installer.Windows.Installation;
 
 internal static partial class WindowsApplianceInstaller
 {
+    private static bool IsDistroRegistered(string distroName)
+        => GetDistroBasePath(distroName) is not null;
+
+    private static bool HasWindowsRegistration()
+    {
+        using var hive = PlatformInstaller.OpenUserHive(writable: false);
+        using var key = hive.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\KautukaWSL");
+        return key is not null;
+    }
+
+    private static bool PathsEqual(string first, string second)
+        => string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(first)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(second)), StringComparison.OrdinalIgnoreCase);
+
+    internal static bool MatchesOwnedRegistration(WindowsApplianceInstallState ownership, string? ownerSid, string name, string path, string? registrationId)
+        => ownerSid is not null && !string.IsNullOrWhiteSpace(ownership.RegistrationId)
+            && string.Equals(ownerSid, ownership.OwnerSid, StringComparison.Ordinal)
+            && string.Equals(name, ownership.DistroName, StringComparison.OrdinalIgnoreCase)
+            && PathsEqual(path, ownership.InstallDir)
+            && string.Equals(registrationId, ownership.RegistrationId, StringComparison.OrdinalIgnoreCase);
+
+    private static string? GetDistroBasePath(string distroName)
+        => GetDistroRegistration(distroName)?.Path;
+
+    private static (string Id, string Path)? GetDistroRegistration(string distroName)
+    {
+        using var hive = PlatformInstaller.OpenUserHive(writable: false);
+        using var root = hive.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Lxss");
+        if (root is null) return null;
+        foreach (string name in root.GetSubKeyNames())
+        {
+            using var entry = root.OpenSubKey(name);
+            if (string.Equals(entry?.GetValue("DistributionName") as string, distroName, StringComparison.OrdinalIgnoreCase))
+                return (name, entry?.GetValue("BasePath") as string
+                    ?? throw new InvalidOperationException($"The registered distribution '{distroName}' has no install path."));
+        }
+        return null;
+    }
+
     private static async Task EnsureWslPrerequisitesAsync(
         WindowsApplianceInstallState state,
         Func<string, Task> log,
@@ -23,7 +62,7 @@ internal static partial class WindowsApplianceInstaller
             throw new InvalidOperationException("Enabling WSL prerequisites requires an elevated installer session.");
 
         WindowsApplianceStateStore.Save(state);
-        RegisterResumeRunOnce();
+        RegisterResumeRunOnce(state.DistroName);
 
         await log("Enabling WSL prerequisites...").ConfigureAwait(false);
         var installAttempt = await RunProcessAsync(
@@ -80,11 +119,18 @@ internal static partial class WindowsApplianceInstaller
 
     private static async Task EnsureDistroImportedAsync(
         WindowsApplianceInstallState state,
+        bool resume,
         Func<string, Task> log,
         CancellationToken cancellationToken)
     {
-        if (await DistroIsRegisteredAsync(state.DistroName, cancellationToken).ConfigureAwait(false))
+        var registered = GetDistroRegistration(state.DistroName);
+        if (registered is not null)
         {
+            if (!resume)
+                throw new InvalidOperationException("A distribution appeared during setup. Installation stopped without changing it.");
+            if (!PathsEqual(registered.Value.Path, state.InstallDir)
+                || (state.RegistrationId is not null && !string.Equals(registered.Value.Id, state.RegistrationId, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException($"A different distribution named '{state.DistroName}' is registered at another location. Resume stopped without changing it.");
             await log($"WSL appliance '{state.DistroName}' is already registered. Leaving it in place.")
                 .ConfigureAwait(false);
             return;
@@ -99,28 +145,6 @@ internal static partial class WindowsApplianceInstaller
             cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Redirected <c>wsl.exe</c> text on this host is UTF-16 interpreted as another code page,
-    /// so the error code arrives with nulls between the letters.
-    /// </summary>
-    private static async Task<bool> DistroIsRegisteredAsync(string distroName, CancellationToken cancellationToken)
-    {
-        ProcessResult probe = await RunProcessAsync(
-            "wsl.exe",
-            ["-d", distroName, "-e", "/bin/true"],
-            allowFailure: true,
-            cancellationToken).ConfigureAwait(false);
-        if (probe.ExitCode == 0)
-            return true;
-
-        string detail = (probe.StandardOutput + probe.StandardError).Replace("\0", "", StringComparison.Ordinal);
-        if (detail.Contains("WSL_E_DISTRO_NOT_FOUND", StringComparison.Ordinal))
-            return false;
-
-        throw new InvalidOperationException(
-            $"Could not tell whether WSL distro '{distroName}' is registered (exit {probe.ExitCode}). {detail}".Trim());
-    }
-
     private static async Task ConfigureDistroAsync(
         WindowsApplianceInstallState state,
         Func<string, Task> log,
@@ -133,14 +157,15 @@ internal static partial class WindowsApplianceInstaller
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static void RegisterResumeRunOnce()
+    private static void RegisterResumeRunOnce(string distroName)
     {
         var installerExecutablePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(installerExecutablePath))
             throw new InvalidOperationException("Unable to determine the installer executable path for resume registration.");
 
-        var command = $"\"{installerExecutablePath}\" --express --resume";
-        using var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(
+        var command = $"\"{installerExecutablePath}\" --express --resume --distro-name \"{distroName}\"";
+        using var hive = PlatformInstaller.OpenUserHive(writable: true);
+        using var key = hive.CreateSubKey(
             @"Software\Microsoft\Windows\CurrentVersion\RunOnce");
         key?.SetValue("KautukaWslInstallerResume", command);
     }

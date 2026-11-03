@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 
 using Microsoft.Extensions.Logging;
 
@@ -52,12 +54,19 @@ internal static partial class Program
     /// </summary>
     private static void MaterializePhotinoNative()
     {
-        string? directory = Path.GetDirectoryName(Environment.ProcessPath);
-        if (string.IsNullOrWhiteSpace(directory))
-            return;
+        string directory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Kautuka", "InstallerNative");
+        Directory.CreateDirectory(directory);
+        if ((File.GetAttributes(Path.GetDirectoryName(directory)!) & FileAttributes.ReparsePoint) != 0
+            || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Installer native library directory cannot be a link.");
 
         TryMaterializeNative("Kautuka.Installer.Windows.Photino.Native.dll", Path.Combine(directory, "Photino.Native.dll"));
         TryMaterializeNative("Kautuka.Installer.Windows.WebView2Loader.dll", Path.Combine(directory, "WebView2Loader.dll"));
+        NativeLibrary.Load(Path.Combine(directory, "WebView2Loader.dll"));
+        string photinoPath = Path.Combine(directory, "Photino.Native.dll");
+        NativeLibrary.SetDllImportResolver(typeof(PhotinoWindow).Assembly, (name, assembly, searchPath) =>
+            string.Equals(name, "Photino.Native", StringComparison.OrdinalIgnoreCase)
+                ? NativeLibrary.Load(photinoPath) : IntPtr.Zero);
     }
 
     private static void TryMaterializeNative(string resourceName, string destination)
@@ -66,11 +75,12 @@ internal static partial class Program
         if (stream is null)
             return;
 
-        if (File.Exists(destination) && new FileInfo(destination).Length == stream.Length)
+        using var content = new MemoryStream();
+        stream.CopyTo(content);
+        byte[] bytes = content.ToArray();
+        if (File.Exists(destination) && CryptographicOperations.FixedTimeEquals(SHA256.HashData(File.ReadAllBytes(destination)), SHA256.HashData(bytes)))
             return;
-
-        using FileStream file = File.Create(destination);
-        stream.CopyTo(file);
+        File.WriteAllBytes(destination, bytes);
     }
 
     private static bool TryOpenEmbeddedWindow(string uiUrl, string loggedUrl, CancellationTokenSource cts, ILogger log)
@@ -79,7 +89,10 @@ internal static partial class Program
         {
             var window = new PhotinoWindow()
                 .SetTitle("Kautuka Installer")
-                .SetUseOsDefaultSize(true)
+                .SetUseOsDefaultSize(false)
+                .SetSize(820, 680)
+                .SetMinSize(560, 480)
+                .Center()
                 .SetContextMenuEnabled(false)
                 .Load(uiUrl);
 

@@ -10,6 +10,7 @@ const {
   refreshViaCookieMock,
   fetchUpdateStatusMock,
   refreshUpdateDiscoveryMock,
+  applyUpdateMock,
   revertUpdateMock,
   setAccessTokenMock,
   setAuthFailureHandlerMock,
@@ -20,6 +21,7 @@ const {
   refreshViaCookieMock: vi.fn(),
   fetchUpdateStatusMock: vi.fn(),
   refreshUpdateDiscoveryMock: vi.fn(),
+  applyUpdateMock: vi.fn(),
   revertUpdateMock: vi.fn(),
   setAccessTokenMock: vi.fn(),
   setAuthFailureHandlerMock: vi.fn(),
@@ -58,7 +60,7 @@ vi.mock('@/features/dashboard', async () => {
     ...actual,
     fetchUpdateStatus: fetchUpdateStatusMock,
     refreshUpdateDiscovery: refreshUpdateDiscoveryMock,
-    applyUpdate: vi.fn(),
+    applyUpdate: applyUpdateMock,
     revertUpdate: revertUpdateMock,
   };
 });
@@ -146,6 +148,7 @@ function renderApp() {
 describe('App update banner', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionStorageMock.getItem.mockImplementation(() => null);
     queryClient.clear();
 
     Object.defineProperty(window, 'localStorage', {
@@ -193,6 +196,7 @@ describe('App update banner', () => {
       lastError: null,
     });
     refreshUpdateDiscoveryMock.mockReset();
+    applyUpdateMock.mockReset();
     revertUpdateMock.mockReset();
 
     vi.stubGlobal(
@@ -222,6 +226,64 @@ describe('App update banner', () => {
       )
     ).toBeInTheDocument();
     expect(screen.queryByTitle('Dismiss update notice')).not.toBeInTheDocument();
+  });
+
+  it('shows update progress rather than the updater socket error during a recorded restart', async () => {
+    sessionStorageMock.getItem.mockImplementation((key) => key === 'kautuka-update-restart'
+      ? JSON.stringify({ until: Date.now() + 60_000, targetVersion: '0.1.20-preview.21' })
+      : null);
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: false, message: 'update-status-unavailable', state: 'Unavailable',
+      managerVersion: '', lastError: 'Cannot assign requested address (localhost:443)',
+    });
+    renderApp();
+    await waitFor(() => expect(screen.getByText('Update in progress')).toBeInTheDocument());
+    expect(screen.queryByText('Update service unavailable')).not.toBeInTheDocument();
+    expect(screen.queryByText(/localhost:443/)).not.toBeInTheDocument();
+  });
+
+  it('records an apply across a page reload so a restart does not surface a socket error', async () => {
+    const release = { releaseId: 'v2', version: '2.0.0', channel: 'preview', releaseFingerprint: 'fp' };
+    const available = { ok: true, message: 'update-status', state: 'Available', availableRelease: release, managerVersion: '1.0.0', lastError: null };
+    fetchUpdateStatusMock.mockResolvedValue(available);
+    applyUpdateMock.mockResolvedValue({ ...available, message: 'update-apply-accepted', state: 'Applying' });
+    const view = renderApp();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(applyUpdateMock).toHaveBeenCalledOnce());
+    const saved = sessionStorageMock.setItem.mock.calls.find(([key]) => key === 'kautuka-update-restart')?.[1];
+    expect(saved).toBeTruthy();
+    view.unmount();
+    sessionStorageMock.getItem.mockImplementation((key) => key === 'kautuka-update-restart' ? String(saved) : null);
+    fetchUpdateStatusMock.mockResolvedValue({ ok: false, message: 'update-status-unavailable', state: 'Unavailable', managerVersion: '', lastError: 'localhost:443' });
+    renderApp();
+    await waitFor(() => expect(screen.getByText('Update in progress')).toBeInTheDocument());
+    expect(screen.queryByText('Update service unavailable')).not.toBeInTheDocument();
+  });
+
+  it('shows a real updater outage when the restart window has expired', async () => {
+    sessionStorageMock.getItem.mockImplementation((key) => key === 'kautuka-update-restart'
+      ? JSON.stringify({ until: Date.now() - 1, targetVersion: '0.1.20-preview.21' })
+      : null);
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: false, message: 'update-status-unavailable', state: 'Unavailable',
+      managerVersion: '', lastError: 'Cannot assign requested address (localhost:443)',
+    });
+    renderApp();
+    await waitFor(() => expect(screen.getByText('Update service unavailable')).toBeInTheDocument());
+    expect(sessionStorageMock.removeItem).toHaveBeenCalledWith('kautuka-update-restart');
+  });
+
+  it('clears the restart window once the target release is current', async () => {
+    sessionStorageMock.getItem.mockImplementation((key) => key === 'kautuka-update-restart'
+      ? JSON.stringify({ until: Date.now() + 60_000, targetVersion: '0.1.20-preview.21' })
+      : null);
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: true, message: 'update-status', state: 'Current',
+      managerVersion: '0.1.20-preview.21', lastError: null,
+    });
+    renderApp();
+    await waitFor(() => expect(sessionStorageMock.removeItem).toHaveBeenCalledWith('kautuka-update-restart'));
   });
 
   it('shows the update banner when discovery fails during a refresh', async () => {

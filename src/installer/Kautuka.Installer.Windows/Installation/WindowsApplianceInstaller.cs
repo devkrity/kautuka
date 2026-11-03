@@ -9,7 +9,7 @@ internal static partial class WindowsApplianceInstaller
     private const string defaultDistroName = "kautuka";
     private static readonly char[] newLineSeparators = ['\r', '\n'];
 
-    public static WindowsApplianceStatusResponse GetStatus()
+    public static WindowsApplianceStatusResponse GetStatus(string distroName = defaultDistroName)
     {
         var defaultInstallDir = DeriveInstallDir(defaultDistroName);
 
@@ -22,6 +22,7 @@ internal static partial class WindowsApplianceInstaller
 
         var wslFeaturesEnabled = isWindows && AreWslFeaturesEnabled(featureStates);
         var wslAvailable = isWindows && CommandAvailable("wsl.exe");
+        var verifiedExisting = isWindows ? GetVerifiedExistingDistroName() : null;
 
         return new WindowsApplianceStatusResponse
         {
@@ -30,7 +31,9 @@ internal static partial class WindowsApplianceInstaller
             WslAvailable = wslAvailable,
             WslFeaturesEnabled = wslFeaturesEnabled,
             WslReady = wslAvailable && wslFeaturesEnabled,
-            HasResumeState = WindowsApplianceStateStore.Exists(),
+            ExistingDistro = isWindows && (IsDistroRegistered(distroName) || IsDistroRegistered(defaultDistroName) || WindowsApplianceStateStore.InstalledExists() || HasWindowsRegistration()),
+            CanOpenExisting = verifiedExisting is not null,
+            HasResumeState = WindowsApplianceStateStore.Matches(distroName),
             DefaultKautukaRoot = defaultInstallDir,
             DefaultInstallDir = defaultInstallDir,
             FeatureStates = featureStates,
@@ -39,6 +42,33 @@ internal static partial class WindowsApplianceInstaller
 
     public static Task<string?> PickFolderForInstallAsync(string? initialPath, CancellationToken cancellationToken)
         => PickFolderAsync(initialPath, cancellationToken);
+
+    internal static string? GetVerifiedExistingDistroName()
+    {
+        try
+        {
+            var ownership = WindowsApplianceStateStore.LoadInstalled();
+            string? sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
+            var registered = GetDistroRegistration(ownership.DistroName);
+            return ResolveVerifiedExistingDistroName(ownership, sid, registered);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    internal static string? ResolveVerifiedExistingDistroName(WindowsApplianceInstallState ownership, string? sid, (string Id, string Path)? registered)
+        => registered is not null && !string.IsNullOrWhiteSpace(ownership.InstallDir)
+            && MatchesOwnedRegistration(ownership, sid, ownership.DistroName, registered.Value.Path, registered.Value.Id)
+                ? ownership.DistroName : null;
+
+    public static async Task StartExistingAsync(CancellationToken cancellationToken)
+    {
+        string name = GetVerifiedExistingDistroName()
+            ?? throw new InvalidOperationException("This installation cannot be verified. Start it using its existing Kautuka Monitor.");
+        await WaitForWebUiReadyAsync(name, _ => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
+    }
 
     public static async Task InstallAsync(
         WindowsApplianceInstallRequest request,
@@ -50,24 +80,44 @@ internal static partial class WindowsApplianceInstaller
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        if (!request.Resume && (IsDistroRegistered(request.DistroName) || IsDistroRegistered(defaultDistroName)
+            || WindowsApplianceStateStore.InstalledExists() || HasWindowsRegistration()))
+            throw new InvalidOperationException($"A WSL distribution named '{request.DistroName}' already exists. Open Kautuka to check for updates; installation has not modified it.");
+
         var state = request.Resume
             ? WindowsApplianceStateStore.Load()
             : await ResolveStateAsync(request, log, cancellationToken).ConfigureAwait(false);
+        string ownerSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+            ?? throw new InvalidOperationException("Could not identify the Windows user for this installation.");
+        if (request.Resume && (!string.Equals(state.OwnerSid, ownerSid, StringComparison.Ordinal)
+            || !string.Equals(state.DistroName, request.DistroName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("The saved installation belongs to a different Windows user or is missing ownership information.");
+        state = state with { OwnerSid = ownerSid };
+        WindowsApplianceStateStore.VerifyRootfs(state);
         if (request.AllowLanAccess && !state.AllowLanAccess)
             state = state with { AllowLanAccess = true };
 
         await log($"Preparing Windows appliance install for distro '{state.DistroName}'...").ConfigureAwait(false);
+
+        WindowsApplianceStateStore.Save(state);
 
         await EnsureWslPrerequisitesAsync(state, log, cancellationToken).ConfigureAwait(false);
 
         state = StageAssets(state);
         await log("Staged installer executable.").ConfigureAwait(false);
 
-        await EnsureDistroImportedAsync(state, log, cancellationToken).ConfigureAwait(false);
+        await EnsureDistroImportedAsync(state, request.Resume, log, cancellationToken).ConfigureAwait(false);
+        var imported = GetDistroRegistration(state.DistroName)
+            ?? throw new InvalidOperationException("The imported Kautuka environment was not registered.");
+        if (!PathsEqual(imported.Path, state.InstallDir))
+            throw new InvalidOperationException("The imported Kautuka environment has an unexpected location.");
+        state = state with { RegistrationId = imported.Id };
+        WindowsApplianceStateStore.Save(state);
         await ConfigureDistroAsync(state, log, cancellationToken).ConfigureAwait(false);
         await WaitForWebUiReadyAsync(state.DistroName, log, cancellationToken).ConfigureAwait(false);
         await ApplyLanChoiceAsync(state.AllowLanAccess, log, cancellationToken).ConfigureAwait(false);
 
+        WindowsApplianceStateStore.SaveInstalled(state);
         PlatformInstaller.RegisterWindowsApplianceUninstall(
             state.InstallerExecutablePath,
             state.ReleaseId,
@@ -96,6 +146,9 @@ internal static partial class WindowsApplianceInstaller
         }
 
         WindowsApplianceStateStore.Delete();
+        try { WindowsApplianceStateStore.DeleteRootfs(state); }
+        catch (IOException ex) { await log($"The installation succeeded, but its temporary archive could not be removed: {ex.Message}").ConfigureAwait(false); }
+        catch (UnauthorizedAccessException ex) { await log($"The installation succeeded, but its temporary archive could not be removed: {ex.Message}").ConfigureAwait(false); }
 
         await log($"Kautuka appliance installed. Open {webUrl}.").ConfigureAwait(false);
         await log($"WSL distro: {state.DistroName}").ConfigureAwait(false);
@@ -111,14 +164,36 @@ internal static partial class WindowsApplianceInstaller
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        await RemoveMonitorResidencyAsync(request.DistroName, cancellationToken).ConfigureAwait(false);
-        await RemoveLanAccessAsync(cancellationToken).ConfigureAwait(false);
+        var ownership = WindowsApplianceStateStore.LoadInstalled();
+        string? currentSid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value;
+        if (currentSid is null || !string.Equals(currentSid, ownership.OwnerSid, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(ownership.RegistrationId))
+            throw new InvalidOperationException("The protected installation record does not identify this Windows user and appliance. Nothing was removed.");
+        string recordedName = ownership.DistroName;
+        string recordedPath = ownership.InstallDir;
+        if (string.IsNullOrWhiteSpace(recordedPath) || string.IsNullOrWhiteSpace(request.InstallDir)
+            || !string.Equals(request.DistroName, recordedName, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(recordedName, ownership.DistroName, StringComparison.OrdinalIgnoreCase)
+            || !PathsEqual(recordedPath, request.InstallDir) || !PathsEqual(recordedPath, ownership.InstallDir))
+            throw new InvalidOperationException("The requested uninstall target does not match the Kautuka installation record. Nothing was removed.");
 
-        await RunProcessAsync(
-            "wsl.exe",
-            ["--unregister", request.DistroName],
-            allowFailure: true,
-            cancellationToken).ConfigureAwait(false);
+        var registered = GetDistroRegistration(recordedName);
+        if (registered is not null && (!PathsEqual(registered.Value.Path, recordedPath)
+            || !MatchesOwnedRegistration(ownership, currentSid, recordedName, registered.Value.Path, registered.Value.Id)))
+            throw new InvalidOperationException("The registered distribution is in a different folder. Nothing was removed.");
+
+        if (registered is not null)
+        {
+            var removal = await RunProcessAsync("wsl.exe", ["--unregister", recordedName],
+                allowFailure: true, cancellationToken).ConfigureAwait(false);
+            if (removal.ExitCode != 0 && !IsDistroNotFound(removal))
+                throw new InvalidOperationException("Windows could not remove the Kautuka environment. Its uninstall entry was retained so you can retry.");
+            if (GetDistroBasePath(recordedName) is not null)
+                throw new InvalidOperationException("The Kautuka environment is still registered. Its uninstall entry was retained so you can retry.");
+        }
+
+        await RemoveMonitorResidencyAsync(recordedName, cancellationToken).ConfigureAwait(false);
+        await RemoveLanAccessAsync(cancellationToken).ConfigureAwait(false);
 
         foreach (string shortcutName in new[] { "Kautuka.url", "Kautuka.lnk" })
         {
@@ -128,14 +203,14 @@ internal static partial class WindowsApplianceInstaller
         }
 
         PlatformInstaller.UnregisterWindowsAppliance();
+        WindowsApplianceStateStore.DeleteInstalled();
 
-        var installDir = string.IsNullOrWhiteSpace(request.InstallDir)
-            ? DeriveInstallDir(request.DistroName)
-            : request.InstallDir;
-
-        if (request.DeleteData && Directory.Exists(installDir))
+        if (request.DeleteData && Directory.Exists(recordedPath))
         {
-            Directory.Delete(installDir, recursive: true);
+            // Never recursively delete a caller-selected Windows folder. WSL unregister
+            // removes its virtual disk; remove the folder only when it is empty.
+            if (!Directory.EnumerateFileSystemEntries(recordedPath).Any())
+                Directory.Delete(recordedPath);
         }
     }
 
