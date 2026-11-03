@@ -71,7 +71,9 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("chmod 2750 \"$credentials_root\" \"$credentials_root/transport\" \"$credentials_state_root\" \"$credentials_state_root/transport\"", source, StringComparison.Ordinal);
         Assert.Contains("chown \"$credential_user:$credential_group\" \"$credentials_root\" \"$credentials_root/transport\" \"$credentials_state_root\" \"$credentials_state_root/transport\"", source, StringComparison.Ordinal);
         Assert.Contains("mkdir -p \"$version_root\" \"$log_dir\" \"$credentials_root/vault\" \"$credentials_root/transport\" \"$credentials_state_root/vault\" \"$credentials_state_root/transport\"", source, StringComparison.Ordinal);
-        Assert.Contains("chown -R \"$credential_user:$credential_user\" \"$install_root\" \"$credentials_root/vault\" \"$credentials_state_root/vault\" \"$credentials_root/transport\" \"$credentials_state_root/transport\" \"$log_dir\"", source, StringComparison.Ordinal);
+        Assert.Contains("chown -R root:root \"$install_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("chmod -R go-w \"$install_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("chown -R \"$credential_user:$credential_user\" \"$credentials_root/vault\" \"$credentials_state_root/vault\" \"$credentials_root/transport\" \"$credentials_state_root/transport\" \"$log_dir\"", source, StringComparison.Ordinal);
         Assert.Contains("chmod 0700 \"$credentials_root/vault\" \"$credentials_state_root/vault\" \"$log_dir\"", source, StringComparison.Ordinal);
         Assert.Contains("validate_material_owner_mode \"$internal_state_root/credentialsHost/vault\" 'kautuka-credentials:kautuka-credentials:700'", source, StringComparison.Ordinal);
         Assert.Contains("Gateway can read CredentialsHost vault", source, StringComparison.Ordinal);
