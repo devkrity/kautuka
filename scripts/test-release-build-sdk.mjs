@@ -109,6 +109,7 @@ try {
     const executables = [
       'bin/kautuka-manager',
       'bin/kautuka-apply-release',
+      'bin/kautuka-update-recovery',
       'services/gateway/kautuka-gateway',
       'services/credentialshost/kautuka-credentialshost',
       'services/channelhost/kautuka-channelhost',
@@ -122,6 +123,7 @@ try {
     }
     await mkdir(path.join(fixtureSource, 'scripts'), { recursive: true });
     await writeFile(path.join(fixtureSource, 'scripts/kautuka-apply-release.sh'), 'fixture apply script');
+    await writeFile(path.join(fixtureSource, 'scripts/kautuka-update-recovery.py'), 'fixture recovery script');
     await mkdir(path.join(fixtureSource, 'src/frontend/web/dist'), { recursive: true });
     await writeFile(path.join(fixtureSource, 'src/frontend/web/dist/index.html'), 'fixture web payload');
     const start = builder.indexOf('cp "$source_root/scripts/kautuka-apply-release.sh"');
