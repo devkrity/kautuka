@@ -94,6 +94,9 @@ jobs:
       - name: Test scheduled release gate
         run: node ./scripts/test-release-schedule-gate.mjs
 
+      - name: Test release source policy
+        run: node ./scripts/test-release-source-policy.mjs
+
       - name: Test Preview tag retry resolution
         run: node ./scripts/test-preview-retry-resolution.mjs
 
