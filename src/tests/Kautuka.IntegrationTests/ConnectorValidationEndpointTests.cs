@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -855,10 +856,12 @@ public sealed class ConnectorValidationEndpointTests
         Assert.Equal("created", response.RootElement.GetProperty("outcome").GetString());
         Assert.Equal("ready", response.RootElement.GetProperty("connector").GetProperty("runtimeArtifactBuildStatus").GetString());
 
-        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
+        string? bundlePath = response.RootElement.GetProperty("connector").GetProperty("bundlePath").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(bundlePath));
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForBundle(bundlePath);
         Assert.Equal("container", captured.Transport);
         Assert.Equal("node", captured.ServerType);
-        Assert.False(string.IsNullOrWhiteSpace(captured.BundlePath));
+        Assert.Equal(bundlePath, captured.BundlePath);
     }
 
     [Fact]
@@ -1422,16 +1425,25 @@ public sealed class ConnectorValidationEndpointTests
             => app.Services.GetRequiredService<IMcpConnectorTestService>() is CapturingConnectorTestService service
                 ? service.LastRequest ?? throw new XunitException("No connector test request was captured.")
                 : throw new XunitException("Capturing connector test service is not registered.");
+
+        public GatewayConnectorTestRequest GetCapturedTestRequestForBundle(string? bundlePath)
+            => app.Services.GetRequiredService<IMcpConnectorTestService>() is CapturingConnectorTestService service
+                ? service.Requests.FirstOrDefault(request => request.BundlePath == bundlePath)
+                    ?? throw new XunitException("No connector test request was captured for the imported bundle.")
+                : throw new XunitException("Capturing connector test service is not registered.");
     }
 
     private sealed class CapturingConnectorTestService : IMcpConnectorTestService
     {
+        public ConcurrentQueue<GatewayConnectorTestRequest> Requests { get; } = new();
+
         public GatewayConnectorTestRequest? LastRequest { get; private set; }
 
         public McpConnectorTestResult? NextResult { get; set; }
 
         public Task<McpConnectorTestResult> TestAsync(GatewayConnectorTestRequest request, CancellationToken ct)
         {
+            Requests.Enqueue(request);
             LastRequest = request;
             if (NextResult is not null)
             {
