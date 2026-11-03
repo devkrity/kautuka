@@ -8,7 +8,7 @@ internal static partial class GatewaySettingsEndpointMappings
 {
     private static void MapSystemSettingsEndpoints(WebApplication app)
     {
-        app.MapGet("/api/settings/system", (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/settings/system", async (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
@@ -16,7 +16,7 @@ internal static partial class GatewaySettingsEndpointMappings
                 return unauthorized;
             }
 
-            return Results.Json(settings.GetPayload(), KautukaJsonContext.Default.GatewaySystemSettingsResponse);
+            return Results.Json(await settings.GetEffectiveSettingsAsync(ct).ConfigureAwait(false), KautukaJsonContext.Default.GatewaySystemSettingsResponse);
         });
 
         app.MapGet("/api/settings/runtime-limits", (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context) =>
@@ -38,7 +38,7 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             await settings.SaveAsync(body, ct).ConfigureAwait(false);
-            return Results.Json(settings.GetPayload(), KautukaJsonContext.Default.GatewaySystemSettingsResponse);
+            return Results.Json(await settings.GetEffectiveSettingsAsync(ct).ConfigureAwait(false), KautukaJsonContext.Default.GatewaySystemSettingsResponse);
         });
 
     }

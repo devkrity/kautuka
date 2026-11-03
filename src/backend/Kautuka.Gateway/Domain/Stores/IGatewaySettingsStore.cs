@@ -13,6 +13,8 @@ internal interface IGatewaySettingsStore
     }
     GatewaySystemSettingsResponse GetPayload();
     GatewayAdvancedSettingsResponse GetAdvancedSettingsPayload();
+    Task<GatewaySystemSettingsResponse> GetEffectiveSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(GetPayload());
+    Task<GatewayAdvancedSettingsResponse> GetEffectiveAdvancedSettingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(GetAdvancedSettingsPayload());
     Task SaveAdvancedSettingsAsync(JsonElement body, CancellationToken cancellationToken = default);
     void SaveProviderPathPolicySettings(JsonElement body);
     void SaveMemorySettings(JsonElement body);

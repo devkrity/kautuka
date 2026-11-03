@@ -30,6 +30,8 @@ Record the candidate tag, commit, installed source version, platform, and test r
 
 After Preview publication, install it from the public repository's Releases page and set the app update channel to **Preview**. Check the displayed version and short commit SHA, exercise updates, and report regressions against the tagged commit. Preview Windows installers may be unsigned; Authenticode status is disclosed in `SIGNING-STATUS.txt`.
 
+The update channel shown in advanced settings reflects UpdateService's effective policy. If UpdateService is temporarily unreachable or its client certificates are unavailable during startup, the page falls back to the last saved Gateway setting; check service health before changing channels in that case.
+
 ## Manual Stable release
 
 1. Choose the Preview tag that passed testing, for example `v0.1.20-preview.3`, and record its commit.
