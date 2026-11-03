@@ -16,20 +16,30 @@ The `resolve-channel` job runs for `workflow_dispatch` so maintainers can perfor
 
 ## Nightly Preview
 
-Set `KAUTUKA_UPCOMING_STABLE_VERSION` to the next plain SemVer, such as `0.1.20`. The nightly run computes the next `v0.1.20-preview.N`, tags the current `main` commit, builds the artifacts, creates a draft, uploads and validates the complete asset set, and publishes an immutable GitHub prerelease. If no commits have landed since the latest Preview tag, a retry can reuse that exact tag only when no release exists or a matching empty draft exists. A partial draft or mismatched release identity stops for maintainer review. A matching published release is skipped only when GitHub reports it immutable. The workflow never moves or deletes tags and does not replace published assets.
+Set `KAUTUKA_UPCOMING_STABLE_VERSION` to the next plain SemVer, such as `0.1.21`. The scheduled run computes the next `v0.1.21-preview.N`, tags the current `main` commit, builds the artifacts, creates a draft, uploads and validates the complete asset set, and publishes an immutable GitHub prerelease. If no commits have landed since the latest Preview tag, a retry can reuse that exact tag only when no release exists or a matching empty draft exists. A partial draft or mismatched release identity stops for maintainer review. A matching published release is skipped only when GitHub reports it immutable. The workflow never moves or deletes tags and does not replace published assets.
 
 For an immediate Preview, dispatch **Release Pipeline** from `main`, set `publish_preview_now=true`, leave `release_tag` empty, and set `dry_run=false`. This explicit opt-in uses the same next-tag selection, immutable-release retry checks, signing, attestation, artifact validation, draft upload, and publish path as the scheduled run. Without that opt-in, manual Preview dispatches can only rebuild and verify an existing Preview tag with `dry_run=true`.
+
+## Release stabilization
+
+Contributors target `main`. When a release needs independent stabilization, create `release/vX.Y.Z` from the selected `main` commit and protect it with the same PR and CI requirements as `main`. Keep normal PRs flowing to `main`; cherry-pick only reviewed release blockers, with tests, into the release branch. Ensure each fix also exists on `main`. Temporarily disable scheduled Preview publication while preparing the branch and use manual dispatch with `source_branch=release/vX.Y.Z` and `publish_preview_now=true` to publish each candidate. The latest Preview tag, even from a previous version, must be an ancestor of the selected source branch; a higher version cannot send Preview users to divergent code and potentially incompatible databases. After Stable publication, merge the release branch into `main` through a reviewed PR to preserve its commit ancestry, bump `KAUTUKA_UPCOMING_STABLE_VERSION` to the next version, and only then re-enable scheduled Preview publication. Do not delete the release branch until publication and the merge back complete; delete it afterward, retaining immutable tags.
+
+For an urgent patch after a newer Preview has diverged, do not publish the patch branch as public Preview. The current pipeline deliberately rejects that unsafe transition; use an isolated candidate process before enabling such patch releases. A versioned patch branch alone is not sufficient authorization to move Preview users backward in source history.
+
+Record the candidate tag, commit, installed source version, platform, and test results. Test the exact candidate's installed upgrade, failed activation and recovery, and the Stable artifacts from that same commit. A published Preview tag establishes identity, not proof of testing. Check database compatibility as well as version ordering: Preview users who select Stable must wait for a newer compatible Stable; never force an older or incompatible Stable over Preview data.
 
 After Preview publication, install it from the public repository's Releases page and set the app update channel to **Preview**. Check the displayed version and short commit SHA, exercise updates, and report regressions against the tagged commit. Preview Windows installers may be unsigned; Authenticode status is disclosed in `SIGNING-STATUS.txt`.
 
 ## Manual Stable release
 
 1. Choose the Preview tag that passed testing, for example `v0.1.20-preview.3`, and record its commit.
-2. Create the plain stable tag `v0.1.20` on that same commit. The workflow rejects a stable tag without a matching Preview tag on the same commit.
-3. Dispatch **Release Pipeline** from `main` with the stable tag and `dry_run=true`. Review the version, source SHA, artifacts, signatures, checksums, and CI results.
+2. Create the plain stable tag `v0.1.20` on that same commit. The workflow rejects a stable tag without a matching published Preview release on the same commit.
+3. Dispatch **Release Pipeline** from `main` with the stable tag, the source branch (`main` or `release/v0.1.20`), and `dry_run=true`. Review the version, source SHA, artifacts, signatures, checksums, and CI results.
 4. Dispatch with `dry_run=false` only after the `stable` GitHub Environment enforces owner approval. The workflow creates a draft GitHub Release, uploads and validates the flat asset set, publishes the immutable release, and checks GitHub's immutable status.
 
 Stable tags are plain SemVer (`vX.Y.Z`; product version `X.Y.Z`). Do not reuse published versions or move a release tag to different source. Fix a bad release forward with a new version.
+
+Both channel environments must use the common release signing key whose public key was provisioned by Preview 22. The build fails before publishing if any platform derives a different public-key fingerprint. Stable `0.1.20` was published with an older distinct key; its assets remain immutable, and it is not a supported automatic key transition to the common-key release. Do not expose signing private keys in logs or repository files.
 
 ## Release recovery
 

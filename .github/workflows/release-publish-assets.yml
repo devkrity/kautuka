@@ -310,11 +310,23 @@ jobs:
       - name: Prepare release notes
         env:
           ARTIFACT_SCOPE: ${{ steps.scope.outputs.artifact_scope }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
+          set -euo pipefail
           notes="release-artifacts/kautuka-release-entrypoint-notes-${ARTIFACT_SCOPE}/kautuka-release-entrypoints.md"
           test -s "$notes"
           mkdir -p release-notes
           cp "$notes" release-notes/kautuka-release-entrypoints.md
+          gh api --method POST "repos/$REPOSITORY/releases/generate-notes" \
+            -f tag_name="$RELEASE_TAG" -f target_commitish="$SOURCE_SHA" \
+            --jq '.body' > release-notes/generated.md
+          if [[ -s release-notes/generated.md ]]; then
+            printf '\n' >> release-notes/kautuka-release-entrypoints.md
+            cat release-notes/generated.md >> release-notes/kautuka-release-entrypoints.md
+          fi
 
       - name: Validate complete flat release asset set
         env:

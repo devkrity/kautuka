@@ -41,6 +41,10 @@ on:
     secrets:
       release_manifest_private_key:
         required: true
+env:
+  # SHA-256 of the canonical preview/common ECDSA public key in DER SubjectPublicKeyInfo form.
+  KAUTUKA_RELEASE_SIGNING_KEY_SHA256: 3271c8e7e8f8ec5382b27a52a6da2877abaedd7d55bec8387eb847d629ad1e20 # gitleaks:allow -- public-key fingerprint
+
 jobs:
   build-linux-release-assets:
     name: Build Linux Release Assets
@@ -160,6 +164,8 @@ jobs:
           printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > "$private_key_path"
           chmod 600 "$private_key_path"
           openssl pkey -in "$private_key_path" -pubout -out "$public_key_path"
+          actual="$(openssl pkey -pubin -in "$public_key_path" -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
           chmod 644 "$public_key_path"
           printf 'RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\n' "$private_key_path" >> "$GITHUB_ENV"
           printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
@@ -315,6 +321,8 @@ jobs:
           printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
           chmod 600 manifest-signing-key.pem
           openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          actual="$(openssl pkey -pubin -in manifest-signing-public.pem -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
           chmod 644 manifest-signing-public.pem
 
       - name: Publish Windows appliance installer
@@ -502,6 +510,8 @@ jobs:
           printf '%s\n' "$RELEASE_MANIFEST_PRIVATE_KEY" > manifest-signing-key.pem
           chmod 600 manifest-signing-key.pem
           openssl pkey -in manifest-signing-key.pem -pubout -out manifest-signing-public.pem
+          actual="$(openssl pkey -pubin -in manifest-signing-public.pem -outform DER | openssl dgst -sha256 -r | awk '{print $1}')"
+          [[ "$actual" == "$KAUTUKA_RELEASE_SIGNING_KEY_SHA256" ]] || { echo 'error: release signing key does not match the common trusted key.' >&2; exit 1; }
           chmod 644 manifest-signing-public.pem
 
       - name: Create Linux installer release asset
