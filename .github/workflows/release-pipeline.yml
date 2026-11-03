@@ -701,7 +701,7 @@ jobs:
       - resolve-channel
       - build-platform-assets
       - prepare-stable-draft
-    if: ${{ needs.resolve-channel.outputs.dry_run != 'true' && needs.prepare-stable-draft.result == 'success' }}
+    if: ${{ always() && needs.resolve-channel.result == 'success' && needs.build-platform-assets.result == 'success' && needs.prepare-stable-draft.result == 'success' && needs.resolve-channel.outputs.dry_run != 'true' }}
     permissions:
       actions: write
       contents: write
