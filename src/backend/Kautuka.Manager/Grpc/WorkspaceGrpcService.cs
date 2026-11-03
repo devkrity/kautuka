@@ -3,6 +3,7 @@ using System.Text.Json;
 using Grpc.Core;
 
 using Kautuka.Manager.Hosting;
+using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
@@ -654,7 +655,10 @@ public sealed class WorkspaceGrpcService(
                 desiredSandboxConnectorBindings,
                 string.IsNullOrWhiteSpace(request.PublisherEpoch) ? "gateway" : request.PublisherEpoch.Trim());
 
-            if (applyResult.RequiresReconciliation)
+            // Gateway must be able to republish the durable desired state while the
+            // appliance is fenced after recovery. Persist that source of truth, but
+            // never reconcile containers or connector side effects in maintenance.
+            if (KautukaMaintenanceMode.ShouldRunDesiredStateSideEffects(applyResult.RequiresReconciliation, KautukaMaintenanceMode.IsActive))
             {
                 await this.connectorExecutionService
                     .ApplyDesiredStateUpdateAsync(applyResult.PreviousConnectors, desiredConnectors, context.CancellationToken)

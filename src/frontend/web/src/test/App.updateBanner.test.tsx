@@ -73,16 +73,12 @@ vi.mock('@/components/Header', () => ({
     updateDescription,
     canApplyUpdate,
     onApplyUpdate,
-    canRollbackUpdate,
-    onRollbackUpdate,
     onCheckForUpdates,
   }: {
     updateTitle?: string;
     updateDescription?: string;
     canApplyUpdate?: boolean;
     onApplyUpdate?: () => void;
-    canRollbackUpdate?: boolean;
-    onRollbackUpdate?: () => void;
     onCheckForUpdates?: () => void;
   }) => (
     <div>
@@ -90,7 +86,6 @@ vi.mock('@/components/Header', () => ({
       {updateTitle ? <div data-testid="sidebar-update-title">{updateTitle}</div> : null}
       {updateDescription ? <div>{updateDescription}</div> : null}
       {canApplyUpdate ? <button onClick={onApplyUpdate}>Apply</button> : null}
-      {canRollbackUpdate ? <button onClick={onRollbackUpdate}>Roll back</button> : null}
       {onCheckForUpdates ? <button onClick={onCheckForUpdates}>Check for updates</button> : null}
     </div>
   ),
@@ -306,9 +301,7 @@ describe('App update banner', () => {
       ).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByText(/Rejected: http:\/\/192\.168\.1\.20:20300/)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Rejected: http:\/\/192\.168\.1\.20:20300/)).toBeInTheDocument();
     expect(
       screen.getByText(/downloads releases only over https or loopback http/)
     ).toBeInTheDocument();
@@ -399,6 +392,29 @@ describe('App update banner', () => {
         'error:update-apply-failed:release-preview-13043308'
       );
     });
+  });
+
+  it('shows the recovery failure when the failed release remains available', async () => {
+    fetchUpdateStatusMock.mockResolvedValueOnce({
+      ok: true,
+      message: 'update-status',
+      state: 'Available',
+      effectiveReleaseChannel: 'preview',
+      eligibilityState: 'Available',
+      eligibilityReason: 'None',
+      currentRelease: { releaseId: 'v1', version: '1.0.0', channel: 'preview', releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v1' },
+      availableRelease: { releaseId: 'v2', version: '2.0.0', channel: 'preview', releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v2' },
+      lastKnownGoodRelease: null,
+      lastDiscoveryAttemptUtc: null,
+      lastDiscoverySuccessUtc: null,
+      managerVersion: '1.0.0',
+      hostReady: true,
+      activeExecCount: 0,
+      lastError: 'The update apply for release 2.0.0 did not complete. The current release is still active.',
+    });
+    renderApp();
+    await waitFor(() => expect(screen.getByText('Update requires attention')).toBeInTheDocument());
+    expect(screen.getByText('The update apply for release 2.0.0 did not complete. The current release is still active.')).toBeInTheDocument();
   });
 
   it('shows preflight progress messaging while apply is in progress', async () => {
@@ -813,15 +829,32 @@ describe('App update banner', () => {
     expect(screen.queryByTitle('Dismiss update notice')).not.toBeInTheDocument();
   });
 
-  it('shows rollback complete when a newer release is immediately available', async () => {
-    sessionStorageMock.getItem.mockImplementation((key: string) =>
-      key === 'kautuka-pending-rollback-version' ? '0.1.20-preview.17' : null
-    );
+  it('shows the recovery error while an update is applying', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
-      state: 'Available',
+      state: 'Applying',
+      lastError: 'An interrupted update needs administrator recovery.',
       currentRelease: { version: '0.1.20-preview.17' },
-      availableRelease: { version: '0.1.20-preview.19' },
+      managerVersion: '0.1.20-preview.17',
+      hostReady: true,
+      activeExecCount: 0,
+    });
+
+    renderApp();
+
+    await waitFor(() => expect(screen.getByText('Update requires attention')).toBeInTheDocument());
+    expect(
+      screen.getByText('An interrupted update needs administrator recovery.')
+    ).toBeInTheDocument();
+  });
+
+  it('does not expose a rollback path when an older release is retained', async () => {
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: true,
+      state: 'Current',
+      currentRelease: { version: '0.1.20-preview.17', releaseId: 'preview17' },
+      availableRelease: { version: '0.1.20-preview.19', releaseId: 'preview19' },
+      lastKnownGoodRelease: { version: '0.1.20-preview.16', releaseId: 'preview16' },
       managerVersion: '0.1.20-preview.17',
       hostReady: true,
       activeExecCount: 0,
@@ -830,153 +863,8 @@ describe('App update banner', () => {
 
     renderApp();
 
-    await waitFor(() => expect(screen.getByText('Rollback complete')).toBeInTheDocument());
-  });
-
-  it('requires confirmation before rollback and shows rollback complete after the previous release returns', async () => {
-    const sessionStorageData = new Map<string, string>();
-    sessionStorageMock.getItem.mockImplementation(
-      (key: string) => sessionStorageData.get(key) ?? null
-    );
-    sessionStorageMock.setItem.mockImplementation((key: string, value: string) => {
-      sessionStorageData.set(key, value);
-    });
-    sessionStorageMock.removeItem.mockImplementation((key: string) => {
-      sessionStorageData.delete(key);
-    });
-
-    fetchUpdateStatusMock.mockResolvedValueOnce({
-      ok: true,
-      message: 'Current',
-      state: 'Current',
-      effectiveReleaseChannel: 'preview',
-      eligibilityState: 'None',
-      eligibilityReason: 'None',
-      currentRelease: {
-        releaseId: '0.1.1-preview.20260525090000',
-        version: '0.1.1-preview.20260525090000',
-        channel: 'preview',
-        releaseFingerprint: 'fp-current',
-        sourceUrl: null,
-        publishedAtUtc: null,
-        tag: 'v0.1.1-preview.20260525090000',
-      },
-      availableRelease: null,
-      lastKnownGoodRelease: {
-        releaseId: '0.1.1-preview.20260525083000',
-        version: '0.1.1-preview.20260525083000',
-        channel: 'preview',
-        releaseFingerprint: 'fp-previous',
-        sourceUrl: null,
-        publishedAtUtc: null,
-        tag: 'v0.1.1-preview.20260525083000',
-      },
-      lastDiscoveryAttemptUtc: null,
-      lastDiscoverySuccessUtc: null,
-      managerVersion: '0.1.1-preview.20260525090000',
-      hostReady: true,
-      activeExecCount: 0,
-      lastError: null,
-    });
-
-    revertUpdateMock.mockResolvedValueOnce({
-      ok: true,
-      message: 'update-revert-accepted',
-      state: 'Applying',
-      effectiveReleaseChannel: 'preview',
-      eligibilityState: 'None',
-      eligibilityReason: 'None',
-      currentRelease: {
-        releaseId: '0.1.1-preview.20260525090000',
-        version: '0.1.1-preview.20260525090000',
-        channel: 'preview',
-        releaseFingerprint: 'fp-current',
-        sourceUrl: null,
-        publishedAtUtc: null,
-        tag: 'v0.1.1-preview.20260525090000',
-      },
-      availableRelease: null,
-      lastKnownGoodRelease: {
-        releaseId: '0.1.1-preview.20260525083000',
-        version: '0.1.1-preview.20260525083000',
-        channel: 'preview',
-        releaseFingerprint: 'fp-previous',
-        sourceUrl: null,
-        publishedAtUtc: null,
-        tag: 'v0.1.1-preview.20260525083000',
-      },
-      lastDiscoveryAttemptUtc: null,
-      lastDiscoverySuccessUtc: null,
-      managerVersion: '0.1.1-preview.20260525090000',
-      hostReady: true,
-      activeExecCount: 0,
-      lastError: null,
-    });
-
-    const firstRender = renderApp();
-
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Roll back' })).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
-
+    await waitFor(() => expect(screen.getByText('Mock Header')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();
     expect(revertUpdateMock).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole('heading', {
-        name: 'Confirm rollback',
-      })
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/restore shared Kautuka state from the latest rollback backup/i)
-    ).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm rollback' }));
-
-    await waitFor(() => {
-      expect(revertUpdateMock).toHaveBeenCalledTimes(1);
-    });
-
-    firstRender.unmount();
-
-    fetchUpdateStatusMock.mockReset();
-
-    fetchUpdateStatusMock.mockResolvedValue({
-      ok: true,
-      message: 'Current',
-      state: 'Current',
-      effectiveReleaseChannel: 'preview',
-      eligibilityState: 'None',
-      eligibilityReason: 'None',
-      currentRelease: {
-        releaseId: '0.1.1-preview.20260525083000',
-        version: '0.1.1-preview.20260525083000',
-        channel: 'preview',
-        releaseFingerprint: 'fp-previous',
-        sourceUrl: null,
-        publishedAtUtc: null,
-        tag: 'v0.1.1-preview.20260525083000',
-      },
-      availableRelease: null,
-      lastKnownGoodRelease: null,
-      lastDiscoveryAttemptUtc: null,
-      lastDiscoverySuccessUtc: null,
-      managerVersion: '0.1.1-preview.20260525083000',
-      hostReady: true,
-      activeExecCount: 0,
-      lastError: null,
-    });
-
-    renderApp();
-
-    await waitFor(() => {
-      expect(screen.getByText('Rollback complete')).toBeInTheDocument();
-    });
-
-    expect(
-      screen.getByText(
-        'Release 0.1.1-preview.20260525083000 is active again. The appliance restored the latest rollback backup, switched bundled services back to the previous release, and returned to normal operation.'
-      )
-    ).toBeInTheDocument();
   });
 });

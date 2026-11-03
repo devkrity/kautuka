@@ -1,4 +1,5 @@
 using Kautuka.UpdateService.Abstractions;
+using Kautuka.Hosting.Hosting;
 
 using Microsoft.Extensions.Options;
 
@@ -25,6 +26,12 @@ internal sealed class HostedCatalogRefreshWorker(
 
         try
         {
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                logger.LogInformation("Hosted catalog refresh is paused while safe update recovery is fenced.");
+                return;
+            }
+
             await hostedCatalogService.RefreshSnapshotAsync(stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -38,6 +45,11 @@ internal sealed class HostedCatalogRefreshWorker(
 
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                continue;
+            }
+
             try
             {
                 await hostedCatalogService.RefreshSnapshotAsync(stoppingToken).ConfigureAwait(false);

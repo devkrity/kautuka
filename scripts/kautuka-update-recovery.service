@@ -1,0 +1,17 @@
+[Unit]
+Description=Kautuka pre-commit database recovery
+DefaultDependencies=no
+Requires=systemd-tmpfiles-setup.service
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=multi-user.target kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service
+Wants=local-fs.target
+ConditionPathExists=/usr/local/lib/kautuka/apply-release
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kautuka/apply-release --boot-recover
+RemainAfterExit=yes
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

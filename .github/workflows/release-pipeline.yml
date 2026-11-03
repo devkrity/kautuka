@@ -15,6 +15,11 @@ on:
         required: true
         default: false
         type: boolean
+      minimum_preview_number:
+        description: Minimum number for a newly published Preview (normally 0).
+        required: false
+        default: '0'
+        type: string
       dry_run:
         description: Build and verify without publishing (leave true unless publishing).
         required: true
@@ -65,6 +70,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           EVENT_NAME: ${{ github.event_name }}
           UPCOMING_STABLE_VERSION: ${{ env.KAUTUKA_UPCOMING_STABLE_VERSION }}
+          MINIMUM_PREVIEW_NUMBER: ${{ inputs.minimum_preview_number || '0' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -103,6 +109,7 @@ jobs:
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             version_prefix="v${UPCOMING_STABLE_VERSION}-preview."
+            [[ "$MINIMUM_PREVIEW_NUMBER" =~ ^(0|[1-9][0-9]{0,5})$ ]] || { echo 'error: minimum_preview_number must be an integer from 0 to 999999.' >&2; exit 1; }
             newest_number=-1
             newest_tag=''
             while IFS= read -r candidate; do
@@ -133,12 +140,14 @@ jobs:
                 echo "Retrying unpublished Preview $release_tag on its original main commit." >> "$GITHUB_STEP_SUMMARY"
               else
                 next_number=$((newest_number + 1))
+                (( next_number >= MINIMUM_PREVIEW_NUMBER )) || next_number="$MINIMUM_PREVIEW_NUMBER"
                 release_tag="${version_prefix}${next_number}"
                 git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
                 git push origin "refs/tags/$release_tag"
               fi
             else
               next_number=$((newest_number + 1))
+              (( next_number >= MINIMUM_PREVIEW_NUMBER )) || next_number="$MINIMUM_PREVIEW_NUMBER"
               release_tag="${version_prefix}${next_number}"
               git tag -a "$release_tag" "$main_sha" -m "Kautuka preview $release_tag"
               git push origin "refs/tags/$release_tag"

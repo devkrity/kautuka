@@ -30,26 +30,67 @@ internal sealed class UpdateActivationWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!options.Enabled)
+        while (!stoppingToken.IsCancellationRequested)
         {
-            return;
-        }
-
-        try
-        {
-            bool resumed = await hostIntegration.TryContinuePendingActivationAsync(stoppingToken).ConfigureAwait(false);
-            if (resumed)
+            UpdateServiceContext? context = null;
+            try
             {
-                logger.LogInformation("Resumed pending update activation after UpdateService restart.");
+                context = await hostIntegration.GetHostContextAsync(stoppingToken).ConfigureAwait(false);
+                if (!options.Enabled && !context.RecoveryRequired)
+                {
+                    return;
+                }
+
+                bool resumed = await hostIntegration.TryContinuePendingActivationAsync(stoppingToken).ConfigureAwait(false);
+                if (resumed)
+                {
+                    logger.LogInformation("Resumed pending update activation after UpdateService restart.");
+                }
+
+                context = await hostIntegration.GetHostContextAsync(stoppingToken).ConfigureAwait(false);
+                if (!context.RecoveryRequired)
+                {
+                    return;
+                }
             }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            await PersistPendingActivationFailureAsync(ex).ConfigureAwait(false);
-            logger.LogWarning(ex, "Pending update activation startup attempt failed.");
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    context = await hostIntegration.GetHostContextAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception observeException)
+                {
+                    logger.LogWarning(observeException, "Could not observe recovery fencing after pending activation failure.");
+                }
+
+                if (context?.RecoveryRequired != true)
+                {
+                    await PersistPendingActivationFailureAsync(ex).ConfigureAwait(false);
+                    logger.LogWarning(ex, "Pending update activation startup attempt failed.");
+                    return;
+                }
+
+                logger.LogWarning(ex, "Safe recovery is still fenced; UpdateService will retry the recovery handoff.");
+            }
+
+            if (context?.RecoveryRequired != true)
+            {
+                return;
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
         }
     }
 

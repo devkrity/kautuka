@@ -10,4 +10,10 @@ public sealed record UpdateServiceContext(
     bool HostStatusObserved = true,
     bool RuntimeUnitsActive = true,
     bool CurrentPointersConsistent = true,
-    bool UpdateServiceRunningCurrent = true);
+    bool UpdateServiceRunningCurrent = true,
+    bool RecoveryRequired = false,
+    string? RecoveryOperationId = null,
+    string? RecoveryPhase = null,
+    string? RecoverySourceRelease = null,
+    string? RecoveryTargetRelease = null,
+    string? RecoverySnapshot = null);

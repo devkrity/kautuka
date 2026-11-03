@@ -175,6 +175,23 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
+    public async Task AcceptingDesiredStateDoesNotBuildConnectorImages()
+    {
+        var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Podman must not be called during desired-state acceptance."));
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(),
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        var connector = new WorkspaceMcpContainerConnectorDefinition(
+            "test", "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+            "uv", [], true, true, "unavailable-bundle.mcpb", "uv", [], 30, 600);
+
+        await service.ApplyDesiredStateUpdateAsync([], [connector], TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task BuildPodmanRunArgumentsUsePreparedBundleImageWithoutMounts()
     {
         string bundlePath = CreateBundleArchive();
@@ -682,57 +699,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
-    public void EnumerateBundleMaterializationCandidatesReturnsOnlyBundleBackedConnectors()
-    {
-        WorkspaceMcpContainerConnectorDefinition[] connectors =
-        [
-            new(
-                "user-1::bundle",
-            "localhost/fedora-minimal:44",
-                "uv",
-                ["run", "python", "-m", "bundle.server"],
-                true,
-                false,
-                "/tmp/connectors/bundle.mcpb",
-                "uv",
-                [],
-                45,
-                600),
-            new(
-                "user-1::plain",
-            "localhost/fedora-minimal:44",
-                "node",
-                ["server.js"],
-                true,
-                false,
-                null,
-                null,
-                [],
-                45,
-                600),
-            new(
-                "user-1::missing-server-type",
-            "localhost/fedora-minimal:44",
-                "uv",
-                ["run", "python", "-m", "bundle.server"],
-                true,
-                false,
-                "/tmp/connectors/invalid.mcpb",
-                null,
-                [],
-                45,
-                600),
-        ];
-
-        IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> candidates = InvokeEnumerateBundleMaterializationCandidates(connectors);
-
-        Assert.Equal(3, candidates.Count);
-        Assert.Contains(candidates, c => c.ConnectorId == "user-1::bundle");
-        Assert.Contains(candidates, c => c.ConnectorId == "user-1::plain");
-        Assert.Contains(candidates, c => c.ConnectorId == "user-1::missing-server-type");
-    }
-
-    [Fact]
     public void BuildAgentSandboxInstallRootUsesDigestStablePath()
     {
         string bundlePath = CreateBundleArchive();
@@ -833,17 +799,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
         object? result = method.Invoke(null, [connector, overrides, timeoutSeconds, enabledOverride]);
         return Assert.IsType<WorkspaceMcpContainerConnectorDefinition>(result);
-    }
-
-    private static IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> InvokeEnumerateBundleMaterializationCandidates(
-        IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors)
-    {
-        MethodInfo method = typeof(WorkspaceContainerConnectorExecutionService)
-            .GetMethod("EnumerateBundleMaterializationCandidates", BindingFlags.Static | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("EnumerateBundleMaterializationCandidates method was not found.");
-
-        object? result = method.Invoke(null, [connectors]);
-        return Assert.IsAssignableFrom<IReadOnlyList<WorkspaceMcpContainerConnectorDefinition>>(result);
     }
 
     private static string InvokeBuildAgentSandboxInstallRoot(WorkspaceMcpContainerConnectorDefinition connector)

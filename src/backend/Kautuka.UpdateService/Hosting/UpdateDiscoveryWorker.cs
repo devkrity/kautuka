@@ -1,5 +1,6 @@
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
+using Kautuka.Hosting.Hosting;
 
 using Microsoft.Extensions.Options;
 
@@ -26,6 +27,18 @@ internal sealed class UpdateDiscoveryWorker(
 
         try
         {
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                logger.LogInformation("Release discovery is paused while safe update recovery is fenced.");
+                return;
+            }
+
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                logger.LogInformation("Release discovery is paused while safe update recovery is fenced.");
+                return;
+            }
+
             // The updater may restart before Manager has finished coming up.
             // Reconcile pending activation independently of UI polling rather
             // than waiting for the next daily discovery interval.
@@ -43,6 +56,16 @@ internal sealed class UpdateDiscoveryWorker(
 
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                continue;
+            }
+
+            if (KautukaMaintenanceMode.IsActive)
+            {
+                continue;
+            }
+
             try
             {
                 await updateCoordinator.RefreshDiscoveryAsync(stoppingToken).ConfigureAwait(false);

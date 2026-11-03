@@ -84,6 +84,15 @@ public sealed class McpbImageMaterializer(
         await imageBuildGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // Another request may have built the same content while this one waited.
+            existsResult = await podmanCommandRunner
+                .RunAsync(["image", "exists", localImage], 15, cancellationToken)
+                .ConfigureAwait(false);
+            if (existsResult.ExitCode == 0)
+            {
+                return localImage;
+            }
+
             Directory.CreateDirectory(buildContextPath);
 
             if (hasBundle)
@@ -181,6 +190,15 @@ public sealed class McpbImageMaterializer(
         await imageBuildGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // Recheck under the build gate so concurrent requests share one image.
+            existsResult = await podmanCommandRunner
+                .RunAsync(["image", "exists", localImage], 15, cancellationToken)
+                .ConfigureAwait(false);
+            if (existsResult.ExitCode == 0)
+            {
+                return localImage;
+            }
+
             Directory.CreateDirectory(buildContextPath);
 
             string bundleSourcePath = Path.Combine(buildContextPath, "bundle");

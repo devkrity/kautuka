@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from 'vitest';
 describe('UserVersionInfo', () => {
   it('shows compact update status and exposes actions when expanded', () => {
     const apply = vi.fn();
-    const rollback = vi.fn();
 
     render(
       <UserVersionInfo
@@ -17,8 +16,6 @@ describe('UserVersionInfo', () => {
         releaseChannel="stable"
         canApplyUpdate
         onApplyUpdate={apply}
-        canRollbackUpdate
-        onRollbackUpdate={rollback}
       />
     );
 
@@ -29,9 +26,7 @@ describe('UserVersionInfo', () => {
     expect(screen.getByText('Track: stable')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
-
     expect(apply).toHaveBeenCalledTimes(1);
-    expect(rollback).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();
   });
 });

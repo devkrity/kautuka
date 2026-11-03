@@ -135,11 +135,9 @@ internal static partial class GatewayRuntimeEndpointMappings
             return Results.Json(response, KautukaJsonContext.Default.GatewayRuntimeUpdateStatusResponse);
         });
 
-        app.MapPost("/api/runtime/update-status/revert", async (
-            [FromServices] IUpdateServiceGrpcService updateServiceGrpcService,
+        app.MapPost("/api/runtime/update-status/revert", (
             IGatewayAuthGuard auth,
-            HttpContext context,
-            CancellationToken cancellationToken) =>
+            HttpContext context) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
@@ -147,8 +145,10 @@ internal static partial class GatewayRuntimeEndpointMappings
                 return unauthorized;
             }
 
-            GatewayRuntimeUpdateStatusResponse response = await RevertUpdateServiceUpdateAsync(updateServiceGrpcService, cancellationToken).ConfigureAwait(false);
-            return Results.Json(response, KautukaJsonContext.Default.GatewayRuntimeUpdateStatusResponse);
+            return Results.Problem(
+                statusCode: StatusCodes.Status410Gone,
+                title: "Release rollback is no longer supported",
+                detail: "Updates are recovered automatically only when activation fails before commit. Apply a newer signed release to address a committed update issue.");
         });
 
         app.MapGet("/api/runtime/update-history", async (
@@ -554,41 +554,6 @@ internal static partial class GatewayRuntimeEndpointMappings
             return CreateFailedUpdateStatus(
                 baselineStatus,
                 message: "update-apply-failed",
-                lastError: ex.Message);
-        }
-    }
-
-    private static async Task<GatewayRuntimeUpdateStatusResponse> RevertUpdateServiceUpdateAsync(
-        IUpdateServiceGrpcService updateServiceGrpcService,
-        CancellationToken cancellationToken)
-    {
-        GatewayRuntimeUpdateStatusResponse baselineStatus = await GetUpdateServiceStatusAsync(updateServiceGrpcService, cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            UpdateServiceStatusResponse status = await updateServiceGrpcService.RevertUpdateAsync(
-                new UpdateServicePingRequest { Message = "update-revert" },
-                cancellationToken).ConfigureAwait(false);
-
-            return ToPayload(status);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return CreateAcceptedUpdateStatus(
-                baselineStatus,
-                message: "update-revert-accepted");
-        }
-        catch (RpcException ex)
-        {
-            return CreateUnavailableUpdateStatus(
-                message: "update-revert-unavailable",
-                lastError: DescribeUnavailable(ex));
-        }
-        catch (InvalidOperationException ex)
-        {
-            return CreateFailedUpdateStatus(
-                baselineStatus,
-                message: "update-revert-failed",
                 lastError: ex.Message);
         }
     }

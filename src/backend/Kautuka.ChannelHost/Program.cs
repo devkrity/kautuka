@@ -6,6 +6,12 @@ using Kautuka.Telemetry.Security;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
+bool provisioningChannelSecurity = args.Length > 0
+    && string.Equals(args[0], "--provision-channel-security", StringComparison.Ordinal);
+using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
+    Environment.GetEnvironmentVariable("Kautuka__Mode"),
+    exclusive: provisioningChannelSecurity);
+
 if (args.Length > 0 && string.Equals(args[0], "--provision-channel-security", StringComparison.Ordinal))
 {
     if (args.Length is not 5 and not 6)
@@ -89,6 +95,7 @@ builder.Services.AddSingleton<IChannelAdapter>(sp => sp.GetRequiredService<Slack
 builder.Services.AddSingleton<IHostedService>(sp => new ChannelAdapterHostedService(
     sp.GetServices<IChannelAdapter>()));
 builder.Services.AddHostedService<ChannelQueueCardExpiryWorker>();
+KautukaMaintenanceMode.SuppressApplicationHostedServices(builder.Services);
 
 builder.Services.AddHttpClient("telegram-api", client =>
 {
@@ -238,6 +245,8 @@ builder.WebHost.ConfigureKestrel(kestrel =>
 var app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(channelHostEndpoint);
+
+app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "Ping"));
 
 ChannelProviderTransportProfile configuredTransport = app.Services.GetRequiredService<ChannelProviderTransportProfile>();
 LoggerMessage.Define<ChannelProviderTransportMode, string>(LogLevel.Information, new EventId(5401, "ChannelProviderTransport"),

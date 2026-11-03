@@ -1,6 +1,9 @@
 using System.Net;
 using System.Reflection;
 
+using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
+    Environment.GetEnvironmentVariable("Kautuka__Mode"));
+
 KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
 
 var builder = WebApplication.CreateSlimBuilder(args);

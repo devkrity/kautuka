@@ -10,6 +10,9 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
+using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
+    Environment.GetEnvironmentVariable("Kautuka__Mode"));
+
 const int GrpcMaxMessageSizeBytes = 4 * 1024 * 1024;
 
 KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
@@ -70,6 +73,9 @@ builder.Services.AddGrpc(options =>
     options.Interceptors.Add<ManagerClientAuthorizationInterceptor>();
 });
 builder.Services.AddSingleton<ManagerClientAuthorizationInterceptor>();
+KautukaMaintenanceMode.SuppressApplicationHostedServices(
+    builder.Services,
+    typeof(ManagerRuntimeHealthWarmWorker));
 
 // -----------------------------------------------------------------------
 // Resolve canonical shared data root.
@@ -112,6 +118,8 @@ builder.WebHost.ConfigureKestrel(options =>
 using WebApplication app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(managerEndpoint);
+
+app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "GetHostStatus", "Ping", "UpdateDesiredState"));
 
 app.MapDefaultEndpoints();
 app.MapGrpcService<WorkspaceGrpcService>();

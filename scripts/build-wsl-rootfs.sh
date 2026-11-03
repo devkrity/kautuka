@@ -165,6 +165,7 @@ dnf install -y \
   iptables \
   libicu \
   nftables \
+  openssl \
   openssh-server \
   passwd \
   podman \
