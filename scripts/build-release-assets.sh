@@ -660,6 +660,10 @@ ensure_release_build_image() {
 
   printf 'Building Linux release build image: %s\n' "$release_build_image"
 
+  mkdir -p "$release_build_context/npm-tools"
+  cp "$source_root/src/images/release-builder/npm-tools/package.json" "$release_build_context/npm-tools/package.json"
+  cp "$source_root/src/images/release-builder/npm-tools/package-lock.json" "$release_build_context/npm-tools/package-lock.json"
+
   local build_args=(
     build
     -f "$release_build_containerfile"

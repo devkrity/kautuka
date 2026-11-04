@@ -39,6 +39,8 @@ try {
   assert.match(builder, /--build-arg "DOTNET_SDK_VERSION=\$dotnet_sdk_version"/, 'builder must pass the selected SDK to the image');
   assert.match(builder, /KAUTUKA_RELEASE_RETAIN_FAILED_WORKDIR:-false/, 'failed work directory retention must remain opt-in');
   assert.match(builder, /KAUTUKA_RELEASE_BUILD_IMAGE/, 'release should accept a digest-pinned reusable builder image');
+  assert.match(builder, /cp "\$source_root\/src\/images\/release-builder\/npm-tools\/package\.json" "\$release_build_context\/npm-tools\/package\.json"/, 'fallback builder context must contain the npm package manifest');
+  assert.match(builder, /cp "\$source_root\/src\/images\/release-builder\/npm-tools\/package-lock\.json" "\$release_build_context\/npm-tools\/package-lock\.json"/, 'fallback builder context must contain the npm lockfile');
   assert.match(builder, /dotnet --list-sdks[\s\S]*grep -Fxq "\$dotnet_sdk_version"/, 'release must reject a builder missing the configured SDK');
   assert.match(builder, /KAUTUKA_RELEASE_WSL_ROOTFS_PATH/, 'release should accept the separately maintained WSL rootfs archive');
   assert.match(builder, /src\/images\/wsl-rootfs\/rootfs\.json/, 'WSL rootfs releasever and source image must come from repository config');
