@@ -37,7 +37,8 @@ public sealed class ChannelRuntimeModularityArchitectureTests
         string endpoints = Read("src/backend/Kautuka.Gateway/Endpoints/Runtime/NaradEndpointMappings.cs");
         string leaseService = Read("src/backend/Kautuka.Gateway/Endpoints/Runtime/NaradClientLeaseService.cs");
         Assert.Contains("LoadBackfillThroughBoundary", streamDelivery, StringComparison.Ordinal);
-        Assert.Contains("PumpLiveEventsAsync", streamDelivery, StringComparison.Ordinal);
+        Assert.Contains("subscription.Reader.ReadAllAsync", streamDelivery, StringComparison.Ordinal);
+        Assert.Contains("WriteLiveEventAsync", streamDelivery, StringComparison.Ordinal);
         Assert.Contains("includeHydrate", streamDelivery, StringComparison.Ordinal);
         Assert.Contains("LoadBackfillThroughBoundary", sessionWatch, StringComparison.Ordinal);
         Assert.Contains("WriteWatchRevisionAsync", sessionWatch, StringComparison.Ordinal);
@@ -100,7 +101,10 @@ public sealed class ChannelRuntimeModularityArchitectureTests
         string streamDelivery = Read("src/backend/Kautuka.Gateway/Endpoints/Runtime/NaradStreamDelivery.cs");
         Assert.Contains("LoadBackfillThroughBoundary", streamDelivery, StringComparison.Ordinal);
         Assert.Contains("ValidateBackfill", streamDelivery, StringComparison.Ordinal);
-        Assert.Contains("PumpLiveEventsAsync", streamDelivery, StringComparison.Ordinal);
+        Assert.Contains("subscription.Reader.ReadAllAsync", streamDelivery, StringComparison.Ordinal);
+        Assert.True(streamDelivery.IndexOf("streamHub.SubscribeForSession", StringComparison.Ordinal)
+            < streamDelivery.IndexOf("ReadNaradSessionProjectionRevision", StringComparison.Ordinal),
+            "Live subscription must be established before the backfill boundary is read.");
         Assert.Contains("ReadNaradSessionProjectionRevision", streamDelivery, StringComparison.Ordinal);
     }
 
