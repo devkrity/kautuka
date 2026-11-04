@@ -32,7 +32,7 @@ on:
         type: boolean
 
 env:
-  KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.25'
+  KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.26'
 
 concurrency:
   # Serialize both channels so a newer same-series Preview cannot publish after
