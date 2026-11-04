@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   fetchApprovalHistory,
   fetchPendingApprovals,
   resolveApproval as resolveApprovalAPI,
   type Approval,
 } from '@/features/approvals';
+import { APPROVAL_REFRESH_INTERVAL_MS } from '../api/queries';
+import { approvalsQueryKeys } from '../api/queryKeys';
+import { queryClient } from '@/lib/queryClient';
 import { getProfile } from '@/features/auth';
-import { useApprovalInvalidationSync } from './useApprovalInvalidationSync';
 
 type ScopeMode = 'mine' | 'all';
 type TabMode = 'pending' | 'history';
@@ -75,25 +77,30 @@ export function useApprovalsPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pendingGeneration = useRef(0);
+  const historyGeneration = useRef(0);
 
   const isAdmin = user?.role?.toLowerCase() === ROLE_ADMIN;
-  const approvalScope: ScopeMode = scope === 'all' && isAdmin ? 'all' : 'mine';
-  const approvalInvalidation = useApprovalInvalidationSync(true, approvalScope);
 
   const loadPending = useCallback(async (s: ScopeMode) => {
+    const generation = ++pendingGeneration.current;
     const items = await fetchPendingApprovals(s);
-    setPending(items);
+    if (generation === pendingGeneration.current) setPending(items);
   }, []);
 
   const loadHistory = useCallback(async (s: ScopeMode, offset: number, append: boolean) => {
+    const generation = ++historyGeneration.current;
     setHistoryLoading(true);
     try {
       const items = await fetchApprovalHistory(s, PAGE_SIZE, offset);
+      if (generation !== historyGeneration.current) return;
       setHistory((prev) => (append ? [...prev, ...items] : items));
       setHistoryHasMore(items.length === PAGE_SIZE);
       setHistoryOffset(offset + items.length);
+    } catch (error) {
+      if (generation === historyGeneration.current) throw error;
     } finally {
-      setHistoryLoading(false);
+      if (generation === historyGeneration.current) setHistoryLoading(false);
     }
   }, []);
 
@@ -127,30 +134,47 @@ export function useApprovalsPage() {
     if (tab !== 'pending') return;
     const scopeToUse: ScopeMode = scope === 'all' && isAdmin ? 'all' : 'mine';
     void loadPending(scopeToUse).catch(() => {
-      // ignore transient refresh errors; SSE will retry on next invalidation
+      // Ignore transient errors; the next refresh will retry.
     });
-  }, [tab, scope, isAdmin, loadPending, approvalInvalidation.epoch]);
+  }, [tab, scope, isAdmin, loadPending]);
 
-  // Approvals page state is local (not only React Query). When the tab is revealed
-  // after waiting in chat/Telegram, refetch even if invalidation SSE was missed.
+  // The page keeps local state, so refresh the visible view on a short interval.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
+    let active = true;
+    let refreshing = false;
     const onVisible = () => {
-      if (document.visibilityState !== 'visible' || tab !== 'pending') {
-        return;
-      }
+      if (refreshing || document.visibilityState !== 'visible' || (tab === 'history' && historyLoading)) return;
+      refreshing = true;
       const scopeToUse: ScopeMode = scope === 'all' && isAdmin ? 'all' : 'mine';
-      void loadPending(scopeToUse).catch(() => {
+      const generation = historyGeneration.current;
+      const refresh = tab === 'pending'
+        ? loadPending(scopeToUse)
+        : (async () => {
+            const count = Math.max(PAGE_SIZE, historyOffset);
+            const pages = await Promise.all(Array.from({ length: Math.ceil(count / PAGE_SIZE) }, (_, index) =>
+              fetchApprovalHistory(scopeToUse, Math.min(PAGE_SIZE, count - index * PAGE_SIZE), index * PAGE_SIZE)));
+            const items = pages.flat();
+            const next = items.length === count ? await fetchApprovalHistory(scopeToUse, 1, count) : [];
+            if (!active || generation !== historyGeneration.current) return;
+            setHistory(items);
+            setHistoryOffset(items.length);
+            setHistoryHasMore(next.length > 0);
+          })();
+      void refresh.catch(() => {
         // ignore transient refresh errors
-      });
+      }).finally(() => { refreshing = false; });
     };
+    const timer = window.setInterval(onVisible, APPROVAL_REFRESH_INTERVAL_MS);
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onVisible);
     return () => {
+      active = false;
+      window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [tab, scope, isAdmin, loadPending]);
+  }, [tab, scope, isAdmin, loadPending, historyOffset, historyLoading]);
 
   useEffect(() => {
     if (tab !== 'history') return;
@@ -165,6 +189,9 @@ export function useApprovalsPage() {
 
   const onChangeScope = async (nextScope: ScopeMode) => {
     if (!isAdmin && nextScope === 'all') return;
+    pendingGeneration.current += 1;
+    historyGeneration.current += 1;
+    setHistoryLoading(false);
     setScope(nextScope);
     setError(null);
 
@@ -181,6 +208,8 @@ export function useApprovalsPage() {
   };
 
   const onChangeTab = (nextTab: TabMode) => {
+    historyGeneration.current += 1;
+    setHistoryLoading(false);
     setTab(nextTab);
     setError(null);
   };
@@ -193,7 +222,9 @@ export function useApprovalsPage() {
     try {
       setResolving((prev) => ({ ...prev, [requestId]: true }));
       const outcome = await resolveApprovalAPI(requestId, action, reason);
+      pendingGeneration.current += 1;
       setPending((prev) => prev.filter((item) => item.id !== requestId));
+      void queryClient.invalidateQueries({ queryKey: approvalsQueryKeys.all });
       if (outcome.decision === 'expired') {
         setError('This approval expired before the run could start.');
       } else {

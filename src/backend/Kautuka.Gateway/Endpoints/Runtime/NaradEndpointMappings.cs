@@ -118,6 +118,7 @@ internal static class NaradEndpointMappings
             string agentId,
             long? afterSessionSequence,
             bool? hydrate,
+            bool? includeWatch,
             IGatewayAuthGuard auth,
             IGatewayCatalogStore catalog,
             IGatewaySessionStore sessions,
@@ -156,6 +157,7 @@ internal static class NaradEndpointMappings
                     admissionGate,
                     Math.Max(0, afterSessionSequence ?? 0),
                     hydrate ?? true,
+                    includeWatch ?? false,
                     ct).ConfigureAwait(false);
             }
             catch (NaradProjectionException)

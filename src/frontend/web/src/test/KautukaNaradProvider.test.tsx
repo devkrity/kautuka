@@ -11,6 +11,7 @@ const attachMock = vi.fn(async () => undefined);
 const disposeMock = vi.fn();
 const subscribeMock = vi.fn(() => () => undefined);
 const requestRecoveryMock = vi.fn(async () => undefined);
+const transportOptionsSeen = vi.fn();
 const getSnapshotMock = vi.fn(() => ({
   attached: true,
   backfilling: false,
@@ -72,39 +73,12 @@ const fetchHistoryPages = vi.fn(
   }
 );
 
-const consumeWatch = vi.fn(
-  async (
-    _options: unknown,
-    _sessionId: string,
-    getCursor: () => number,
-    onRevision: (record: unknown) => void
-  ) => {
-    getCursor();
-    onRevision({
-      type: 'session.revision',
-      protocolVersion: 'narad/v1',
-      eventId: 'watch-1',
-      timestamp: '2026-08-05T00:00:00Z',
-      sessionId: 'session-1',
-      revision: 2,
-    });
-    onRevision({
-      type: 'session.revision',
-      protocolVersion: 'narad/v1',
-      eventId: 'watch-2',
-      timestamp: '2026-08-05T00:00:01Z',
-      sessionId: 'session-1',
-      revision: 3,
-    });
-  }
-);
-
 vi.mock('../features/chat/kautuka/createKautukaNaradTransport', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../features/chat/kautuka/createKautukaNaradTransport')>();
   return {
     ...actual,
-    createKautukaNaradTransport: () => ({
+    createKautukaNaradTransport: (options: unknown) => (transportOptionsSeen(options), {
       attach: vi.fn(async () => ({
         capabilities: {
           protocolVersion: 'narad/v1',
@@ -137,13 +111,6 @@ vi.mock('../features/chat/kautuka/createKautukaNaradTransport', async (importOri
       pageSize: number,
       apply: (record: unknown) => void
     ) => fetchHistoryPages(transport, sessionId, cursor, pageSize, apply),
-    consumeKautukaNaradWatchRevisions: (
-      options: unknown,
-      sessionId: string,
-      getCursor: () => number,
-      onRevision: (record: unknown) => void,
-      _signal: AbortSignal
-    ) => consumeWatch(options, sessionId, getCursor, onRevision),
   };
 });
 
@@ -176,7 +143,7 @@ describe('KautukaNaradProvider', () => {
     sendNaradUserMessageMock.mockClear();
     resolveNaradInterruptMock.mockClear();
     fetchHistoryPages.mockClear();
-    consumeWatch.mockClear();
+    transportOptionsSeen.mockClear();
     getSnapshotMock.mockReturnValue({
       attached: true,
       backfilling: false,
@@ -198,28 +165,6 @@ describe('KautukaNaradProvider', () => {
     expect(subscribeMock).toHaveBeenCalled();
     unmount();
     expect(disposeMock).toHaveBeenCalled();
-  });
-
-  it('starts the revision watch after history attachment and skips it if unmounted', async () => {
-    let finishAttach!: () => void;
-    attachMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishAttach = resolve; }));
-    const { unmount } = render(
-      <KautukaNaradProvider agentId="agent-1" sessionId="session-1"><Probe /></KautukaNaradProvider>
-    );
-    await waitFor(() => expect(attachMock).toHaveBeenCalled());
-    expect(consumeWatch).not.toHaveBeenCalled();
-    await act(async () => { finishAttach(); });
-    await waitFor(() => expect(consumeWatch).toHaveBeenCalledTimes(1));
-    unmount();
-
-    consumeWatch.mockClear();
-    attachMock.mockImplementationOnce(() => new Promise<void>((resolve) => { finishAttach = resolve; }));
-    const second = render(
-      <KautukaNaradProvider agentId="agent-1" sessionId="session-1"><Probe /></KautukaNaradProvider>
-    );
-    second.unmount();
-    await act(async () => { finishAttach(); });
-    expect(consumeWatch).not.toHaveBeenCalled();
   });
 
   it('does not re-attach when the parent re-renders the same session', async () => {
@@ -256,19 +201,6 @@ describe('KautukaNaradProvider', () => {
     );
 
     await waitFor(() => expect(getByTestId('connection')).toHaveTextContent('error'));
-  });
-
-  it('does not fill history on healthy watch when live (authority rides the stream)', async () => {
-    render(
-      <KautukaNaradProvider agentId="agent-1" sessionId="session-1">
-        <Probe />
-      </KautukaNaradProvider>
-    );
-    await waitFor(() => expect(attachMock).toHaveBeenCalled());
-    await waitFor(() => expect(consumeWatch).toHaveBeenCalled());
-    // Watch applies revisions; without a session gap, no history thrash.
-    expect(requestRecoveryMock).not.toHaveBeenCalled();
-    expect(fetchHistoryPages).not.toHaveBeenCalled();
   });
 
   it('recreates attach lifecycle when session identity changes', async () => {

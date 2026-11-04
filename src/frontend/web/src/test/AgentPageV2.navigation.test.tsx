@@ -308,6 +308,28 @@ describe('AgentPageV2 deep-link and navigation', () => {
     expect(router.state.location.search).toContain('sessionId=session-1');
   });
 
+  it('preserves a cross-agent deep link while the target session list loads', async () => {
+    const { AgentPageV2 } = await import('@/pages/AgentPageV2');
+    const makeSession = (id: string, targetId: string) => ({ id, targetType: 'agent', targetId, title: id,
+      updatedAt: '2026-08-04T00:00:00.000Z', createdAt: '2026-08-04T00:00:00.000Z', messages: [], compacted: false });
+    let resolveTarget!: (value: ReturnType<typeof makeSession>[]) => void;
+    const targetSessions = new Promise<ReturnType<typeof makeSession>[]>((resolve) => { resolveTarget = resolve; });
+    listSessionsForAgentMock.mockImplementation((agentId: string) =>
+      agentId === 'agent-1' ? Promise.resolve([makeSession('session-1', agentId)]) : targetSessions);
+    const router = createMemoryRouter([{ path: '/workspace/:agentId', element: <AgentPageV2 /> }], {
+      initialEntries: ['/workspace/agent-1?sessionId=session-1'],
+    });
+    render(<RouterProvider router={router} />);
+    await waitFor(() => expect(naradProviderPropsMock).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-1', sessionId: 'session-1' })));
+    naradProviderPropsMock.mockClear();
+    await act(async () => { await router.navigate('/workspace/agent-2?sessionId=session-3'); });
+    expect(router.state.location.search).toBe('?sessionId=session-3');
+    await act(async () => { resolveTarget([makeSession('session-2', 'agent-2'), makeSession('session-3', 'agent-2')]); await targetSessions; });
+    await waitFor(() => expect(naradProviderPropsMock).toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-2', sessionId: 'session-3' })));
+    expect(naradProviderPropsMock).not.toHaveBeenCalledWith(expect.objectContaining({ agentId: 'agent-2', sessionId: 'session-1' }));
+    expect(router.state.location.search).toBe('?sessionId=session-3');
+  });
+
   it('does not present replayed historical activity as a live run during initial history loading', async () => {
     const { AgentPageV2 } = await import('@/pages/AgentPageV2');
     connectionStatusMock.mockReturnValue('attaching');
@@ -347,6 +369,9 @@ describe('AgentPageV2 deep-link and navigation', () => {
       expect(naradProviderPropsMock).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: 'session-2', agentId: 'agent-2' })
       )
+    );
+    expect(naradProviderPropsMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', agentId: 'agent-2' })
     );
     expect(
       screen.queryByText(/Choose a session from the sidebar|Create a new session from the sidebar/i)
@@ -432,6 +457,9 @@ describe('AgentPageV2 deep-link and navigation', () => {
         expect.objectContaining({ sessionId: 'session-2', agentId: 'agent-2' })
       )
     );
+    expect(naradProviderPropsMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', agentId: 'agent-2' })
+    );
     expect(
       screen.queryByText(
         /Choose a session from the sidebar|Create a new session from the sidebar/i
@@ -462,6 +490,9 @@ describe('AgentPageV2 deep-link and navigation', () => {
       expect(naradProviderPropsMock).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: 'session-2', agentId: 'agent-2' })
       )
+    );
+    expect(naradProviderPropsMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', agentId: 'agent-2' })
     );
     expect(
       screen.queryByText(

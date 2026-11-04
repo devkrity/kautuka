@@ -813,12 +813,14 @@ export const AgentPageV2: React.FC = () => {
     (!resolvedAgentId ? agents[0] ?? null : null);
   const [sessions, setSessions] = React.useState<Session[]>([]);
   const [sessionId, setSessionId] = React.useState<string | null>(requestedSessionId);
+  const [sessionAgentId, setSessionAgentId] = React.useState<string | null>(routeAgentId);
   const [error, setError] = React.useState<string | null>(null);
   const [isAgentSettingsOpen, setIsAgentSettingsOpen] = React.useState(false);
   const [isFilesOpen, setIsFilesOpen] = React.useState(false);
   const [createAgentOpen, setCreateAgentOpen] = React.useState(false);
   const newSessionDraftRef = React.useRef(false);
   const sessionRequestGenerationRef = React.useRef(0);
+  const pendingAgentNavigationRef = React.useRef<string | null>(null);
   const loadedAgentIdRef = React.useRef<string | null>(null);
   const dialogAgentIdRef = React.useRef<string | null>(null);
   const dialogSessionIdRef = React.useRef<string | null>(null);
@@ -866,6 +868,9 @@ export const AgentPageV2: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
+    if (pendingAgentNavigationRef.current && pendingAgentNavigationRef.current !== routeAgentId) return;
+    pendingAgentNavigationRef.current = null;
+    if (sessionAgentId !== selectedAgent?.id) return;
     if (!sessionId) {
       if (searchParams.has('sessionId')) {
         const next = new URLSearchParams(searchParams);
@@ -882,7 +887,7 @@ export const AgentPageV2: React.FC = () => {
     const next = new URLSearchParams(searchParams);
     next.set('sessionId', sessionId);
     setSearchParams(next, { replace: true });
-  }, [searchParams, sessionId, setSearchParams]);
+  }, [routeAgentId, searchParams, sessionAgentId, selectedAgent?.id, sessionId, setSearchParams]);
 
   React.useEffect(() => {
     if (!selectedAgent?.id) return;
@@ -892,9 +897,11 @@ export const AgentPageV2: React.FC = () => {
       // Agent identity changed (dropdown, back/forward, or soft URL nav). Drop any
       // "New session" draft belonging to the previous agent and refuse a foreign sessionId.
       newSessionDraftRef.current = false;
-      setSessionId(null);
+      setSessionId(requestedSessionId);
       setSessions([]);
+      setError(null);
     }
+    setSessionAgentId(agentId);
     loadedAgentIdRef.current = agentId;
 
     let cancelled = false;
@@ -923,6 +930,10 @@ export const AgentPageV2: React.FC = () => {
       return;
     }
     sessionRequestGenerationRef.current += 1;
+    pendingAgentNavigationRef.current = agentId;
+    setSessionId(null);
+    setSessions([]);
+    setError(null);
     setSelectedAgentId(agentId);
     navigate({ pathname: `/workspace/${encodeURIComponent(agentId)}`, search: '' }, { replace: true });
   };
@@ -1052,7 +1063,7 @@ export const AgentPageV2: React.FC = () => {
               {error}
             </Alert>
           ) : null}
-          {selectedAgent && sessionId ? (
+          {selectedAgent && sessionId && sessionAgentId === selectedAgent.id ? (
             <KautukaNaradProvider key={`${selectedAgent.id}:${sessionId}`} agentId={selectedAgent.id} sessionId={sessionId}>
               <AgentWorkspace
                 key={sessionId}

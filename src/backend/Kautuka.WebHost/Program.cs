@@ -65,8 +65,8 @@ using WebApplication app = builder.Build();
 
 app.UseWebHostMaintenancePage();
 
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
-app.MapGet("/alive", () => Results.Ok(new { status = "alive" }));
+app.MapGet("/health", () => Results.Text("{\"status\":\"ok\"}", "application/json"));
+app.MapGet("/alive", () => Results.Text("{\"status\":\"alive\"}", "application/json"));
 
 app.Use(async (context, next) =>
 {

@@ -1,7 +1,7 @@
 import { BrandMark } from '@/components/BrandMark';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
-import { useApprovalInvalidationSync, usePendingApprovals } from '@/features/approvals';
+import { APPROVAL_REFRESH_INTERVAL_MS, usePendingApprovals } from '@/features/approvals';
 import { useCurrentUser, UserProfileDialog, UserVersionInfo } from '@/features/auth';
 import { ROLE_ADMIN } from '@/features/settings';
 import { cn } from '@/lib/utils';
@@ -85,11 +85,11 @@ export function Header({
   const [collapsed, setCollapsed] = React.useState(false);
   const location = useLocation();
 
-  // Invalidation SSE drives pending badge refresh; no clock polling.
-  useApprovalInvalidationSync(authenticated, 'mine');
   const { data: pendingList = [] } = usePendingApprovals('mine', {
     enabled: authenticated,
     refetchOnWindowFocus: true,
+    refetchInterval: APPROVAL_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
   const pendingApprovals = pendingList.length;
 
