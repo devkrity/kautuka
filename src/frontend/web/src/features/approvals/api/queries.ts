@@ -17,6 +17,7 @@ import { type Approval, type HitlApprovalStatsResponse } from '../schemas/approv
 import { approvalsQueryKeys } from './queryKeys';
 
 export type { HitlStatsQuery };
+export const APPROVAL_REFRESH_INTERVAL_MS = 5_000;
 
 export function usePendingApprovals(
   scope: 'mine' | 'all' = 'mine',

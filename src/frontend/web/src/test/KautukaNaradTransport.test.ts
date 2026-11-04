@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createKautukaNaradTransport,
   fetchKautukaNaradHistoryPages,
-  consumeKautukaNaradWatchRevisions,
   type AuthenticatedFetch,
 } from '../features/chat/kautuka/createKautukaNaradTransport';
 import { NaradClientError, createSseFrameParser, parseSseFrameData } from '@devkrity/narad';
@@ -116,6 +115,7 @@ describe('createKautukaNaradTransport', () => {
           ]);
         }
         return sseResponse([
+          'data: {"type":"graph.snapshot","protocolVersion":"narad/v1","timestamp":"2026-08-05T00:00:01Z","sessionId":"session-1","scope":"run","rootRunId":"run-1","graphSchemaVersion":"narad.graph/v1","revision":1,"sourceRunCursor":{"rootRunId":"run-1","sequence":1},"rootNodeId":"root","nodes":[{"id":"root","kind":"run","status":"running","label":"Root"}],"edges":[]}\n\n',
           'id: evt-2\nevent: message\ndata: {"type":"run.finished","protocolVersion":"narad/v1","eventId":"evt-2","timestamp":"2026-08-05T00:00:01Z","sessionId":"session-1","sessionSequence":2,"rootRunId":"run-1","runId":"run-1","sequence":2}\n\n',
         ]);
       }
@@ -127,11 +127,31 @@ describe('createKautukaNaradTransport', () => {
     const iterator = transport.subscribeLive('session-1', 0, abort.signal)[Symbol.asyncIterator]();
     const first = await iterator.next();
     const second = await iterator.next();
+    const third = await iterator.next();
     abort.abort();
     transport.dispose();
     expect(first.value).toMatchObject({ sessionSequence: 1 });
-    expect(second.value).toMatchObject({ sessionSequence: 2 });
+    expect(second.value).toMatchObject({ type: 'graph.snapshot' });
+    expect(third.value).toMatchObject({ sessionSequence: 2 });
     expect(streamUrls[1]).toContain('afterSessionSequence=1');
+  });
+
+  it('preserves authority and revision order within one stream read', async () => {
+    const fetchMock = vi.fn<AuthenticatedFetch>(async (input) => {
+      expect(String(input)).toContain('includeWatch=true');
+      return sseResponse([
+        'id: evt-1\nevent: message\ndata: {"type":"run.started","protocolVersion":"narad/v1","eventId":"evt-1","timestamp":"2026-08-05T00:00:00Z","sessionId":"session-1","sessionSequence":1,"rootRunId":"run-1","runId":"run-1","sequence":1}\n\nid: session-revision:session-1:1\nevent: watch\ndata: {"type":"session.revision","protocolVersion":"narad/v1","eventId":"session-revision:session-1:1","timestamp":"2026-08-05T00:00:00Z","sessionId":"session-1","revision":1,"cursor":{"kind":"session","sessionSequence":1}}\n\n',
+      ]);
+    });
+    const transport = createKautukaNaradTransport({ agentId: 'agent-1', fetch: fetchMock });
+    const abort = new AbortController();
+    const iterator = transport.subscribeLive('session-1', 0, abort.signal)[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    const second = await iterator.next();
+    abort.abort();
+    transport.dispose();
+    expect(first.value).toMatchObject({ type: 'run.started' });
+    expect(second.value).toMatchObject({ type: 'session.revision' });
   });
 
   it('fails closed on unauthorized responses', async () => {
@@ -156,69 +176,6 @@ describe('createKautukaNaradTransport', () => {
     await expect(iterator.next()).rejects.toBeInstanceOf(NaradClientError);
     abort.abort();
     transport.dispose();
-  });
-
-  it('applies watch revision events from the Narad watch stream', async () => {
-    const fetchMock = vi.fn<AuthenticatedFetch>(async (input) => {
-      if (String(input).includes('/watch?')) {
-        expect(String(input)).toContain('afterSessionSequence=0');
-        return sseResponse([
-          'id: watch-1\nevent: watch\ndata: {"type":"session.revision","protocolVersion":"narad/v1","eventId":"watch-1","timestamp":"2026-08-05T00:00:00Z","sessionId":"session-1","revision":3}\n\n',
-        ]);
-      }
-      throw new Error(`Unexpected URL ${String(input)}`);
-    });
-    const revisions: unknown[] = [];
-    const abort = new AbortController();
-    const consumePromise = consumeKautukaNaradWatchRevisions(
-      { agentId: 'agent-1', fetch: fetchMock },
-      'session-1',
-      () => 0,
-      (record) => {
-        revisions.push(record);
-        abort.abort();
-      },
-      abort.signal,
-    );
-    await consumePromise.catch(() => undefined);
-    expect(revisions).toHaveLength(1);
-  });
-
-  it('reconnects watch SSE with cursor advanced from latest sequence', async () => {
-    const watchUrls: string[] = [];
-    let cursor = 0;
-    const fetchMock = vi.fn<AuthenticatedFetch>(async (input) => {
-      const url = String(input);
-      if (!url.includes('/watch?')) {
-        throw new Error(`Unexpected URL ${url}`);
-      }
-      watchUrls.push(url);
-      if (watchUrls.length === 1) {
-        return sseResponse([
-          'id: watch-1\nevent: watch\ndata: {"type":"session.revision","protocolVersion":"narad/v1","eventId":"watch-1","timestamp":"2026-08-05T00:00:00Z","sessionId":"session-1","sessionSequence":1,"revision":1}\n\n',
-        ]);
-      }
-      return sseResponse([
-        'id: watch-2\nevent: watch\ndata: {"type":"session.revision","protocolVersion":"narad/v1","eventId":"watch-2","timestamp":"2026-08-05T00:00:01Z","sessionId":"session-1","sessionSequence":2,"revision":2}\n\n',
-      ]);
-    });
-    const abort = new AbortController();
-    const consumePromise = consumeKautukaNaradWatchRevisions(
-      { agentId: 'agent-1', fetch: fetchMock },
-      'session-1',
-      () => cursor,
-      (record) => {
-        const sessionSequence = (record as { sessionSequence?: number }).sessionSequence;
-        if (typeof sessionSequence === 'number') {
-          cursor = Math.max(cursor, sessionSequence);
-        }
-      },
-      abort.signal,
-    );
-    await vi.waitFor(() => expect(watchUrls.length).toBeGreaterThan(1), { timeout: 2000 });
-    abort.abort();
-    await consumePromise.catch(() => undefined);
-    expect(watchUrls[1]).toContain('afterSessionSequence=1');
   });
 
   it('aborts in-flight fetch on dispose', async () => {

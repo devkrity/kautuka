@@ -126,7 +126,7 @@ Auto-Pilot targets may be owned agents or workflows. Workflow schedules validate
 
 The email attachment template stores each result object as a JSON string in its `items` array because the current workflow schema subset permits arrays of scalar items, not arrays of objects.
 
-Cron and run-now share one launch gate (`AutopilotRunLaunchService`). A schedule in `needs_approval` mode must persist an `autopilot_prerun` approval and park the scheduled run as `awaiting_pre_run_approval` before chat execution starts. Session-less pre-run HITL still publishes `HitlApprovalRequested` for channel cards and a Watch doorbell (`hitl.invalidation`) onto `GET /api/approvals/changes` so the web Approvals list refreshes without a chat session. Auto-Pilot pre-run has no session by design and does not append `interrupt.requested`.
+Cron and run-now share one launch gate (`AutopilotRunLaunchService`). A schedule in `needs_approval` mode must persist an `autopilot_prerun` approval and park the scheduled run as `awaiting_pre_run_approval` before chat execution starts. Session-less pre-run HITL still publishes `HitlApprovalRequested` for channel cards and a Watch doorbell (`hitl.invalidation`) onto `GET /api/approvals/changes` for external clients. The web Approvals list refreshes without a chat session. Auto-Pilot pre-run has no session by design and does not append `interrupt.requested`.
 
 When the next occurrence is due while a run is already `pending_approval` (`awaiting_pre_run_approval` or `waiting_for_in_run_approval`), the scheduler republishes the outstanding approval instead of inserting skip rows and sending “occurrence skipped” text. Channel notify retries when a pending interaction has no transport message id. Channel approval recovery repeats on an interval for the same undelivered case. An orphaned pending-approval run with no approval row is marked stale so a new occurrence can launch.
 
@@ -144,7 +144,7 @@ AAAT applies the same unresolved-failure rule to the live child stream and to du
 
 ## Reconnect and out-of-band approvals
 
-Approving from another tab or the Approvals page has no original browser response stream to continue. The committed resolution can emit an immediate session revision, and later nested pause or root terminal boundaries can emit further revisions. Each revision-only Narad invalidation asks the workspace to attach and replay instead of merging a second transcript projection. The Approvals nav badge and Approvals page subscribe to `GET /api/approvals/changes` for the same invalidation watermark (user-scoped, or admin `scope=all`) and refetch pending lists instead of polling. Session-less Auto-Pilot pre-run requests use the same watermark so they appear without a workspace session.
+Approving from another tab or the Approvals page has no original browser response stream to continue. The committed resolution can emit an immediate session revision, and later nested pause or root terminal boundaries can emit further revisions. Each revision-only Narad invalidation asks the workspace to attach and replay instead of merging a second transcript projection. The browser refreshes approval data every five seconds while visible and immediately invalidates local queries after a decision. The nav badge uses user scope; the Approvals page also supports admin `scope=all`. External clients can still subscribe to `GET /api/approvals/changes`.
 
 ## Recovery guarantees
 

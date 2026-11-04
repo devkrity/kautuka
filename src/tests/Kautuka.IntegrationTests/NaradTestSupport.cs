@@ -330,6 +330,7 @@ internal static class NaradTestSupport
     {
         private readonly List<NaradPersistedEvent> events = [];
         private readonly object gate = new();
+        public Action? AfterRevisionRead { get; set; }
 
         public void Append(NaradPersistedEvent persistedEvent)
         {
@@ -343,14 +344,17 @@ internal static class NaradTestSupport
 
         public long ReadNaradSessionProjectionRevision(string storageLocatorKey, string sessionId)
         {
+            long revision;
             lock (gate)
             {
-                return events
+                revision = events
                     .Where(item => string.Equals(item.SessionId, sessionId, StringComparison.Ordinal))
                     .Select(static item => item.SessionSequence)
                     .DefaultIfEmpty(0L)
                     .Max();
             }
+            AfterRevisionRead?.Invoke();
+            return revision;
         }
 
         public IReadOnlyList<NaradPersistedEvent> ListNaradSessionHistory(string storageLocatorKey, string sessionId)

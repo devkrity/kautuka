@@ -41,9 +41,11 @@ This is the Kautuka audit index for authority events persisted by Gateway and de
 Public session streams and paginated history apply `NaradPublicAuthorityFilter`:
 
 - Deliver negotiated client-visible authority: public progress, tool calls, reasoning, conversation, and core run/interrupt events.
-- Suppress `trace.event` and `session.revision`.
+- Suppress persisted `trace.event` and `session.revision` records.
 - Omit `progress.recorded` unless `privacy` is `public`.
 - Redact protected identity fields (`actorId`, `userId`, `ownerUserId`, `createdById`) from delivered copies without mutating stored journal JSON.
 - Keep `agentId` on public delivery so clients and channel projectors can bind surface vs nested work.
+
+The session stream can optionally include generated `session.revision` watch notifications when `includeWatch=true`. These notifications remain distinct from authority and are not included in history; without the option, the existing stream contract is unchanged.
 
 Executable coverage: `NaradSecurityTests`, Narad conformance traces in `@devkrity/narad-spec`, and channel acceptance scenarios `Narad-004`, `Narad-006`, and `Narad-007`.

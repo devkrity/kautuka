@@ -2,6 +2,7 @@ import React from 'react';
 import {
   NARAD_PROFILE_IDS,
   createAttachCoordinator,
+  classifyWireRecord,
   installNaradClientDebugGlobal,
   isNaradClientDebugEnabled,
   logNaradDebug,
@@ -18,7 +19,6 @@ import { queryClient } from '@/lib/queryClient';
 import type { ConversationAsset } from '../types/chatTypes';
 import { createNaradSessionBinding } from './createNaradSessionBinding';
 import {
-  consumeKautukaNaradWatchRevisions,
   createKautukaNaradTransport,
   type KautukaNaradTransportOptions,
 } from './createKautukaNaradTransport';
@@ -71,10 +71,14 @@ export type KautukaNaradProviderProps = Readonly<{
 
 const KautukaNaradContext = React.createContext<KautukaNaradContextValue | null>(null);
 
-function createPublishingReducer(store: NaradClientStore, reducer: NaradReducer): NaradReducer {
+function createPublishingReducer(store: NaradClientStore, onWatch: () => void): NaradReducer {
   return {
     getSnapshot: () => store.getSnapshot(),
-    apply: (value) => store.apply(value),
+    apply: (value) => {
+      const result = store.apply(value);
+      if (classifyWireRecord(value) === 'watch') onWatch();
+      return result;
+    },
     clearSessionGap: () => store.clearSessionGap(),
     clearResyncRequired: () => store.clearResyncRequired(),
     setActiveProfiles: (profiles) => store.setActiveProfiles(profiles),
@@ -198,10 +202,15 @@ export const KautukaNaradProvider: React.FC<KautukaNaradProviderProps> = ({
     lifecycleAbortRef.current = lifecycle;
 
     const transport = createKautukaNaradTransport(transportOptions);
-    const publishingReducer = createPublishingReducer(sessionBinding.store, sessionBinding.reducer);
+    const publishingReducer = createPublishingReducer(sessionBinding.store, () => {
+      if (!lifecycle.signal.aborted && (sessionBinding.store.getSnapshot().sessionGap || coordinatorRef.current?.getSnapshot().resyncRequired)) {
+        queueMicrotask(() => { if (!lifecycle.signal.aborted) void requestRecoveryRef.current(); });
+      }
+    });
     const coordinator = createAttachCoordinator(transport, publishingReducer, {
       sessionId,
       claimedProfiles: [...DEFAULT_CLAIMED_PROFILES],
+      historyPageSize: 500,
     });
     coordinatorRef.current = coordinator;
     coordinatorUnsubscribeRef.current = coordinator.subscribe(() => {
@@ -264,30 +273,8 @@ export const KautukaNaradProvider: React.FC<KautukaNaradProviderProps> = ({
     mountedRef.current = true;
     void attachSessionRef.current();
 
-    const watchAbort = new AbortController();
-    const store = sessionBinding.store;
-
-    void consumeKautukaNaradWatchRevisions(
-      transportOptions,
-      sessionId,
-      () => store.getSnapshot().lastSessionSequence,
-      (record) => {
-        // Watch is a revision notification only — not authority delivery.
-        // Live carries sessionSequence-ordered domain events. Only fill history if apply
-        // latched a gap (or prior catch-up failed).
-        store.apply(record);
-        const snap = store.getSnapshot();
-        const coordinator = coordinatorRef.current;
-        if (snap.sessionGap || coordinator?.getSnapshot().resyncRequired) {
-          void requestRecoveryRef.current();
-        }
-      },
-      watchAbort.signal,
-    ).catch(() => undefined);
-
     return () => {
       mountedRef.current = false;
-      watchAbort.abort();
       disposeSessionRuntime();
     };
     // Attach identity is agent+session. Callback object identity must not tear down live.

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Execution;
@@ -21,6 +20,7 @@ internal static class NaradStreamDelivery
         IRootRunAdmissionGate admissionGate,
         long afterSessionSequence,
         bool includeHydrate,
+        bool includeWatch,
         CancellationToken cancellationToken)
     {
         NaradSseWriter.ConfigureResponse(context);
@@ -30,10 +30,6 @@ internal static class NaradStreamDelivery
         try
         {
             long boundaryRevision = definitionStore.ReadNaradSessionProjectionRevision(storageLocatorKey, session.Id);
-
-            var liveBuffer = new ConcurrentDictionary<string, NaradPersistedEvent>(StringComparer.Ordinal);
-            using CancellationTokenSource liveReaderCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            Task liveReader = PumpLiveEventsAsync(subscription, liveBuffer, liveReaderCancellation.Token);
 
             // Fold the full session through the attach boundary so graph hydrate has a coherent
             // revision rail. Authority backfill below still starts at afterSessionSequence —
@@ -86,46 +82,32 @@ internal static class NaradStreamDelivery
                     await WriteAuthorityEventAsync(writer, persistedEvent, cancellationToken).ConfigureAwait(false);
                 }
 
-                await liveReaderCancellation.CancelAsync().ConfigureAwait(false);
-                try
+                if (includeWatch && authorityBackfill.Count > 0)
                 {
-                    await liveReader.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
+                    await WriteWatchRevisionAsync(writer, session.Id, authorityBackfill[^1], cancellationToken).ConfigureAwait(false);
                 }
 
                 long lastDeliveredSequence = authorityBackfill.Count > 0
                     ? authorityBackfill[^1].SessionSequence
                     : afterSessionSequence;
-                foreach (NaradPersistedEvent buffered in liveBuffer.Values
-                             .Where(item => BelongsToSessionStream(item, session.Id)
-                                 && item.SessionSequence > afterSessionSequence
-                                 && item.SessionSequence <= boundaryRevision)
-                             .OrderBy(item => item.SessionSequence))
-                {
-                    if (!deliveredEventIds.Add(buffered.EventId))
-                    {
-                        continue;
-                    }
-
-                    lastDeliveredSequence = Math.Max(lastDeliveredSequence, buffered.SessionSequence);
-                    // Already folded into projectionHistory; deliver wire authority + skip
-                    // re-apply (would double-advance graph revisions past the attach snapshot).
-                    await WriteAuthorityEventAsync(writer, buffered, cancellationToken).ConfigureAwait(false);
-                }
-
-                using RuntimeEventStreamSubscription liveSubscription = streamHub.SubscribeForSession(session.Id);
-                await foreach (NaradPersistedEvent liveEvent in liveSubscription.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+                await foreach (NaradPersistedEvent liveEvent in subscription.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
                     if (!BelongsToSessionStream(liveEvent, session.Id))
                     {
                         continue;
                     }
 
-                    if (liveEvent.SessionSequence <= lastDeliveredSequence && !deliveredEventIds.Add(liveEvent.EventId))
+                    if (liveEvent.SessionSequence <= boundaryRevision || liveEvent.SessionSequence <= lastDeliveredSequence)
                     {
                         continue;
+                    }
+
+                    // Different roots can publish out of session order. Reconnect from
+                    // the last delivered cursor so durable history restores the order
+                    // before the projection consumes the later event.
+                    if (liveEvent.SessionSequence > lastDeliveredSequence + 1)
+                    {
+                        break;
                     }
 
                     if (!deliveredEventIds.Add(liveEvent.EventId))
@@ -142,6 +124,10 @@ internal static class NaradStreamDelivery
                         rootRunId => admissionGate.IsAdmissionClosed(agent.Id, rootRunId),
                         includeHydrate,
                         cancellationToken).ConfigureAwait(false);
+                    if (includeWatch && RuntimeEventStreamHub.IsSessionWatchInvalidationBoundary(liveEvent))
+                    {
+                        await WriteWatchRevisionAsync(writer, session.Id, liveEvent, cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
             finally
@@ -154,6 +140,12 @@ internal static class NaradStreamDelivery
             subscription.Dispose();
         }
     }
+
+    private static Task WriteWatchRevisionAsync(NaradSseWriteContext writer, string sessionId, NaradPersistedEvent persistedEvent, CancellationToken cancellationToken)
+        => writer.WriteWatchAsync(
+            NaradSessionProjection.BuildSessionRevisionWatch(sessionId, persistedEvent),
+            NaradSessionProjection.BuildSessionWatchEventId(sessionId, persistedEvent.SessionSequence),
+            cancellationToken);
 
     private static async Task WriteLiveEventAsync(
         NaradSseWriteContext writer,
@@ -354,27 +346,6 @@ internal static class NaradStreamDelivery
         {
             _ = NaradStreamObservation.ValidateEventJson(persistedEvent);
             _ = NaradEventJsonParser.ParseBody(persistedEvent);
-        }
-    }
-
-    private static async Task PumpLiveEventsAsync(
-        RuntimeEventStreamSubscription subscription,
-        ConcurrentDictionary<string, NaradPersistedEvent> liveBuffer,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            await foreach (NaradPersistedEvent liveEvent in subscription.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
-            {
-                liveBuffer[liveEvent.EventId] = liveEvent;
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (InvalidOperationException)
-        {
-            // Slow-subscriber disconnect during backfill; caller resumes from durable history.
         }
     }
 

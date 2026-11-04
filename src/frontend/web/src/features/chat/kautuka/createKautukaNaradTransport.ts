@@ -244,6 +244,7 @@ export function createKautukaNaradTransport(options: KautukaNaradTransportOption
         } else {
           query.set('agentId', options.agentId ?? '');
           query.set('hydrate', 'true');
+          query.set('includeWatch', 'true');
         }
         let response: Response;
         try {
@@ -387,56 +388,5 @@ export async function fetchKautukaNaradHistoryPages(
       return;
     }
     cursor = page.nextSessionSequence;
-  }
-}
-
-export async function consumeKautukaNaradWatchRevisions(
-  transportOptions: KautukaNaradTransportOptions,
-  sessionId: string,
-  getCursor: () => number,
-  onRevision: (record: unknown) => void,
-  signal: AbortSignal,
-): Promise<void> {
-  const limits = transportOptions.limits ?? DEFAULT_NARAD_LIMITS;
-
-  while (!signal.aborted) {
-    try {
-      const cursor = Math.max(0, getCursor());
-      const query = new URLSearchParams({
-        afterSessionSequence: String(cursor),
-      });
-      if (transportOptions.agentId) {
-        query.set('agentId', transportOptions.agentId);
-      }
-      const response = await transportOptions.fetch(
-        `${NARAD_BASE}/sessions/${encodeURIComponent(sessionId)}/watch?${query.toString()}`,
-        { credentials: 'include', signal, headers: { Accept: 'text/event-stream' } },
-      );
-      await consumeSseResponse(response, signal, limits, (record) => {
-        if (classifyWireRecord(record) === 'watch') {
-          onRevision(record);
-        }
-      });
-    } catch (error) {
-      if (signal.aborted) {
-        return;
-      }
-    }
-
-    if (signal.aborted) {
-      return;
-    }
-
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(resolve, 250);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          reject(new DOMException('Aborted', 'AbortError'));
-        },
-        { once: true },
-      );
-    }).catch(() => undefined);
   }
 }

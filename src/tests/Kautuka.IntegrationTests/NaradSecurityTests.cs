@@ -45,14 +45,16 @@ public sealed class NaradSecurityTests
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
-    [Fact]
-    public async Task CrossSessionStreamReturnsForbidden()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CrossSessionStreamReturnsForbidden(bool includeWatch)
     {
         await using WebApplication app = await BuildAppAsync(authGuard: new DenyCrossSessionAuthGuard()).ConfigureAwait(true);
         HttpClient client = app.GetTestClient();
 
         using HttpResponseMessage response = await client
-            .GetAsync(new Uri("/api/narad/v1/sessions/session-1/stream?agentId=agent-1&afterSessionSequence=0", UriKind.Relative), TestContext.Current.CancellationToken)
+            .GetAsync(new Uri($"/api/narad/v1/sessions/session-1/stream?agentId=agent-1&afterSessionSequence=0&includeWatch={includeWatch}", UriKind.Relative), TestContext.Current.CancellationToken)
             .ConfigureAwait(true);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);

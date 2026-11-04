@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "image": "ghcr.io/devkrity/kautuka-release-builder@sha256:8208cd18bb27fe3a223e58c2df00247dd1299c4c0ea71559f4f55b824bc47e51",
-  "description": "Reviewed public GHCR digest consumed by release jobs."
+  "image": "",
+  "description": "Build from the configured toolchain until a refreshed image is promoted."
 }

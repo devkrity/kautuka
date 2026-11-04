@@ -684,6 +684,10 @@ ensure_release_build_image() {
 
 log_phase "Ensuring Linux release build image"
 ensure_release_build_image
+if ! run_build_container "$release_build_image" dotnet --list-sdks | awk '{print $1}' | grep -Fxq "$dotnet_sdk_version"; then
+  echo "error: release builder does not contain required .NET SDK $dotnet_sdk_version; refresh the pinned builder image." >&2
+  exit 1
+fi
 
 log_phase "Building frontend assets"
 run_build_container \

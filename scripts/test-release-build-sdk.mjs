@@ -39,6 +39,7 @@ try {
   assert.match(builder, /--build-arg "DOTNET_SDK_VERSION=\$dotnet_sdk_version"/, 'builder must pass the selected SDK to the image');
   assert.match(builder, /KAUTUKA_RELEASE_RETAIN_FAILED_WORKDIR:-false/, 'failed work directory retention must remain opt-in');
   assert.match(builder, /KAUTUKA_RELEASE_BUILD_IMAGE/, 'release should accept a digest-pinned reusable builder image');
+  assert.match(builder, /dotnet --list-sdks[\s\S]*grep -Fxq "\$dotnet_sdk_version"/, 'release must reject a builder missing the configured SDK');
   assert.match(builder, /KAUTUKA_RELEASE_WSL_ROOTFS_PATH/, 'release should accept the separately maintained WSL rootfs archive');
   assert.match(builder, /src\/images\/wsl-rootfs\/rootfs\.json/, 'WSL rootfs releasever and source image must come from repository config');
   assert.match(builder, /NODE_SHA256=.*node\.linuxX64Sha256/, 'local image fallback must use the configured Node checksum');
@@ -65,7 +66,7 @@ try {
   assert.equal(npmToolsLock.packages['node_modules/tmp'].version, npmTools.overrides.tmp, 'lockfile must resolve the patched tmp override');
   assert.equal(rootfsConfig.releasever, '44');
   assert.equal(rootfsConfig.architecture, 'amd64');
-  assert.match(releaseBuilderPin.image, /^ghcr\.io\/devkrity\/kautuka-release-builder@sha256:[a-f0-9]{64}$/, 'release builder must be pinned to an immutable GHCR digest');
+  assert.match(releaseBuilderPin.image, /^(?:|ghcr\.io\/devkrity\/kautuka-release-builder@sha256:[a-f0-9]{64})$/, 'release builder must use the local build fallback or an immutable GHCR digest');
   assert.match(rootfsPin.image, /^ghcr\.io\/devkrity\/kautuka-wsl-rootfs@sha256:[a-f0-9]{64}$/, 'WSL rootfs must be pinned to an immutable GHCR digest');
   assert.match(refreshInputsWorkflow, /docker build --provenance=false -f src\/images\/wsl-rootfs\/Containerfile/, 'single-platform rootfs publish must upload a plain manifest whose digest can be pinned');
   assert.match(platformAssetsWorkflow, /docker create --entrypoint \/bin\/true \"\$WSL_ROOTFS_IMAGE\"/, 'data-only WSL rootfs image has no CMD, so extraction must provide a command when creating the stopped container');

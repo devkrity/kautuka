@@ -131,6 +131,106 @@ public sealed class NaradEndpointTests
     }
 
     [Fact]
+    public async Task SessionStreamIncludesRevisionOnlyWhenRequested()
+    {
+        NaradPersistedEvent[] seed =
+        [
+            AuthorityEvent("evt-1", NaradEventTypes.RunStarted, "session-1", 1, "run-1", "run-1", 1),
+        ];
+        await using WebApplication app = await BuildAppAsync(seed).ConfigureAwait(true);
+        HttpClient client = app.GetTestClient();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri("/api/narad/v1/sessions/session-1/stream?agentId=agent-1&hydrate=false&includeWatch=true", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(true);
+        List<SseFrame> frames = await ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 3, timeout.Token).ConfigureAwait(true);
+        Assert.Contains(frames, frame => frame.Id == "evt-1");
+        Assert.Contains(frames, frame => frame.Id == "session-revision:session-1:1");
+    }
+
+    [Fact]
+    public async Task CombinedStreamDeliversLiveAuthorityAndRevision()
+    {
+        await using WebApplication app = await BuildAppAsync().ConfigureAwait(true);
+        RuntimeEventStreamHub hub = (RuntimeEventStreamHub)app.Services.GetRequiredService<IRuntimeEventStreamHub>();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        using HttpResponseMessage response = await app.GetTestClient().GetAsync(
+            new Uri("/api/narad/v1/sessions/session-1/stream?agentId=agent-1&hydrate=false&includeWatch=true", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(true);
+        Task<List<SseFrame>> reading = ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 3, timeout.Token, TimeSpan.FromSeconds(8));
+        while (hub.SessionSubscriberCount < 1)
+        {
+            await Task.Delay(10, timeout.Token).ConfigureAwait(true);
+        }
+        hub.Publish(AuthorityEvent("evt-live-combined", NaradEventTypes.RunStarted, "session-1", 1, "run-1", "run-1", 1));
+        List<SseFrame> frames = await reading.ConfigureAwait(true);
+        Assert.Contains(frames, frame => frame.Id == "evt-live-combined");
+        Assert.Contains(frames, frame => frame.Id == "session-revision:session-1:1");
+    }
+
+    [Fact]
+    public async Task StreamDeliversEventPublishedDuringHistoryReplay()
+    {
+        NaradPersistedEvent started = AuthorityEvent("evt-before", NaradEventTypes.RunStarted, "session-1", 1, "run-1", "run-1", 1);
+        NaradPersistedEvent finished = AuthorityEvent("evt-during", NaradEventTypes.RunFinished, "session-1", 2, "run-1", "run-1", 2);
+        await using WebApplication app = await BuildAppAsync([started]).ConfigureAwait(true);
+        NaradTestAgentStore store = app.Services.GetRequiredService<NaradTestAgentStore>();
+        RuntimeEventStreamHub hub = (RuntimeEventStreamHub)app.Services.GetRequiredService<IRuntimeEventStreamHub>();
+        store.AfterRevisionRead = () =>
+        {
+            store.AfterRevisionRead = null;
+            store.Append(finished);
+            hub.Publish(finished);
+        };
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        using HttpResponseMessage response = await app.GetTestClient().GetAsync(
+            new Uri("/api/narad/v1/sessions/session-1/stream?agentId=agent-1&hydrate=false&includeWatch=true", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(true);
+        List<SseFrame> frames = await ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 5, timeout.Token).ConfigureAwait(true);
+        Assert.Contains(frames, frame => frame.Id == "evt-before");
+        Assert.Contains(frames, frame => frame.Id == "evt-during");
+        Assert.True(frames.FindIndex(frame => frame.Id == "evt-before") < frames.FindIndex(frame => frame.Id == "evt-during"));
+    }
+
+    [Fact]
+    public async Task OutOfOrderLiveEventsReconnectThroughDurableHistory()
+    {
+        NaradPersistedEvent first = AuthorityEvent("evt-first", NaradEventTypes.RunStarted, "session-1", 1, "run-1", "run-1", 1);
+        NaradPersistedEvent second = AuthorityEvent("evt-second", NaradEventTypes.RunFinished, "session-1", 2, "run-1", "run-1", 2);
+        NaradPersistedEvent third = AuthorityEvent("evt-third", NaradEventTypes.RunStarted, "session-1", 3, "run-2", "run-2", 1);
+        await using WebApplication app = await BuildAppAsync([first]).ConfigureAwait(true);
+        NaradTestAgentStore store = app.Services.GetRequiredService<NaradTestAgentStore>();
+        RuntimeEventStreamHub hub = (RuntimeEventStreamHub)app.Services.GetRequiredService<IRuntimeEventStreamHub>();
+        store.AfterRevisionRead = () =>
+        {
+            store.AfterRevisionRead = null;
+            store.Append(second);
+            store.Append(third);
+            hub.Publish(third);
+        };
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        HttpClient client = app.GetTestClient();
+        using HttpResponseMessage response = await client.GetAsync(
+            new Uri("/api/narad/v1/sessions/session-1/stream?agentId=agent-1&hydrate=false", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(true);
+        List<SseFrame> firstFrames = await ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 4, timeout.Token, TimeSpan.FromSeconds(8)).ConfigureAwait(true);
+        SseFrame observed = Assert.Single(firstFrames, frame => frame.Id == "evt-first");
+        Assert.DoesNotContain(firstFrames, frame => frame.Id == "evt-third");
+        long cursor = JsonNode.Parse(observed.Data)!["sessionSequence"]!.GetValue<long>();
+        using HttpResponseMessage retry = await client.GetAsync(
+            new Uri($"/api/narad/v1/sessions/session-1/stream?agentId=agent-1&hydrate=false&afterSessionSequence={cursor.ToString(System.Globalization.CultureInfo.InvariantCulture)}", UriKind.Relative),
+            HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(true);
+        List<SseFrame> frames = await ReadSseFramesAsync(await retry.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 3, timeout.Token).ConfigureAwait(true);
+        Assert.True(frames.FindIndex(frame => frame.Id == "evt-second") >= 0);
+        Assert.True(frames.FindIndex(frame => frame.Id == "evt-second") < frames.FindIndex(frame => frame.Id == "evt-third"));
+    }
+
+    [Fact]
     public async Task StreamDedupesRepeatedEventIdsOnLiveReplay()
     {
         NaradPersistedEvent started = AuthorityEvent("evt-live", NaradEventTypes.RunStarted, "session-1", 1, "run-live", "run-live", 1);

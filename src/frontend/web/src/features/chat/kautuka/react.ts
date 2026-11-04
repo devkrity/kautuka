@@ -2,7 +2,7 @@ import {
   useKautukaNaradConnectionStatus,
   useKautukaNaradSelector,
 } from './KautukaNaradProvider';
-import { useApprovalsBySession, useApprovalInvalidationSync, approvalsQueryKeys } from '@/features/approvals';
+import { APPROVAL_REFRESH_INTERVAL_MS, useApprovalsBySession, approvalsQueryKeys } from '@/features/approvals';
 import type { Approval } from '@/features/approvals';
 import { queryClient } from '@/lib/queryClient';
 import React from 'react';
@@ -78,9 +78,9 @@ function useChatSessionApprovals(sessionIdOverride?: string | null): readonly Ap
   const snapshotSessionId = useKautukaNaradSelector((snapshot) => snapshot.sessionId);
   const sessionId = sessionIdOverride ?? snapshotSessionId;
   const connection = useKautukaConnectionView();
-  useApprovalInvalidationSync(Boolean(sessionId));
   const { data: sessionApprovals = [] } = useApprovalsBySession(sessionId, {
-    refetchInterval: false,
+    refetchInterval: APPROVAL_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
   });
   React.useEffect(() => {
     if (!sessionId || (!connection.sessionGap && !connection.resyncRequired)) {
