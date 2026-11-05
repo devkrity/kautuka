@@ -99,4 +99,10 @@ describe('remote MCP configuration', () => {
       suggestRemoteMcpIdentity('https://mcp.example.com/secret-path?tools=web_search')
     ).toEqual({ id: 'mcp-example-com', name: 'mcp.example.com' });
   });
+
+  it('rejects unsupported provider sign-in routes without blocking ordinary login queries', () => {
+    expect(() => parseRemoteMcpUrl('https://mcp.exa.ai/mcp?login')).toThrow(/OAuth/);
+    expect(() => parseRemoteMcpUrl('https://mcp.firecrawl.dev/v2/mcp-oauth')).toThrow(/OAuth/);
+    expect(parseRemoteMcpUrl('https://example.com/mcp?login').hostname).toBe('example.com');
+  });
 });

@@ -4,7 +4,7 @@ CREATE TABLE gateway_schema (
     schema_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
 );
-INSERT INTO gateway_schema(schema_id, created_at) VALUES ('gateway-2026-10-26.1', CURRENT_TIMESTAMP);
+INSERT INTO gateway_schema(schema_id, created_at) VALUES ('gateway-2026-11-06.1', CURRENT_TIMESTAMP);
 CREATE TABLE providers (
             id           TEXT PRIMARY KEY,
             name         TEXT NOT NULL,

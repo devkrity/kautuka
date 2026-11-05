@@ -170,7 +170,7 @@ describe('RemoteMcpEditor', () => {
       />
     );
     expect(screen.queryByRole('button', { name: 'Remove API key' })).not.toBeInTheDocument();
-    expect(screen.getByText(/Shared system access remains available/)).toBeInTheDocument();
+    expect(screen.getByText(/Everyone's credential remains available/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Credential scope'), { target: { value: 'system' } });
     fireEvent.click(screen.getByRole('button', { name: 'Remove API key' }));
     expect(screen.getByText('Will remove the shared system credential.')).toBeInTheDocument();
@@ -178,6 +178,33 @@ describe('RemoteMcpEditor', () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
     expect(onSave.mock.calls[0][2]).toBe('system');
     expect(onSave.mock.calls[0][1]).toEqual([{ key: 'api-key', action: 'remove' }]);
+  });
+
+  it('requires acknowledgement before changing a shared address', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const connector = connectorSchema.parse({ id: 'shared', name: 'Shared', transport: 'http', scope: 'system', httpUrl: 'https://old.example/mcp', credentials: [], httpHeaders: [] });
+    render(<RemoteMcpEditor connector={connector} onSave={onSave} onTest={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value: 'https://new.example/mcp' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('everyone who uses it will need to enter their key again');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /I understand/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByLabelText('Server URL'), { target: { value: 'https://another.example/mcp' } });
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
+  it('requires explicit review before replacing a legacy key with no authentication', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const connector = connectorSchema.parse({ id: 'legacy', name: 'Legacy', transport: 'http', httpUrl: 'https://example.com/mcp', requiresCredentialReentry: true, credentials: [], httpHeaders: [] });
+    render(<RemoteMcpEditor connector={connector} onSave={onSave} onTest={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Confirm the new authentication choice');
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /I reviewed the new authentication choice/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce());
+    expect(onSave.mock.calls[0][0].confirmLegacyAuthReplacement).toBe(true);
   });
 
   it('requires an explicit credential choice for a changed personal destination', async () => {

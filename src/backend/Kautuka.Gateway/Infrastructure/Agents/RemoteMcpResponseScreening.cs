@@ -27,13 +27,7 @@ internal static class RemoteMcpResponseScreening
             response.Headers.TryAddWithoutValidation(header.Key, screened);
         }
         response.ReasonPhrase = response.ReasonPhrase is null ? null : Screen(response.ReasonPhrase, values);
-        byte[][] patterns = [.. values.SelectMany(static value => new[]
-        {
-            Encoding.UTF8.GetBytes(value),
-            JsonEncodedText.Encode(value).EncodedUtf8Bytes.ToArray(),
-            JsonEncodedText.Encode(value, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).EncodedUtf8Bytes.ToArray(),
-        }).OrderByDescending(static bytes => bytes.Length)];
-        response.Content = new ScreenedContent(response.Content, patterns, values);
+        response.Content = new ScreenedContent(response.Content, new ScreeningPatterns(values), values);
     }
 
     private static string Screen(string value, string[] secrets)
@@ -48,12 +42,50 @@ internal static class RemoteMcpResponseScreening
         foreach (byte[] pattern in patterns) CryptographicOperations.ZeroMemory(pattern);
     }
 
+    private static byte[][] Copy(byte[][] patterns) => [.. patterns.Select(static pattern => pattern.ToArray())];
+
+    internal sealed class ScreeningPatterns : IDisposable
+    {
+        private readonly byte[][] patterns;
+        private readonly object sync = new();
+        private bool disposed;
+
+        public ScreeningPatterns(IEnumerable<string> values)
+        {
+            patterns = [.. values.SelectMany(static value => new[]
+            {
+                Encoding.UTF8.GetBytes(value),
+                JsonEncodedText.Encode(value).EncodedUtf8Bytes.ToArray(),
+                JsonEncodedText.Encode(value, JavaScriptEncoder.UnsafeRelaxedJsonEscaping).EncodedUtf8Bytes.ToArray(),
+            }).OrderByDescending(static bytes => bytes.Length)];
+        }
+
+        public Stream Wrap(Stream source)
+        {
+            lock (sync)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                return new ScreeningStream(source, Copy(patterns));
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (sync)
+            {
+                if (disposed) return;
+                disposed = true;
+                Clear(patterns);
+            }
+        }
+    }
+
     private sealed class ScreenedContent : HttpContent
     {
         private readonly HttpContent source;
-        private readonly byte[][] patterns;
+        private readonly ScreeningPatterns patterns;
 
-        public ScreenedContent(HttpContent source, byte[][] patterns, string[] secrets)
+        public ScreenedContent(HttpContent source, ScreeningPatterns patterns, string[] secrets)
         {
             this.source = source;
             this.patterns = patterns;
@@ -65,10 +97,10 @@ internal static class RemoteMcpResponseScreening
         protected override bool TryComputeLength(out long length) { length = 0; return false; }
 
         protected override async Task<Stream> CreateContentReadStreamAsync()
-            => new ScreeningStream(await source.ReadAsStreamAsync().ConfigureAwait(false), patterns);
+            => patterns.Wrap(await source.ReadAsStreamAsync().ConfigureAwait(false));
 
         protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken)
-            => new ScreeningStream(await source.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), patterns);
+            => patterns.Wrap(await source.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
 
         protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
         {
@@ -79,7 +111,7 @@ internal static class RemoteMcpResponseScreening
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { source.Dispose(); Clear(patterns); }
+            if (disposing) { source.Dispose(); patterns.Dispose(); }
             base.Dispose(disposing);
         }
     }

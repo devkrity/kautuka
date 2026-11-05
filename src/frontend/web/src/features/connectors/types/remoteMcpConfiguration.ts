@@ -17,6 +17,9 @@ export function parseRemoteMcpUrl(input: string): URL {
   }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash)
     throw new Error('Use an HTTP or HTTPS MCP URL without embedded credentials or a fragment.');
+  if ((url.hostname.toLowerCase() === 'mcp.exa.ai' && [...url.searchParams.keys()].some((key) => key.toLowerCase() === 'login')) ||
+      (url.hostname.toLowerCase() === 'mcp.firecrawl.dev' && url.pathname.replace(/\/$/, '').toLowerCase() === '/v2/mcp-oauth'))
+    throw new Error("OAuth sign-in isn't supported for remote MCPs yet. Use the provider's API-key or keyless endpoint.");
   if ([...url.searchParams.keys()].some((key) => credentialQueryNames.test(key)))
     throw new Error(
       'Remove credentials from the URL and configure them as credential-backed headers.'

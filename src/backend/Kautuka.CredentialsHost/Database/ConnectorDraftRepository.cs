@@ -48,10 +48,10 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
         using (SqliteCommand command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = "INSERT INTO connector_credential_drafts(id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at) VALUES($id,$actor,$connector,$scope,$candidate,$base,$endpoint,$baseEndpoint,$useDurable,$namespace,$declared,$removed,$expires)";
+            command.CommandText = "INSERT INTO connector_credential_drafts(id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at,source_association_id) VALUES($id,$actor,$connector,$scope,$candidate,$base,$endpoint,$baseEndpoint,$useDurable,$namespace,$declared,$removed,$expires,$source)";
             command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$actor", actor); command.Parameters.AddWithValue("$connector", connectorId);
             command.Parameters.AddWithValue("$scope", scope); command.Parameters.AddWithValue("$candidate", candidate); command.Parameters.AddWithValue("$base", baseUpdatedAt);
-            command.Parameters.AddWithValue("$endpoint", effectiveEndpoint); command.Parameters.AddWithValue("$baseEndpoint", baseEndpoint); command.Parameters.AddWithValue("$useDurable", useDurable ? 1 : 0); command.Parameters.AddWithValue("$namespace", credentialNamespace); command.Parameters.AddWithValue("$declared", Json(declared)); command.Parameters.AddWithValue("$removed", Json(removed)); command.Parameters.AddWithValue("$expires", expires);
+            command.Parameters.AddWithValue("$endpoint", effectiveEndpoint); command.Parameters.AddWithValue("$baseEndpoint", baseEndpoint); command.Parameters.AddWithValue("$useDurable", useDurable ? 1 : 0); command.Parameters.AddWithValue("$namespace", credentialNamespace); command.Parameters.AddWithValue("$declared", Json(declared)); command.Parameters.AddWithValue("$removed", Json(removed)); command.Parameters.AddWithValue("$expires", expires); command.Parameters.AddWithValue("$source", sourceAssociationId);
             command.ExecuteNonQuery();
         }
         foreach ((string key, string value) in entries)
@@ -60,11 +60,6 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
             command.CommandText = "INSERT INTO connector_credential_draft_entries(draft_id,key,encrypted_value) VALUES($id,$key,$value)";
             command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$key", key);
             command.Parameters.AddWithValue("$value", vault.Encrypt(value, new CredentialEnvelopeIdentity("draft", id, key))); command.ExecuteNonQuery();
-        }
-        using (SqliteCommand source = connection.CreateCommand())
-        {
-            source.Transaction = transaction; source.CommandText = "INSERT INTO connector_draft_sources(draft_id,association_id) VALUES($id,$source)";
-            source.Parameters.AddWithValue("$id", id); source.Parameters.AddWithValue("$source", sourceAssociationId); source.ExecuteNonQuery();
         }
         using (SqliteCommand receipt = connection.CreateCommand())
         {
@@ -104,7 +99,7 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
     internal static ConnectorDraftRecord Read(SqliteConnection connection, SqliteTransaction? transaction, string id, string actor, long now)
     {
         using SqliteCommand command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "SELECT id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at,COALESCE((SELECT association_id FROM connector_draft_sources WHERE draft_id=connector_credential_drafts.id),'') FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor AND expires_at>$now";
+        command.CommandText = "SELECT id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at,source_association_id FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor AND completed=0 AND expires_at>$now";
         command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$actor", actor); command.Parameters.AddWithValue("$now", now);
         using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read()) throw new RpcException(new Status(StatusCode.NotFound, "Connector draft was not found or expired."));
@@ -168,14 +163,14 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
         using (SqliteCommand lookup = connection.CreateCommand())
         {
             lookup.Transaction = transaction;
-            lookup.CommandText = "SELECT connector_id,credential_scope FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor UNION ALL SELECT connector_id,credential_scope FROM connector_association_draft_metadata WHERE draft_id=$id AND actor_id=$actor LIMIT 1";
+            lookup.CommandText = "SELECT connector_id,credential_scope FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor";
             lookup.Parameters.AddWithValue("$id", id); lookup.Parameters.AddWithValue("$actor", actor);
             using SqliteDataReader reader = lookup.ExecuteReader();
             if (reader.Read()) { connector = reader.GetString(0); scope = reader.GetString(1); }
         }
         if (connector is null || scope is null) return false;
         using SqliteCommand command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "DELETE FROM connector_association_draft_metadata WHERE draft_id=$id AND actor_id=$actor; DELETE FROM connector_credential_draft_entries WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); DELETE FROM connector_draft_sources WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); DELETE FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor";
+        command.CommandText = "DELETE FROM connector_credential_draft_entries WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); DELETE FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor";
         command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$actor", actor); bool deleted = command.ExecuteNonQuery() > 0;
         WriteAudit(connection, transaction, id, actor, "draft-cancel", scope, connector);
         transaction.Commit(); return deleted;
@@ -185,7 +180,7 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
     {
         using SqliteConnection connection = database.OpenConnection(); using SqliteTransaction transaction = connection.BeginTransaction();
         using SqliteCommand command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "DELETE FROM connector_credential_draft_entries WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); DELETE FROM connector_draft_sources WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); DELETE FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor";
+        command.CommandText = "DELETE FROM connector_credential_draft_entries WHERE draft_id=$id AND EXISTS (SELECT 1 FROM connector_credential_drafts WHERE id=$id AND actor_id=$actor); UPDATE connector_credential_drafts SET completed=1 WHERE id=$id AND actor_id=$actor AND staged_association_id IS NOT NULL";
         command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$actor", actor); command.ExecuteNonQuery(); transaction.Commit();
     }
     private void WriteAudit(SqliteConnection connection, SqliteTransaction transaction, string id, string actor, string action, string scope, string connectorId)
@@ -200,7 +195,7 @@ internal sealed class ConnectorDraftRepository(CredentialsDatabase database, Cre
     private static void Cleanup(SqliteConnection connection, SqliteTransaction transaction, long now)
     {
         using SqliteCommand command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "DELETE FROM connector_credential_draft_entries WHERE draft_id IN (SELECT id FROM connector_credential_drafts WHERE expires_at <= $now); DELETE FROM connector_credential_drafts WHERE expires_at <= $now";
+        command.CommandText = "DELETE FROM connector_credential_draft_entries WHERE draft_id IN (SELECT id FROM connector_credential_drafts WHERE expires_at <= $now); UPDATE connector_credential_drafts SET completed=1 WHERE expires_at <= $now AND staged_association_id IS NOT NULL; DELETE FROM connector_credential_drafts WHERE expires_at <= $now AND staged_association_id IS NULL";
         command.Parameters.AddWithValue("$now", now); command.ExecuteNonQuery();
     }
 }

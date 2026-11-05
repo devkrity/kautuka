@@ -218,7 +218,7 @@ public sealed class ConnectorValidationEndpointTests
         using var blockedClient = new HttpClient(blocked) { Timeout = TimeSpan.FromSeconds(5) };
         HttpRequestException denied = await Assert.ThrowsAsync<HttpRequestException>(() =>
             blockedClient.GetAsync(new Uri("http://127.0.0.1:9/mcp"), cancellationToken));
-        Assert.Contains("not allowed", denied.Message, StringComparison.Ordinal);
+        Assert.Contains("isn't allowed", denied.Message, StringComparison.Ordinal);
 
         using var target = new TcpListener(IPAddress.Loopback, 0);
         using var redirector = new TcpListener(IPAddress.Loopback, 0);
@@ -917,6 +917,30 @@ public sealed class ConnectorValidationEndpointTests
         _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, admin);
         Assert.Equal(updatedAt, fixture.ConnectorUpdatedAt("owner-draft"));
         Assert.False(otherLease.Token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task LegacyMarkerRejectsPreviouslyCreatedUnconfirmedDraftUntilReviewedReplacement()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new { name = "Legacy", transport = "http", httpUrl = "https://example.com/mcp", enabled = true, credentials = Array.Empty<object>(), httpHeaders = Array.Empty<object>() };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/legacy-review", candidate, admin);
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "legacy-review", candidate, credentialScope = "user", entries = new { } }, admin);
+        string id = draft.RootElement.GetProperty("draftId").GetString()!;
+        fixture.MarkConnectorLegacy("legacy-review");
+        foreach (string action in new[] { "test", "save" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{id}/{action}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+            using HttpResponseMessage response = await fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+        var confirmed = new { name = "Legacy", transport = "http", httpUrl = "https://example.com/mcp", enabled = true, credentials = Array.Empty<object>(), httpHeaders = Array.Empty<object>(), confirmLegacyAuthReplacement = true };
+        using JsonDocument replacement = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "legacy-review", candidate = confirmed, credentialScope = "user", entries = new { } }, admin);
+        string replacementId = replacement.RootElement.GetProperty("draftId").GetString()!;
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{replacementId}/save", null, admin);
+        Assert.False(saved.RootElement.GetProperty("requiresCredentialReentry").GetBoolean());
     }
 
     [Fact]
@@ -1670,6 +1694,11 @@ public sealed class ConnectorValidationEndpointTests
         public FakeCredentialsServiceClient Credentials { get; }
 
         public string ConnectorUpdatedAt(string id) => app.Services.GetRequiredService<GatewayState>().McpServers[id].UpdatedAt;
+        public void MarkConnectorLegacy(string id)
+        {
+            GatewayState state = app.Services.GetRequiredService<GatewayState>();
+            state.McpServers[id] = state.McpServers[id] with { RequiresCredentialReentry = true };
+        }
         public RemoteMcpOperationLease AcquireConnectorLease(string id, string userId)
             => app.Services.GetRequiredService<RemoteMcpCredentialRevisionTracker>().Acquire(id, userId, null, includeSystem: false);
 

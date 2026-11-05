@@ -345,7 +345,9 @@ public sealed class SqliteGatewaySchemaBootstrapperTests
         SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection);
         using (SqliteCommand drop = connection.CreateCommand())
         {
-            drop.CommandText = "ALTER TABLE mcp_servers DROP COLUMN mcp_protocol_version";
+            // The protocol column predates remote_config_json. Exercise a registered older
+            // schema rather than fabricating a damaged database with the current marker.
+            drop.CommandText = "ALTER TABLE mcp_servers DROP COLUMN remote_config_json; ALTER TABLE mcp_servers DROP COLUMN mcp_protocol_version; UPDATE gateway_schema SET schema_id='gateway-2026-10-23.2'";
             drop.ExecuteNonQuery();
         }
 

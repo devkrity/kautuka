@@ -167,7 +167,7 @@ internal sealed partial class GatewayState
                 row.BundlePath, row.ServerType,
                 row.ReadinessTimeoutSeconds, row.JitCooldownSeconds, row.HealthcheckUrl, row.HealthcheckIntervalMilliseconds,
                 row.Enabled != 0, row.IsInternalSystemConnector != 0, row.CreatedAt, row.UpdatedAt, row.Scope, row.OwnerUserId, row.ToolCount, toolNames, envKeys,
-                row.RuntimeArtifactType, row.RuntimeArtifactSourceDigest, row.RuntimeArtifactBuildStatus, row.McpProtocolVersion, remote.Credentials, remote.HttpHeaders, remote.CredentialNamespace, remote.CredentialAssociationId, remote.CredentialOperationId, remote.CredentialSourceId);
+                row.RuntimeArtifactType, row.RuntimeArtifactSourceDigest, row.RuntimeArtifactBuildStatus, row.McpProtocolVersion, remote.Credentials, remote.HttpHeaders, remote.CredentialNamespace, remote.CredentialAssociationId, remote.CredentialOperationId, remote.CredentialSourceId, remote.RequiresCredentialReentry);
         }
     }
 

@@ -17,7 +17,9 @@ internal sealed record RemoteMcpRequestContext(
     Func<CancellationToken, Task>? Revalidate = null,
     Func<RemoteMcpOperationLease>? CreateLease = null,
     string? CredentialNamespace = null,
-    string? ProtocolVersion = null);
+    string? ProtocolVersion = null,
+    bool PreferIpv4 = false,
+    bool RequiresCredentialReentry = false);
 
 internal sealed class RemoteMcpConfigurationException : HttpRequestException
 {
@@ -36,7 +38,8 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
         cancellationToken = linked?.Token ?? cancellationToken;
         RemoteMcpConfigurationValidator.ValidateEndpoint(context.Endpoint);
         RemoteMcpConfigurationValidator.ValidateEndpoint(request.RequestUri);
-        if (context.Revalidate is not null) await context.Revalidate(cancellationToken).ConfigureAwait(false);
+        if (context.RequiresCredentialReentry)
+            throw new RemoteMcpConfigurationException("This remote connector used the previous credential setup. Enter its key again in connector settings before using it.");
         Uri? destination = request.RequestUri;
         if (destination is null || !destination.IsAbsoluteUri || !string.IsNullOrEmpty(destination.UserInfo)
             || !string.Equals(destination.Scheme, context.Endpoint.Scheme, StringComparison.OrdinalIgnoreCase)
@@ -97,7 +100,15 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
             }
             if (context.Revalidate is not null) await context.Revalidate(cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            HttpResponseMessage response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            HttpResponseMessage response;
+            try
+            {
+                response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                throw RemoteMcpFailureMessages.AsSafeException(ex, context.PreferIpv4 && !HasConfiguredCredential(resolved));
+            }
             if ((int)response.StatusCode is >= 300 and < 400)
             {
                 response.Dispose();
@@ -106,6 +117,9 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
             string? providerFailure = (int)response.StatusCode switch
             {
                 401 => "Remote MCP authentication was rejected (HTTP 401). Check the configured credentials.",
+                403 when context.Endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase)
+                    && !HasConfiguredCredential(resolved)
+                    => "Exa free access was refused on this network. Add an Exa API key or use a network with direct IPv4 access.",
                 403 => "Remote MCP access was denied (HTTP 403). Check credentials and the provider's access restrictions.",
                 429 => "Remote MCP usage limit was reached (HTTP 429). Check the provider's quota before retrying.",
                 _ => null,
@@ -124,6 +138,13 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
             foreach (string name in injected) request.Headers.Remove(name);
         }
     }
+
+    private bool HasConfiguredCredential(IReadOnlyDictionary<string, string> resolved)
+        => context.Headers.Any(header => header.CredentialKey is not null
+            && resolved.TryGetValue(ConnectorCredentialKeys.BuildRemoteCredentialKey(
+                context.CredentialNamespace ?? string.Empty, context.Endpoint, header.CredentialKey), out string? value)
+            && !string.IsNullOrWhiteSpace(value));
+
     protected override void Dispose(bool disposing)
     {
         if (disposing) lease?.Dispose();

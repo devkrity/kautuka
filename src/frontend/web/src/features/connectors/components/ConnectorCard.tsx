@@ -112,12 +112,21 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           {connector.toolCount != null ? (
             <Badge variant="info">{connector.toolCount} tools</Badge>
           ) : null}
+          {connector.requiresCredentialReentry ? (
+            <Badge variant="attention">Key needs to be entered again</Badge>
+          ) : null}
           {credBadge}
         </>
       }
       description={connector.description}
       meta={
         <>
+          {connector.requiresCredentialReentry ? (
+            <p role="alert" className="mt-1 text-sm text-destructive">
+              This remote connector used the previous key setup. Edit it and enter its key again
+              before using it.
+            </p>
+          ) : null}
           {commandSummary ? (
             <p
               className="mt-1 truncate font-mono text-[10px] text-muted-foreground/70"

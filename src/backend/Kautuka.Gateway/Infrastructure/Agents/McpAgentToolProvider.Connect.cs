@@ -203,7 +203,9 @@ internal sealed partial class McpAgentToolProvider
         var requestContext = new RemoteMcpRequestContext(approvedEndpoint, serverDef.Id, userId ?? string.Empty,
             includeSystem, [.. serverDef.Credentials], [.. serverDef.HttpHeaders],
             (keys, token) => credentialResolver.ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId ?? string.Empty, keys, includeSystem, token), RevalidateAsync,
-            () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion);
+            () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion,
+            PreferIpv4: approvedEndpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
+            RequiresCredentialReentry: serverDef.RequiresCredentialReentry);
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 
@@ -445,6 +447,7 @@ internal sealed partial class McpAgentToolProvider
             CredentialAssociationId = serverDef.CredentialAssociationId,
             CredentialOperationId = serverDef.CredentialOperationId,
             CredentialSourceId = serverDef.CredentialSourceId,
+            RequiresCredentialReentry = serverDef.RequiresCredentialReentry,
             Credentials = serverDef.Credentials,
             HttpHeaders = serverDef.HttpHeaders,
             CreatedAt = serverDef.CreatedAt,

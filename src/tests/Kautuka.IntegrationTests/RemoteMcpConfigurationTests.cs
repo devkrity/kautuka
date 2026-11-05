@@ -23,6 +23,12 @@ public sealed class RemoteMcpConfigurationTests
     public void AllowsOrdinaryProviderConfigurationQueries()
         => RemoteMcpConfigurationValidator.ValidateEndpoint(new Uri("https://example.com/mcp?tools=search&login"));
 
+    [Theory]
+    [InlineData("https://mcp.exa.ai/mcp?login")]
+    [InlineData("https://mcp.firecrawl.dev/v2/mcp-oauth")]
+    public void RejectsUnsupportedProviderSignInRoutes(string input)
+        => Assert.Contains("OAuth", Assert.Throws<InvalidOperationException>(() => RemoteMcpConfigurationValidator.ValidateEndpoint(new Uri(input))).Message, StringComparison.Ordinal);
+
     [Fact]
     public void SourceGeneratedJsonRequiresExplicitRequiredAndRoundTrips()
     {

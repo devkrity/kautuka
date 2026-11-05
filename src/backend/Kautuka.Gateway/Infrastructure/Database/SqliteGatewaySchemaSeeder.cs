@@ -1,6 +1,5 @@
 using System.Text.Json.Nodes;
 
-using Kautuka.Gateway.Domain.Connectors;
 
 using Microsoft.Data.Sqlite;
 
@@ -124,7 +123,7 @@ internal static class SqliteGatewaySchemaSeeder
                 $protocolVersion);
             """;
         command.Parameters.AddWithValue("$now", now);
-        command.Parameters.AddWithValue("$protocolVersion", McpServerSchemaCompat.MarkItDownInitialProtocolVersion);
+        command.Parameters.AddWithValue("$protocolVersion", "2024-11-05");
         command.ExecuteNonQuery();
     }
 

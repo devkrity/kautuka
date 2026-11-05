@@ -27,6 +27,61 @@ public sealed class RemoteMcpRequestHandlerTests
         Assert.False(request.Headers.Contains("Authorization"));
     }
 
+    [Fact]
+    public async Task ExaFreeAccessFailureExplainsNetworkRestrictionWhenNoKeyIsConfigured()
+    {
+        Uri endpoint = new("https://mcp.exa.ai/mcp");
+        string key = ConnectorCredentialKeys.BuildRemoteCredentialKey("namespace-one", endpoint, "api-key");
+        RemoteMcpRequestContext context = CreateContext((_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>())) with
+        {
+            Endpoint = endpoint,
+            Resolve = (_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()),
+            PreferIpv4 = true,
+            Headers = [new("x-api-key", CredentialKey: "api-key")],
+        };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, new RejectedHandler(403)));
+        RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
+            () => client.GetAsync(endpoint, TestContext.Current.CancellationToken));
+        Assert.Contains("Exa free access was refused on this network", error.Message, StringComparison.Ordinal);
+        Assert.Contains("direct IPv4", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(key, error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RequestRechecksAuthorizationExactlyOnceAfterCredentialResolution()
+    {
+        int calls = 0;
+        var context = CreateContext((_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>())) with
+        {
+            Revalidate = _ => { calls++; return Task.CompletedTask; },
+        };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, new RecordingHandler()));
+        using HttpResponseMessage response = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task LegacyRemoteTokenSetupBlocksRuntimeUntilTheOwnerReentersTheKey()
+    {
+        int resolves = 0;
+        var inner = new RecordingHandler();
+        var context = CreateContext((_, _) =>
+        {
+            resolves++;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+        }) with
+        { RequiresCredentialReentry = true };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
+            () => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
+
+        Assert.Contains("used the previous credential setup", error.Message, StringComparison.Ordinal);
+        Assert.Contains("Enter its key again", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, resolves);
+        Assert.Equal(0, inner.Sends);
+    }
+
     private sealed class RejectedHandler(int status) : HttpMessageHandler
     {
         public int Sends { get; private set; }
@@ -147,7 +202,7 @@ public sealed class RemoteMcpRequestHandlerTests
         };
         using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
         using HttpResponseMessage first = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
-        Assert.Equal(2, checks);
+        Assert.Equal(1, checks);
         allowed = false;
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
         Assert.Equal(1, inner.Sends);

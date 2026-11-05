@@ -101,6 +101,8 @@ R23. Extensive automated coverage must establish:
 
 R24. Live verification distinguishes discovery from actual search. Exercise anonymous search through implemented Kautuka paths for Tavily and Firecrawl; record Exa success or concrete remaining provider restriction. Authenticated behavior requires securely supplied test keys; never invent credentials or expose them. If unavailable, report authenticated live verification as pending while testing deterministic local equivalents extensively. Do not mark unsupported live claims as verified.
 
+Review follow-up, 2026-11-06: The existing production-transport harness returned actual anonymous search result URLs for Firecrawl and Exa. Tavily returned a keyless search result earlier; later searches reported `monthly_cap_reached_bonus_eligible`, although initialize and discovery still worked. No signup, payment, or bonus action was taken. These are component-level checks, not deployed-appliance or live Gateway-to-CredentialsHost verification. Authenticated live testing remains pending securely supplied keys; no new provider activity was performed for this follow-up.
+
 ## Implementation chunks and compliance evidence
 
 Implement bounded reviewable chunks: (1) schema/contracts/validation/persistence, (2) late transport injection and network/session policy, (3) credential draft lifecycle/import/UI, (4) presets and integrated regression/acceptance. Adjust chunk boundaries when owning-code dependencies justify it. Review each before delegating the next. No commit/push/publication is authorized by this document.

@@ -87,7 +87,8 @@ internal sealed record GatewayMcpServer(
     string? McpProtocolVersion = null,
     IReadOnlyList<RemoteMcpCredential>? Credentials = null,
     IReadOnlyList<RemoteMcpHeader>? HttpHeaders = null,
-    string? CredentialNamespace = null, string? CredentialAssociationId = null, string? CredentialOperationId = null, string? CredentialSourceId = null);
+    string? CredentialNamespace = null, string? CredentialAssociationId = null, string? CredentialOperationId = null, string? CredentialSourceId = null,
+    bool RequiresCredentialReentry = false);
 
 internal sealed record GatewaySkill(
     string Id,

@@ -46,6 +46,11 @@ internal sealed partial class McpAgentToolProvider
             return new AgentToolSurfaceContribution([], Complete: true);
         }
 
+        McpServerDefinition? needsReentry = activeDefs.Select(static item => item.Definition)
+            .FirstOrDefault(static server => server.Transport == McpTransport.Http && server.RequiresCredentialReentry);
+        if (needsReentry is not null)
+            throw new InvalidOperationException($"Remote connector '{needsReentry.Name}' needs its key entered again in connector settings before it can be used.");
+
         Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)>[] tasks = activeDefs
             .Select(binding => ConnectSafeAsync(binding.Definition, binding.Binding, context, ct))
             .ToArray();
@@ -188,7 +193,7 @@ internal sealed partial class McpAgentToolProvider
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        throw new InvalidOperationException("Remote MCP invocation failed.");
+                        throw new InvalidOperationException(RemoteMcpFailureMessages.Describe(ex));
                     }
                 }
 

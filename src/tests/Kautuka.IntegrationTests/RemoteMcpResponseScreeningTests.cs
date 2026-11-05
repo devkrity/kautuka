@@ -42,6 +42,22 @@ public sealed class RemoteMcpResponseScreeningTests
     }
 
     [Fact]
+    public async Task ClosingOneScreeningReadDoesNotDisableScreeningForAnotherRead()
+    {
+        const string secret = "repeatable-synthetic-secret";
+        using var patterns = new RemoteMcpResponseScreening.ScreeningPatterns([secret]);
+        byte[] payload = Encoding.UTF8.GetBytes($"echo:{secret}");
+
+        await using (Stream first = patterns.Wrap(new MemoryStream(payload, writable: false)))
+            Assert.Equal("echo:[redacted]", await ReadAllAsync(first));
+
+        await using Stream second = patterns.Wrap(new MemoryStream(payload, writable: false));
+        string secondRead = await ReadAllAsync(second);
+        Assert.Equal("echo:[redacted]", secondRead);
+        Assert.DoesNotContain(secret, secondRead, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task StreamsAnEventWithoutWaitingForEofOrAnotherEvent()
     {
         using var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -93,5 +109,11 @@ public sealed class RemoteMcpResponseScreeningTests
             bytes.CopyTo(buffer.Span);
             return ValueTask.FromResult(bytes.Length);
         }
+    }
+
+    private static async Task<string> ReadAllAsync(Stream stream)
+    {
+        using var reader = new StreamReader(stream, Encoding.UTF8, leaveOpen: true);
+        return await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
     }
 }

@@ -167,6 +167,7 @@ internal static class AgentToolingFingerprint
             Append(builder, credential.Label);
             Append(builder, credential.Required ? "1" : "0");
         }
+        Append(builder, server.RequiresCredentialReentry ? "credential-reentry-required" : "credential-setup-current");
         foreach (RemoteMcpHeader header in server.HttpHeaders)
         {
             Append(builder, header.Name);

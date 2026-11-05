@@ -52,8 +52,9 @@ internal sealed class McpConnectorTestService(
         if (!Uri.TryCreate(httpUrl, UriKind.Absolute, out Uri? uri))
             return new McpConnectorTestResult(false, "Connector destination is invalid.");
 
-        if (!ProbeNetworkPolicy.IsAllowed(httpUrl, request.AllowPrivateDestination))
-            return new McpConnectorTestResult(false, "Connector test destination is not allowed.");
+        string? policyFailure = ProbeNetworkPolicy.GetDestinationFailure(httpUrl, request.AllowPrivateDestination);
+        if (policyFailure is not null)
+            return new McpConnectorTestResult(false, policyFailure);
 
         try
         {
@@ -75,7 +76,7 @@ internal sealed class McpConnectorTestService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return new McpConnectorTestResult(false, "Remote MCP connection failed.");
+            return new McpConnectorTestResult(false, RemoteMcpFailureMessages.Describe(ex));
         }
     }
 

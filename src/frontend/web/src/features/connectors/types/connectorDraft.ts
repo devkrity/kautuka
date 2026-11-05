@@ -24,6 +24,7 @@ export type ConnectorDraft = {
   envKeys: string; // raw textarea — one per line
   credentials?: RemoteMcpCredential[];
   httpHeaders?: RemoteMcpHeader[];
+  confirmLegacyAuthReplacement?: boolean;
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -52,6 +53,7 @@ export type ConnectorSavePayload = {
   envKeys: string[];
   credentials?: RemoteMcpCredential[];
   httpHeaders?: RemoteMcpHeader[];
+  confirmLegacyAuthReplacement?: boolean;
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -146,6 +148,7 @@ export function buildSavePayload(d: ConnectorDraft): ConnectorSavePayload {
     mcpProtocolVersion: d.mcpProtocolVersion || null,
     credentials: d.transport === 'http' ? (d.credentials ?? []) : [],
     httpHeaders: d.transport === 'http' ? (d.httpHeaders ?? []) : [],
+    confirmLegacyAuthReplacement: d.confirmLegacyAuthReplacement ?? false,
     envKeys:
       d.transport === 'http'
         ? []

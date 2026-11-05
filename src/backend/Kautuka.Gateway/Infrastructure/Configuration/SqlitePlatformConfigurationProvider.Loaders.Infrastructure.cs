@@ -161,6 +161,7 @@ internal partial class SqlitePlatformConfigurationProvider
                     CredentialAssociationId = remote.CredentialAssociationId,
                     CredentialOperationId = remote.CredentialOperationId,
                     CredentialSourceId = remote.CredentialSourceId,
+                    RequiresCredentialReentry = remote.RequiresCredentialReentry,
                     Credentials = remote.Credentials,
                     HttpHeaders = remote.HttpHeaders,
                     ContainerImage = r.ContainerImage,

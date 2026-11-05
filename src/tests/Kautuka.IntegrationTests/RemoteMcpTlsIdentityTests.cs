@@ -12,6 +12,30 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class RemoteMcpTlsIdentityTests
 {
+    [Fact]
+    public void ExaPrefersPublicIpv4ButAllowsIpv6Fallback()
+    {
+        IPAddress ipv6 = IPAddress.Parse("2001:db8::2");
+        IPAddress ipv4 = IPAddress.Parse("203.0.113.9");
+        IPAddress[] dualStack = [ipv6, ipv4];
+
+        Assert.Equal(ipv6, ProbeNetworkPolicy.SelectAddress(dualStack, allowPrivate: false, preferIpv4: false));
+        Assert.Equal(ipv4, ProbeNetworkPolicy.SelectAddress(dualStack, allowPrivate: false, preferIpv4: true));
+        Assert.Equal(ipv6, ProbeNetworkPolicy.SelectAddress([ipv6], allowPrivate: false, preferIpv4: true));
+        Assert.Equal("Exa free access needs a direct IPv4 connection. Add an Exa API key or use a network with public IPv4 access.",
+            RemoteMcpFailureMessages.Describe(new HttpRequestException("IPv4 is unavailable", new SocketException((int)SocketError.NetworkUnreachable)), keylessExa: true));
+    }
+
+    [Fact]
+    public void RemoteMcpFailuresUsePlainOwnerMessages()
+    {
+        Assert.Equal("The remote MCP address could not be found.", RemoteMcpFailureMessages.Describe(
+            new HttpRequestException("lookup failed", new SocketException((int)SocketError.HostNotFound))));
+        Assert.Contains("secure connection", RemoteMcpFailureMessages.Describe(new AuthenticationException("certificate failed")), StringComparison.Ordinal);
+        Assert.Contains("not allowed", RemoteMcpFailureMessages.Describe(new HttpRequestException("This destination is not allowed by connector network policy.")), StringComparison.Ordinal);
+        Assert.Contains("not allowed", RemoteMcpFailureMessages.Describe(new HttpRequestException("This destination isn't allowed by connector network policy.")), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("localhost", true)]
     [InlineData("127.0.0.1", false)]

@@ -16,6 +16,11 @@ internal static class RemoteMcpConfigurationValidator
         if (endpoint is null || !endpoint.IsAbsoluteUri || endpoint.Scheme is not ("http" or "https")
             || !string.IsNullOrEmpty(endpoint.UserInfo) || !string.IsNullOrEmpty(endpoint.Fragment))
             throw new InvalidOperationException("Use an HTTP or HTTPS MCP endpoint without embedded credentials or a fragment.");
+        if ((endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase)
+                && Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(endpoint.Query).ContainsKey("login"))
+            || (endpoint.IdnHost.Equals("mcp.firecrawl.dev", StringComparison.OrdinalIgnoreCase)
+                && endpoint.AbsolutePath.TrimEnd('/').Equals("/v2/mcp-oauth", StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("This remote MCP URL uses OAuth sign-in, which isn't supported yet. Use its API-key or keyless MCP endpoint.");
         if (Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(endpoint.Query).Keys.Any(CredentialQueryNames.Contains))
             throw new InvalidOperationException("Remove credentials from the MCP URL and configure credential-backed headers.");
     }

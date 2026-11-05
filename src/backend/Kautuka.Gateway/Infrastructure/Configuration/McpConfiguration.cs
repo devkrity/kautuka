@@ -44,6 +44,7 @@ internal sealed class McpServerDefinition
     public string? CredentialAssociationId { get; init; }
     public string? CredentialOperationId { get; init; }
     public string? CredentialSourceId { get; init; }
+    public bool RequiresCredentialReentry { get; init; }
 
     public IReadOnlyList<RemoteMcpCredential> Credentials { get; init; } = [];
     public IReadOnlyList<RemoteMcpHeader> HttpHeaders { get; init; } = [];

@@ -241,13 +241,17 @@ internal sealed partial class GatewayCatalogStore
 
         string? credentialNamespace = string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase)
             ? existingServer?.CredentialNamespace ?? draftNamespace ?? Guid.NewGuid().ToString("N") : null;
+        bool configuredRequiredHeader = associationOperationId is not null && request.ConfirmLegacyAuthReplacement;
+        bool requiresCredentialReentry = string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase)
+            && existingServer?.RequiresCredentialReentry == true && !configuredRequiredHeader;
         var server = new GatewayMcpServer(serverId, name, description, iconUrl, presetId, transport,
             httpUrl, containerImage, containerCommand, containerArgs, containerSidecarName,
             bundlePath, serverType,
             readinessTimeoutSeconds, jitCooldownSeconds, healthcheckUrl, healthcheckIntervalMilliseconds,
             enabled, isInternalSystemConnector, createdAt, now, scopeValue, ownerUserIdValue, toolCount, toolNames, envKeysFinal,
             runtimeArtifactType, runtimeArtifactSourceDigest, runtimeArtifactBuildStatus, mcpProtocolVersion, credentials, headers, credentialNamespace,
-            associationId ?? existingServer?.CredentialAssociationId, associationOperationId ?? existingServer?.CredentialOperationId, associationSourceId ?? existingServer?.CredentialSourceId);
+            associationId ?? existingServer?.CredentialAssociationId, associationOperationId ?? existingServer?.CredentialOperationId, associationSourceId ?? existingServer?.CredentialSourceId,
+            requiresCredentialReentry);
 
         McpTransport parsedTransport = ParsePersistedTransport(transport);
 
@@ -290,6 +294,7 @@ internal sealed partial class GatewayCatalogStore
             CredentialAssociationId = server.CredentialAssociationId,
             CredentialOperationId = server.CredentialOperationId,
             CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
         });
 
         state.McpServers[serverId] = server;
@@ -434,6 +439,7 @@ internal sealed partial class GatewayCatalogStore
             CredentialAssociationId = server.CredentialAssociationId,
             CredentialOperationId = server.CredentialOperationId,
             CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
             CreatedAt = server.CreatedAt,
             UpdatedAt = now,
         });
@@ -484,6 +490,7 @@ internal sealed partial class GatewayCatalogStore
             CredentialAssociationId = server.CredentialAssociationId,
             CredentialOperationId = server.CredentialOperationId,
             CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
             CreatedAt = server.CreatedAt,
             UpdatedAt = server.UpdatedAt,
         };

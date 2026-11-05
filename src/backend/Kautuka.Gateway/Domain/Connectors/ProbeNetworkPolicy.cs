@@ -35,56 +35,61 @@ internal static class ProbeNetworkPolicy
     }
 
     public static bool IsAllowed(string? url, bool allowPrivate)
-    {
-        if (allowPrivate)
-        {
-            return true;
-        }
+        => GetDestinationFailure(url, allowPrivate) is null;
 
+    public static string? GetDestinationFailure(string? url, bool allowPrivate)
+    {
         if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
             || uri.Scheme is not ("http" or "https")
-            || string.IsNullOrWhiteSpace(uri.Host)
-            || IsBlockedName(uri.IdnHost))
+            || string.IsNullOrWhiteSpace(uri.Host))
         {
-            return false;
+            return "This destination isn't allowed by connector network policy.";
         }
+        if (!allowPrivate && IsBlockedName(uri.IdnHost)) return "This destination isn't allowed by connector network policy.";
 
         if (IPAddress.TryParse(uri.IdnHost, out IPAddress? literal))
         {
-            return !IsPrivate(literal);
+            return allowPrivate || !IsPrivate(literal) ? null : "This destination isn't allowed by connector network policy.";
         }
 
+        IPAddress[] addresses;
         try
         {
-            return Dns.GetHostAddresses(uri.IdnHost).All(static address => !IsPrivate(address));
+            addresses = Dns.GetHostAddresses(uri.IdnHost);
         }
         catch (SocketException)
         {
-            return false;
+            return "The remote MCP address could not be found.";
         }
+
+        if (addresses.Length == 0) return "The remote MCP address could not be found.";
+        return !allowPrivate && addresses.Any(static address => IsPrivate(address))
+            ? "This destination isn't allowed by connector network policy."
+            : null;
     }
 
-    public static SocketsHttpHandler CreateProbeHandler(bool allowPrivate)
+    public static SocketsHttpHandler CreateProbeHandler(bool allowPrivate, bool preferIpv4 = false)
         => new()
         {
             UseProxy = false,
             UseCookies = false,
             AllowAutoRedirect = false,
-            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, cancellationToken),
+            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4, cancellationToken),
         };
 
-    public static SocketsHttpHandler CreateRuntimeHandler(bool allowPrivate)
+    public static SocketsHttpHandler CreateRuntimeHandler(bool allowPrivate, bool preferIpv4 = false)
         => new()
         {
             UseProxy = false,
             UseCookies = false,
             AllowAutoRedirect = false,
-            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, cancellationToken),
+            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4, cancellationToken),
         };
 
     private static async ValueTask<Stream> ConnectAsync(
         SocketsHttpConnectionContext context,
         bool allowPrivate,
+        bool preferIpv4,
         CancellationToken cancellationToken)
     {
         IPAddress[] addresses;
@@ -94,22 +99,14 @@ internal static class ProbeNetworkPolicy
         }
         catch (SocketException ex)
         {
-            throw new HttpRequestException("Connector test destination is not allowed.", ex);
+            throw new HttpRequestException("The remote MCP address could not be found.", ex);
         }
 
-        IPAddress? chosen = null;
-        foreach (IPAddress address in addresses)
-        {
-            if (allowPrivate || !IsPrivate(address))
-            {
-                chosen = address;
-                break;
-            }
-        }
+        IPAddress? chosen = SelectAddress(addresses, allowPrivate, preferIpv4);
 
         if (chosen is null)
         {
-            throw new HttpRequestException("Connector test destination is not allowed.");
+            throw new HttpRequestException("This destination isn't allowed by connector network policy.");
         }
 
         Socket? socket = new(chosen.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
@@ -124,6 +121,13 @@ internal static class ProbeNetworkPolicy
         {
             socket?.Dispose();
         }
+    }
+
+    internal static IPAddress? SelectAddress(IEnumerable<IPAddress> addresses, bool allowPrivate, bool preferIpv4)
+    {
+        IPAddress[] allowed = [.. addresses.Where(address => allowPrivate || !IsPrivate(address))];
+        return (preferIpv4 ? allowed.FirstOrDefault(address => address.AddressFamily == AddressFamily.InterNetwork) : null)
+            ?? allowed.FirstOrDefault();
     }
 
     private static bool IsBlockedName(string host)

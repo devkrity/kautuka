@@ -1,5 +1,5 @@
 import { ConnectorCard } from '@/features/connectors/components/ConnectorCard';
-import type { Connector } from '@/features/connectors/schemas/connectorSchema';
+import { connectorSchema, type Connector } from '@/features/connectors/schemas/connectorSchema';
 import { screen } from '@testing-library/dom';
 import { render } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -59,5 +59,12 @@ describe('ConnectorCard managed sign-in connector', () => {
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
     expect(screen.queryByText('mcp/markitdown')).toBeNull();
     expect(screen.queryByText('KAUTUKA_M365_REFRESH_TOKEN')).toBeNull();
+  });
+
+  it('shows the re-entry warning for a migrated remote connector', () => {
+    const connector = connectorSchema.parse({ id: 'legacy', name: 'Legacy', transport: 'http', httpUrl: 'https://example.com/mcp', requiresCredentialReentry: true });
+    render(<ConnectorCard connector={connector} canManage onToggle={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} toggling={false} />);
+    expect(screen.getByText('Key needs to be entered again')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('enter its key again');
   });
 });

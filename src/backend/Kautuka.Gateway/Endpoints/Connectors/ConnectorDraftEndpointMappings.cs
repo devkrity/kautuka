@@ -54,6 +54,9 @@ internal static class ConnectorDraftEndpointMappings
             catalog.TryGetMcpServer(body.ConnectorId, out GatewayMcpServer? existing);
             Uri? baseEndpoint = await ResolveEffectiveEndpointAsync(user, existing, candidate, resolver, ct).ConfigureAwait(false);
             bool canManage = existing is null || GatewayOwnershipAccess.CanManageConnector(user, existing);
+            if (existing?.RequiresCredentialReentry == true && !canManage) return Forbidden();
+            if (existing?.RequiresCredentialReentry == true && !candidate.ConfirmLegacyAuthReplacement)
+                return BadRequest("Confirm the new authentication choice before testing or saving this connector.");
             Uri requestedEndpoint = new(candidate.HttpUrl!, UriKind.Absolute);
             bool priorPersonal = existing is not null && baseEndpoint is not null && !string.Equals(baseEndpoint.AbsoluteUri, existing.HttpUrl, StringComparison.Ordinal);
             Uri effectiveEndpoint = canManage && priorPersonal ? baseEndpoint! : requestedEndpoint;
@@ -61,8 +64,10 @@ internal static class ConnectorDraftEndpointMappings
             bool personalCandidate = !canManage && existing is not null;
             if (!Authorized(user, existing, candidate, body.CredentialScope, personalCandidate)) return Forbidden();
             if (body.CredentialScope == "system" && personal) return Forbidden();
-            if (!GatewayOwnershipAccess.IsAdmin(user) && (existing is null || existing.Scope == GatewayOwnershipScopes.User || personal)
-                && !ProbeNetworkPolicy.IsAllowed(effectiveEndpoint.AbsoluteUri, allowPrivate: false)) return BadRequest("Connector destination is not allowed.");
+            string? destinationFailure = !GatewayOwnershipAccess.IsAdmin(user) && (existing is null || existing.Scope == GatewayOwnershipScopes.User || personal)
+                ? ProbeNetworkPolicy.GetDestinationFailure(effectiveEndpoint.AbsoluteUri, allowPrivate: false)
+                : null;
+            if (destinationFailure is not null) return BadRequest(destinationFailure);
             string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, candidate.Scope);
             if (body.CredentialScope == "system" && (existing is not null ? existing.Scope != GatewayOwnershipScopes.System : scope != GatewayOwnershipScopes.System)) return Forbidden();
             bool changedDestination = existing is not null && !string.Equals(baseEndpoint?.AbsoluteUri, effectiveEndpoint.AbsoluteUri, StringComparison.Ordinal);
@@ -161,7 +166,8 @@ internal static class ConnectorDraftEndpointMappings
                         RemoteMcpOperationLease lease = revisions.Acquire(draft.ConnectorId, user.Id, null, includeSystem, draftId);
                         lease.ScheduleExpiry(DateTimeOffset.FromUnixTimeSeconds(draft.ExpiresAtUnixSeconds));
                         return lease;
-                    }, draft.CredentialNamespace, candidate.McpProtocolVersion);
+                    }, draft.CredentialNamespace, candidate.McpProtocolVersion,
+                    PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase));
                 McpConnectorTestResult result = await testService.TestAsync(new GatewayConnectorTestRequest
                 {
                     Id = draft.ConnectorId,
@@ -198,7 +204,7 @@ internal static class ConnectorDraftEndpointMappings
                 if ((!committed && !string.Equals(currentEndpoint?.AbsoluteUri ?? string.Empty, draft.BaseEndpoint, StringComparison.Ordinal))
                     || (draft.CredentialScope == "system" && personal))
                     return BadRequest("Connector draft destination changed.");
-                bool persistConfiguration = current is null || (GatewayOwnershipAccess.CanManageConnector(user, current) && !GatewayCatalogStore.RemoteCandidateMatches(current, candidate));
+                bool persistConfiguration = current is null || (GatewayOwnershipAccess.CanManageConnector(user, current) && (!GatewayCatalogStore.RemoteCandidateMatches(current, candidate) || (current.RequiresCredentialReentry && candidate.ConfirmLegacyAuthReplacement)));
                 string scope = current?.Scope ?? GatewayOwnershipAccess.ResolveCatalogScope(user, candidate.Scope);
                 string? owner = current?.OwnerUserId ?? GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
                 string revisionScope = draft.CredentialScope == "system" ? "system" : "user:" + user.Id;
@@ -271,6 +277,7 @@ internal static class ConnectorDraftEndpointMappings
         McpProtocolVersion = candidate.McpProtocolVersion,
         Credentials = candidate.Credentials,
         HttpHeaders = candidate.HttpHeaders,
+        ConfirmLegacyAuthReplacement = candidate.ConfirmLegacyAuthReplacement,
         Enabled = candidate.Enabled,
     };
 
@@ -284,6 +291,7 @@ internal static class ConnectorDraftEndpointMappings
         if (server is null) return (GatewayOwnershipAccess.IsAdmin(user) || user.CanImportConnectors)
             && (credentialScope != "system" || GatewayOwnershipAccess.ResolveCatalogScope(user, candidate.Scope) == GatewayOwnershipScopes.System);
         if (!GatewayOwnershipAccess.CanAccessConnector(user, server) || server.IsInternalSystemConnector) return false;
+        if (server.RequiresCredentialReentry && (!GatewayOwnershipAccess.CanManageConnector(user, server) || !candidate.ConfirmLegacyAuthReplacement)) return false;
         if (credentialScope == "system" && server.Scope != GatewayOwnershipScopes.System) return false;
         return GatewayOwnershipAccess.CanManageConnector(user, server)
             || (credentialScope == "user" && GatewayCatalogStore.RemoteCandidateMatches(server, candidate, ignoreHttpUrl: personalCandidate));

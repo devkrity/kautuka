@@ -25,7 +25,7 @@ internal sealed class ConnectorAssociationRepository(CredentialsDatabase databas
         using (SqliteCommand existing = connection.CreateCommand())
         {
             existing.Transaction = transaction;
-            existing.CommandText = "SELECT a.id,a.actor_id,a.connector_id,a.credential_namespace,a.source_id,a.credential_scope,m.draft_id FROM connector_credential_associations a LEFT JOIN connector_association_draft_metadata m ON m.association_id=a.id WHERE a.operation_id=$operation";
+            existing.CommandText = "SELECT a.id,a.actor_id,a.connector_id,a.credential_namespace,a.source_id,a.credential_scope,d.id FROM connector_credential_associations a LEFT JOIN connector_credential_drafts d ON d.staged_association_id=a.id WHERE a.operation_id=$operation";
             existing.Parameters.AddWithValue("$operation", operation);
             using SqliteDataReader reader = existing.ExecuteReader();
             if (reader.Read())
@@ -82,7 +82,7 @@ internal sealed class ConnectorAssociationRepository(CredentialsDatabase databas
         using (SqliteCommand existing = connection.CreateCommand())
         {
             existing.Transaction = transaction;
-            existing.CommandText = "SELECT a.id,a.actor_id,a.source_id,m.draft_id FROM connector_credential_associations a LEFT JOIN connector_association_draft_metadata m ON m.association_id=a.id WHERE a.operation_id=$operation";
+            existing.CommandText = "SELECT a.id,a.actor_id,a.source_id,d.id FROM connector_credential_associations a LEFT JOIN connector_credential_drafts d ON d.staged_association_id=a.id WHERE a.operation_id=$operation";
             existing.Parameters.AddWithValue("$operation", draftId);
             using SqliteDataReader reader = existing.ExecuteReader();
             if (reader.Read())
@@ -122,7 +122,7 @@ internal sealed class ConnectorAssociationRepository(CredentialsDatabase databas
         using (SqliteCommand metadata = connection.CreateCommand())
         {
             metadata.Transaction = transaction;
-            metadata.CommandText = "INSERT INTO connector_association_draft_metadata SELECT $association,id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at FROM connector_credential_drafts WHERE id=$draft AND actor_id=$actor";
+            metadata.CommandText = "UPDATE connector_credential_drafts SET staged_association_id=$association WHERE id=$draft AND actor_id=$actor AND staged_association_id IS NULL";
             metadata.Parameters.AddWithValue("$association", association); metadata.Parameters.AddWithValue("$draft", draftId); metadata.Parameters.AddWithValue("$actor", actor);
             if (metadata.ExecuteNonQuery() != 1) throw new InvalidOperationException("Staged draft metadata disappeared.");
         }
@@ -177,7 +177,7 @@ internal sealed class ConnectorAssociationRepository(CredentialsDatabase databas
     {
         using SqliteConnection connection = database.OpenConnection();
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = "SELECT m.draft_id,m.actor_id,m.connector_id,m.credential_scope,m.candidate_json,m.base_updated_at,m.effective_endpoint,m.base_endpoint,m.use_durable,m.credential_namespace,m.declared_keys_json,m.remove_keys_json,m.expires_at,a.source_id FROM connector_association_draft_metadata m JOIN connector_credential_associations a ON a.id=m.association_id WHERE m.draft_id=$id AND m.actor_id=$actor";
+        command.CommandText = "SELECT d.id,d.actor_id,d.connector_id,d.credential_scope,d.candidate_json,d.base_updated_at,d.effective_endpoint,d.base_endpoint,d.use_durable,d.credential_namespace,d.declared_keys_json,d.remove_keys_json,d.expires_at,d.source_association_id FROM connector_credential_drafts d JOIN connector_credential_associations a ON a.id=d.staged_association_id AND a.operation_id=d.id AND a.actor_id=d.actor_id WHERE d.id=$id AND d.actor_id=$actor";
         command.Parameters.AddWithValue("$id", draftId); command.Parameters.AddWithValue("$actor", actor);
         using SqliteDataReader reader = command.ExecuteReader();
         if (!reader.Read()) throw new RpcException(new Status(StatusCode.NotFound, "Staged connector draft was not found."));

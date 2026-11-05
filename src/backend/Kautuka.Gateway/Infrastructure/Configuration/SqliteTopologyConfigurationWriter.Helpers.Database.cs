@@ -104,7 +104,7 @@ internal partial class SqliteTopologyConfigurationWriter
                 server.RuntimeArtifactSourceDigest,
                 server.RuntimeArtifactBuildStatus,
                 server.McpProtocolVersion,
-                JsonSerializer.Serialize(new RemoteMcpConfiguration([.. server.Credentials], [.. server.HttpHeaders], server.CredentialNamespace, server.CredentialAssociationId, server.CredentialOperationId, server.CredentialSourceId), jsonContext.RemoteMcpConfiguration))));
+                JsonSerializer.Serialize(new RemoteMcpConfiguration([.. server.Credentials], [.. server.HttpHeaders], server.CredentialNamespace, server.CredentialAssociationId, server.CredentialOperationId, server.CredentialSourceId, server.RequiresCredentialReentry), jsonContext.RemoteMcpConfiguration))));
     }
 
     private static void ExecuteNonQuery(SqliteConnection connection, Func<SqliteConnection, SqliteTransaction?, SqliteCommand> commandFactory, Action<SqliteCommand>? configure = null, SqliteTransaction? transaction = null)

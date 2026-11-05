@@ -125,6 +125,48 @@ public sealed class ConnectorAssociationRepositoryTests
     }
 
     [Fact]
+    public void ConsolidationMigratesLiveAndStagedOnlyDraftsWithoutChangingSecrets()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-association-migration", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var db = new CredentialsDatabase(root); CredentialsSchemaInitializer.EnsureReady(db);
+            using var ring = new CredentialKeyRing(root); var vault = new CredentialsVaultService(ring); var clock = new TestClock();
+            var drafts = new ConnectorDraftRepository(db, vault, clock); var associations = new ConnectorAssociationRepository(db, vault, clock);
+            const string ns = "11111111111111111111111111111111"; string key = "__connector_remote__:" + ns + ":destination:key";
+            string staged = Guid.NewGuid().ToString("N"); string live = Guid.NewGuid().ToString("N");
+            drafts.Create(staged, "alice", "connector", "user", "staged-candidate", "v1", "https://example.com", "", false, ns, [key], new Dictionary<string, string> { [key] = "staged-secret" }, []);
+            string association = associations.Stage(staged, "alice", "");
+            drafts.DiscardInput(staged, "alice");
+            drafts.Create(live, "alice", "connector", "user", "live-candidate", "v1", "https://example.com", "", false, ns, [key], new Dictionary<string, string> { [key] = "live-secret" }, []);
+            using (SqliteConnection connection = db.OpenConnection())
+            using (SqliteCommand command = connection.CreateCommand())
+            {
+                command.CommandText = """
+                    CREATE TABLE connector_draft_sources(draft_id TEXT PRIMARY KEY,association_id TEXT NOT NULL);
+                    INSERT INTO connector_draft_sources SELECT id,source_association_id FROM connector_credential_drafts;
+                    CREATE TABLE connector_association_draft_metadata(association_id TEXT PRIMARY KEY,draft_id TEXT NOT NULL,actor_id TEXT NOT NULL,connector_id TEXT NOT NULL,credential_scope TEXT NOT NULL,candidate_json TEXT NOT NULL,base_updated_at TEXT NOT NULL,effective_endpoint TEXT NOT NULL,base_endpoint TEXT NOT NULL,use_durable INTEGER NOT NULL,credential_namespace TEXT NOT NULL,declared_keys_json TEXT NOT NULL,remove_keys_json TEXT NOT NULL,expires_at INTEGER NOT NULL);
+                    INSERT INTO connector_association_draft_metadata SELECT staged_association_id,id,actor_id,connector_id,credential_scope,candidate_json,base_updated_at,effective_endpoint,base_endpoint,use_durable,credential_namespace,declared_keys_json,remove_keys_json,expires_at FROM connector_credential_drafts WHERE staged_association_id IS NOT NULL;
+                    DELETE FROM connector_draft_sources WHERE draft_id=$staged;
+                    DELETE FROM connector_credential_drafts WHERE id=$staged;
+                    ALTER TABLE connector_credential_drafts DROP COLUMN staged_association_id;
+                    ALTER TABLE connector_credential_drafts DROP COLUMN source_association_id;
+                    """;
+                command.Parameters.AddWithValue("$staged", staged); command.ExecuteNonQuery();
+            }
+            CredentialsSchemaInitializer.EnsureReady(db);
+            Assert.Equal("staged-candidate", associations.GetStagedDraft(staged, "alice").Candidate);
+            Assert.Equal(association, associations.Stage(staged, "alice", ""));
+            Assert.Equal("staged-secret", associations.Resolve(association, "connector", ns, "alice", [key], false)[key]);
+            Assert.Equal("live-secret", drafts.Resolve(live, "alice", [key], false)[key]);
+            using SqliteConnection verify = db.OpenConnection();
+            using var tables = new SqliteCommand("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('connector_draft_sources','connector_association_draft_metadata')", verify);
+            Assert.Equal(0L, tables.ExecuteScalar());
+        }
+        finally { SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root); if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public void CorruptDraftLeavesNoStagedAssociation()
     {
         string root = Path.Combine(Path.GetTempPath(), "kautuka-associations", Guid.NewGuid().ToString("N"));

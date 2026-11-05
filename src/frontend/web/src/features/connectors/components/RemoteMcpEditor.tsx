@@ -57,6 +57,8 @@ export function RemoteMcpEditor({
   const [error, setError] = useState('');
   const [result, setResult] = useState<ConnectorTestResult | null>(null);
   const [credentialScope, setCredentialScope] = useState<'user' | 'system'>('user');
+  const [sharedUrlChangeAcknowledged, setSharedUrlChangeAcknowledged] = useState(false);
+  const [legacyAuthAcknowledged, setLegacyAuthAcknowledged] = useState(false);
   const initialEndpoint = useRef(draft.httpUrl);
   const canonicalEndpoint = (value: string) => {
     try {
@@ -68,6 +70,7 @@ export function RemoteMcpEditor({
   const destinationChanged =
     canonicalEndpoint(draft.httpUrl) !== canonicalEndpoint(initialEndpoint.current);
   const personalDestinationChanged = !canManage && destinationChanged;
+  const sharedDestinationChanged = !!connector && connector.scope === 'system' && canManage && destinationChanged;
   const credentials = draft.credentials ?? [];
   const headers = draft.httpHeaders ?? [];
   const authentication = headers.find(
@@ -82,6 +85,8 @@ export function RemoteMcpEditor({
       : 'api-key'
     : 'none';
   const update = (next: Partial<ConnectorDraft>) => {
+    if ('httpUrl' in next) setSharedUrlChangeAcknowledged(false);
+    if ('credentials' in next || 'httpHeaders' in next) setLegacyAuthAcknowledged(false);
     onDraftChanged?.();
     setDraft((previous) => ({ ...previous, ...next }));
     setResult(null);
@@ -147,6 +152,11 @@ export function RemoteMcpEditor({
     let candidate: ConnectorDraft;
     try {
       candidate = validate();
+      if (connector?.requiresCredentialReentry && !legacyAuthAcknowledged)
+        throw new Error('Confirm the new authentication choice before testing or saving.');
+      if (connector?.requiresCredentialReentry) candidate.confirmLegacyAuthReplacement = true;
+      if (kind === 'save' && sharedDestinationChanged && !sharedUrlChangeAcknowledged)
+        throw new Error('Confirm that everyone will need to enter credentials again before saving this address change.');
       if (kind === 'save' && personalDestinationChanged) {
         const referenced = new Set(
           headers.flatMap((header) => (header.credentialKey ? [header.credentialKey] : []))
@@ -239,19 +249,26 @@ export function RemoteMcpEditor({
                 : ''}
             </p>
           )}
-          <label className="block text-sm">
-            Authentication
-            <select
-              className={inputClass}
-              value={authKind}
-              disabled={!canManage || !!busy}
-              onChange={(event) => setAuthentication(event.target.value)}
-            >
-              <option value="none">None</option>
-              <option value="bearer">Bearer token</option>
-              <option value="api-key">API key header</option>
-            </select>
-          </label>
+          {sharedDestinationChanged && (
+            <div className="space-y-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <p role="alert">Changing this shared address means everyone who uses it will need to enter their key again.</p>
+              <label className="flex items-start gap-2">
+                <input type="checkbox" checked={sharedUrlChangeAcknowledged} disabled={!!busy}
+                  onChange={(event) => setSharedUrlChangeAcknowledged(event.target.checked)} />
+                <span>I understand that users will need to enter their keys again.</span>
+              </label>
+            </div>
+          )}
+          {connector?.requiresCredentialReentry && canManage && (
+            <label className="flex items-start gap-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
+              <input type="checkbox" checked={legacyAuthAcknowledged} disabled={!!busy} onChange={(event) => {
+                setLegacyAuthAcknowledged(event.target.checked);
+                onDraftChanged?.();
+                setResult(null);
+              }} />
+              <span>I reviewed the new authentication choice. If I choose no key or an optional key, this connector may connect without one.</span>
+            </label>
+          )}
           {canManageSystemCredentials &&
             (!connector || connector.scope === 'system') &&
             credentials.length > 0 && (
@@ -268,27 +285,11 @@ export function RemoteMcpEditor({
                     setResult(null);
                   }}
                 >
-                  <option value="user">My access</option>
-                  <option value="system">Shared system access</option>
+                  <option value="user">Just me</option>
+                  <option value="system">Everyone</option>
                 </select>
               </label>
             )}
-          {authKind === 'api-key' && authentication && (
-            <label className="block text-sm">
-              API key header name
-              <input
-                className={inputClass}
-                value={authentication.name}
-                disabled={!canManage || !!busy}
-                onChange={(event) =>
-                  updateHeader(headers.indexOf(authentication), {
-                    ...authentication,
-                    name: event.target.value,
-                  })
-                }
-              />
-            </label>
-          )}
           {credentials.map((credential) => {
             const mutation = changes.find((change) => change.key === credential.key);
             const presence = credentialPresence.find((entry) => entry.key === credential.key);
@@ -344,7 +345,7 @@ export function RemoteMcpEditor({
                   presence?.systemConfigured &&
                   !destinationChanged && (
                     <p className="text-xs text-muted-foreground">
-                      Shared system access remains available when your personal credential is
+                      Everyone's credential remains available when your personal credential is
                       absent.
                     </p>
                   )}
@@ -365,7 +366,7 @@ export function RemoteMcpEditor({
             );
           })}
           <details>
-            <summary className="cursor-pointer text-sm font-medium">Additional headers</summary>
+            <summary className="cursor-pointer text-sm font-medium">Advanced headers</summary>
             <div className="mt-3 space-y-3">
               {headers.map((header, index) =>
                 header === authentication ? null : (
@@ -453,6 +454,22 @@ export function RemoteMcpEditor({
           <details>
             <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
             <div className="mt-3 space-y-3">
+              <label className="block text-sm">
+                Authentication
+                <select className={inputClass} value={authKind} disabled={!canManage || !!busy}
+                  onChange={(event) => setAuthentication(event.target.value)}>
+                  <option value="none">None</option>
+                  <option value="bearer">Bearer token</option>
+                  <option value="api-key">API key header</option>
+                </select>
+              </label>
+              {authKind === 'api-key' && authentication && (
+                <label className="block text-sm">
+                  API key header name
+                  <input className={inputClass} value={authentication.name} disabled={!canManage || !!busy}
+                    onChange={(event) => updateHeader(headers.indexOf(authentication), { ...authentication, name: event.target.value })} />
+                </label>
+              )}
               {!connector && (
                 <label className="block text-sm">
                   Connector ID
@@ -554,7 +571,7 @@ export function RemoteMcpEditor({
             >
               {busy === 'test' ? 'Testing…' : 'Test connection'}
             </Button>
-            <Button type="button" disabled={!!busy} onClick={() => void run('save')}>
+            <Button type="button" disabled={!!busy || (sharedDestinationChanged && !sharedUrlChangeAcknowledged)} onClick={() => void run('save')}>
               {busy === 'save' ? 'Saving…' : 'Save'}
             </Button>
           </div>

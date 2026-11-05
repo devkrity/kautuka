@@ -504,6 +504,7 @@ internal sealed class GatewayConnectorUpsertRequest
 
     public RemoteMcpCredential[]? Credentials { get; init; }
     public RemoteMcpHeader[]? HttpHeaders { get; init; }
+    public bool ConfirmLegacyAuthReplacement { get; init; }
 
     public bool? Enabled { get; init; }
 
@@ -852,7 +853,8 @@ internal sealed record GatewayConnectorListItem(
     string UpdatedAt,
     string? McpProtocolVersion = null,
     RemoteMcpCredential[]? Credentials = null,
-    RemoteMcpHeader[]? HttpHeaders = null);
+    RemoteMcpHeader[]? HttpHeaders = null,
+    bool RequiresCredentialReentry = false);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 

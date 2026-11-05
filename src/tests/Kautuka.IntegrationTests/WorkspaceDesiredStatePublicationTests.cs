@@ -14,6 +14,7 @@ using Kautuka.Gateway.Domain.Memory;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.Gateway.Endpoints.Connectors;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.Hosting.Hosting;
 using Kautuka.Telemetry.Telemetry;
@@ -2690,6 +2691,46 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.Equal(["TOKEN"], container.EnvKeys);
         Assert.Equal("/bundle.mcpb", container.BundlePath);
         Assert.Empty(container.Credentials!);
+    }
+
+    [Fact]
+    public async Task LegacyCredentialReentrySurvivesOrdinaryEditsUntilRequiredHeaderSetup()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState initialState = CreateState(temp.SqlitePath); IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config); var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions); var writer = new SqliteTopologyConfigurationWriter(database, provider);
+        GatewayCatalogStore Catalog(GatewayState state) => new(state, definitions, writer, new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(), new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var original = new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Credentials = [], HttpHeaders = [] };
+        _ = await Catalog(initialState).SaveMcpServerAsync("legacy", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        await using (SqliteConnection connection = new(database.ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using var mark = new SqliteCommand("UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.requiresCredentialReentry',json('true')) WHERE id='legacy'", connection);
+            _ = await mark.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+        GatewayState state = CreateState(temp.SqlitePath); GatewayCatalogStore catalog = Catalog(state);
+        GatewayMcpServer changed = await catalog.SaveMcpServerAsync("legacy", new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Enabled = false }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        Assert.True(changed.RequiresCredentialReentry);
+        Assert.True(CreateState(temp.SqlitePath).McpServers["legacy"].RequiresCredentialReentry);
+        Assert.True(Assert.Single(provider.GetCurrent().McpServers, server => server.Id == "legacy").RequiresCredentialReentry);
+        Assert.True(GatewayConnectorEndpointMappings.ToConnectorPayload(changed).RequiresCredentialReentry);
+        var configured = new GatewayConnectorUpsertRequest
+        {
+            Name = "Legacy",
+            Transport = "http",
+            HttpUrl = "https://example.com/mcp",
+            Enabled = false,
+            Credentials = [new("api-key", "API key", true)],
+            HttpHeaders = [new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")]
+        };
+        string association = Guid.NewGuid().ToString("N");
+        GatewayMcpServer unconfirmed = await catalog.ActivateAssociationDraftAsync("legacy", configured, changed.UpdatedAt, changed.CredentialNamespace!, "", Guid.NewGuid().ToString("N"), GatewayOwnershipScopes.System, null, _ => true, _ => Task.FromResult(association), TestContext.Current.CancellationToken);
+        Assert.True(unconfirmed.RequiresCredentialReentry);
+        var confirmed = new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Enabled = false, ConfirmLegacyAuthReplacement = true, Credentials = [], HttpHeaders = [] };
+        GatewayMcpServer saved = await catalog.ActivateAssociationDraftAsync("legacy", confirmed, unconfirmed.UpdatedAt, unconfirmed.CredentialNamespace!, association, Guid.NewGuid().ToString("N"), GatewayOwnershipScopes.System, null, _ => true, _ => Task.FromResult(Guid.NewGuid().ToString("N")), TestContext.Current.CancellationToken);
+        Assert.False(saved.RequiresCredentialReentry);
+        Assert.False(CreateState(temp.SqlitePath).McpServers["legacy"].RequiresCredentialReentry);
     }
 
     [Fact]

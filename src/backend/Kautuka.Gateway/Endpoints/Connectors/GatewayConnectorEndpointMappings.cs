@@ -45,9 +45,9 @@ internal static class GatewayConnectorEndpointMappings
                 return Results.Json(new GatewayErrorResponse("Forbidden."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
             }
             else if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase)
-                && !ProbeNetworkPolicy.IsAllowed(request.HttpUrl, GatewayOwnershipAccess.IsAdmin(user)))
+                && ProbeNetworkPolicy.GetDestinationFailure(request.HttpUrl, GatewayOwnershipAccess.IsAdmin(user)) is string destinationFailure)
             {
-                return Results.Json(new GatewayErrorResponse("Connector test destination is not allowed."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                return Results.Json(new GatewayErrorResponse(destinationFailure), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
             else if (IsUntrustedBundlePath(user, database, request.BundlePath))
             {
@@ -120,7 +120,9 @@ internal static class GatewayConnectorEndpointMappings
                         saved is not null && !personalDestination && !string.Equals(saved.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase),
                         [.. saved?.Credentials ?? []], [.. saved?.HttpHeaders ?? []],
                         (keys, token) => credentialResolver.ResolveRemoteAsync(saved?.CredentialAssociationId, saved?.Id ?? string.Empty, saved?.CredentialNamespace, user.Id, keys, includeSystem, token), RevalidateAsync,
-                        () => revisions.Acquire(saved?.Id ?? revisionKey, user.Id, agentId: null, includeSystem), saved?.CredentialNamespace, request.McpProtocolVersion),
+                        () => revisions.Acquire(saved?.Id ?? revisionKey, user.Id, agentId: null, includeSystem), saved?.CredentialNamespace, request.McpProtocolVersion,
+                        PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
+                        RequiresCredentialReentry: saved?.RequiresCredentialReentry == true),
                 };
             }
             else
@@ -659,7 +661,8 @@ internal static class GatewayConnectorEndpointMappings
         server.UpdatedAt,
         server.McpProtocolVersion,
         [.. server.Credentials ?? []],
-        [.. server.HttpHeaders ?? []]);
+        [.. server.HttpHeaders ?? []],
+        server.RequiresCredentialReentry);
 
     private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector)
         => new()

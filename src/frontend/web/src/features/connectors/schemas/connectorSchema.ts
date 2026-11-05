@@ -47,6 +47,7 @@ export const connectorSchema = z.object({
   envKeys: z.array(z.string()).default([]),
   credentials: z.array(remoteMcpCredentialSchema).optional(),
   httpHeaders: z.array(remoteMcpHeaderSchema).optional(),
+  requiresCredentialReentry: z.boolean().default(false),
   scope: ownershipScopeSchema.default('system'),
   ownerUserId: z.string().nullable().default(null),
   createdAt: z.string().default(''),

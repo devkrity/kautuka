@@ -30,35 +30,6 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
-    public async Task HttpClientFactoryDoesNotDisposeTransportDuringClientCreation()
-    {
-        var transport = new CapturingAsyncDisposable();
-        await using (transport.ConfigureAwait(true))
-        {
-            var factory = new McpHttpClientFactory(
-                transportFactory: _ => transport,
-                clientFactory: (createdTransport, _) =>
-                {
-                    Assert.Same(transport, createdTransport);
-                    Assert.False(transport.DisposeAsyncCalled);
-                    return Task.FromResult<McpClient>(null!);
-                });
-
-            McpClient? client = await factory.CreateAsync(
-                new HttpClientTransportOptions
-                {
-                    Endpoint = new Uri("https://learn.microsoft.com/api/mcp", UriKind.Absolute),
-                    Name = "probe",
-                },
-                allowPrivateDestination: false,
-                CancellationToken.None);
-
-            Assert.Null(client);
-            Assert.False(transport.DisposeAsyncCalled);
-        }
-    }
-
-    [Fact]
     public async Task BuildToolsAsyncAttemptsHttpConnectorWithoutSandbox()
     {
         var httpFactory = new CapturingMcpHttpClientFactory();
@@ -974,6 +945,19 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
+    public async Task LegacyRemoteCredentialSetupExplainsReentryBeforeDiscovery()
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "legacy", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "legacy", Name = "Legacy", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, RequiresCredentialReentry = true };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var factory = new CapturingMcpHttpClientFactory();
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), TestContext.Current.CancellationToken).AsTask());
+        Assert.Contains("key entered again", error.Message, StringComparison.Ordinal);
+        Assert.False(factory.WasCalled);
+    }
+
+    [Fact]
     public async Task RemoteRequestContextRejectsRevisionAndBindingChanges()
     {
         var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "remote", Context = "OwnContext" }] };
@@ -1529,27 +1513,8 @@ public sealed class McpAgentToolProviderTests
         public Task<McpClient> CreateAsync(HttpClientTransportOptions transportOptions, bool allowPrivateDestination, RemoteMcpRequestContext context, CancellationToken cancellationToken)
         {
             LastContext = context;
-            return CreateAsync(transportOptions, allowPrivateDestination, cancellationToken);
-        }
-
-        public Task<McpClient> CreateAsync(
-            HttpClientTransportOptions transportOptions,
-            bool allowPrivateDestination,
-            CancellationToken cancellationToken)
-        {
             WasCalled = true;
             throw new InvalidOperationException("Synthetic MCP HTTP factory failure for transport-path verification.");
-        }
-    }
-
-    private sealed class CapturingAsyncDisposable : IAsyncDisposable
-    {
-        public bool DisposeAsyncCalled { get; private set; }
-
-        public ValueTask DisposeAsync()
-        {
-            DisposeAsyncCalled = true;
-            return ValueTask.CompletedTask;
         }
     }
 
