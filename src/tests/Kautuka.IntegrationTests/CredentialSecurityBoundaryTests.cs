@@ -226,6 +226,7 @@ public sealed class CredentialSecurityBoundaryTests
                 OperationId = Guid.NewGuid().ToString("N")
             };
             held.Entries.Add("MCP_REFRESH_TOKEN", "held-secret");
+            held.Entries.Add("kautuka.internal.broker_installation_identity", "installation-private-key");
             await service.SetSystemCredentials(held, TestCallContext.Instance);
             var named = new GetResolvedCredentialsRequest
             {
@@ -234,6 +235,7 @@ public sealed class CredentialSecurityBoundaryTests
             };
             named.RequiredKeys.Add("token");
             named.RequiredKeys.Add("MCP_REFRESH_TOKEN");
+            named.RequiredKeys.Add("kautuka.internal.broker_installation_identity");
             CredentialMapResponse hidden = await service.GetResolvedCredentials(named, TestCallContext.Instance);
             Assert.Empty(hidden.Entries);
             named.IncludeSystemScope = true;
@@ -243,6 +245,13 @@ public sealed class CredentialSecurityBoundaryTests
             named.IncludeHeldSecrets = true;
             CredentialMapResponse heldVisible = await service.GetResolvedCredentials(named, TestCallContext.Instance);
             Assert.Equal("held-secret", heldVisible.Entries["MCP_REFRESH_TOKEN"]);
+            Assert.False(heldVisible.Entries.ContainsKey("kautuka.internal.broker_installation_identity"));
+            CredentialMapResponse internalValue = await service.GetSystemCredential(new GetSystemCredentialRequest
+            {
+                Key = "kautuka.internal.broker_installation_identity",
+                Access = new CredentialAccessContext { ActorId = "gateway-runtime", Capability = CredentialCapability.RuntimeResolve },
+            }, TestCallContext.Instance);
+            Assert.Equal("installation-private-key", internalValue.Entries["kautuka.internal.broker_installation_identity"]);
             await using SqliteConnection auditConnection = await database.OpenConnectionAsync(TestContext.Current.CancellationToken);
             await using var auditCommand = new SqliteCommand(
                 "SELECT group_concat(actor_id || ':' || action || ':' || scope || ':' || key_id || ':' || outcome, '|') FROM credential_audit ORDER BY sequence",

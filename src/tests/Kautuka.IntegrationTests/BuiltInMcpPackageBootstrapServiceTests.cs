@@ -13,6 +13,66 @@ namespace Kautuka.IntegrationTests;
 public sealed class BuiltInMcpPackageBootstrapServiceTests
 {
     [Fact]
+    public async Task BootstrapStopsAfterCancellationDuringRejectedActivation()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            string bundles = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(bundles);
+            await File.WriteAllTextAsync(Path.Combine(bundles, "kautuka-web-tools.mcpb"), "placeholder", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            await File.WriteAllTextAsync(Path.Combine(bundles, "kautuka-m365-mail.mcpb"), "placeholder", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            using var stop = new CancellationTokenSource();
+            var catalog = new FakeCatalogStore { ActivationFailuresRemaining = 1, OnActivationFailure = stop.Cancel };
+            var packages = new FakeMcpbPackageService { Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Test", Transport = "container" }, "0.4", "node", "kautuka-web-tools") };
+            var service = new BuiltInMcpPackageBootstrapService(new FakeWebHostEnvironment(root), catalog, packages,
+                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
+            await service.StartAsync(stop.Token).ConfigureAwait(true);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExecuteTask!).ConfigureAwait(true);
+            Assert.Equal(1, catalog.SaveSystemCallCount);
+            Assert.Equal(1, packages.InspectCallCount);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    public async Task BootstrapRetriesWhenManagerRejectsConnectorActivation(int failures, bool succeeds)
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            string bundles = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(bundles);
+            await File.WriteAllTextAsync(Path.Combine(bundles, "kautuka-web-tools.mcpb"), "placeholder", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            var catalog = new FakeCatalogStore { ActivationFailuresRemaining = failures };
+            var packages = new FakeMcpbPackageService
+            {
+                Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest
+                {
+                    Name = "Kautuka Web Tools",
+                    Transport = "container",
+                    ContainerImage = McpCommandTransportMapper.NodeImage,
+                    ContainerCommand = "node",
+                    ContainerArgs = ["server.js"],
+                    BundlePath = "/tmp/kautuka-web-tools.mcpb",
+                    ServerType = "node"
+                }, "0.4", "node", "kautuka-web-tools")
+            };
+            var service = new BuiltInMcpPackageBootstrapService(new FakeWebHostEnvironment(root), catalog, packages,
+                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
+            await service.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+            await service.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken).ConfigureAwait(true);
+            Assert.Equal(2, catalog.SaveSystemCallCount);
+            Assert.Equal(2, packages.InspectCallCount);
+            Assert.Equal(succeeds, catalog.SavedRequest is not null);
+            await service.StopAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task BootstrapWaitsForMaintenanceFenceBeforeImportingConnectors()
     {
         string root = CreateTempDirectory();
@@ -525,6 +585,8 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
 
     private sealed class FakeCatalogStore : IGatewayCatalogStore
     {
+        public int ActivationFailuresRemaining { get; set; }
+        public Action? OnActivationFailure { get; init; }
         public GatewayMcpServer? ExistingServer { get; init; }
 
         public int SaveCallCount { get; private set; }
@@ -600,6 +662,11 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
         public Task<GatewayMcpServer> SaveSystemMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, CancellationToken cancellationToken = default)
         {
             SaveSystemCallCount++;
+            if (ActivationFailuresRemaining-- > 0)
+            {
+                OnActivationFailure?.Invoke();
+                throw new ConnectorActivationException("Manager rejected the desired state update.");
+            }
             return SaveMcpServerAsync(serverId, request, GatewayOwnershipScopes.System, ownerUserId: null, cancellationToken);
         }
 

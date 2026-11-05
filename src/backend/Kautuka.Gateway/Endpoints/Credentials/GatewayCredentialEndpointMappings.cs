@@ -6,6 +6,9 @@ namespace Kautuka.Gateway.Endpoints.Credentials;
 
 internal static class GatewayCredentialEndpointMappings
 {
+    private static bool IsInternalCredential(string key)
+        => key.StartsWith("kautuka.internal.", StringComparison.OrdinalIgnoreCase);
+
     public static WebApplication MapGatewayCredentialEndpoints(this WebApplication app)
     {
         // ── User credential endpoints ─────────────────────────────────────────────
@@ -119,7 +122,7 @@ internal static class GatewayCredentialEndpointMappings
                 return unauthorized;
 
             IReadOnlyList<string> keys = await credentialResolver.ListSystemKeysAsync(ct).ConfigureAwait(false);
-            return Results.Json(new CredentialCollectionResponse("system", [.. keys]), KautukaJsonContext.Default.CredentialCollectionResponse);
+            return Results.Json(new CredentialCollectionResponse("system", [.. keys.Where(key => !IsInternalCredential(key))]), KautukaJsonContext.Default.CredentialCollectionResponse);
         });
 
         app.MapPut("/api/credentials/system", async (
@@ -138,6 +141,9 @@ internal static class GatewayCredentialEndpointMappings
             if (body?.Entries is not { Count: > 0 })
                 return Results.Json(new CredentialUpdateResponse("No entries provided."), KautukaJsonContext.Default.CredentialUpdateResponse, statusCode: StatusCodes.Status400BadRequest);
 
+            if (body.Entries.Keys.Any(IsInternalCredential))
+                return Results.Json(new CredentialUpdateResponse("Internal credentials cannot be changed here."), KautukaJsonContext.Default.CredentialUpdateResponse, statusCode: StatusCodes.Status400BadRequest);
+
             await credentialResolver.SetSystemAsync(body.Entries, ct).ConfigureAwait(false);
             return Results.Json(new CredentialUpdateResponse("System credentials updated."), KautukaJsonContext.Default.CredentialUpdateResponse);
         });
@@ -152,6 +158,9 @@ internal static class GatewayCredentialEndpointMappings
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
                 return unauthorized;
+
+            if (IsInternalCredential(key))
+                return Results.NotFound();
 
             bool deleted = await credentialResolver.DeleteSystemAsync(key, ct).ConfigureAwait(false);
             return deleted ? Results.Ok() : Results.NotFound();

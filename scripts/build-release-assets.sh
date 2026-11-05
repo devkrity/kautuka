@@ -451,6 +451,30 @@ stage_oci_image_archives() {
     exit 1
   fi
 
+  local image_rows
+  image_rows="$(python3 - "$allowlist" <<'PY'
+import json, re, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    data = json.load(handle)
+images = data.get("images")
+if not isinstance(images, list):
+    raise SystemExit("runtime image inventory must contain an images array")
+archives = set()
+for entry in images:
+    if not isinstance(entry, dict):
+        raise SystemExit("runtime image inventory contains an invalid entry")
+    archive = entry.get("archive")
+    if archive is None:
+        continue
+    values = (entry.get("id"), entry.get("image"), archive)
+    if any(not isinstance(value, str) or not value or any(c in value for c in "\t\r\n") for value in values):
+        raise SystemExit("runtime image archive entry is invalid")
+    if not re.fullmatch(r"[a-z0-9.-]+\.tar", archive) or archive in archives:
+        raise SystemExit("runtime image archive name is invalid or duplicated")
+    archives.add(archive)
+    print("\t".join(values))
+PY
+)" || { echo 'error: failed to parse runtime image inventory.' >&2; return 1; }
   sudo mkdir -p "$dest"
   while IFS=$'\t' read -r image_id image_ref archive_name; do
     [[ -n "$image_id" && -n "$image_ref" && -n "$archive_name" ]] || continue
@@ -462,14 +486,7 @@ stage_oci_image_archives() {
     sudo cp "$tmp_archive" "$dest/$archive_name"
     rm -f "$tmp_archive"
     sudo chmod 644 "$dest/$archive_name"
-  done < <(python3 - "$allowlist" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as handle:
-    data = json.load(handle)
-for entry in data.get("images", []):
-    print("\t".join((entry["id"], entry["image"], entry["archive"])))
-PY
-)
+  done <<< "$image_rows"
 }
 
 log_phase() {
@@ -564,7 +581,24 @@ published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 output_root="$(mkdir -p "$output_root" && cd "$output_root" && pwd)"
 release_dir="$output_root/$version"
 
-rm -rf "$release_dir"
+# A prewarm-only input can be inside the output directory. Preserve it (and
+# any existing release files) when rebuilding just the appliance image.
+if [[ "$prewarm_only" == 'true' ]]; then
+  appliance_output="$release_dir/kautuka-wsl-appliance.tar.gz"
+  if [[ "$(realpath -e -- "$platform_tarball_override")" == "$(realpath -m -- "$appliance_output")" \
+        || "$platform_tarball_override" -ef "$appliance_output" ]]; then
+    echo 'error: prewarm input must be a different file from the output appliance.' >&2
+    exit 1
+  fi
+  for metadata in kautuka-platform-release.json kautuka-platform-release.sig kautuka-release-assets.sha256; do
+    if [[ -e "$release_dir/$metadata" ]]; then
+      echo "error: prewarm-only cannot replace an appliance beside existing release metadata; use a separate output directory." >&2
+      exit 1
+    fi
+  done
+else
+  rm -rf "$release_dir"
+fi
 mkdir -p "$release_dir"
 
 work_dir="$(create_work_dir "$output_root")"

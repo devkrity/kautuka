@@ -18,6 +18,7 @@ internal static partial class GatewayAuthEndpointMappings
 
     private static void MapExternalLoginEndpoints(WebApplication app)
     {
+        MapBoundExternalLoginEndpoints(app);
         app.MapGet("/api/auth/external/providers", (ExternalLoginProviders providers) =>
             Results.Json(
                 new ExternalLoginProvidersResponse(providers.Google, providers.Microsoft),

@@ -34,6 +34,38 @@ internal static class ConnectorDpop
         return signingInput + "." + Base64Url(signature);
     }
 
+    public static string CreateInstallationProof(string privateJwk, string method, string url, ReadOnlySpan<byte> body)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
+            || uri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment)
+            || !string.Equals(uri.AbsoluteUri, url, StringComparison.Ordinal))
+            throw new ArgumentException("The broker request URL must be canonical HTTPS without a query or fragment.", nameof(url));
+        if (string.IsNullOrWhiteSpace(method) || body.Length > 32768)
+            throw new ArgumentException("The broker request is invalid.", nameof(method));
+
+        using ECDsa key = Import(privateJwk);
+        string header = WriteHeader(key.ExportParameters(includePrivateParameters: false), "kautuka-installation+jwt");
+        using var stream = new MemoryStream();
+        long issuedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("aud", uri.GetLeftPart(UriPartial.Authority));
+            writer.WriteString("htm", method.ToUpperInvariant());
+            writer.WriteString("htu", url);
+            writer.WriteNumber("iat", issuedAt);
+            writer.WriteNumber("exp", issuedAt + 60);
+            writer.WriteString("jti", Base64Url(RandomNumberGenerator.GetBytes(32)));
+            writer.WriteString("body_hash", Base64Url(SHA256.HashData(body)));
+            writer.WriteEndObject();
+        }
+        string signingInput = Base64Url(Encoding.UTF8.GetBytes(header)) + "." + Base64Url(stream.ToArray());
+        byte[] signature = key.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256,
+            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        return signingInput + "." + Base64Url(signature);
+    }
+
     private static ECDsa Import(string privateJwk)
     {
         using JsonDocument document = JsonDocument.Parse(privateJwk);
@@ -50,13 +82,13 @@ internal static class ConnectorDpop
         return ECDsa.Create(parameters);
     }
 
-    private static string WriteHeader(ECParameters parameters)
+    private static string WriteHeader(ECParameters parameters, string type = "dpop+jwt")
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
             writer.WriteStartObject();
-            writer.WriteString("typ", "dpop+jwt");
+            writer.WriteString("typ", type);
             writer.WriteString("alg", "ES256");
             writer.WritePropertyName("jwk");
             writer.WriteStartObject();

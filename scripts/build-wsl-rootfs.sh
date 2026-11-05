@@ -23,6 +23,7 @@ Notes:
   - The resulting rootfs contains the minimal base OS, WSL hardening config, rootless Podman
     prerequisites, and SSH server required for the appliance runtime.
   - Manager and release payloads are layered into the rootfs later by the release workflow.
+  - On SELinux hosts, Podman privately relabels the work directory; use a dedicated directory.
 EOF
 }
 
@@ -314,8 +315,15 @@ tar --numeric-owner --xattrs --acls -czf /work/out/rootfs.tar.gz -C "$rootfs_dir
 EOF
     chmod +x "$container_script"
 
+    local work_mount="$work_dir:/work"
+    if [[ "$container_runtime" == 'podman' ]] && command -v getenforce >/dev/null 2>&1; then
+        case "$(getenforce 2>/dev/null || true)" in
+            Enforcing|Permissive) work_mount+=":Z" ;;
+        esac
+    fi
+
     "$container_runtime" run --rm \
-        -v "$work_dir:/work" \
+        -v "$work_mount" \
         -w /work \
         "$image" \
         bash /work/build-rootfs.sh /work/rootfs "$releasever" "$container_arch"

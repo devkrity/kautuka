@@ -23,24 +23,37 @@ internal sealed partial class BuiltInConnectorCatalogService(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        List<ConnectorAuthProfile> failed = [];
         foreach (ConnectorAuthProfile profile in authCatalog.Profiles)
         {
-            try
-            {
-                bool exists = catalog.TryGetMcpServer(profile.Id, out GatewayMcpServer? existing) && existing is not null;
-                await catalog.SaveSystemMcpServerAsync(
-                    profile.Id,
-                    ManagedConnectorSettings.Registration(profile, exists ? existing : null),
-                    cancellationToken).ConfigureAwait(false);
-                LogRegistered(logger, profile.Id);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogRegisterFailed(logger, ex, profile.Id);
-            }
+            if (!await RegisterAsync(profile, cancellationToken).ConfigureAwait(false)) failed.Add(profile);
         }
 
+        // A concurrent startup publication can overtake the first snapshot.
+        // Re-read and retry failed registrations once after the initial pass.
+        foreach (ConnectorAuthProfile profile in failed)
+            _ = await RegisterAsync(profile, cancellationToken).ConfigureAwait(false);
+
+        cancellationToken.ThrowIfCancellationRequested();
         await SeedAskFirstAsync(authCatalog, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<bool> RegisterAsync(ConnectorAuthProfile profile, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            bool exists = catalog.TryGetMcpServer(profile.Id, out GatewayMcpServer? existing) && existing is not null;
+            await catalog.SaveSystemMcpServerAsync(profile.Id, ManagedConnectorSettings.Registration(profile, exists ? existing : null), cancellationToken).ConfigureAwait(false);
+            LogRegistered(logger, profile.Id);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LogRegisterFailed(logger, ex, profile.Id);
+            return false;
+        }
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

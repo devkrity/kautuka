@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Assets;
 using Kautuka.Gateway.Domain.Auth;
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Memory;
 using Kautuka.Gateway.Domain.Sandbox;
@@ -2599,6 +2600,84 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public async Task ConnectorActivationRejectionRollsBackSqliteAndLaterSavePersists()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        var publisher = new RecordingDesiredStatePublisher { RejectFirst = true };
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var writer = new SqliteTopologyConfigurationWriter(database, new SqlitePlatformConfigurationProvider(database, definitions));
+        var catalog = new GatewayCatalogStore(state, definitions, writer, new NoOpWorkspaceRuntimeTool(),
+            new NoOpSkillPackageService(), publisher, new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var request = new GatewayConnectorUpsertRequest
+        {
+            Name = "Test connector",
+            Transport = "container",
+            ContainerImage = "docker.io/example/image:latest",
+            ContainerCommand = "test",
+            ContainerArgs = [],
+            Enabled = true,
+        };
+
+        await Assert.ThrowsAsync<ConnectorActivationException>(() => catalog.SaveSystemMcpServerAsync("retry-test", request, TestContext.Current.CancellationToken));
+        Assert.False(catalog.TryGetMcpServer("retry-test", out _));
+        Assert.DoesNotContain(CreateState(temp.SqlitePath).McpServers.Values, server => server.Id == "retry-test");
+
+        await catalog.SaveSystemMcpServerAsync("retry-test", request, TestContext.Current.CancellationToken);
+        Assert.True(catalog.TryGetMcpServer("retry-test", out _));
+        Assert.Single(CreateState(temp.SqlitePath).McpServers.Values, server => server.Id == "retry-test");
+    }
+
+    [Fact]
+    public async Task BuiltInConnectorRegistrationStopsWhenPublisherConvertsCancellationToFailure()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        using var cancellation = new CancellationTokenSource();
+        GatewayState state = CreateState(temp.SqlitePath);
+        var publisher = new RecordingDesiredStatePublisher { RejectFirst = true, OnPublish = cancellation.Cancel };
+        var catalog = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(CreateConfiguration(temp.SqlitePath)),
+            new RecordingTopologyWriter(), new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), publisher,
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var settings = new GatewaySettingsStore(state, new KautukaLogLevelSwitch(LogLevel.Warning), publisher,
+            new NoOpUpdateServiceGrpcService(), CreateConfiguration(temp.SqlitePath), new StaticPlatformConfigurationProvider(CreatePlatformConfiguration()));
+        var profiles = new ConnectorAuthCatalog([GoogleMailConnectorTests.BrokerProfile(), MicrosoftMailConnectorTests.Profile("test-client")]);
+        var service = new BuiltInConnectorCatalogService(profiles, catalog, settings, NullLogger<BuiltInConnectorCatalogService>.Instance);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.StartAsync(cancellation.Token));
+        Assert.Single(publisher.Reasons);
+        Assert.False(catalog.TryGetMcpServer("kautuka-m365-mail", out _));
+    }
+
+    [Fact]
+    public async Task BuiltInConnectorsRetryInitialRejectedPublicationAfterOtherRegistrations()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        var publisher = new RecordingDesiredStatePublisher { RejectFirst = true };
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitionStore = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var writer = new SqliteTopologyConfigurationWriter(database, new SqlitePlatformConfigurationProvider(database, definitionStore));
+        var catalog = new GatewayCatalogStore(state, definitionStore,
+            writer, new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), publisher,
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var settings = new GatewaySettingsStore(state, new KautukaLogLevelSwitch(LogLevel.Warning), publisher,
+            new NoOpUpdateServiceGrpcService(), CreateConfiguration(temp.SqlitePath), new StaticPlatformConfigurationProvider(CreatePlatformConfiguration()));
+        var profiles = new ConnectorAuthCatalog([GoogleMailConnectorTests.BrokerProfile(), MicrosoftMailConnectorTests.Profile("test-client")]);
+        var service = new BuiltInConnectorCatalogService(profiles, catalog, settings, NullLogger<BuiltInConnectorCatalogService>.Instance);
+        await service.StartAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(3, publisher.Reasons.Count(reason => reason == "connector-save"));
+        Assert.True(catalog.TryGetMcpServer("kautuka-google-mail", out _));
+        Assert.True(catalog.TryGetMcpServer("kautuka-m365-mail", out _));
+        Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-google-mail");
+        Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-m365-mail");
+        GatewayState reloaded = CreateState(temp.SqlitePath);
+        Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-google-mail");
+        Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-m365-mail");
+    }
+
+    [Fact]
     public async Task SaveSystemMcpServerAsyncMarksConnectorAsInternalSystem()
     {
         using var temp = new TemporaryGatewayStateDirectory();
@@ -2753,11 +2832,14 @@ public sealed class WorkspaceDesiredStatePublicationTests
     private sealed class RecordingDesiredStatePublisher : IWorkspaceDesiredStatePublisher
     {
         public List<string> Reasons { get; } = [];
+        public bool RejectFirst { get; init; }
+        public Action? OnPublish { get; init; }
 
         public DesiredStatePublishResult TryPublishCurrent(string reason)
         {
             Reasons.Add(reason);
-            return DesiredStatePublishResult.Succeeded;
+            OnPublish?.Invoke();
+            return RejectFirst && Reasons.Count == 1 ? DesiredStatePublishResult.Failed : DesiredStatePublishResult.Succeeded;
         }
     }
 

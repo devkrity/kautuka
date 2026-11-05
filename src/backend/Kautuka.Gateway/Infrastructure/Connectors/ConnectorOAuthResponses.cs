@@ -15,7 +15,9 @@ internal sealed record ConnectorOAuthStatusItem(
     bool Configured,
     string Message,
     string SignInLabel,
-    string RevokeUrl);
+    string RevokeUrl,
+    bool BoundFlow = false,
+    bool Pending = false);
 
 internal sealed record ConnectorOAuthCatalogResponse(ConnectorOAuthStatusItem[] Connectors);
 

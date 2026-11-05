@@ -334,8 +334,9 @@ public sealed class ConnectorValidationEndpointTests
             },
             adminToken).ConfigureAwait(true);
         Assert.True(systemProbe.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal("system-token", fixture.GetCapturedTestRequest().TestEnv!["MCP_AUTH_TOKEN"]);
-        Assert.True(fixture.GetCapturedTestRequest().AllowPrivateDestination);
+        GatewayConnectorTestRequest systemCaptured = fixture.GetCapturedTestRequestForUrl("https://ha.example.com/api/mcp");
+        Assert.Equal("system-token", systemCaptured.TestEnv!["MCP_AUTH_TOKEN"]);
+        Assert.True(systemCaptured.AllowPrivateDestination);
         (string systemScope, string? systemOwner) = fixture.ReadStoredConnectorOwnership("shared-http");
         Assert.Equal("system", systemScope);
         Assert.Null(systemOwner);
@@ -402,7 +403,7 @@ public sealed class ConnectorValidationEndpointTests
             },
             memberToken).ConfigureAwait(true);
         Assert.True(memberProbe.RootElement.GetProperty("success").GetBoolean());
-        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForUrl("https://member.example/mcp");
         Assert.Equal("user-token", captured.TestEnv!["MCP_AUTH_TOKEN"]);
         Assert.False(captured.TestEnv.ContainsValue("system-token"));
         Assert.False(captured.AllowPrivateDestination);
@@ -1430,6 +1431,11 @@ public sealed class ConnectorValidationEndpointTests
             => app.Services.GetRequiredService<IMcpConnectorTestService>() is CapturingConnectorTestService service
                 ? service.Requests.FirstOrDefault(request => request.BundlePath == bundlePath)
                     ?? throw new XunitException("No connector test request was captured for the imported bundle.")
+                : throw new XunitException("Capturing connector test service is not registered.");
+
+        public GatewayConnectorTestRequest GetCapturedTestRequestForUrl(string url)
+            => app.Services.GetRequiredService<IMcpConnectorTestService>() is CapturingConnectorTestService service
+                ? service.Requests.Single(request => request.HttpUrl == url)
                 : throw new XunitException("Capturing connector test service is not registered.");
     }
 

@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { runBoundMailLogin } from '@/features/auth';
 import type { ConnectorOAuthStatus } from '../api/connectors';
 import {
   useBeginConnectorOAuth,
@@ -17,6 +18,13 @@ export function ConnectorSignInPanel({ connectorId }: { connectorId: string }) {
   const begin = useBeginConnectorOAuth();
   const disconnect = useDisconnectConnectorOAuth();
   const [note, setNote] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const attempt = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setConnecting(false);
+    setNote(null);
+    return () => { attempt.current?.abort(); attempt.current = null; };
+  }, [connectorId]);
   const status = catalog.data?.find((item) => matchesConnectorOAuth(connectorId, item));
   if (!status) {
     return null;
@@ -36,6 +44,9 @@ export function ConnectorSignInPanel({ connectorId }: { connectorId: string }) {
             size="xs"
             className="shrink-0"
             onClick={() => {
+              attempt.current?.abort();
+              attempt.current = null;
+              setConnecting(false);
               disconnect.mutate(connectorId, {
                 onSuccess: (result) => {
                   setNote(result.message);
@@ -53,6 +64,23 @@ export function ConnectorSignInPanel({ connectorId }: { connectorId: string }) {
             size="xs"
             className="shrink-0"
             onClick={() => {
+              if (status.boundFlow) {
+                attempt.current?.abort();
+                const controller = new AbortController();
+                attempt.current = controller;
+                setConnecting(true);
+                void runBoundMailLogin(connectorId, controller.signal).then(async () => {
+                  if (controller.signal.aborted) return;
+                  setNote('Signed in.');
+                  await catalog.refetch();
+                }).catch((error: unknown) => {
+                  if (controller.signal.aborted) return;
+                  const message = error instanceof Error ? error.message : 'Mail sign-in failed.';
+                  setNote(message);
+                  toast.error(message);
+                }).finally(() => { if (!controller.signal.aborted) setConnecting(false); });
+                return;
+              }
               begin.mutate(
                 { connectorId, origin: window.location.origin },
                 {
@@ -67,7 +95,7 @@ export function ConnectorSignInPanel({ connectorId }: { connectorId: string }) {
                 }
               );
             }}
-            disabled={begin.isPending || !status.configured}
+            disabled={begin.isPending || connecting || status.pending || !status.configured}
           >
             {status.signInLabel}
           </Button>

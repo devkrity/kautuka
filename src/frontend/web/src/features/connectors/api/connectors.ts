@@ -192,6 +192,8 @@ export interface ConnectorOAuthStatus {
   message: string;
   signInLabel: string;
   revokeUrl: string;
+  boundFlow?: boolean;
+  pending?: boolean;
 }
 
 export interface ConnectorOAuthBegin {
@@ -223,6 +225,8 @@ function readOAuthStatus(value: unknown): ConnectorOAuthStatus | null {
     message: typeof body.message === 'string' ? body.message : '',
     signInLabel: typeof body.signInLabel === 'string' ? body.signInLabel : 'Sign in',
     revokeUrl: typeof body.revokeUrl === 'string' ? body.revokeUrl : '',
+    boundFlow: body.boundFlow === true,
+    pending: body.pending === true,
   };
 }
 

@@ -34,8 +34,7 @@ try {
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const signatureUrl = "http://127.0.0.1:20300/manifest.sig";
 
-  const generate = (extraArgs = []) => {
-    const result = spawnSync(process.execPath, [
+  const generateRaw = (extraArgs = []) => spawnSync(process.execPath, [
       generator,
       "--output-dir", outputDir,
       "--private-key", privateKeyPath,
@@ -48,6 +47,8 @@ try {
       "--published-at", "2026-10-29T00:00:00.000Z",
       ...extraArgs,
     ], { encoding: "utf8" });
+  const generate = (extraArgs = []) => {
+    const result = generateRaw(extraArgs);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   };
 
@@ -97,6 +98,17 @@ try {
   assert.equal(manifest.artifacts.find((asset) => asset.platform === "wsl-amd64").url, `${exactReleaseBase}/kautuka-wsl-appliance.tar.gz`);
   assert.equal(manifest.artifacts.find((asset) => asset.platform === "linux-x64").url, `${exactReleaseBase}/kautuka-linux-amd64.tar.gz`);
   assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "exact-tag artifact and signature URLs remain covered by the manifest signature");
+
+  for (const [type, options] of [["rsa", { modulusLength: 2048 }], ["ec", { namedCurve: "secp384r1" }]]) {
+    const badKey = generateKeyPairSync(type, options).privateKey;
+    const badKeyPath = path.join(tempRoot, `${type}-wrong-key.pem`);
+    await fs.writeFile(badKeyPath, badKey.export({ type: "pkcs8", format: "pem" }));
+    const rejected = generateRaw(["--private-key", badKeyPath]);
+    assert.notEqual(rejected.status, 0, `${type} key must be rejected`);
+    assert.match(rejected.stderr, /ECDSA P-256/);
+    assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), manifestBytes,
+      "rejecting a key must not overwrite the existing manifest");
+  }
 
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");
   assert.match(buildAssets, /manifest_args\+\=\(--signature-url "\$signature_url"\)/, "release builder passes the explicit URL into the signed manifest generator");

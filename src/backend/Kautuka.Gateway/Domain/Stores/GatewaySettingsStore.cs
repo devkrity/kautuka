@@ -165,6 +165,9 @@ internal sealed class GatewaySettingsStore : IGatewaySettingsStore
 
         var newSettings = new GatewaySystemSettings
         {
+            AuthenticationBrokerOrigin = state.SystemSettings.AuthenticationBrokerOrigin,
+            AuthenticationBrokerGoogleClientId = state.SystemSettings.AuthenticationBrokerGoogleClientId,
+            AuthenticationBrokerMicrosoftClientId = state.SystemSettings.AuthenticationBrokerMicrosoftClientId,
             LogLevel = logLevel,
             ReleaseChannel = releaseChannel,
             Locale = locale,

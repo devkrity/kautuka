@@ -15,6 +15,26 @@ internal sealed class ExternalLoginSession
 
     public required string CookieBindingHash { get; init; }
 
+    public string? TabBindingHash { get; init; }
+
+    public string? BrokerFlowId { get; init; }
+
+    public bool BrowserConfirmed { get; set; }
+
+    public string? BrokerOrigin { get; init; }
+
+    public bool CompletionBusy { get; set; }
+
+    public string? CompletionFingerprint { get; set; }
+
+    public AuthLoginResponse? CompletedResponse { get; set; }
+
+    public string? CompletedRefreshToken { get; set; }
+
+    public DateTimeOffset CompletedAccessExpiresAt { get; set; }
+
+    public DateTimeOffset CompletedRefreshExpiresAt { get; set; }
+
     public required string Intent { get; init; }
 
     public string? LinkUserId { get; init; }
@@ -38,14 +58,24 @@ internal sealed class ExternalLoginSessionStore
             PruneExpired(DateTimeOffset.UtcNow);
             if (sessions.Count >= MaximumSessions)
             {
-                string? earliest = sessions.MinBy(item => item.Value.ExpiresAt).Key;
-                if (earliest is not null)
-                {
-                    sessions.Remove(earliest);
-                }
+                string? earliest = sessions.Where(item => item.Value.TabBindingHash is null)
+                    .OrderBy(item => item.Value.ExpiresAt).Select(item => item.Key).FirstOrDefault();
+                if (earliest is null) return;
+                sessions.Remove(earliest);
             }
 
             sessions[state] = session;
+        }
+    }
+
+    public bool TrySaveBound(string state, ExternalLoginSession session)
+    {
+        lock (gate)
+        {
+            PruneExpired(DateTimeOffset.UtcNow);
+            if (sessions.Count >= MaximumSessions || sessions.ContainsKey(state)) return false;
+            sessions.Add(state, session);
+            return true;
         }
     }
 
@@ -60,11 +90,62 @@ internal sealed class ExternalLoginSessionStore
                 return false;
             }
 
+            // A legacy callback must never consume a tab-bound operation.
+            if (found.TabBindingHash is not null)
+            {
+                session = null;
+                return false;
+            }
+
             // Consume state even when the binding is wrong, so a guessed or stolen state cannot be retried.
             sessions.Remove(state);
             session = found;
             return cookieBinding is not null && FixedTimeEquals(found.CookieBindingHash, HashBinding(cookieBinding));
         }
+    }
+
+    public bool TryGetBound(string state, string? cookieBinding, string? tabBinding, DateTimeOffset now, out ExternalLoginSession? session)
+    {
+        lock (gate)
+        {
+            PruneExpired(now);
+            if (sessions.TryGetValue(state, out ExternalLoginSession? found)
+                && cookieBinding is not null && tabBinding is not null && found.TabBindingHash is not null
+                && FixedTimeEquals(found.CookieBindingHash, HashBinding(cookieBinding))
+                && FixedTimeEquals(found.TabBindingHash, HashBinding(tabBinding)))
+            {
+                session = found;
+                return true;
+            }
+            session = null;
+            return false;
+        }
+    }
+
+    public bool TryConfirmBrowser(string state, string? cookieBinding, string? tabBinding, DateTimeOffset now)
+    {
+        lock (gate)
+        {
+            if (!TryGetBound(state, cookieBinding, tabBinding, now, out ExternalLoginSession? session) || session is null) return false;
+            session.BrowserConfirmed = true;
+            return true;
+        }
+    }
+
+    public bool TryBeginCompletion(string state, string? cookieBinding, string? tabBinding, DateTimeOffset now, out ExternalLoginSession? session)
+    {
+        lock (gate)
+        {
+            if (!TryGetBound(state, cookieBinding, tabBinding, now, out session) || session is null
+                || !session.BrowserConfirmed || session.CompletionBusy) return false;
+            session.CompletionBusy = true;
+            return true;
+        }
+    }
+
+    public void EndCompletion(ExternalLoginSession session)
+    {
+        lock (gate) session.CompletionBusy = false;
     }
 
     internal static string HashBinding(string binding)

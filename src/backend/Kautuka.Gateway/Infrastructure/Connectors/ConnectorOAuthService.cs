@@ -7,7 +7,8 @@ internal sealed class ConnectorOAuthService(
     IConnectorRefreshTokenStore tokens,
     ConnectorAuthorizationClient client,
     ConnectorOAuthSessionStore sessions,
-    ConnectorAuthEndpoint? authEndpoint = null)
+    ConnectorAuthEndpoint? authEndpoint = null,
+    BrokerMailCoordinator? mailCoordinator = null)
 {
     private readonly object beginAttemptsLock = new();
     private readonly Dictionary<string, (DateTimeOffset WindowStart, int Count)> beginAttempts = new(StringComparer.Ordinal);
@@ -23,6 +24,11 @@ internal sealed class ConnectorOAuthService(
         if (profile is null)
         {
             return new ConnectorOAuthBeginResponse("missing", "This connector does not use sign-in.", null);
+        }
+
+        if (UsesBroker(profile))
+        {
+            return new ConnectorOAuthBeginResponse("rejected", "Start sign-in from the Connectors page.", null);
         }
 
         if (endpoint.IsMisconfigured)
@@ -139,6 +145,8 @@ internal sealed class ConnectorOAuthService(
         }
 
         bool brokerExchange = UsesBroker(profile);
+        if (brokerExchange)
+            return new ConnectorOAuthCompleteResponse("rejected", "Start sign-in from the Connectors page.");
         if (string.IsNullOrWhiteSpace(code) || brokerExchange && string.IsNullOrWhiteSpace(brokerTicket))
         {
             return new ConnectorOAuthCompleteResponse("rejected", "The sign-in response was not accepted.");
@@ -196,6 +204,26 @@ internal sealed class ConnectorOAuthService(
         if (profile is null)
         {
             return new ConnectorOAuthDisconnectResponse(false, "This connector does not use sign-in.", null);
+        }
+
+        if (UsesBroker(profile) && mailCoordinator is null)
+            return new ConnectorOAuthDisconnectResponse(false, "Mailbox sign-in is unavailable. Please try again.", profile.RevokeUrl);
+        if (UsesBroker(profile) && mailCoordinator is not null && endpoint.Host is not null)
+        {
+            try
+            {
+                await mailCoordinator.DisconnectAsync(new Uri(endpoint.Host), userId, profile.Id, cancellationToken).ConfigureAwait(false);
+                await DeleteObsoleteCredentialsAsync(userId, profile, cancellationToken).ConfigureAwait(false);
+                return new ConnectorOAuthDisconnectResponse(true, "Disconnected. You can also remove Kautuka on the permissions page.", profile.RevokeUrl);
+            }
+            catch (HttpRequestException)
+            {
+                return new ConnectorOAuthDisconnectResponse(false, "The mailbox could not be disconnected. Please try again.", profile.RevokeUrl);
+            }
+            catch (global::Grpc.Core.RpcException)
+            {
+                return new ConnectorOAuthDisconnectResponse(false, "The saved sign-in could not be removed. Please try again.", profile.RevokeUrl);
+            }
         }
 
         string? currentRefreshToken = await tokens.GetAsync(userId, profile.RefreshCredentialKey, cancellationToken).ConfigureAwait(false);
@@ -256,6 +284,17 @@ internal sealed class ConnectorOAuthService(
         RemoveHeldCredentials(profile, environment);
         if (!exchangeAccessToken)
         {
+            return environment;
+        }
+
+        if (UsesBroker(profile) && mailCoordinator is null)
+            throw new InvalidOperationException("Mailbox sign-in is unavailable.");
+        if (UsesBroker(profile) && mailCoordinator is not null && endpoint.Host is not null)
+        {
+            if (string.IsNullOrWhiteSpace(userId)) throw new InvalidOperationException(ConnectorAuthProfile.SignInRequiredMessage);
+            BrokerMailRefreshResult? result = await mailCoordinator.RefreshAsync(new Uri(endpoint.Host), userId, profile.Id, cancellationToken).ConfigureAwait(false);
+            if (result is null) throw new InvalidOperationException("Mail sign-in is still being refreshed. Try again shortly.");
+            environment[profile.AccessTokenEnvironmentKey] = result.AccessToken;
             return environment;
         }
 
@@ -543,6 +582,26 @@ internal sealed class ConnectorOAuthService(
         CancellationToken cancellationToken)
     {
         bool configured = profile.IsReady(endpoint);
+        if (UsesBroker(profile) && mailCoordinator is null)
+            return new ConnectorOAuthStatusItem(profile.Id, false, false, false, "Mailbox sign-in is unavailable.", profile.SignInLabel, profile.RevokeUrl, BoundFlow: true);
+        if (UsesBroker(profile) && mailCoordinator is not null)
+        {
+            BrokerMailStoredState state = await mailCoordinator.ReadStateAsync(userId, profile.Id, cancellationToken).ConfigureAwait(false);
+            bool obsolete = !string.IsNullOrWhiteSpace(await tokens.GetAsync(userId, profile.RefreshCredentialKey, cancellationToken).ConfigureAwait(false))
+                || (!string.IsNullOrWhiteSpace(profile.DpopKeyCredentialKey) && !string.IsNullOrWhiteSpace(await tokens.GetAsync(userId, profile.DpopKeyCredentialKey, cancellationToken).ConfigureAwait(false)))
+                || (!string.IsNullOrWhiteSpace(profile.DpopNonceCredentialKey) && !string.IsNullOrWhiteSpace(await tokens.GetAsync(userId, profile.DpopNonceCredentialKey, cancellationToken).ConfigureAwait(false)));
+            bool differentBroker = state.Active is not null && state.Active.BrokerOrigin != endpoint.Host
+                || state.PendingActivation is not null && state.PendingActivation.Credential.BrokerOrigin != endpoint.Host;
+            bool boundConnected = state.Active is not null && !state.RequiresReconnect && !state.DisconnectPending && !differentBroker;
+            string status = differentBroker ? "This mailbox belongs to another broker. Restore that broker configuration before removing the connection."
+                : state.DisconnectPending ? "Disconnect was interrupted. Remove the saved sign-in to retry."
+                : state.PendingActivation is not null ? "Sign-in was interrupted. Remove the pending sign-in, then try again."
+                : boundConnected ? "Signed in. Sending starts as Ask me first, and you can change that on the agent."
+                : state.RequiresReconnect || obsolete ? "Reconnect this mailbox to continue using it."
+                : configured ? "Sign in once. Kautuka keeps the mailbox connection. You do not register an app." : profile.ConfigurationMessage;
+            return new ConnectorOAuthStatusItem(profile.Id, boundConnected, state.Active is not null || state.PendingActivation is not null || obsolete,
+                configured && !state.DisconnectPending && !differentBroker, status, profile.SignInLabel, profile.RevokeUrl, BoundFlow: true, Pending: state.PendingActivation is not null);
+        }
         string? refresh = await tokens.GetAsync(userId, profile.RefreshCredentialKey, cancellationToken).ConfigureAwait(false);
         bool legacyHostedCredential = endpoint.IsHosted
             && !string.IsNullOrWhiteSpace(refresh)
@@ -565,5 +624,14 @@ internal sealed class ConnectorOAuthService(
             message,
             profile.SignInLabel,
             profile.RevokeUrl);
+    }
+
+    internal async Task DeleteObsoleteCredentialsAsync(string userId, ConnectorAuthProfile profile, CancellationToken cancellationToken)
+    {
+        await tokens.DeleteAsync(userId, profile.RefreshCredentialKey, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(profile.DpopKeyCredentialKey))
+            await tokens.DeleteAsync(userId, profile.DpopKeyCredentialKey, cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(profile.DpopNonceCredentialKey))
+            await tokens.DeleteAsync(userId, profile.DpopNonceCredentialKey, cancellationToken).ConfigureAwait(false);
     }
 }

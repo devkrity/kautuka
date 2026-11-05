@@ -2,6 +2,13 @@ using Kautuka.Gateway.Domain.Connectors;
 
 namespace Kautuka.Gateway.Domain.Stores;
 
+internal sealed class ConnectorActivationException : InvalidOperationException
+{
+    public ConnectorActivationException() { }
+    public ConnectorActivationException(string message) : base(message) { }
+    public ConnectorActivationException(string message, Exception innerException) : base(message, innerException) { }
+}
+
 internal sealed partial class GatewayCatalogStore
 {
     private static McpTransport ParsePersistedTransport(string transport) => transport.ToUpperInvariant() switch
@@ -204,7 +211,7 @@ internal sealed partial class GatewayCatalogStore
                 state.McpServers.Remove(serverId);
             }
 
-            throw new InvalidOperationException($"Connector '{serverId}' could not be activated because Manager rejected the desired state update.");
+            throw new ConnectorActivationException($"Connector '{serverId}' could not be activated because Manager rejected the desired state update.");
         }
 
         if (string.Equals(server.RuntimeArtifactType, "oci", StringComparison.OrdinalIgnoreCase)

@@ -21,6 +21,24 @@ namespace Kautuka.SecurityTests;
 public sealed class GatewaySecurityBoundaryTests
 {
     [Fact]
+    public void OwnerOnlySecretCanBeAtomicallyMovedAndRemovedByOwner()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "kautuka-owner-secret-test", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string temporary = Path.Combine(directory, "key.tmp");
+            string destination = Path.Combine(directory, "key");
+            OwnerOnlySecretFile.WriteAllBytes(temporary, RandomNumberGenerator.GetBytes(32));
+            AssertOwnerOnly(temporary);
+            File.Move(temporary, destination);
+            AssertOwnerOnly(destination);
+            File.Delete(destination);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
     public void PasswordHasherNeverStoresPlaintextAndRejectsLegacyPlaintext()
     {
         string hash = GatewayPasswordHasher.Hash("Correct-Horse-1");
@@ -123,6 +141,7 @@ public sealed class GatewaySecurityBoundaryTests
             {
                 Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
                 Assert.Equal(WindowsIdentity.GetCurrent().User, (SecurityIdentifier)rule.IdentityReference);
+                Assert.True(rule.FileSystemRights.HasFlag(FileSystemRights.Delete));
             }
         }
         else
@@ -288,6 +307,7 @@ public sealed class GatewaySecurityBoundaryTests
             foreach (FileSystemAccessRule rule in rules)
             {
                 Assert.Equal(WindowsIdentity.GetCurrent().User, (SecurityIdentifier)rule.IdentityReference);
+                Assert.True(rule.FileSystemRights.HasFlag(FileSystemRights.Delete));
             }
 
             return;

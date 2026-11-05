@@ -178,6 +178,9 @@ async function main() {
   );
   const privateKeyPem = await fs.readFile(privateKeyPath, "utf8");
   const privateKey = createPrivateKey(privateKeyPem);
+  if (privateKey.asymmetricKeyType !== "ec" || privateKey.asymmetricKeyDetails?.namedCurve !== "prime256v1") {
+    throw new Error("Release manifest signing key must be an ECDSA P-256 private key.");
+  }
   const signature = cryptoSign("sha256", manifestBytes, privateKey).toString(
     "base64",
   );
