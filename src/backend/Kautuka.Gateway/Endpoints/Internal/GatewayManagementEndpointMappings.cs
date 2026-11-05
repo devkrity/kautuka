@@ -19,6 +19,17 @@ internal static class GatewayManagementEndpointMappings
             return Results.Accepted();
         }).RequireAuthorization("AdminManagement");
 
+        // Return only the public installation identifier, never its private key.
+        app.MapGet("/api/internal/broker/installation-id", async (
+            ConnectorAuthEndpoint endpoint, BrokerInstallationIdentityProvider identities, HttpContext context, CancellationToken ct) =>
+        {
+            if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None)) return Results.StatusCode(403);
+            if (!Uri.TryCreate(endpoint.Host, UriKind.Absolute, out Uri? origin)) return Results.StatusCode(503);
+            identities.ValidateBrokerOrigin(origin);
+            string? id = await identities.GetExistingIdAsync(ct).ConfigureAwait(false);
+            return id is null ? Results.NotFound() : Results.Text($"{origin.GetLeftPart(UriPartial.Authority)}\n{id}\n", "text/plain");
+        }).RequireAuthorization("AdminManagement");
+
         // Operator maintenance action; never accept a broker URL from the caller.
         app.MapPost("/api/internal/broker/rotate-installation-key", async (
             ConnectorAuthEndpoint endpoint, BrokerInstallationRegistration registration, BoundMailSessionStore sessions, HttpContext context, CancellationToken ct) =>

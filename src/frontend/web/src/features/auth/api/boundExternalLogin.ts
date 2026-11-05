@@ -5,6 +5,7 @@ type Provider = 'google' | 'microsoft';
 type Intent = 'login' | 'link';
 type Started = { startUrl: string; brokerOrigin: string; state: string; flowId: string; tabHandle: string };
 const identifier = /^[A-Za-z0-9_-]{43}$/;
+const suspendedMessage = 'The broker operator suspended this installation. Contact the broker operator; provider grants may need to be revoked.';
 
 function headers(intent: Intent, mail = false): Record<string, string> {
   const result: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -52,6 +53,8 @@ async function runBoundFlow(
       body: JSON.stringify(mail ? {} : { provider, microsoftAccountType: accountType, intent }),
       signal: requestSignal(signal, 20000),
     });
+    if (start.status === 403 && start.headers.get('Kautuka-Installation-Error') === 'installation_suspended')
+      throw new Error(suspendedMessage);
     if (!start.ok) throw new Error('Sign-in could not start. Try again.');
     const data = (await start.json()) as Started;
     signal?.throwIfAborted();
@@ -96,9 +99,11 @@ async function runBoundFlow(
             // Binding is idempotent for this nonce. A lost response can be retried safely.
             let response: Response;
             try { response = await bind(); } catch { if (finished) return; response = await bind(); }
+            if (response.status === 403 && response.headers.get('Kautuka-Installation-Error') === 'installation_suspended')
+              throw new Error(suspendedMessage);
             if (!response.ok) throw new Error('Binding rejected');
             finish();
-          } catch { finish(new Error('Sign-in could not be confirmed. Start again.')); }
+          } catch (error) { finish(error instanceof Error && error.message === suspendedMessage ? error : new Error('Sign-in could not be confirmed. Start again.')); }
         })();
       }
       window.addEventListener('message', onMessage);
@@ -124,6 +129,8 @@ async function runBoundFlow(
         await wait(2000, signal);
         continue;
       }
+      if (response.status === 403 && response.headers.get('Kautuka-Installation-Error') === 'installation_suspended')
+        throw new Error(suspendedMessage);
       if (response.status === 429 && response.headers.get('Kautuka-Admission-Denied') === 'new_account_limit') {
         const seconds = Number(response.headers.get('retry-after'));
         const when = Number.isFinite(seconds) && seconds > 0 ? ` Try again after ${new Date(Date.now() + seconds * 1000).toLocaleString()}.` : ' Try again later.';

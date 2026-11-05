@@ -13,6 +13,18 @@ namespace Kautuka.IntegrationTests;
 public sealed class BrokerInstallationIdentityTests
 {
     [Fact]
+    public async Task ReadingInstallationIdDoesNotCreateOrRotateAnIdentity()
+    {
+        var store = new MemoryStore();
+        using var provider = new BrokerInstallationIdentityProvider(store);
+        Assert.Null(await provider.GetExistingIdAsync(CancellationToken.None));
+        Assert.Equal(0, store.Writes);
+        BrokerInstallationIdentity identity = await provider.GetOrCreateAsync(CancellationToken.None);
+        Assert.Equal(identity.Id, await provider.GetExistingIdAsync(CancellationToken.None));
+        Assert.Equal(1, store.Writes);
+    }
+
+    [Fact]
     public async Task ConcurrentInitializationPersistsOneIdentityAndReusesItAfterRestart()
     {
         var store = new MemoryStore();

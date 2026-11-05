@@ -17,6 +17,11 @@ public sealed partial class AuthEndpointActivationTests
         string member = await fixture.LoginAsAsync("management-member", "Testing1");
         int initialPublications = publisher.Publications;
 
+        using (HttpResponseMessage anonymousId = await fixture.SendAnonymousAsync(HttpMethod.Get, "/api/internal/broker/installation-id", null))
+            Assert.Equal(HttpStatusCode.Unauthorized, anonymousId.StatusCode);
+        using (HttpResponseMessage ordinaryId = await fixture.SendAuthenticatedAsync(HttpMethod.Get, "/api/internal/broker/installation-id", member))
+            Assert.Equal(HttpStatusCode.Forbidden, ordinaryId.StatusCode);
+
         foreach (string path in new[] { "/api/internal/shutdown", "/api/internal/runtime/desired-state/rehydrate", "/api/internal/broker/rotate-installation-key" })
         {
             using HttpResponseMessage anonymous = await fixture.SendAnonymousAsync(HttpMethod.Post, path, null);
@@ -46,6 +51,8 @@ public sealed partial class AuthEndpointActivationTests
             services => services.AddSingleton<IWorkspaceDesiredStatePublisher>(publisher), IPAddress.Parse("192.0.2.4"));
         string admin = await fixture.LoginAsBootstrapAdminAsync();
         int initialPublications = publisher.Publications;
+        using (HttpResponseMessage remoteId = await fixture.SendAuthenticatedAsync(HttpMethod.Get, "/api/internal/broker/installation-id", admin))
+            Assert.Equal(HttpStatusCode.Forbidden, remoteId.StatusCode);
         foreach (string path in new[] { "/api/internal/shutdown", "/api/internal/runtime/desired-state/rehydrate", "/api/internal/broker/rotate-installation-key" })
         {
             using HttpResponseMessage response = await fixture.SendAuthenticatedAsync(HttpMethod.Post, path, admin);

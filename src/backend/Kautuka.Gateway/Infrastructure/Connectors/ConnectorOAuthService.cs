@@ -216,6 +216,10 @@ internal sealed class ConnectorOAuthService(
                 await DeleteObsoleteCredentialsAsync(userId, profile, cancellationToken).ConfigureAwait(false);
                 return new ConnectorOAuthDisconnectResponse(true, "Disconnected. You can also remove Kautuka on the permissions page.", profile.RevokeUrl);
             }
+            catch (BrokerInstallationSuspendedException)
+            {
+                return new ConnectorOAuthDisconnectResponse(false, "The broker suspended this installation. Contact the broker operator and revoke the provider grant using the permissions page.", profile.RevokeUrl);
+            }
             catch (HttpRequestException)
             {
                 return new ConnectorOAuthDisconnectResponse(false, "The mailbox could not be disconnected. Please try again.", profile.RevokeUrl);
@@ -592,15 +596,17 @@ internal sealed class ConnectorOAuthService(
                 || (!string.IsNullOrWhiteSpace(profile.DpopNonceCredentialKey) && !string.IsNullOrWhiteSpace(await tokens.GetAsync(userId, profile.DpopNonceCredentialKey, cancellationToken).ConfigureAwait(false)));
             bool differentBroker = state.Active is not null && state.Active.BrokerOrigin != endpoint.Host
                 || state.PendingActivation is not null && state.PendingActivation.Credential.BrokerOrigin != endpoint.Host;
-            bool boundConnected = state.Active is not null && !state.RequiresReconnect && !state.DisconnectPending && !differentBroker;
+            bool brokerSuspended = state.SuspendedBrokerOrigin == endpoint.Host;
+            bool boundConnected = state.Active is not null && !state.RequiresReconnect && !state.DisconnectPending && !brokerSuspended && !differentBroker;
             string status = differentBroker ? "This mailbox belongs to another broker. Restore that broker configuration before removing the connection."
+                : brokerSuspended ? "The broker operator suspended this installation. Contact the broker operator; provider grants may need to be revoked."
                 : state.DisconnectPending ? "Disconnect was interrupted. Remove the saved sign-in to retry."
                 : state.PendingActivation is not null ? "Sign-in was interrupted. Remove the pending sign-in, then try again."
                 : boundConnected ? "Signed in. Sending starts as Ask me first, and you can change that on the agent."
                 : state.RequiresReconnect || obsolete ? "Reconnect this mailbox to continue using it."
                 : configured ? "Sign in once. Kautuka keeps the mailbox connection. You do not register an app." : profile.ConfigurationMessage;
             return new ConnectorOAuthStatusItem(profile.Id, boundConnected, state.Active is not null || state.PendingActivation is not null || obsolete,
-                configured && !state.DisconnectPending && !differentBroker, status, profile.SignInLabel, profile.RevokeUrl, BoundFlow: true, Pending: state.PendingActivation is not null);
+                configured && !state.DisconnectPending && !brokerSuspended && !differentBroker, status, profile.SignInLabel, profile.RevokeUrl, BoundFlow: true, Pending: state.PendingActivation is not null);
         }
         string? refresh = await tokens.GetAsync(userId, profile.RefreshCredentialKey, cancellationToken).ConfigureAwait(false);
         bool legacyHostedCredential = endpoint.IsHosted
