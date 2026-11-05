@@ -60,7 +60,7 @@ jobs:
           echo "value=$tag" >> "$GITHUB_OUTPUT"
         if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
         with:
           registry: ghcr.io
@@ -130,7 +130,7 @@ jobs:
           [[ "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo 'Invalid GHCR tag.' >&2; exit 1; }
           echo "value=$tag" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         if: ${{ github.event_name != 'schedule' || steps.schedule.outputs.enabled == 'true' }}
         with:
           registry: ghcr.io
