@@ -54,7 +54,9 @@ describe('RemoteMcpEditor', () => {
 
   it('keeps bearer secrets out of the connector definition and defaults manual credentials to required', async () => {
     const { onSave } = setup();
+    expect(screen.getByRole('combobox', { name: 'Authentication' })).toBeVisible();
     fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'bearer' } });
+    expect(screen.getByLabelText('API key (required)')).toBeVisible();
     fireEvent.change(screen.getByLabelText('API key (required)'), {
       target: { value: 'synthetic-owner-key' },
     });
@@ -74,6 +76,7 @@ describe('RemoteMcpEditor', () => {
   it('supports an arbitrary API-key header without losing the authentication fields', async () => {
     const { onSave } = setup();
     fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'api-key' } });
+    fireEvent.click(screen.getByText('Advanced', { selector: 'summary' }));
     fireEvent.change(screen.getByLabelText('API key header name'), {
       target: { value: 'X-Subscription-Token' },
     });

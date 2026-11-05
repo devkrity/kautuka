@@ -66,6 +66,7 @@ function normalizeConnector(value: unknown): Connector {
       readApiNumber(value, 'healthcheckIntervalMilliseconds') ?? null,
     mcpProtocolVersion: readApiNullableString(value, 'mcpProtocolVersion') ?? null,
     enabled: readApiBoolean(value, 'enabled') ?? true,
+    requiresCredentialReentry: readApiBoolean(value, 'requiresCredentialReentry') ?? false,
     toolCount: readApiNumber(value, 'toolCount') ?? null,
     toolNames: readApiStringArray(value, 'toolNames') ?? null,
     envKeys: readApiStringArray(value, 'envKeys') ?? [],

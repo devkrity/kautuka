@@ -46,10 +46,7 @@ internal sealed partial class McpAgentToolProvider
             return new AgentToolSurfaceContribution([], Complete: true);
         }
 
-        McpServerDefinition? needsReentry = activeDefs.Select(static item => item.Definition)
-            .FirstOrDefault(static server => server.Transport == McpTransport.Http && server.RequiresCredentialReentry);
-        if (needsReentry is not null)
-            throw new InvalidOperationException($"Remote connector '{needsReentry.Name}' needs its key entered again in connector settings before it can be used.");
+        bool skippedLegacy = activeDefs.RemoveAll(static item => item.Definition.Transport == McpTransport.Http && item.Definition.RequiresCredentialReentry) > 0;
 
         Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)>[] tasks = activeDefs
             .Select(binding => ConnectSafeAsync(binding.Definition, binding.Binding, context, ct))
@@ -57,7 +54,7 @@ internal sealed partial class McpAgentToolProvider
         (string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
 
         var entries = new List<AgentToolSurfaceEntry>();
-        bool complete = true;
+        bool complete = !skippedLegacy;
         foreach ((_, IReadOnlyList<AgentToolSurfaceEntry>? listed) in results)
         {
             if (listed is null)
@@ -168,6 +165,16 @@ internal sealed partial class McpAgentToolProvider
                     new ToolIdentity(ToolPolicyCategory.Connector, toolName, connectorId), currentAgent.ApprovalPolicy));
                 if (!currentApproval.Include || (currentApproval.RequiresApproval && !originalApproval.RequiresApproval))
                     throw new InvalidOperationException($"MCP tool '{toolName}' permissions changed. Refresh the tool catalogue.");
+
+                if (serverDef.Transport == McpTransport.Http && serverDef.RequiresCredentialReentry)
+                {
+                    bool canManage = string.Equals(serverDef.Scope, GatewayOwnershipScopes.System, StringComparison.OrdinalIgnoreCase)
+                        ? IsAdminUser(context.UserId ?? string.Empty)
+                        : !string.IsNullOrEmpty(context.UserId) && string.Equals(context.UserId, serverDef.OwnerUserId, StringComparison.Ordinal);
+                    throw new InvalidOperationException(canManage
+                        ? $"Remote connector '{serverDef.Name}' needs its authentication reviewed in connector settings before it can be used."
+                        : $"Remote connector '{serverDef.Name}' needs its authentication updated. Ask the connector owner or an administrator.");
+                }
 
                 AgentToolInvocationContextState? invocationContext = AgentToolInvocationContext.Current;
                 McpAgentToolProviderLog.ConnectorToolInvoking(

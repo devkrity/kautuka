@@ -269,27 +269,19 @@ export function RemoteMcpEditor({
               <span>I reviewed the new authentication choice. If I choose no key or an optional key, this connector may connect without one.</span>
             </label>
           )}
-          {canManageSystemCredentials &&
-            (!connector || connector.scope === 'system') &&
-            credentials.length > 0 && (
-              <label className="block text-sm">
-                Credential scope
-                <select
-                  className={inputClass}
-                  disabled={!!busy}
-                  value={credentialScope}
-                  onChange={(event) => {
-                    onDraftChanged?.();
-                    setCredentialScope(event.target.value as 'user' | 'system');
-                    setChanges([]);
-                    setResult(null);
-                  }}
-                >
-                  <option value="user">Just me</option>
-                  <option value="system">Everyone</option>
-                </select>
-              </label>
-            )}
+          <label className="block text-sm">
+            Authentication
+            <select
+              className={inputClass}
+              value={authKind}
+              disabled={!canManage || !!busy}
+              onChange={(event) => setAuthentication(event.target.value)}
+            >
+              <option value="none">None</option>
+              <option value="bearer">Bearer token</option>
+              <option value="api-key">API key header</option>
+            </select>
+          </label>
           {credentials.map((credential) => {
             const mutation = changes.find((change) => change.key === credential.key);
             const presence = credentialPresence.find((entry) => entry.key === credential.key);
@@ -454,15 +446,27 @@ export function RemoteMcpEditor({
           <details>
             <summary className="cursor-pointer text-sm font-medium">Advanced</summary>
             <div className="mt-3 space-y-3">
-              <label className="block text-sm">
-                Authentication
-                <select className={inputClass} value={authKind} disabled={!canManage || !!busy}
-                  onChange={(event) => setAuthentication(event.target.value)}>
-                  <option value="none">None</option>
-                  <option value="bearer">Bearer token</option>
-                  <option value="api-key">API key header</option>
-                </select>
-              </label>
+              {canManageSystemCredentials &&
+                (!connector || connector.scope === 'system') &&
+                credentials.length > 0 && (
+                  <label className="block text-sm">
+                    Credential scope
+                    <select
+                      className={inputClass}
+                      disabled={!!busy}
+                      value={credentialScope}
+                      onChange={(event) => {
+                        onDraftChanged?.();
+                        setCredentialScope(event.target.value as 'user' | 'system');
+                        setChanges([]);
+                        setResult(null);
+                      }}
+                    >
+                      <option value="user">Just me</option>
+                      <option value="system">Everyone</option>
+                    </select>
+                  </label>
+                )}
               {authKind === 'api-key' && authentication && (
                 <label className="block text-sm">
                   API key header name

@@ -192,3 +192,9 @@ The following evidence combines owning-source inspection with automated checks. 
 - `git diff --check` passed. The branch remains `enhancement/remote-mcp-configuration`; all work is local and uncommitted. There is no GitHub CI, deployment, authentication-key live test or running-appliance certification claim.
 
 Known limits retained by design: encrypted unreferenced association versions await safe GC; known-echo screening is best effort; configured observability controls audit retention; provider free quotas can be exhausted; generic remote OAuth sign-in is deferred. These do not remove the agreed temporary-input TTL, final-send injection, atomic activation, scope isolation or credential exposure boundary.
+
+### Follow-up review: connector setup and legacy discovery
+
+The connector API normalizer now carries `requiresCredentialReentry` into list, detail, card and editor state. Managers see the review action; other users are directed to the connector owner or an administrator. The ordinary remote setup form again shows authentication and the masked key input, with header names and scope details under Advanced. Legacy connector discovery now skips only the affected connector and marks the contribution incomplete so it is not persisted as a complete catalogue; retained proxies reject locally before any network send with permission-appropriate guidance.
+
+Follow-up checks: the focused backend selection passed 4/4 (mixed healthy/legacy discovery, incomplete catalogue non-persistence and retained-proxy permissions); focused frontend mapping/editor/card tests passed 13/13; frontend type-check and production build passed; the existing production-bundle Chromium setup test passed at both desktop and mobile sizes (2/2). These checks use synthetic credentials and mocked provider responses. No new live-provider or deployed-appliance verification was performed.

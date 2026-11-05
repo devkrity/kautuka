@@ -123,8 +123,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
         <>
           {connector.requiresCredentialReentry ? (
             <p role="alert" className="mt-1 text-sm text-destructive">
-              This remote connector used the previous key setup. Edit it and enter its key again
-              before using it.
+              {canManage
+                ? 'This remote connector used the previous key setup. Edit it and enter its key again before using it.'
+                : 'This remote connector needs its key entered again. Ask the connector owner or an administrator to update it.'}
             </p>
           ) : null}
           {commandSummary ? (
@@ -143,16 +144,18 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       actions={
         managed ? null : (
           <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="text-muted-foreground"
-              onClick={() => onEdit(connector)}
-              title="Edit"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </Button>
+            {(!connector.requiresCredentialReentry || canManage) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                onClick={() => onEdit(connector)}
+                title="Edit"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+            )}
             <Button
               type="button"
               variant="ghost"

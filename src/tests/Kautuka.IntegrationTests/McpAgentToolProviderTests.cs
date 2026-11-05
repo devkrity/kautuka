@@ -945,15 +945,42 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
-    public async Task LegacyRemoteCredentialSetupExplainsReentryBeforeDiscovery()
+    public async Task LegacyConnectorDoesNotBlockHealthyConnectorDiscovery()
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "legacy", Context = "OwnContext" }, new AgentMcpBindingDefinition { ConnectorId = "healthy", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "legacy", Name = "Legacy", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, RequiresCredentialReentry = true };
+        var healthy = new McpServerDefinition { Id = "healthy", Name = "Healthy", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server, healthy] } };
+        var factory = new CapturingMcpHttpClientFactory();
+        var grpc = new CapturingWorkspaceGrpcService { SucceedListTools = true, ListedToolName = "healthy_search" };
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, grpc, new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-1");
+        AgentToolSurfaceContribution contribution = await provider.ContributeAsync(context, TestContext.Current.CancellationToken);
+        Assert.False(contribution.Complete);
+        Assert.Equal("healthy_search", Assert.Single(contribution.Entries).Name);
+        Assert.Equal("healthy_search", Assert.Single(await provider.HydrateAsync(context, contribution.Entries, TestContext.Current.CancellationToken)).Name);
+        Assert.False(factory.WasCalled);
+        using ToolSurfaceTestStore store = ToolSurfaceTestStore.Create();
+        var catalog = new AgentToolCatalog([provider], store.SurfaceStore, source);
+        Assert.Equal("healthy_search", Assert.Single(await catalog.BuildToolsAsync(context, TestContext.Current.CancellationToken)).Name);
+        Assert.Equal("healthy_search", Assert.Single(await catalog.BuildToolsAsync(context, TestContext.Current.CancellationToken)).Name);
+        Assert.Equal(3, grpc.ListToolsCallCount);
+    }
+
+    [Theory]
+    [InlineData("system", null, "Ask the connector owner or an administrator")]
+    [InlineData("user", "user-1", "reviewed in connector settings")]
+    public async Task RetainedLegacyProxyRejectsBeforeNetworkWithPermissionSensitiveGuidance(string scope, string? owner, string expected)
     {
         var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "legacy", Context = "OwnContext" }] };
-        var server = new McpServerDefinition { Id = "legacy", Name = "Legacy", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, RequiresCredentialReentry = true };
+        var server = new McpServerDefinition { Id = "legacy", Name = "Legacy", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, Scope = scope, OwnerUserId = owner, RequiresCredentialReentry = true };
         var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
         var factory = new CapturingMcpHttpClientFactory();
         var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
-        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), TestContext.Current.CancellationToken).AsTask());
-        Assert.Contains("key entered again", error.Message, StringComparison.Ordinal);
+        var entry = new AgentToolSurfaceEntry { Source = AgentToolSurfaceSources.Mcp, SourceId = "legacy", Name = "search" };
+        var tool = Assert.Single(await provider.HydrateAsync(CreateContainerToolContext(agent, "user-1"), [entry], TestContext.Current.CancellationToken));
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), TestContext.Current.CancellationToken).AsTask());
+        Assert.Contains(expected, error.Message, StringComparison.Ordinal);
         Assert.False(factory.WasCalled);
     }
 
