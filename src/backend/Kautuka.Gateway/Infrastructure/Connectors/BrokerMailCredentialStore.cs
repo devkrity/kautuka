@@ -26,7 +26,7 @@ internal sealed record BrokerMailPendingRefresh(string OperationId, string Input
 }
 
 internal sealed record BrokerMailStoredState(BrokerMailCredential? Active, BrokerMailPendingActivation? PendingActivation, BrokerMailPendingRefresh? PendingRefresh,
-    string? LastCompletedRefresh = null, bool RequiresReconnect = false, string? LastUnknownRefresh = null, bool DisconnectPending = false)
+    string? LastCompletedRefresh = null, bool RequiresReconnect = false, string? LastUnknownRefresh = null, bool DisconnectPending = false, string? SuspendedBrokerOrigin = null)
 {
     public override string ToString() => "BrokerMailStoredState { Credentials = [redacted] }";
 }
@@ -120,6 +120,16 @@ internal sealed class BrokerMailCredentialStore(IBrokerMailCredentialStorage sto
             if (state.PendingActivation?.Credential.FlowId != flowId) throw new InvalidOperationException("The pending mail activation changed.");
             return state.Active is null ? state with { PendingActivation = null }
                 : state with { PendingActivation = null, RequiresReconnect = true, LastUnknownRefresh = flowId };
+        }, ct);
+
+    public Task MarkBrokerSuspendedAsync(string userId, string connectorId, string brokerOrigin, CancellationToken ct)
+        => ChangeAsync(userId, connectorId, state =>
+        {
+            if (state.Active is not null && state.Active.BrokerOrigin != brokerOrigin
+                || state.PendingActivation is not null && state.PendingActivation.Credential.BrokerOrigin != brokerOrigin)
+                throw new InvalidOperationException("The suspension does not match the saved broker origin.");
+            return state.Active is not null || state.PendingActivation is not null || state.PendingRefresh is not null
+                ? state with { SuspendedBrokerOrigin = brokerOrigin } : state;
         }, ct);
 
     // Call only after broker revocation/cancellation has been confirmed. The

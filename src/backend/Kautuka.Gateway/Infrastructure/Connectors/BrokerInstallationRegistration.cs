@@ -6,6 +6,16 @@ using Kautuka.Gateway.Domain.Connectors;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
+internal sealed class BrokerInstallationSuspendedException : HttpRequestException
+{
+    public BrokerInstallationSuspendedException() : base("The broker operator suspended this installation. Contact the broker operator; provider grants may need to be revoked.", null, HttpStatusCode.Forbidden) { }
+    public BrokerInstallationSuspendedException(string message) : base(message) { }
+    public BrokerInstallationSuspendedException(string message, Exception innerException) : base(message, innerException) { }
+    public static bool IsSuspended(HttpResponseMessage response) => response.StatusCode == HttpStatusCode.Forbidden
+        && response.Headers.TryGetValues("Kautuka-Installation-Error", out IEnumerable<string>? values)
+        && values.Any(value => value == "installation_suspended");
+}
+
 internal sealed class BrokerInstallationRegistration(BrokerInstallationIdentityProvider identities, HttpClient client) : IDisposable
 {
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -45,6 +55,7 @@ internal sealed class BrokerInstallationRegistration(BrokerInstallationIdentityP
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.Add("Kautuka-Installation-Proof", ConnectorDpop.CreateInstallationProof(identity.PrivateJwk, "POST", url, body));
             using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (BrokerInstallationSuspendedException.IsSuspended(response)) throw new BrokerInstallationSuspendedException();
             if (response.StatusCode != HttpStatusCode.NoContent)
                 throw new HttpRequestException("The broker could not register this installation.", null, response.StatusCode);
             registeredOrigin = url;
@@ -87,6 +98,7 @@ internal sealed class BrokerInstallationRegistration(BrokerInstallationIdentityP
         request.Headers.Add("Kautuka-Installation-Proof", ConnectorDpop.CreateInstallationProof(previous.PrivateJwk, "POST", url, body));
         request.Headers.Add("Kautuka-Replacement-Proof", ConnectorDpop.CreateInstallationProof(next.PrivateJwk, "POST", url, body));
         using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (BrokerInstallationSuspendedException.IsSuspended(response)) throw new BrokerInstallationSuspendedException();
         if (response.StatusCode != HttpStatusCode.NoContent) throw new HttpRequestException("The broker could not rotate this installation key.", null, response.StatusCode);
     }
 

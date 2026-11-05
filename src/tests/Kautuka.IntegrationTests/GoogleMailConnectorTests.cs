@@ -1037,6 +1037,32 @@ public sealed class GoogleMailConnectorTests
         Assert.True((await store.ReadAsync("owner", "kautuka-google-mail", CancellationToken.None)).DisconnectPending);
     }
 
+    [Fact]
+    public async Task SuspendedBrokerIsShownAsBlockedWhileKeepingSavedCredential()
+    {
+        const string id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        using var store = new BrokerMailCredentialStore(new BrokerTestStorage());
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Broker must not be called.") };
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(store, handoff);
+        var credential = new BrokerMailCredential("google", id, id, 1, "kmf1." + new string('x', 40), ConnectorDpop.CreatePrivateJwk(), "https://auth.kautuka.io");
+        await store.StageActivationAsync("owner", "kautuka-google-mail", new(credential, id), CancellationToken.None);
+        await store.PromoteActivationAsync("owner", "kautuka-google-mail", id, CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.MarkBrokerSuspendedAsync("owner", "kautuka-google-mail", "https://wrong.example", CancellationToken.None));
+        Assert.Null((await store.ReadAsync("owner", "kautuka-google-mail", CancellationToken.None)).SuspendedBrokerOrigin);
+        await store.MarkBrokerSuspendedAsync("owner", "kautuka-google-mail", "https://auth.kautuka.io", CancellationToken.None);
+        using var client = new ConnectorAuthorizationClient(new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Broker must not be called.") });
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), new MemoryTokens(), client, new ConnectorOAuthSessionStore(), Hosted, coordinator);
+        ConnectorOAuthStatusItem status = Assert.Single((await service.ListStatusAsync("owner", CancellationToken.None)).Connectors);
+        Assert.False(status.Connected);
+        Assert.True(status.HasSavedCredential);
+        Assert.False(status.Configured);
+        Assert.Contains("suspended", status.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(credential, (await store.ReadAsync("owner", "kautuka-google-mail", CancellationToken.None)).Active);
+    }
+
     [Theory]
     [InlineData("not-configured", null)]
     [InlineData("not-a-guid", null)]

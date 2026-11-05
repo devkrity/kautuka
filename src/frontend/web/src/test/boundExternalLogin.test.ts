@@ -8,6 +8,18 @@ const token = 'A'.repeat(43);
 describe('bound external login', () => {
   afterEach(() => { setAccessToken(null); vi.restoreAllMocks(); vi.unstubAllGlobals(); sessionStorage.clear(); });
 
+  it('explains broker suspension without starting or retrying mail sign-in', async () => {
+    setAccessToken('local-access', Date.now() + 3600000);
+    const popup = { location: { replace: vi.fn() }, close: vi.fn() } as unknown as Window;
+    vi.spyOn(window, 'open').mockReturnValue(popup);
+    const fetchMock = vi.fn(async () => new Response(null, { status: 403,
+      headers: { 'Kautuka-Installation-Error': 'installation_suspended' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(runBoundMailLogin('kautuka-m365-mail')).rejects.toThrow('broker operator suspended this installation');
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(popup.close).toHaveBeenCalledOnce();
+  });
+
   it('uses authenticated mail endpoints and validates the popup binding', async () => {
     setAccessToken('local-access', Date.now() + 3600000);
     const replace = vi.fn();

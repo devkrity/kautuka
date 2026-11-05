@@ -164,6 +164,11 @@ internal static partial class GatewayAuthEndpointMappings
 
     private static IResult BrokerFailure(HttpContext context, HttpRequestException exception)
     {
+        if (exception is BrokerInstallationSuspendedException)
+        {
+            context.Response.Headers["Kautuka-Installation-Error"] = "installation_suspended";
+            return Results.StatusCode(StatusCodes.Status403Forbidden);
+        }
         if (exception.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
         {
             context.Response.Headers.RetryAfter = "60";

@@ -232,15 +232,40 @@ internal sealed class BrokerHandoffClient(
             || !string.IsNullOrEmpty(origin.UserInfo) || !string.IsNullOrEmpty(origin.Query) || !string.IsNullOrEmpty(origin.Fragment))
             throw new ArgumentException("The broker must be an HTTPS origin.", nameof(origin));
         string url = origin.GetLeftPart(UriPartial.Authority) + path;
-        async Task<HttpResponseMessage> SendOnceAsync(BrokerInstallationIdentity key)
+        async Task<HttpResponseMessage> SendOnceAsync(BrokerInstallationIdentity key, string? nonce)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new ByteArrayContent(body) };
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.Add("Kautuka-Installation-Proof", ConnectorDpop.CreateInstallationProof(key.PrivateJwk, "POST", url, body));
-            if (mailKey is not null) request.Headers.Add("DPoP", ConnectorDpop.CreateProof(mailKey, nonce: null, authorizationCode: null, "POST", url));
+            if (mailKey is not null) request.Headers.Add("DPoP", ConnectorDpop.CreateProof(mailKey, nonce, authorizationCode: null, "POST", url));
             return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         }
-        HttpResponseMessage response = await SendOnceAsync(identity).ConfigureAwait(false);
+        async Task<HttpResponseMessage> SendWithNonceAsync(BrokerInstallationIdentity key)
+        {
+            HttpResponseMessage initial = await SendOnceAsync(key, null).ConfigureAwait(false);
+            if (mailKey is null || initial.StatusCode != HttpStatusCode.BadRequest
+                || !initial.Headers.TryGetValues("DPoP-Nonce", out IEnumerable<string>? values)) return initial;
+            string[] nonces = [.. values];
+            if (nonces.Length != 1 || !IsId(nonces[0])) return initial;
+            try
+            {
+                using JsonDocument challenge = await ReadJsonAsync(initial, 1024, ct).ConfigureAwait(false);
+                if (challenge.RootElement.ValueKind != JsonValueKind.Object
+                    || !challenge.RootElement.TryGetProperty("error", out JsonElement error)
+                    || error.ValueKind != JsonValueKind.String || error.GetString() != "use_dpop_nonce") return initial;
+            }
+            catch (JsonException) { return initial; }
+            catch (InvalidDataException) { return initial; }
+            catch { initial.Dispose(); throw; }
+            initial.Dispose();
+            return await SendOnceAsync(key, nonces[0]).ConfigureAwait(false);
+        }
+        HttpResponseMessage response = await SendWithNonceAsync(identity).ConfigureAwait(false);
+        if (BrokerInstallationSuspendedException.IsSuspended(response))
+        {
+            response.Dispose();
+            throw new BrokerInstallationSuspendedException();
+        }
         if (response.StatusCode == HttpStatusCode.Forbidden
             && response.Headers.TryGetValues("Kautuka-Mail-Error", out IEnumerable<string>? errors)
             && errors.Any(value => value == "insufficient_scope")) return response;
@@ -250,7 +275,13 @@ internal sealed class BrokerHandoffClient(
         catch { response.Dispose(); throw; }
         if (current.Id != identity.Id || ConnectorDpop.Thumbprint(current.PrivateJwk) == ConnectorDpop.Thumbprint(identity.PrivateJwk)) return response;
         response.Dispose();
-        return await SendOnceAsync(current).ConfigureAwait(false);
+        HttpResponseMessage retry = await SendWithNonceAsync(current).ConfigureAwait(false);
+        if (BrokerInstallationSuspendedException.IsSuspended(retry))
+        {
+            retry.Dispose();
+            throw new BrokerInstallationSuspendedException();
+        }
+        return retry;
     }
 
     private static byte[] WriteBody(Action<Utf8JsonWriter> write)

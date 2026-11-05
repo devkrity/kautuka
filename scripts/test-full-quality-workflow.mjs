@@ -3,7 +3,16 @@ import { readFile } from 'node:fs/promises';
 
 const workflow = await readFile(new URL('../.github/workflows/dotnet-quality.yml', import.meta.url), 'utf8');
 const releaseWorkflow = await readFile(new URL('../.github/workflows/release-pipeline.yml', import.meta.url), 'utf8');
+const secretWorkflow = await readFile(new URL('../.github/workflows/secret-scan.yml', import.meta.url), 'utf8');
 const buildPolicy = await readFile(new URL('../src/Directory.Build.props', import.meta.url), 'utf8');
+
+for (const [name, source] of [['quality', workflow], ['secret scan', secretWorkflow]]) {
+  assert.match(source, /^permissions:\s*\r?\n  contents: read\s*\r?\n(?=\S)/m, `${name} must use only read-only contents permissions`);
+  assert.doesNotMatch(source, /^[ \t]+permissions:/m, `${name} jobs must not override the workflow's permissions`);
+  const checkouts = [...source.matchAll(/^      - uses: actions\/checkout@[^\r\n]*\r?\n((?:        [^\r\n]*\r?\n|          [^\r\n]*\r?\n)*)/gm)];
+  assert.ok(checkouts.length, `${name} must have a checkout`);
+  for (const checkout of checkouts) assert.match(checkout[1], /^          persist-credentials: false\s*$/m, `${name} checkout must not persist credentials`);
+}
 
 assert.doesNotMatch(workflow, /quality-change-scope|classify-quality-scope|outputs\.scope/,
   'required quality validation must not depend on changed-file classification');

@@ -59,6 +59,23 @@ internal sealed class BrokerInstallationIdentityProvider(IBrokerInstallationIden
         finally { gate.Release(); }
     }
 
+    // Inspection must never create or rotate an identity while handling an incident.
+    public async Task<string?> GetExistingIdAsync(CancellationToken ct)
+    {
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            string? saved = await store.ReadAsync(ct).ConfigureAwait(false);
+            if (saved is null) return null;
+            if (!saved.StartsWith("rotation|", StringComparison.Ordinal)) return Parse(saved).Id;
+            string[] parts = saved.Split('|');
+            if (parts.Length != 6 || parts[2].Length != 43 || parts[2].Any(static c => c is not ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_' or '-')))
+                throw new CryptographicException("The broker installation identity is invalid.");
+            return parts[2];
+        }
+        finally { gate.Release(); }
+    }
+
     public async Task<BrokerInstallationIdentity> GetOrCreateAsync(CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);

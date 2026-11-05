@@ -200,6 +200,11 @@ internal static partial class ConnectorOAuthEndpointMappings
 
     private static IResult BoundMailBrokerFailure(HttpContext context, HttpRequestException exception)
     {
+        if (exception is BrokerInstallationSuspendedException)
+        {
+            context.Response.Headers["Kautuka-Installation-Error"] = "installation_suspended";
+            return Results.Text("{\"error\":\"installation_suspended\",\"message\":\"The broker operator suspended this installation. Contact the broker operator; provider grants may need to be revoked.\"}", "application/json", statusCode: StatusCodes.Status403Forbidden);
+        }
         if (exception is BrokerMailRequestException { RetryAfter: TimeSpan delay })
             context.Response.Headers.RetryAfter = Math.Ceiling(delay.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (exception is BrokerMailRequestException { AdmissionDenial: not null } admission)

@@ -13,6 +13,145 @@ public sealed class BrokerMailCoordinatorTests
     private static readonly string Next = "kmf1." + new string('y', 40);
 
     [Fact]
+    public async Task NonceChallengeRetriesOnceWithFreshProofsAndIdenticalBody()
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new NonceChallengeHandler();
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        bool active = await broker.IsMailActiveAsync(new Uri("https://auth.kautuka.io/"), "google", Id, 1, Id, ConnectorDpop.CreatePrivateJwk(), CancellationToken.None);
+        Assert.True(active);
+        Assert.Equal(2, handler.Calls.Count);
+        Assert.Equal(handler.Calls[0].Body, handler.Calls[1].Body);
+        Assert.NotEqual(handler.Calls[0].InstallationProof, handler.Calls[1].InstallationProof);
+        Assert.NotEqual(handler.Calls[0].Dpop, handler.Calls[1].Dpop);
+        using JsonDocument first = ReadJwtPayload(handler.Calls[0].Dpop);
+        using JsonDocument second = ReadJwtPayload(handler.Calls[1].Dpop);
+        Assert.False(first.RootElement.TryGetProperty("nonce", out _));
+        Assert.Equal(Id, second.RootElement.GetProperty("nonce").GetString());
+        Assert.NotEqual(first.RootElement.GetProperty("jti").GetString(), second.RootElement.GetProperty("jti").GetString());
+    }
+
+    [Fact]
+    public async Task SuspendedInstallationDoesNotTriggerKeyRecoveryOrRepeatTheMailRequest()
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new NonceChallengeHandler { Suspended = true };
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        BrokerInstallationIdentity before = await identities.GetOrCreateAsync(CancellationToken.None);
+        await Assert.ThrowsAsync<BrokerInstallationSuspendedException>(() => broker.IsMailActiveAsync(
+            new Uri("https://auth.kautuka.io/"), "google", Id, 1, Id, ConnectorDpop.CreatePrivateJwk(), CancellationToken.None));
+        Assert.Single(handler.Calls);
+        BrokerInstallationIdentity after = await identities.GetOrCreateAsync(CancellationToken.None);
+        Assert.Equal(before.Id, after.Id);
+        Assert.Equal(before.PrivateJwk, after.PrivateJwk);
+    }
+
+    [Theory]
+    [InlineData(true, false, 2)]
+    [InlineData(false, true, 1)]
+    public async Task NonceRetryIsBoundedAndRejectsMalformedChallenges(bool repeatChallenge, bool malformed, int expectedCalls)
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new NonceChallengeHandler { RepeatChallenge = repeatChallenge, Malformed = malformed };
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        await Assert.ThrowsAsync<BrokerMailRequestException>(() => broker.IsMailActiveAsync(
+            new Uri("https://auth.kautuka.io/"), "google", Id, 1, Id, ConnectorDpop.CreatePrivateJwk(), CancellationToken.None));
+        Assert.Equal(expectedCalls, handler.Calls.Count);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task UnrecognizedNonceChallengeDoesNotRetry(bool wrongError, bool multipleNonces)
+    {
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new NonceChallengeHandler { WrongError = wrongError, MultipleNonces = multipleNonces };
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        await Assert.ThrowsAsync<BrokerMailRequestException>(() => broker.IsMailActiveAsync(
+            new Uri("https://auth.kautuka.io/"), "google", Id, 1, Id, ConnectorDpop.CreatePrivateJwk(), CancellationToken.None));
+        Assert.Single(handler.Calls);
+    }
+
+    [Fact]
+    public async Task NonceNegotiationRemainsBoundedWhenInstallationKeyRotates()
+    {
+        var identityStore = new IdentityStorage();
+        using var identities = new BrokerInstallationIdentityProvider(identityStore);
+        using var handler = new RotateDuringNonceHandler(identityStore);
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        Assert.True(await broker.IsMailActiveAsync(new Uri("https://auth.kautuka.io/"), "google", Id, 1, Id, ConnectorDpop.CreatePrivateJwk(), CancellationToken.None));
+        Assert.Equal(4, handler.Calls.Count);
+        Assert.All(handler.Calls, call => Assert.Equal(handler.Calls[0].Body, call.Body));
+        Assert.Equal(4, handler.Calls.Select(call => call.Proof).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(4, handler.Calls.Select(call => call.Dpop).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(2, handler.Registrations);
+    }
+
+    private sealed class RotateDuringNonceHandler(IdentityStorage storage) : HttpMessageHandler
+    {
+        public List<(string Body, string Proof, string Dpop)> Calls { get; } = [];
+        public int Registrations { get; private set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath == "/installation/register") { Registrations++; return new HttpResponseMessage(HttpStatusCode.NoContent); }
+            Calls.Add((await request.Content!.ReadAsStringAsync(ct), request.Headers.GetValues("Kautuka-Installation-Proof").Single(), request.Headers.GetValues("DPoP").Single()));
+            if (Calls.Count is 1 or 3)
+            {
+                var challenge = new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"error\":\"use_dpop_nonce\"}") };
+                challenge.Headers.TryAddWithoutValidation("DPoP-Nonce", Id);
+                return challenge;
+            }
+            if (Calls.Count == 2)
+            {
+                string current = (await storage.ReadAsync(ct))!;
+                await storage.WriteAsync(current[..43] + ":" + ConnectorDpop.CreatePrivateJwk(), ct);
+                return new HttpResponseMessage(HttpStatusCode.Forbidden);
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"active\":true}") };
+        }
+    }
+
+    private static JsonDocument ReadJwtPayload(string jwt)
+    {
+        string part = jwt.Split('.')[1].Replace('-', '+').Replace('_', '/');
+        return JsonDocument.Parse(Convert.FromBase64String(part.PadRight((part.Length + 3) / 4 * 4, '=')));
+    }
+
+    private sealed class NonceChallengeHandler : HttpMessageHandler
+    {
+        public bool Suspended { get; init; }
+        public bool RepeatChallenge { get; init; }
+        public bool Malformed { get; init; }
+        public bool WrongError { get; init; }
+        public bool MultipleNonces { get; init; }
+        public List<(string Body, string InstallationProof, string Dpop)> Calls { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/installation/register") return new HttpResponseMessage(HttpStatusCode.NoContent);
+            Calls.Add((await request.Content!.ReadAsStringAsync(cancellationToken), request.Headers.GetValues("Kautuka-Installation-Proof").Single(), request.Headers.GetValues("DPoP").Single()));
+            if (Suspended)
+            {
+                var suspended = new HttpResponseMessage(HttpStatusCode.Forbidden);
+                suspended.Headers.TryAddWithoutValidation("Kautuka-Installation-Error", "installation_suspended");
+                return suspended;
+            }
+            if (Calls.Count == 1 || RepeatChallenge)
+            {
+                var challenge = new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent(WrongError ? "{\"error\":\"other\"}" : "{\"error\":\"use_dpop_nonce\"}") };
+                challenge.Headers.TryAddWithoutValidation("DPoP-Nonce", Malformed ? "invalid" : Id);
+                if (MultipleNonces) challenge.Headers.TryAddWithoutValidation("DPoP-Nonce", Id);
+                return challenge;
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"active\":true}") };
+        }
+    }
+
+    [Fact]
     public async Task PartialRefreshMarksConnectionForReconnectAndStillAllowsRemoval()
     {
         using var store = new BrokerMailCredentialStore(new MemoryStorage());
@@ -35,6 +174,48 @@ public sealed class BrokerMailCoordinatorTests
         await coordinator.DisconnectAsync(origin, "u", "c", CancellationToken.None);
         Assert.Null((await store.ReadAsync("u", "c", CancellationToken.None)).Active);
         Assert.Equal(1, handler.DisconnectCalls);
+    }
+
+    [Fact]
+    public async Task BrokerSuspensionIsPersistedWithoutDiscardingMailCredentials()
+    {
+        var storage = new MemoryStorage();
+        using var store = new BrokerMailCredentialStore(storage);
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new BrokerHandler { SuspendRefresh = true };
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(store, broker);
+        var origin = new Uri("https://auth.kautuka.io/");
+        var credential = new BrokerMailCredential("google", Id, Id, 1, Token, ConnectorDpop.CreatePrivateJwk(), "https://auth.kautuka.io");
+        await coordinator.ActivateAsync(origin, "u", "c", new(credential, Id), CancellationToken.None);
+        await Assert.ThrowsAsync<BrokerInstallationSuspendedException>(() => coordinator.RefreshAsync(origin, "u", "c", CancellationToken.None));
+        BrokerMailStoredState saved = await store.ReadAsync("u", "c", CancellationToken.None);
+        Assert.Equal("https://auth.kautuka.io", saved.SuspendedBrokerOrigin);
+        Assert.Equal(credential, saved.Active);
+        Assert.NotNull(saved.PendingRefresh);
+        using var restarted = new BrokerMailCredentialStore(storage);
+        Assert.Equal("https://auth.kautuka.io", (await restarted.ReadAsync("u", "c", CancellationToken.None)).SuspendedBrokerOrigin);
+        using var restartedCoordinator = new BrokerMailCoordinator(restarted, broker);
+        await Assert.ThrowsAsync<BrokerInstallationSuspendedException>(() => restartedCoordinator.RefreshAsync(origin, "u", "c", CancellationToken.None));
+        Assert.Equal(1, handler.RefreshCalls);
+    }
+
+    [Fact]
+    public async Task EmptySuspendedStateDoesNotBlockANewBrokerAfterRestart()
+    {
+        var storage = new MemoryStorage();
+        using var first = new BrokerMailCredentialStore(storage);
+        await first.MarkBrokerSuspendedAsync("u", "c", "https://old.example", CancellationToken.None);
+        Assert.Null((await first.ReadAsync("u", "c", CancellationToken.None)).SuspendedBrokerOrigin);
+        using var reopened = new BrokerMailCredentialStore(storage);
+        using var identities = new BrokerInstallationIdentityProvider(new IdentityStorage());
+        using var handler = new BrokerHandler();
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var broker = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(reopened, broker);
+        var credential = new BrokerMailCredential("google", Id, Id, 1, Token, ConnectorDpop.CreatePrivateJwk(), "https://new.example");
+        Assert.Equal(credential, await coordinator.ActivateAsync(new Uri("https://new.example/"), "u", "c", new(credential, Id), CancellationToken.None));
     }
 
     [Fact]
@@ -512,6 +693,7 @@ public sealed class BrokerMailCoordinatorTests
         public bool ActivationConflict { get; set; }
         public bool RefreshGone { get; set; }
         public bool InsufficientRefreshScope { get; set; }
+        public bool SuspendRefresh { get; set; }
         public bool LoseDisconnect { get; set; }
         public bool DisconnectMarkerExpired { get; set; }
         public bool DenyNewAccount { get; set; }
@@ -549,6 +731,12 @@ public sealed class BrokerMailCoordinatorTests
                 case "/installation/mail-refresh":
                     if (RefreshGone) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Gone));
                     RefreshCalls++;
+                    if (SuspendRefresh)
+                    {
+                        var suspended = new HttpResponseMessage(HttpStatusCode.Forbidden);
+                        suspended.Headers.TryAddWithoutValidation("Kautuka-Installation-Error", "installation_suspended");
+                        return Task.FromResult(suspended);
+                    }
                     if (InsufficientRefreshScope)
                     {
                         var denied = new HttpResponseMessage(HttpStatusCode.Forbidden);

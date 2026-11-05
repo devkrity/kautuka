@@ -23,6 +23,7 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             if (!stillAuthorized()) throw new UnauthorizedAccessException();
             Uri origin = new(session.BrokerOrigin);
             BrokerMailStoredState state = await store.ReadAsync(session.UserId, session.ConnectorId, ct).ConfigureAwait(false);
+            if (state.SuspendedBrokerOrigin == session.BrokerOrigin) throw new BrokerInstallationSuspendedException();
             EnsureOrigin(origin, state);
             if (state.Active?.FlowId == session.FlowId)
             {
@@ -44,6 +45,11 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             await RecoverActivationCoreAsync(origin, session.UserId, session.ConnectorId, ct, stillAuthorized).ConfigureAwait(false);
             return true;
         }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(session.UserId, session.ConnectorId, session.BrokerOrigin, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         finally { gate.Release(); }
     }
 
@@ -55,6 +61,7 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
         try
         {
             BrokerMailStoredState state = await store.ReadAsync(userId, connectorId, ct).ConfigureAwait(false);
+            if (state.SuspendedBrokerOrigin == origin.GetLeftPart(UriPartial.Authority)) throw new BrokerInstallationSuspendedException();
             EnsureOrigin(origin, state);
             EnsureOrigin(origin, pending.Credential);
             BrokerMailCredential? active = state.Active;
@@ -68,6 +75,11 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             await store.StageActivationAsync(userId, connectorId, pending, ct).ConfigureAwait(false);
             return await RecoverActivationCoreAsync(origin, userId, connectorId, ct).ConfigureAwait(false);
         }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(userId, connectorId, origin.GetLeftPart(UriPartial.Authority), CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         finally { gate.Release(); }
     }
 
@@ -76,12 +88,18 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
         SemaphoreSlim gate = Gate(userId, connectorId);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try { return await RecoverActivationCoreAsync(origin, userId, connectorId, ct).ConfigureAwait(false); }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(userId, connectorId, origin.GetLeftPart(UriPartial.Authority), CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         finally { gate.Release(); }
     }
 
     private async Task<BrokerMailCredential> RecoverActivationCoreAsync(Uri origin, string userId, string connectorId, CancellationToken ct, Func<bool>? stillAuthorized = null)
     {
         BrokerMailStoredState state = await store.ReadAsync(userId, connectorId, ct).ConfigureAwait(false);
+        if (state.SuspendedBrokerOrigin == origin.GetLeftPart(UriPartial.Authority)) throw new BrokerInstallationSuspendedException();
         EnsureOrigin(origin, state);
         BrokerMailPendingActivation pending = state.PendingActivation ?? throw new InvalidOperationException("There is no pending mail activation.");
         BrokerMailCredential credential = pending.Credential;
@@ -134,6 +152,7 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
         {
             BrokerMailStoredState state = await store.ReadAsync(userId, connectorId, ct).ConfigureAwait(false);
             EnsureOrigin(origin, state);
+            if (state.SuspendedBrokerOrigin == origin.GetLeftPart(UriPartial.Authority)) throw new BrokerInstallationSuspendedException();
             if (state.RequiresReconnect || state.DisconnectPending) throw new InvalidOperationException("Reconnect the mail account before using it.");
             if (state.PendingActivation is not null) throw new InvalidOperationException("Mail activation must complete before refresh.");
             BrokerMailCredential active = state.Active ?? throw new InvalidOperationException("The mail account is not connected.");
@@ -171,6 +190,11 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             if (result.ExpiresAt is long expiry && expiry <= now || result.ExpiresAt is null && (result.IssuedAt > now + 30_000 || result.IssuedAt < now - 30_000))
                 return null;
             return result;
+        }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(userId, connectorId, origin.GetLeftPart(UriPartial.Authority), CancellationToken.None).ConfigureAwait(false);
+            throw;
         }
         finally { gate.Release(); }
     }
@@ -246,6 +270,11 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             }
             await store.ClearConnectionAsync(userId, connectorId, state, ct).ConfigureAwait(false);
         }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(userId, connectorId, origin.GetLeftPart(UriPartial.Authority), CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         finally { gate.Release(); }
     }
 
@@ -309,6 +338,11 @@ internal sealed class BrokerMailCoordinator(BrokerMailCredentialStore store, Bro
             // Cancel only this flow at the broker; another local active flow may
             // be the older connection being replaced, and must not be revoked.
             await broker.CancelMailAsync(origin, session.FlowId, session.DpopPrivateJwk, ct).ConfigureAwait(false);
+        }
+        catch (BrokerInstallationSuspendedException)
+        {
+            await store.MarkBrokerSuspendedAsync(session.UserId, session.ConnectorId, session.BrokerOrigin, CancellationToken.None).ConfigureAwait(false);
+            throw;
         }
         finally { gate.Release(); }
     }
