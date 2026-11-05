@@ -67,6 +67,8 @@ internal static class ProbeNetworkPolicy
     public static SocketsHttpHandler CreateProbeHandler(bool allowPrivate)
         => new()
         {
+            UseProxy = false,
+            UseCookies = false,
             AllowAutoRedirect = false,
             ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, cancellationToken),
         };
@@ -74,6 +76,9 @@ internal static class ProbeNetworkPolicy
     public static SocketsHttpHandler CreateRuntimeHandler(bool allowPrivate)
         => new()
         {
+            UseProxy = false,
+            UseCookies = false,
+            AllowAutoRedirect = false,
             ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, cancellationToken),
         };
 

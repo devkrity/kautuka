@@ -65,6 +65,8 @@ public sealed class GatewaySchemaUpgradeTests
                 VALUES ('interaction-1', 'telegram-1', 'chat-1', 'approve?', 'created', 'expires', 481, 'provider-481');
                 INSERT INTO runtime_users(username, user_id, created_at, updated_at, telegramuser_idsJson, telegram_bot_ids_json)
                 VALUES ('amit', 'user-1', 'created', 'updated', '[]', '[]');
+                INSERT INTO mcp_servers(id, name, transport, http_url, encrypted_env_json, created_at, updated_at)
+                VALUES ('remote-1', 'Remote', 'http', 'https://example.com/mcp', 'legacy-envelope', 'created', 'updated');
                 INSERT INTO tool_approval_requests(id, tool_call_id, tool_name, tool_type, requested_at)
                 VALUES ('approval-1', 'call-1', 'shell', 'mcp', 'requested');
                 INSERT INTO agent_tool_invocations(
@@ -101,6 +103,9 @@ public sealed class GatewaySchemaUpgradeTests
         Assert.Equal(1L, migrated.ExecuteScalar<long>("SELECT notify_channels FROM autopilot_schedules WHERE id='schedule-1'"));
         Assert.Equal(481L, migrated.ExecuteScalar<long>("SELECT channel_message_id FROM runtime_channel_interactions WHERE id='interaction-1'"));
         Assert.Equal("user-1", migrated.ExecuteScalar<string>("SELECT user_id FROM runtime_users WHERE username='amit'"));
+        Assert.Equal("legacy-envelope", migrated.ExecuteScalar<string>("SELECT encrypted_env_json FROM mcp_servers WHERE id='remote-1'"));
+        Assert.Equal(32L, migrated.ExecuteScalar<long>("SELECT length(json_extract(remote_config_json,'$.credentialNamespace')) FROM mcp_servers WHERE id='remote-1'"));
+        Assert.Equal(0L, migrated.ExecuteScalar<long>("SELECT json_array_length(json_extract(remote_config_json,'$.credentials')) FROM mcp_servers WHERE id='remote-1'"));
         Assert.Equal("single", migrated.ExecuteScalar<string>("SELECT channel_tether_mode FROM tool_approval_requests WHERE id='approval-1'"));
         Assert.Equal(1L, migrated.ExecuteScalar<long>("SELECT COUNT(*) FROM agent_tool_invocation_links WHERE approval_request_id='approval-1'"));
         Assert.Equal(1L, migrated.ExecuteScalar<long>("SELECT COUNT(*) FROM approval_continuation_jobs WHERE request_id='approval-1'"));
@@ -111,6 +116,19 @@ public sealed class GatewaySchemaUpgradeTests
             using SqliteDataReader reader = foreignKeyCheck.ExecuteReader();
             Assert.False(reader.Read());
         }
+    }
+
+    [Fact]
+    public void RemoteConfigurationColumnStillRejectsAnIncompatibleDeclaration()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        KautukaDatabase database = CreateDatabase(temp.SqlitePath);
+        database.EnsureReady();
+        using SqliteConnection connection = new(database.ConnectionString);
+        connection.Open();
+        connection.ExecuteScript("ALTER TABLE mcp_servers DROP COLUMN remote_config_json; ALTER TABLE mcp_servers ADD COLUMN remote_config_json TEXT NULL;");
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(() => SqliteGatewaySchemaBootstrapper.ValidateExisting(connection));
+        Assert.Contains("incompatible table 'mcp_servers'", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]

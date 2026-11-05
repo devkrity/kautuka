@@ -68,6 +68,85 @@ internal sealed class CredentialResolverService(
         return response.Entries;
     }
 
+    private static CredentialAccessContext DraftAccess(string userId, string scope)
+        => Access(userId, scope == "system" ? CredentialCapability.SystemAdmin : CredentialCapability.OwnUserAdmin);
+
+    public async Task<string> StageAssociationAsync(string draftId, string userId, string scope, string? sourceId, CancellationToken ct)
+    {
+        var request = new StageConnectorAssociationRequest { Access = DraftAccess(userId, scope), DraftId = draftId, SourceAssociationId = sourceId ?? string.Empty };
+        StageConnectorAssociationResponse response = await CallAsync(Client, "StageConnectorAssociation", client => client.StageConnectorAssociationAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return response.AssociationId;
+    }
+
+    public async Task<string> StageMutationAsync(string operationId, string userId, string scope, string connectorId, string credentialNamespace, string? sourceId, IReadOnlyDictionary<string, string> entries, IReadOnlyList<string> removals, CancellationToken ct)
+    {
+        var request = new StageConnectorMutationRequest { Access = DraftAccess(userId, scope), OperationId = operationId, ConnectorId = connectorId, CredentialNamespace = credentialNamespace, SourceAssociationId = sourceId ?? string.Empty, CredentialScope = scope };
+        foreach ((string key, string value) in entries) request.Entries[key] = value;
+        request.RemoveKeys.AddRange(removals);
+        StageConnectorAssociationResponse response = await CallAsync(Client, "StageConnectorMutation", client => client.StageConnectorMutationAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return response.AssociationId;
+    }
+
+    public async Task<ConnectorDraftMetadata> GetStagedDraftAsync(string draftId, string userId, CancellationToken ct)
+        => await CallAsync(Client, "GetStagedConnectorDraft", client => client.GetStagedConnectorDraftAsync(new ConnectorDraftAccessRequest { Access = DraftAccess(userId, "user"), DraftId = draftId }, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+
+    public async Task<IReadOnlyDictionary<string, string>> ResolveAssociationAsync(string associationId, string connectorId, string credentialNamespace, string userId, IReadOnlyList<string> keys, bool includeSystem, CancellationToken ct)
+    {
+        var request = new ResolveConnectorAssociationRequest { Access = Access(string.IsNullOrEmpty(userId) ? "gateway-runtime" : userId, CredentialCapability.RuntimeResolve), AssociationId = associationId, ConnectorId = connectorId, CredentialNamespace = credentialNamespace, UserId = userId, IncludeSystemScope = includeSystem };
+        request.RequiredKeys.AddRange(keys);
+        CredentialMapResponse response = await CallAsync(Client, "ResolveConnectorAssociation", client => client.ResolveConnectorAssociationAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return response.Entries;
+    }
+
+    public Task<IReadOnlyDictionary<string, string>> ResolveRemoteAsync(string? associationId, string connectorId, string? credentialNamespace, string userId, IReadOnlyList<string> keys, bool includeSystem, CancellationToken ct)
+    {
+        if (associationId is null) return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>(StringComparer.Ordinal));
+        if (credentialNamespace is null) throw new RpcException(new Status(StatusCode.FailedPrecondition, "Credential association has no connector identity."));
+        return ResolveAssociationAsync(associationId, connectorId, credentialNamespace, userId, keys, includeSystem, ct);
+    }
+
+    public async Task<(IReadOnlyList<string> User, IReadOnlyList<string> System)> GetAssociationPresenceAsync(string associationId, string connectorId, string credentialNamespace, string userId, IReadOnlyList<string> keys, bool includeSystem, CancellationToken ct)
+    {
+        var request = new ResolveConnectorAssociationRequest { Access = Access(string.IsNullOrEmpty(userId) ? "gateway-runtime" : userId, CredentialCapability.RuntimeResolve), AssociationId = associationId, ConnectorId = connectorId, CredentialNamespace = credentialNamespace, UserId = userId, IncludeSystemScope = includeSystem };
+        request.RequiredKeys.AddRange(keys);
+        ConnectorAssociationPresenceResponse response = await CallAsync(Client, "GetConnectorAssociationPresence", client => client.GetConnectorAssociationPresenceAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return ([.. response.UserKeys], [.. response.SystemKeys]);
+    }
+
+    public async Task<IReadOnlyList<ConnectorDraftMetadata>> ListDraftsAsync(string userId, CancellationToken ct)
+    {
+        ConnectorDraftListResponse response = await CallAsync(Client, "ListConnectorDrafts", client => client.ListConnectorDraftsAsync(new ListConnectorDraftsRequest { Access = DraftAccess(userId, "user") }, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return [.. response.Drafts];
+    }
+
+    public async Task<ConnectorDraftMetadata> CreateDraftAsync(string id, string userId, string connectorId, string scope, string candidateJson, string baseUpdatedAt, string effectiveEndpoint, string baseEndpoint, bool useDurable, string credentialNamespace, IReadOnlyList<string> declared, IReadOnlyDictionary<string, string> entries, IReadOnlyList<string> removed, string? sourceAssociationId, CancellationToken ct)
+    {
+        var request = new CreateConnectorDraftRequest { Access = DraftAccess(userId, scope), DraftId = id, ConnectorId = connectorId, CredentialScope = scope, CandidateJson = candidateJson, BaseUpdatedAt = baseUpdatedAt, EffectiveEndpoint = effectiveEndpoint, BaseEndpoint = baseEndpoint, UseDurableCredentials = useDurable, CredentialNamespace = credentialNamespace, SourceAssociationId = sourceAssociationId ?? string.Empty };
+        request.DeclaredKeys.AddRange(declared); request.RemoveKeys.AddRange(removed);
+        foreach ((string key, string value) in entries) request.Entries[key] = value;
+        return await CallAsync(Client, "CreateConnectorDraft", client => client.CreateConnectorDraftAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+    }
+
+    public async Task<ConnectorDraftMetadata> GetDraftAsync(string id, string userId, string scope, CancellationToken ct)
+        => await CallAsync(Client, "GetConnectorDraft", client => client.GetConnectorDraftAsync(new ConnectorDraftAccessRequest { Access = DraftAccess(userId, scope), DraftId = id }, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+
+    public async Task<IReadOnlyDictionary<string, string>> ResolveDraftAsync(string id, string userId, string scope, IReadOnlyList<string> keys, bool includeSystem, CancellationToken ct)
+    {
+        var request = new ResolveConnectorDraftRequest { Access = DraftAccess(userId, scope), DraftId = id, IncludeSystemScope = includeSystem };
+        request.RequiredKeys.AddRange(keys);
+        CredentialMapResponse response = await CallAsync(Client, "ResolveConnectorDraft", client => client.ResolveConnectorDraftAsync(request, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return response.Entries;
+    }
+
+    public async Task<bool> CancelDraftAsync(string id, string userId, string scope, CancellationToken ct)
+    {
+        DeleteCredentialResponse response = await CallAsync(Client, "CancelConnectorDraft", client => client.CancelConnectorDraftAsync(new ConnectorDraftAccessRequest { Access = DraftAccess(userId, scope), DraftId = id }, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+        return response.Deleted;
+    }
+
+    public async Task DiscardDraftInputAsync(string id, string userId, CancellationToken ct)
+        => _ = await CallAsync(Client, "DiscardConnectorDraftInput", client => client.DiscardConnectorDraftInputAsync(new ConnectorDraftAccessRequest { Access = DraftAccess(userId, "user"), DraftId = id }, cancellationToken: ct).ResponseAsync).ConfigureAwait(false);
+
     public async Task<CredentialHealthResponse> GetHealthAsync(CancellationToken ct = default)
         => await CallAsync(
             Client,

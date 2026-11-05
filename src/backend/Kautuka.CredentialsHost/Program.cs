@@ -93,6 +93,8 @@ builder.Services.AddSingleton<CredentialRecoveryArchive>();
 builder.Services.AddSingleton<CredentialsVaultService>();
 builder.Services.AddSingleton<CredentialAuditStore>();
 builder.Services.AddSingleton<CredentialRepository>();
+builder.Services.AddSingleton<ConnectorDraftRepository>();
+builder.Services.AddHostedService<ConnectorDraftCleanupService>();
 builder.Services.AddSingleton<CredentialsGrpcService>();
 builder.Services.AddHealthChecks().AddCheck<CredentialReadinessHealthCheck>("credentials-ready");
 KautukaMaintenanceMode.SuppressApplicationHostedServices(builder.Services);

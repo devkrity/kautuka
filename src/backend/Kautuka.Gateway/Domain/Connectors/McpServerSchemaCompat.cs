@@ -17,7 +17,18 @@ internal static class McpServerSchemaCompat
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        if (!TableExists(connection, "mcp_servers") || HasColumn(connection, "mcp_servers", "mcp_protocol_version"))
+        if (!TableExists(connection, "mcp_servers"))
+            return;
+
+        if (!HasColumn(connection, "mcp_servers", "remote_config_json"))
+        {
+            using var addRemote = connection.CreateCommand();
+            addRemote.CommandText = "ALTER TABLE mcp_servers ADD COLUMN remote_config_json TEXT NOT NULL DEFAULT '{\"credentials\":[],\"httpHeaders\":[]}'";
+            addRemote.ExecuteNonQuery();
+        }
+
+        EnsureRemoteNamespaces(connection);
+        if (HasColumn(connection, "mcp_servers", "mcp_protocol_version"))
         {
             return;
         }
@@ -36,6 +47,14 @@ internal static class McpServerSchemaCompat
             """;
         backfill.Parameters.AddWithValue("$protocolVersion", MarkItDownInitialProtocolVersion);
         backfill.ExecuteNonQuery();
+    }
+
+    public static void EnsureRemoteNamespaces(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "mcp_servers") || !HasColumn(connection, "mcp_servers", "remote_config_json")) return;
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.credentialNamespace',lower(hex(randomblob(16)))) WHERE lower(transport)='http' AND (json_extract(remote_config_json,'$.credentialNamespace') IS NULL OR json_extract(remote_config_json,'$.credentialNamespace')='')";
+        command.ExecuteNonQuery();
     }
 
     private static bool TableExists(SqliteConnection connection, string tableName)

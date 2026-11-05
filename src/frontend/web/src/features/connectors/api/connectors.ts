@@ -69,6 +69,8 @@ function normalizeConnector(value: unknown): Connector {
     toolCount: readApiNumber(value, 'toolCount') ?? null,
     toolNames: readApiStringArray(value, 'toolNames') ?? null,
     envKeys: readApiStringArray(value, 'envKeys') ?? [],
+    credentials: readApiArray(value, 'credentials'),
+    httpHeaders: readApiArray(value, 'httpHeaders'),
     scope: readApiString(value, 'scope') ?? 'system',
     ownerUserId: readApiNullableString(value, 'ownerUserId') ?? null,
     createdAt: readApiString(value, 'createdAt') ?? '',
@@ -150,6 +152,41 @@ export async function testConnector(data: ConnectorTestPayload): Promise<Connect
   return normalizeTestResult(response.data);
 }
 
+export type RemoteMcpDraftRequest = {
+  connectorId: string;
+  candidate: ConnectorSavePayload;
+  credentialScope: 'user' | 'system';
+  entries: Record<string, string>;
+  removeKeys: string[];
+};
+export type RemoteMcpDraftHandle = { draftId: string; expiresAt: string };
+export async function createRemoteMcpDraft(
+  request: RemoteMcpDraftRequest
+): Promise<RemoteMcpDraftHandle> {
+  const response = await apiClient.post('/credentials/connector-drafts', request);
+  const draftId = readApiString(response.data, 'draftId');
+  const expiresAt = readApiString(response.data, 'expiresAt');
+  if (!draftId || !expiresAt)
+    throw new Error('The server did not return a credential draft reference.');
+  return { draftId, expiresAt };
+}
+
+export async function testRemoteMcpDraft(draftId: string): Promise<ConnectorTestResult> {
+  const response = await apiClient.post(`/connectors/drafts/${encodeURIComponent(draftId)}/test`);
+  return normalizeTestResult(response.data);
+}
+
+export async function saveRemoteMcpDraft(draftId: string): Promise<Connector> {
+  const response = await apiClient.post(`/connectors/drafts/${encodeURIComponent(draftId)}/save`);
+  const connector = normalizeConnector(response.data);
+  if (!connector.id) throw new Error('The server did not return a saved connector.');
+  return connector;
+}
+
+export async function cancelRemoteMcpDraft(draftId: string): Promise<void> {
+  await apiClient.delete(`/credentials/connector-drafts/${encodeURIComponent(draftId)}`);
+}
+
 export async function importMcpbConnectorBundle(file: File): Promise<ConnectorMcpbImportResult> {
   const formData = new FormData();
   formData.append('file', file, file.name);
@@ -163,6 +200,14 @@ export interface ConnectorCredentialStatus {
   configuredKeys: string[];
   missingKeys: string[];
   httpUrl: string | null;
+  credentials?: RemoteCredentialPresence[];
+}
+
+export interface RemoteCredentialPresence {
+  key: string;
+  userConfigured: boolean;
+  systemConfigured: boolean;
+  effectiveScope: 'user' | 'system' | 'none';
 }
 
 function normalizeCredentialStatus(value: unknown, connectorId: string): ConnectorCredentialStatus {
@@ -174,7 +219,25 @@ function normalizeCredentialStatus(value: unknown, connectorId: string): Connect
     ? (obj.missingKeys as unknown[]).filter((k): k is string => typeof k === 'string')
     : [];
   const httpUrl = typeof obj.httpUrl === 'string' ? obj.httpUrl : null;
-  return { connectorId, configuredKeys: configured, missingKeys: missing, httpUrl };
+  const credentials: RemoteCredentialPresence[] = Array.isArray(obj.credentials)
+    ? obj.credentials.flatMap((entry: unknown) => {
+        if (!entry || typeof entry !== 'object') return [];
+        const item = entry as Record<string, unknown>;
+        if (typeof item.key !== 'string') return [];
+        return [
+          {
+            key: item.key,
+            userConfigured: item.userConfigured === true,
+            systemConfigured: item.systemConfigured === true,
+            effectiveScope:
+              item.effectiveScope === 'user' || item.effectiveScope === 'system'
+                ? item.effectiveScope
+                : 'none',
+          },
+        ];
+      })
+    : [];
+  return { connectorId, configuredKeys: configured, missingKeys: missing, httpUrl, credentials };
 }
 
 export async function fetchConnectorCredentialStatus(

@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Connectors;
+
 using Microsoft.Extensions.AI;
 
 namespace Kautuka.Gateway.Infrastructure.Agents;
@@ -42,11 +44,13 @@ internal interface IAgentToolCatalog
 internal sealed class AgentToolCatalog(
     IEnumerable<IAgentToolProvider> providers,
     IAgentToolSurfaceStore surfaceStore,
-    IPlatformConfigurationProvider configProvider) : IAgentToolCatalog
+    IPlatformConfigurationProvider configProvider,
+    RemoteMcpCredentialRevisionTracker? credentialRevisions = null) : IAgentToolCatalog
 {
     private readonly IAgentToolProvider[] providers = [.. providers];
     private readonly IAgentToolSurfaceStore surfaceStore = surfaceStore;
     private readonly IPlatformConfigurationProvider configProvider = configProvider;
+    private readonly RemoteMcpCredentialRevisionTracker credentialRevisions = credentialRevisions ?? new();
     private readonly object sync = new();
     private readonly Dictionary<string, Task<AgentToolSurfaceContribution>> inflight = new(StringComparer.Ordinal);
 
@@ -54,27 +58,40 @@ internal sealed class AgentToolCatalog(
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        string fingerprint = await FingerprintAsync(context, ct).ConfigureAwait(false);
-        AgentToolSurfaceSnapshot? snapshot = surfaceStore.TryGet(context.AgentId, fingerprint);
-        if (snapshot is not null)
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            return await HydrateAsync(context, snapshot.Catalogue.Entries, ct).ConfigureAwait(false);
-        }
-
-        string flightKey = string.Concat(context.AgentId, "\n", fingerprint);
-        Task<AgentToolSurfaceContribution> pending;
-        lock (sync)
-        {
-            if (!inflight.TryGetValue(flightKey, out pending!))
+            string fingerprint = await FingerprintAsync(context, ct).ConfigureAwait(false);
+            AgentDefinition? currentAgent = configProvider.GetCurrent().Agents.FirstOrDefault(agent => string.Equals(agent.Id, context.AgentId, StringComparison.Ordinal));
+            if (currentAgent is null || !currentAgent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, currentAgent.Scope, currentAgent.OwnerUserId))
+                throw new InvalidOperationException("Agent is no longer available to this caller.");
+            context = context with { AgentDefinition = currentAgent };
+            AgentToolSurfaceSnapshot? snapshot = surfaceStore.TryGet(context.AgentId, fingerprint);
+            IReadOnlyList<AgentToolSurfaceEntry> entries;
+            if (snapshot is not null)
             {
-                pending = MaterializeMissAsync(context, fingerprint);
-                inflight[flightKey] = pending;
-                ObserveInflight(flightKey, pending);
+                entries = snapshot.Catalogue.Entries;
             }
+            else
+            {
+                string flightKey = string.Concat(context.AgentId, "\n", fingerprint);
+                Task<AgentToolSurfaceContribution> pending;
+                lock (sync)
+                {
+                    if (!inflight.TryGetValue(flightKey, out pending!))
+                    {
+                        pending = MaterializeMissAsync(context, fingerprint);
+                        inflight[flightKey] = pending;
+                        ObserveInflight(flightKey, pending);
+                    }
+                }
+                AgentToolSurfaceContribution contribution = await pending.WaitAsync(ct).ConfigureAwait(false);
+                entries = contribution.Entries;
+            }
+            IReadOnlyList<AIFunction> tools = await HydrateAsync(context, entries, ct).ConfigureAwait(false);
+            if (string.Equals(fingerprint, await FingerprintAsync(context, ct).ConfigureAwait(false), StringComparison.Ordinal))
+                return tools;
         }
-
-        AgentToolSurfaceContribution contribution = await pending.WaitAsync(ct).ConfigureAwait(false);
-        return await HydrateAsync(context, contribution.Entries, ct).ConfigureAwait(false);
+        throw new InvalidOperationException("Connector configuration changed while building tools. Retry the operation.");
     }
 
     private void ObserveInflight(string flightKey, Task<AgentToolSurfaceContribution> pending)
@@ -100,12 +117,12 @@ internal sealed class AgentToolCatalog(
 
     private async Task<string> FingerprintAsync(AgentToolContext context, CancellationToken ct)
     {
-        string configFingerprint = AgentToolingFingerprint.Compute(context.AgentDefinition, configProvider.GetCurrent());
-        if (string.IsNullOrEmpty(context.UserId))
-        {
-            return configFingerprint;
-        }
-
+        PlatformConfiguration config = configProvider.GetCurrent();
+        AgentDefinition? currentAgent = config.Agents.FirstOrDefault(agent => string.Equals(agent.Id, context.AgentId, StringComparison.Ordinal));
+        if (currentAgent is null || !currentAgent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, currentAgent.Scope, currentAgent.OwnerUserId))
+            throw new InvalidOperationException("Agent is no longer available to this caller.");
+        context = context with { AgentDefinition = currentAgent };
+        string configFingerprint = AgentToolingFingerprint.Compute(currentAgent, config);
         List<(string ConnectorId, string Endpoint)> endpoints = [];
         foreach (IAgentToolProvider provider in providers)
         {
@@ -116,7 +133,17 @@ internal sealed class AgentToolCatalog(
             }
         }
 
-        return AgentToolingFingerprint.WithCaller(configFingerprint, context.UserId, endpoints);
+        PlatformConfiguration current = configProvider.GetCurrent();
+        var revisions = new List<(string ConnectorId, string Revision)>();
+        foreach ((string connectorId, string endpoint) in endpoints)
+        {
+            McpServerDefinition? server = current.McpServers.FirstOrDefault(item => string.Equals(item.Id, connectorId, StringComparison.Ordinal));
+            if (server is null) continue;
+            bool personal = !string.Equals(server.HttpUrl?.AbsoluteUri, endpoint, StringComparison.Ordinal);
+            bool includeSystem = !personal && !string.Equals(server.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase);
+            revisions.Add((connectorId, credentialRevisions.Get(connectorId, context.UserId ?? string.Empty, includeSystem)));
+        }
+        return AgentToolingFingerprint.WithCaller(configFingerprint, context.UserId, endpoints, revisions);
     }
 
     private async Task<AgentToolSurfaceContribution> MaterializeMissAsync(AgentToolContext context, string fingerprint)

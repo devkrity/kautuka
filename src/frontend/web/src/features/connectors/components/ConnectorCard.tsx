@@ -37,9 +37,11 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       ? (connector.httpUrl ?? '')
       : [connector.containerCommand, ...connector.containerArgs].filter(Boolean).join(' ');
 
-  const hasEnvKeys = !managed && (connector.envKeys?.length ?? 0) > 0;
+  const hasCredentialDefinitions =
+    !managed &&
+    (isHttp ? (connector.credentials?.length ?? 0) > 0 : (connector.envKeys?.length ?? 0) > 0);
   const { data: credStatus, isLoading: credLoading } = useConnectorCredentialStatus(
-    hasEnvKeys ? connector.id : null
+    hasCredentialDefinitions ? connector.id : null
   );
   const hitlStats = useHitlStats({ mcpServerId: connector.id });
   const hitlTools = (connector.toolNames ?? []).filter((toolName) =>
@@ -47,7 +49,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
   );
 
   const credBadge = (() => {
-    if (!hasEnvKeys) return null;
+    if (!hasCredentialDefinitions) return null;
     if (credLoading)
       return (
         <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
@@ -56,6 +58,21 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
         </span>
       );
     if (!credStatus) return null;
+    if (isHttp) {
+      const missingRequired = (connector.credentials ?? []).some(
+        (credential) => credential.required && !credStatus.configuredKeys.includes(credential.key)
+      );
+      if (missingRequired) return <Badge variant="attention">Required credential missing</Badge>;
+      if (credStatus.configuredKeys.length > 0)
+        return <Badge variant="info">Credentials configured</Badge>;
+      const freePreset =
+        connector.presetId && ['tavily', 'exa', 'firecrawl'].includes(connector.presetId);
+      return (
+        <Badge variant="muted">
+          {freePreset ? 'Using free access' : 'Optional credential not configured'}
+        </Badge>
+      );
+    }
     const total = credStatus.configuredKeys.length + credStatus.missingKeys.length;
     const allSet = credStatus.missingKeys.length === 0;
     return allSet ? (
@@ -102,7 +119,10 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       meta={
         <>
           {commandSummary ? (
-            <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground/70" title={commandSummary}>
+            <p
+              className="mt-1 truncate font-mono text-[10px] text-muted-foreground/70"
+              title={commandSummary}
+            >
               {commandSummary}
             </p>
           ) : null}
@@ -140,7 +160,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       }
       footer={
         <>
-          <span className="max-w-[60%] truncate font-mono text-xs text-muted-foreground">{connector.id}</span>
+          <span className="max-w-[60%] truncate font-mono text-xs text-muted-foreground">
+            {connector.id}
+          </span>
           <StatePill
             active={connector.enabled}
             disabled={toggling || !canManage}
@@ -171,11 +193,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           {hitlTools.map((toolName) => (
             <div key={toolName} className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-[11px] text-foreground/75">{toolName}</span>
-              <HitlFunctionStat
-                mcpServerId={connector.id}
-                toolName={toolName}
-                label={toolName}
-              />
+              <HitlFunctionStat mcpServerId={connector.id} toolName={toolName} label={toolName} />
             </div>
           ))}
         </div>

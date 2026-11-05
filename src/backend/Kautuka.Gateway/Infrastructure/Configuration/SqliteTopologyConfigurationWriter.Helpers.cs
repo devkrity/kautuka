@@ -59,7 +59,8 @@ internal partial class SqliteTopologyConfigurationWriter
         string? RuntimeArtifactType = null,
         string? RuntimeArtifactSourceDigest = null,
         string? RuntimeArtifactBuildStatus = null,
-        string? McpProtocolVersion = null);
+        string? McpProtocolVersion = null,
+        string RemoteConfig = "{}");
 
     internal sealed record UpsertSkillParameters(
         string Id,

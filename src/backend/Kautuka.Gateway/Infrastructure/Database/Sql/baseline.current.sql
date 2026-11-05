@@ -45,6 +45,7 @@ CREATE TABLE mcp_servers (
             http_url                       TEXT NULL,
             encrypted_env_json              TEXT NULL,
             env_keys_json                   TEXT NOT NULL DEFAULT '[]',
+            remote_config_json               TEXT NOT NULL DEFAULT '{"credentials":[],"httpHeaders":[]}',
             requiresApproval              INTEGER NOT NULL DEFAULT 0,
             requiresApprovalFunctionsJson TEXT NULL,
             tool_count                     INTEGER NULL,

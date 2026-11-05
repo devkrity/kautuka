@@ -8,4 +8,6 @@ internal interface IMcpHttpClientFactory
         HttpClientTransportOptions transportOptions,
         bool allowPrivateDestination,
         CancellationToken cancellationToken);
+
+    Task<McpClient> CreateAsync(HttpClientTransportOptions transportOptions, bool allowPrivateDestination, RemoteMcpRequestContext context, CancellationToken cancellationToken);
 }

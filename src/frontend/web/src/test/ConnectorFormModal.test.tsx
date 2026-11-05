@@ -20,11 +20,11 @@ function createDraft(): ConnectorDraft {
     description: 'Official Home Assistant MCP endpoint',
     iconUrl: '',
     presetId: null,
-    transport: 'http',
-    httpUrl: 'https://ha.example.com/api/mcp',
+    transport: 'container',
+    httpUrl: '',
     localCommand: '',
     localArgs: '',
-    containerImage: '',
+    containerImage: 'example/container',
     containerCommand: '',
     containerArgs: '',
     containerSidecarName: '',
@@ -35,14 +35,14 @@ function createDraft(): ConnectorDraft {
     healthcheckUrl: '',
     healthcheckIntervalMilliseconds: '',
     mcpProtocolVersion: '',
-    envKeys: 'MCP_AUTH_TOKEN',
+    envKeys: 'CONNECTOR_TOKEN',
     enabled: false,
     toolCount: null,
     toolNames: null,
   };
 }
 
-describe('ConnectorFormModal validation credentials', () => {
+describe('ConnectorFormModal container validation credentials', () => {
   beforeEach(() => {
     mutateSpy.mockReset();
   });
@@ -124,7 +124,7 @@ describe('ConnectorFormModal validation credentials', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('MCP_AUTH_TOKEN'), {
+    fireEvent.change(screen.getByLabelText('CONNECTOR_TOKEN'), {
       target: { value: credentialValue },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
@@ -132,7 +132,7 @@ describe('ConnectorFormModal validation credentials', () => {
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         testEnv: {
-          MCP_AUTH_TOKEN: credentialValue,
+          CONNECTOR_TOKEN: credentialValue,
         },
       }),
       expect.any(Object)
@@ -149,8 +149,8 @@ describe('ConnectorFormModal validation credentials', () => {
       expect.not.objectContaining({ testEnv: expect.anything() }),
       expect.any(Object)
     );
-    expect(savedDraft.envKeys).toBe('MCP_AUTH_TOKEN');
-    expect(savedCredValues).toMatchObject({ MCP_AUTH_TOKEN: credentialValue });
+    expect(savedDraft.envKeys).toBe('CONNECTOR_TOKEN');
+    expect(savedCredValues).toMatchObject({ CONNECTOR_TOKEN: credentialValue });
   });
 
   it('includes imported bundle metadata in the validation payload', () => {

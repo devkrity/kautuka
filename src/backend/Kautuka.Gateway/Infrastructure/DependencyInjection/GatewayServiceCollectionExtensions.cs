@@ -49,6 +49,7 @@ internal static class GatewayServiceCollectionExtensions
         services.AddSingleton<MafSessionStore>();
         services.AddSingleton<IToolExecutionPolicyService, ToolExecutionPolicyService>();
         services.AddSingleton<IAgentToolSurfaceStore, SqliteAgentToolSurfaceStore>();
+        services.AddSingleton<RemoteMcpCredentialRevisionTracker>();
         services.AddSingleton<IAgentToolCatalog, AgentToolCatalog>();
         services.AddSingleton<IEffectiveSkillManifestResolver, EffectiveSkillManifestResolver>();
         services.AddSingleton<ISkillPackageService, SkillPackageService>();

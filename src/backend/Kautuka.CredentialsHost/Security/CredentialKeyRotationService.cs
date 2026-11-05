@@ -165,6 +165,10 @@ internal sealed class CredentialKeyRotationService(
             """
             SELECT scope, subject, key, encrypted_value
             FROM (
+                SELECT 'association-' || scope AS scope, association_id || ':' || subject AS subject, key, encrypted_value FROM connector_credential_association_entries
+                UNION ALL
+                SELECT 'draft' AS scope, draft_id AS subject, key, encrypted_value FROM connector_credential_draft_entries
+                UNION ALL
                 SELECT 'system' AS scope, '' AS subject, key, encrypted_value FROM system_credentials
                 UNION ALL
                 SELECT 'user' AS scope, user_id AS subject, key, encrypted_value FROM user_credentials
@@ -185,6 +189,7 @@ internal sealed class CredentialKeyRotationService(
         return rows;
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "Scope selects fixed SQL statements and all values are parameters.")]
     private static async Task UpdateRowAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
@@ -199,12 +204,24 @@ internal sealed class CredentialKeyRotationService(
             command.CommandText = "UPDATE user_credentials SET encrypted_value=$value,updated_at=$now WHERE user_id=$subject AND key=$key";
             command.Parameters.AddWithValue("$subject", row.Subject);
         }
+        else if (row.Scope == "draft")
+        {
+            command.CommandText = "UPDATE connector_credential_draft_entries SET encrypted_value=$value WHERE draft_id=$subject AND key=$key";
+            command.Parameters.AddWithValue("$subject", row.Subject);
+        }
+        else if (row.Scope.StartsWith("association-", StringComparison.Ordinal))
+        {
+            command.CommandText = "UPDATE connector_credential_association_entries SET encrypted_value=$value WHERE association_id=$association AND scope=$scope AND subject=$subject AND key=$key";
+            command.Parameters.AddWithValue("$association", row.Subject[..32]);
+            command.Parameters.AddWithValue("$scope", row.Scope[12..]);
+            command.Parameters.AddWithValue("$subject", row.Subject[33..]);
+        }
         else
         {
             command.CommandText = "UPDATE system_credentials SET encrypted_value=$value,updated_at=$now WHERE key=$key";
         }
         command.Parameters.AddWithValue("$value", replacement);
-        command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        if (row.Scope is "user" or "system") command.Parameters.AddWithValue("$now", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$key", row.Key);
         if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
             throw new InvalidOperationException("Credential disappeared during key rotation.");
@@ -218,7 +235,7 @@ internal sealed class CredentialKeyRotationService(
     {
         await using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT encrypted_value FROM system_credentials UNION ALL SELECT encrypted_value FROM user_credentials";
+        command.CommandText = "SELECT encrypted_value FROM system_credentials UNION ALL SELECT encrypted_value FROM user_credentials UNION ALL SELECT encrypted_value FROM connector_credential_draft_entries UNION ALL SELECT encrypted_value FROM connector_credential_association_entries";
         await using SqliteDataReader reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {

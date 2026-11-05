@@ -659,9 +659,11 @@ public sealed class McpAgentToolProviderTests
         var inspect = new CountingSkillPackageService();
         AgentDefinition agent = CreateBoundHttpAgent();
         PlatformConfiguration config = CreateHttpPlatform(agent);
-        AgentToolCatalog catalog = CreateCatalog(testStore, config, httpFactory, grpcService, inspect);
+        var revisions = new RemoteMcpCredentialRevisionTracker();
+        AgentToolCatalog catalog = CreateCatalog(testStore, config, httpFactory, grpcService, inspect, revisions);
 
-        string fingerprint = AgentToolingFingerprint.Compute(agent, config);
+        string fingerprint = AgentToolingFingerprint.WithCaller(AgentToolingFingerprint.Compute(agent, config), null,
+            [("homeassistant-mcp", "https://ha.example.com/api/mcp")], [("homeassistant-mcp", revisions.Get("homeassistant-mcp", string.Empty, true))]);
         testStore.SurfaceStore.Save(agent.Id, fingerprint, new AgentToolSurfaceCatalogue
         {
             Entries =
@@ -875,6 +877,7 @@ public sealed class McpAgentToolProviderTests
         AgentDefinition firstAgent = CreateBoundContainerAgent("container-mcp");
         PlatformConfiguration config = new()
         {
+            Agents = [firstAgent],
             McpServers =
             [
                 new McpServerDefinition
@@ -899,6 +902,8 @@ public sealed class McpAgentToolProviderTests
         await catalog.BuildToolsAsync(CreateContainerToolContext(firstAgent), CancellationToken.None);
 
         AgentDefinition rebound = CreateBoundContainerAgent("other-mcp");
+        config.Agents.Clear();
+        config.Agents.Add(rebound);
         await catalog.BuildToolsAsync(CreateContainerToolContext(rebound), CancellationToken.None);
 
         Assert.Equal(2, grpcService.ListToolsCallCount);
@@ -945,6 +950,118 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
+    public async Task CredentialRevisionInvalidatesPersistedRemoteCatalogue()
+    {
+        using ToolSurfaceTestStore store = ToolSurfaceTestStore.Create();
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "remote", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "remote", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true };
+        var config = new PlatformConfiguration { Agents = [agent], McpServers = [server] };
+        var source = new StaticPlatformConfigurationProvider(config);
+        var factory = new CapturingMcpHttpClientFactory();
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        var revisions = new RemoteMcpCredentialRevisionTracker();
+        var catalog = new AgentToolCatalog([provider], store.SurfaceStore, source, revisions);
+        string initial = AgentToolingFingerprint.WithCaller(AgentToolingFingerprint.Compute(agent, config), "user-1",
+            [("remote", "https://example.com/mcp")], [("remote", revisions.Get("remote", "user-1", true))]);
+        store.SurfaceStore.Save(agent.Id, initial, new AgentToolSurfaceCatalogue { Entries = [new AgentToolSurfaceEntry { Source = AgentToolSurfaceSources.Mcp, SourceId = "remote", Name = "search" }] });
+        AgentToolContext context = CreateContainerToolContext(agent, "user-1");
+        Assert.Single(await catalog.BuildToolsAsync(context, CancellationToken.None));
+        Assert.False(factory.WasCalled);
+        revisions.BeginChange("remote", "user:user-1");
+        revisions.EndChange("remote", "user:user-1");
+        Assert.Empty(await catalog.BuildToolsAsync(context, CancellationToken.None));
+        Assert.True(factory.WasCalled);
+    }
+
+    [Fact]
+    public async Task RemoteRequestContextRejectsRevisionAndBindingChanges()
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "remote", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "remote", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var revisions = new RemoteMcpCredentialRevisionTracker();
+        var factory = new CapturingMcpHttpClientFactory();
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance, credentialRevisions: revisions);
+        _ = await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), CancellationToken.None);
+        RemoteMcpRequestContext captured = Assert.IsType<RemoteMcpRequestContext>(factory.LastContext);
+        Assert.NotNull(captured.Revalidate);
+        await captured.Revalidate(CancellationToken.None);
+        revisions.BeginChange("remote", "user:user-1");
+        await Assert.ThrowsAnyAsync<Exception>(() => captured.Revalidate(CancellationToken.None));
+        revisions.EndChange("remote", "user:user-1");
+        await Assert.ThrowsAnyAsync<Exception>(() => captured.Revalidate(CancellationToken.None));
+        _ = await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), CancellationToken.None);
+        captured = Assert.IsType<RemoteMcpRequestContext>(factory.LastContext);
+        source.Current = new PlatformConfiguration { Agents = [new AgentDefinition { Id = agent.Id, Scope = "system" }], McpServers = [server] };
+        await Assert.ThrowsAnyAsync<Exception>(() => captured.Revalidate!(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("user:user-1", false)]
+    [InlineData("system", false)]
+    [InlineData("headers", false)]
+    [InlineData("user:other", true)]
+    public async Task RemoteSnapshotRejectsRelevantChangesWhilePersonalEndpointIsResolving(string change, bool expectFactory)
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "remote", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "remote", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, Scope = "system", CredentialNamespace = Guid.NewGuid().ToString("N"), CredentialAssociationId = Guid.NewGuid().ToString("N") };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var revisions = new RemoteMcpCredentialRevisionTracker(); var factory = new CapturingMcpHttpClientFactory();
+        var blocked = new BarrierAssociationClient();
+        var resolver = new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(() => blocked));
+        var provider = new McpAgentToolProvider(source, resolver, factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance, credentialRevisions: revisions);
+        Task<IEnumerable<Microsoft.Extensions.AI.AIFunction>> build = provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), CancellationToken.None).AsTask();
+        await blocked.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        if (change == "headers")
+        {
+            var edited = new McpServerDefinition { Id = server.Id, Transport = McpTransport.Http, HttpUrl = server.HttpUrl, Enabled = true, Scope = "system", CredentialNamespace = server.CredentialNamespace, CredentialAssociationId = server.CredentialAssociationId, HttpHeaders = [new RemoteMcpHeader("X-Mode", "changed")] };
+            source.Current = new PlatformConfiguration { Agents = [agent], McpServers = [edited] };
+        }
+        else { revisions.BeginChange("remote", change); revisions.EndChange("remote", change); }
+        blocked.Release.SetResult(new CredentialMapResponse());
+        _ = await build;
+        Assert.Equal(expectFactory, factory.WasCalled);
+    }
+
+    [Fact]
+    public async Task RetainedProxyRejectsDisabledUnboundAndNewApprovalPolicy()
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "test", Context = "OwnContext" }] };
+        var server = new McpServerDefinition { Id = "test", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true };
+        var configuration = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var grpc = new CapturingWorkspaceGrpcService { SucceedListTools = true, ListedToolName = "search", RecordCalls = true };
+        var provider = new McpAgentToolProvider(configuration, CreateHeldSecretResolver("unused", "unused"), new CapturingMcpHttpClientFactory(), grpc, new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-1");
+        Microsoft.Extensions.AI.AIFunction tool = Assert.Single(await provider.BuildToolsAsync(context, CancellationToken.None));
+        configuration.Current = new PlatformConfiguration { Agents = [agent], McpServers = [new McpServerDefinition { Id = "test", Transport = McpTransport.Container, Enabled = false }] };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None).AsTask());
+        var unbound = new AgentDefinition { Id = agent.Id, Scope = "system", McpBindings = [] };
+        configuration.Current = new PlatformConfiguration { Agents = [unbound], McpServers = [server] };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None).AsTask());
+        var requiresApproval = new AgentDefinition { Id = agent.Id, Scope = "system", McpBindings = agent.McpBindings, ApprovalPolicy = new ApprovalPolicy { RequireMcpIds = ["test"] } };
+        configuration.Current = new PlatformConfiguration { Agents = [requiresApproval], McpServers = [server] };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None).AsTask());
+        Assert.Null(grpc.LastCall);
+    }
+
+    private sealed class MutablePlatformConfigurationProvider : IPlatformConfigurationProvider
+    {
+        public required PlatformConfiguration Current { get; set; }
+        public PlatformConfiguration GetCurrent() => Current;
+    }
+
+    private sealed class BarrierAssociationClient : CredentialsService.CredentialsServiceClient
+    {
+        public TaskCompletionSource<bool> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<CredentialMapResponse> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override AsyncUnaryCall<CredentialMapResponse> ResolveConnectorAssociationAsync(ResolveConnectorAssociationRequest request, CallOptions options)
+        {
+            Started.TrySetResult(true);
+            return new AsyncUnaryCall<CredentialMapResponse>(Release.Task, Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), static () => { });
+        }
+    }
+
+    [Fact]
     public async Task ContainerInvokeLoadsHeldRefreshTokenInsteadOfTreatingItAsSignedOut()
     {
         const string refreshKey = "KAUTUKA_M365_REFRESH_TOKEN";
@@ -963,9 +1080,25 @@ public sealed class McpAgentToolProviderTests
             authorizationClient,
             new ConnectorOAuthSessionStore());
         var workspaceTool = new CapturingWorkspaceTool();
+        var agent = new AgentDefinition
+        {
+            Scope = "system",
+            Id = "agent-alpha",
+            Name = "Agent Alpha",
+            Sandbox = new AgentSandboxDefinition { Enabled = false },
+            McpBindings =
+                [
+                    new AgentMcpBindingDefinition
+                    {
+                        ConnectorId = "kautuka-m365-mail",
+                        Context = "OwnContext",
+                    },
+                ],
+        };
         var provider = new McpAgentToolProvider(
             new StaticPlatformConfigurationProvider(new PlatformConfiguration
             {
+                Agents = [agent],
                 McpServers =
                 [
                     new McpServerDefinition
@@ -986,20 +1119,7 @@ public sealed class McpAgentToolProviderTests
             NullLogger<McpAgentToolProvider>.Instance,
             oauth);
         var context = new AgentToolContext(
-            new AgentDefinition
-            {
-                Id = "agent-alpha",
-                Name = "Agent Alpha",
-                Sandbox = new AgentSandboxDefinition { Enabled = false },
-                McpBindings =
-                [
-                    new AgentMcpBindingDefinition
-                    {
-                        ConnectorId = "kautuka-m365-mail",
-                        Context = "OwnContext",
-                    },
-                ],
-            },
+            agent,
             "agent-alpha",
             "user-1",
             workspaceTool,
@@ -1056,9 +1176,25 @@ public sealed class McpAgentToolProviderTests
             ListedToolName = "echo",
             RecordCalls = true,
         };
+        var agent = new AgentDefinition
+        {
+            Scope = "system",
+            Id = "agent-alpha",
+            Name = "Agent Alpha",
+            Sandbox = new AgentSandboxDefinition { Enabled = false },
+            McpBindings =
+                [
+                    new AgentMcpBindingDefinition
+                    {
+                        ConnectorId = connectorId,
+                        Context = "OwnContext",
+                    },
+                ],
+        };
         var provider = new McpAgentToolProvider(
             new StaticPlatformConfigurationProvider(new PlatformConfiguration
             {
+                Agents = [agent],
                 McpServers =
                 [
                     new McpServerDefinition
@@ -1081,20 +1217,7 @@ public sealed class McpAgentToolProviderTests
             NullLogger<McpAgentToolProvider>.Instance);
         var workspaceTool = new CapturingWorkspaceTool();
         var context = new AgentToolContext(
-            new AgentDefinition
-            {
-                Id = "agent-alpha",
-                Name = "Agent Alpha",
-                Sandbox = new AgentSandboxDefinition { Enabled = false },
-                McpBindings =
-                [
-                    new AgentMcpBindingDefinition
-                    {
-                        ConnectorId = connectorId,
-                        Context = "OwnContext",
-                    },
-                ],
-            },
+            agent,
             "agent-alpha",
             "user-1",
             workspaceTool,
@@ -1214,7 +1337,8 @@ public sealed class McpAgentToolProviderTests
         PlatformConfiguration config,
         CapturingMcpHttpClientFactory httpFactory,
         CapturingWorkspaceGrpcService grpcService,
-        CountingSkillPackageService inspect)
+        CountingSkillPackageService inspect,
+        RemoteMcpCredentialRevisionTracker? revisions = null)
     {
         var configProvider = new StaticPlatformConfigurationProvider(config);
         var mcp = new McpAgentToolProvider(
@@ -1230,12 +1354,13 @@ public sealed class McpAgentToolProviderTests
             CreateNoOpCredentialResolver(),
             new ToolExecutionPolicyService(),
             NullLogger<SkillAgentToolProvider>.Instance);
-        return new AgentToolCatalog([mcp, skill], testStore.SurfaceStore, configProvider);
+        return new AgentToolCatalog([mcp, skill], testStore.SurfaceStore, configProvider, revisions);
     }
 
     private static AgentDefinition CreateBoundHttpAgent()
         => new()
         {
+            Scope = "system",
             Id = "agent-alpha",
             Name = "Agent Alpha",
             SystemPrompt = "persona prompt",
@@ -1262,6 +1387,7 @@ public sealed class McpAgentToolProviderTests
     private static AgentDefinition CreateBoundContainerAgent(string connectorId = "container-mcp")
         => new()
         {
+            Scope = "system",
             Id = "agent-alpha",
             Name = "Agent Alpha",
             Sandbox = new AgentSandboxDefinition { Enabled = false },
@@ -1398,6 +1524,13 @@ public sealed class McpAgentToolProviderTests
     private sealed class CapturingMcpHttpClientFactory : IMcpHttpClientFactory
     {
         public bool WasCalled { get; private set; }
+        public RemoteMcpRequestContext? LastContext { get; private set; }
+
+        public Task<McpClient> CreateAsync(HttpClientTransportOptions transportOptions, bool allowPrivateDestination, RemoteMcpRequestContext context, CancellationToken cancellationToken)
+        {
+            LastContext = context;
+            return CreateAsync(transportOptions, allowPrivateDestination, cancellationToken);
+        }
 
         public Task<McpClient> CreateAsync(
             HttpClientTransportOptions transportOptions,

@@ -1,4 +1,5 @@
 using Kautuka.Gateway.Domain.Assets;
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Manager.Protos;
@@ -20,8 +21,11 @@ internal sealed partial class McpAgentToolProvider(
     ConnectorOAuthService? connectorOAuth = null,
     IConversationAssetIngestionService? documentIngestion = null,
     GatewayState? gatewayState = null,
-    MailImageHandoff? mailImages = null) : IAgentToolSurfaceContributor
+    MailImageHandoff? mailImages = null,
+    RemoteMcpCredentialRevisionTracker? credentialRevisions = null) : IAgentToolSurfaceContributor
 {
+    private readonly RemoteMcpCredentialRevisionTracker credentialRevisions = credentialRevisions ?? new();
+
     public string SurfaceSource => AgentToolSurfaceSources.Mcp;
 
     public async ValueTask<IEnumerable<AIFunction>> BuildToolsAsync(AgentToolContext context, CancellationToken ct)

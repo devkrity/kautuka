@@ -25,6 +25,155 @@ internal sealed class CredentialsGrpcService(
     ILogger<CredentialsGrpcService> logger)
     : CredentialsService.CredentialsServiceBase
 {
+    private ConnectorDraftRepository Drafts => new(db, vault, TimeProvider.System);
+    private ConnectorAssociationRepository Associations => new(db, vault, TimeProvider.System);
+
+    public override Task<StageConnectorAssociationResponse> StageConnectorMutation(StageConnectorMutationRequest request, ServerCallContext context)
+    {
+        AuthorizeDraft(request.Access, request.CredentialScope);
+        ValidateOperationId(request.OperationId); ValidateOperationId(request.CredentialNamespace); ValidateUserId(request.Access!.ActorId, allowEmpty: false);
+        if (request.SourceAssociationId.Length != 0) ValidateOperationId(request.SourceAssociationId);
+        if (string.IsNullOrWhiteSpace(request.ConnectorId) || request.ConnectorId.Length > 128 || request.Entries.Count > 65 || request.RemoveKeys.Count > 64)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid connector credential mutation."));
+        ValidateKeys(request.Entries.Keys); ValidateKeys(request.RemoveKeys);
+        if (request.Entries.Any(entry => string.IsNullOrWhiteSpace(entry.Value) || Encoding.UTF8.GetByteCount(entry.Value) > 65536))
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid connector credential value."));
+        if (request.RemoveKeys.Distinct(StringComparer.Ordinal).Count() != request.RemoveKeys.Count || request.RemoveKeys.Any(request.Entries.ContainsKey))
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Conflicting connector credential mutation."));
+        string id = Associations.StageMutation(request.OperationId, request.Access.ActorId, request.ConnectorId, request.CredentialNamespace, request.SourceAssociationId, request.CredentialScope, request.Entries, [.. request.RemoveKeys]);
+        return Task.FromResult(new StageConnectorAssociationResponse { AssociationId = id });
+    }
+
+    public override Task<StageConnectorAssociationResponse> StageConnectorAssociation(StageConnectorAssociationRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        if (request.SourceAssociationId.Length != 0) ValidateOperationId(request.SourceAssociationId);
+        ConnectorDraftRecord draft;
+        try { draft = Drafts.Get(request.DraftId, request.Access!.ActorId); }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound) { draft = Associations.GetStagedDraft(request.DraftId, request.Access!.ActorId); }
+        AuthorizeDraft(request.Access, draft.Scope);
+        return Task.FromResult(new StageConnectorAssociationResponse { AssociationId = Associations.Stage(request.DraftId, request.Access!.ActorId, request.SourceAssociationId) });
+    }
+
+    public override Task<ConnectorDraftMetadata> GetStagedConnectorDraft(ConnectorDraftAccessRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        CredentialRequestAuthorizer.AuthorizeUserAdministration(request.Access, request.Access!.ActorId);
+        return Task.FromResult(ToMetadata(Associations.GetStagedDraft(request.DraftId, request.Access.ActorId)));
+    }
+
+    public override Task<CredentialMapResponse> ResolveConnectorAssociation(ResolveConnectorAssociationRequest request, ServerCallContext context)
+    {
+        ValidateAssociationRequest(request);
+        var response = new CredentialMapResponse();
+        response.Entries.Add(Associations.Resolve(request.AssociationId, request.ConnectorId, request.CredentialNamespace, request.UserId, request.RequiredKeys, request.IncludeSystemScope || request.UserId.Length == 0));
+        return Task.FromResult(response);
+    }
+
+    public override Task<ConnectorAssociationPresenceResponse> GetConnectorAssociationPresence(ResolveConnectorAssociationRequest request, ServerCallContext context)
+    {
+        ValidateAssociationRequest(request);
+        (List<string> user, List<string> system) = Associations.GetPresence(request.AssociationId, request.ConnectorId, request.CredentialNamespace, request.UserId, request.RequiredKeys, request.IncludeSystemScope || request.UserId.Length == 0);
+        var response = new ConnectorAssociationPresenceResponse(); response.UserKeys.AddRange(user); response.SystemKeys.AddRange(system);
+        return Task.FromResult(response);
+    }
+
+    private static void ValidateAssociationRequest(ResolveConnectorAssociationRequest request)
+    {
+        CredentialRequestAuthorizer.AuthorizeResolve(request.Access, request.UserId);
+        ValidateOperationId(request.AssociationId); ValidateOperationId(request.CredentialNamespace); ValidateUserId(request.UserId, allowEmpty: true); ValidateKeys(request.RequiredKeys);
+        if (string.IsNullOrWhiteSpace(request.ConnectorId) || request.ConnectorId.Length > 128) throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid connector."));
+        if (request.RequiredKeys.Count > 64) throw new RpcException(new Status(StatusCode.InvalidArgument, "Too many credential keys."));
+    }
+
+    public override Task<ConnectorDraftListResponse> ListConnectorDrafts(ListConnectorDraftsRequest request, ServerCallContext context)
+    {
+        CredentialRequestAuthorizer.AuthorizeUserAdministration(request.Access, request.Access?.ActorId ?? string.Empty);
+        ValidateUserId(request.Access!.ActorId, allowEmpty: false);
+        var response = new ConnectorDraftListResponse();
+        response.Drafts.AddRange(Drafts.ListPending(request.Access.ActorId).Select(ToMetadata));
+        return Task.FromResult(response);
+    }
+
+    public override Task<ConnectorDraftMetadata> CreateConnectorDraft(CreateConnectorDraftRequest request, ServerCallContext context)
+    {
+        AuthorizeDraft(request.Access, request.CredentialScope);
+        ValidateOperationId(request.DraftId);
+        ValidateOperationId(request.CredentialNamespace);
+        if (request.SourceAssociationId.Length != 0) ValidateOperationId(request.SourceAssociationId);
+        ValidateUserId(request.Access!.ActorId, allowEmpty: false);
+        if (string.IsNullOrWhiteSpace(request.ConnectorId) || request.ConnectorId.Length > 128 || request.CandidateJson.Length is 0 or > 131072 || request.EffectiveEndpoint.Length is 0 or > 8192
+            || request.DeclaredKeys.Count > 64 || request.Entries.Count > 64 || request.RemoveKeys.Count > 64)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid connector draft."));
+        string[] declared = [.. request.DeclaredKeys];
+        string[] removed = [.. request.RemoveKeys];
+        ValidateKeys(declared); ValidateKeys(removed);
+        if (declared.Distinct(StringComparer.Ordinal).Count() != declared.Length
+            || removed.Any(key => !declared.Contains(key, StringComparer.Ordinal))
+            || request.Entries.Any(pair => !declared.Contains(pair.Key, StringComparer.Ordinal) || removed.Contains(pair.Key, StringComparer.Ordinal)
+                || string.IsNullOrWhiteSpace(pair.Value) || Encoding.UTF8.GetByteCount(pair.Value) > 65536))
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid connector draft credential mutation."));
+        ConnectorDraftRecord draft = Drafts.Create(request.DraftId, request.Access!.ActorId, request.ConnectorId, request.CredentialScope,
+            request.CandidateJson, request.BaseUpdatedAt, request.EffectiveEndpoint, request.BaseEndpoint, request.UseDurableCredentials, request.CredentialNamespace, declared, new Dictionary<string, string>(request.Entries, StringComparer.Ordinal), removed, request.SourceAssociationId);
+        return Task.FromResult(ToMetadata(draft));
+    }
+
+    public override Task<ConnectorDraftMetadata> GetConnectorDraft(ConnectorDraftAccessRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        ConnectorDraftRecord draft = Drafts.Get(request.DraftId, request.Access!.ActorId);
+        CredentialRequestAuthorizer.AuthorizeUserAdministration(request.Access, request.Access!.ActorId);
+        return Task.FromResult(ToMetadata(draft));
+    }
+
+    public override Task<CredentialMapResponse> ResolveConnectorDraft(ResolveConnectorDraftRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        ConnectorDraftRecord draft = Drafts.Get(request.DraftId, request.Access!.ActorId);
+        AuthorizeDraft(request.Access, draft.Scope); ValidateKeys(request.RequiredKeys);
+        var response = new CredentialMapResponse();
+        response.Entries.Add(Drafts.Resolve(request.DraftId, request.Access!.ActorId, [.. request.RequiredKeys], request.IncludeSystemScope));
+        return Task.FromResult(response);
+    }
+
+    public override Task<DeleteCredentialResponse> CancelConnectorDraft(ConnectorDraftAccessRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        CredentialRequestAuthorizer.AuthorizeUserAdministration(request.Access, request.Access!.ActorId);
+        return Task.FromResult(new DeleteCredentialResponse { Deleted = Drafts.Cancel(request.DraftId, request.Access!.ActorId) });
+    }
+
+    public override Task<DeleteCredentialResponse> DiscardConnectorDraftInput(ConnectorDraftAccessRequest request, ServerCallContext context)
+    {
+        ValidateOperationId(request.DraftId); ValidateUserId(request.Access?.ActorId ?? "", allowEmpty: false);
+        CredentialRequestAuthorizer.AuthorizeUserAdministration(request.Access, request.Access!.ActorId);
+        _ = Associations.GetStagedDraft(request.DraftId, request.Access.ActorId);
+        Drafts.DiscardInput(request.DraftId, request.Access.ActorId);
+        return Task.FromResult(new DeleteCredentialResponse { Deleted = true });
+    }
+
+    private static void AuthorizeDraft(CredentialAccessContext? access, string scope)
+    {
+        if (scope == "user") CredentialRequestAuthorizer.AuthorizeUserAdministration(access, access?.ActorId ?? "");
+        else if (scope == "system") CredentialRequestAuthorizer.AuthorizeSystemAdministration(access);
+        else throw new RpcException(new Status(StatusCode.InvalidArgument, "Invalid draft credential scope."));
+    }
+
+    private static ConnectorDraftMetadata ToMetadata(ConnectorDraftRecord draft) => new()
+    {
+        DraftId = draft.Id,
+        ConnectorId = draft.ConnectorId,
+        CredentialScope = draft.Scope,
+        CandidateJson = draft.Candidate,
+        BaseUpdatedAt = draft.BaseUpdatedAt,
+        ExpiresAtUnixSeconds = draft.ExpiresAt,
+        EffectiveEndpoint = draft.EffectiveEndpoint,
+        BaseEndpoint = draft.BaseEndpoint,
+        UseDurableCredentials = draft.UseDurable,
+        CredentialNamespace = draft.CredentialNamespace,
+        SourceAssociationId = draft.SourceAssociationId,
+    };
+
     public override async Task<CredentialHealthResponse> GetHealth(
         CredentialHealthRequest request,
         ServerCallContext context)
@@ -95,7 +244,7 @@ internal sealed class CredentialsGrpcService(
         }
 
         result.Entries.Add(merged);
-        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access.ActorId, "resolve", "merged", userId, "batch", "success"),
+        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access!.ActorId, "resolve", "merged", userId, "batch", "success"),
             context.CancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -116,7 +265,7 @@ internal sealed class CredentialsGrpcService(
         var response = new CredentialMapResponse();
         if (row.HasValue)
             response.Entries.Add(row.Value.Key, Decrypt(row.Value, "system", string.Empty));
-        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access.ActorId, "resolve", "system", string.Empty, request.Key, row.HasValue ? "success" : "not_found"),
+        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access!.ActorId, "resolve", "system", string.Empty, request.Key, row.HasValue ? "success" : "not_found"),
             context.CancellationToken).ConfigureAwait(false);
         return response;
     }
@@ -135,7 +284,7 @@ internal sealed class CredentialsGrpcService(
 
         var response = new CredentialKeyListResponse();
         response.Keys.AddRange(keys);
-        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access.ActorId, "list", "user", request.UserId, "batch", "success"),
+        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access!.ActorId, "list", "user", request.UserId, "batch", "success"),
             context.CancellationToken).ConfigureAwait(false);
         return response;
     }
@@ -150,9 +299,9 @@ internal sealed class CredentialsGrpcService(
         ValidateEntries(request.Entries);
         ValidateOperationId(request.OperationId);
         int upserted = await repository.MutateAsync(new CredentialMutation(
-            request.OperationId, request.Access.ActorId, "user", userId,
+            request.OperationId, request.Access!.ActorId, "user", userId,
             new Dictionary<string, string>(request.Entries, StringComparer.Ordinal), null,
-            new CredentialAuditEvent(request.OperationId, request.Access.ActorId, "set", "user", userId, "batch", "success")),
+            new CredentialAuditEvent(request.OperationId, request.Access!.ActorId, "set", "user", userId, "batch", "success")),
             context.CancellationToken).ConfigureAwait(false);
         CredentialsGrpcServiceLog.UserCredentialsSet(logger, userId, upserted);
         return new SetCredentialsResponse { UpsertedCount = upserted };
@@ -167,8 +316,8 @@ internal sealed class CredentialsGrpcService(
         ValidateKey(request.Key);
         ValidateOperationId(request.OperationId);
         int rows = await repository.MutateAsync(new CredentialMutation(
-            request.OperationId, request.Access.ActorId, "user", request.UserId, null, request.Key,
-            new CredentialAuditEvent(request.OperationId, request.Access.ActorId, "delete", "user", request.UserId, request.Key, "completed")),
+            request.OperationId, request.Access!.ActorId, "user", request.UserId, null, request.Key,
+            new CredentialAuditEvent(request.OperationId, request.Access!.ActorId, "delete", "user", request.UserId, request.Key, "completed")),
             context.CancellationToken).ConfigureAwait(false);
 
         return new DeleteCredentialResponse { Deleted = rows > 0 };
@@ -187,7 +336,7 @@ internal sealed class CredentialsGrpcService(
 
         var response = new CredentialKeyListResponse();
         response.Keys.AddRange(keys);
-        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access.ActorId, "list", "system", string.Empty, "batch", "success"),
+        await audit.WriteAsync(new CredentialAuditEvent(CorrelationId(context), request.Access!.ActorId, "list", "system", string.Empty, "batch", "success"),
             context.CancellationToken).ConfigureAwait(false);
         return response;
     }
@@ -200,9 +349,9 @@ internal sealed class CredentialsGrpcService(
         ValidateEntries(request.Entries);
         ValidateOperationId(request.OperationId);
         int upserted = await repository.MutateAsync(new CredentialMutation(
-            request.OperationId, request.Access.ActorId, "system", string.Empty,
+            request.OperationId, request.Access!.ActorId, "system", string.Empty,
             new Dictionary<string, string>(request.Entries, StringComparer.Ordinal), null,
-            new CredentialAuditEvent(request.OperationId, request.Access.ActorId, "set", "system", string.Empty, "batch", "success")),
+            new CredentialAuditEvent(request.OperationId, request.Access!.ActorId, "set", "system", string.Empty, "batch", "success")),
             context.CancellationToken).ConfigureAwait(false);
         CredentialsGrpcServiceLog.SystemCredentialsSet(logger, upserted);
         return new SetCredentialsResponse { UpsertedCount = upserted };
@@ -216,8 +365,8 @@ internal sealed class CredentialsGrpcService(
         ValidateKey(request.Key);
         ValidateOperationId(request.OperationId);
         int rows = await repository.MutateAsync(new CredentialMutation(
-            request.OperationId, request.Access.ActorId, "system", string.Empty, null, request.Key,
-            new CredentialAuditEvent(request.OperationId, request.Access.ActorId, "delete", "system", string.Empty, request.Key, "completed")),
+            request.OperationId, request.Access!.ActorId, "system", string.Empty, null, request.Key,
+            new CredentialAuditEvent(request.OperationId, request.Access!.ActorId, "delete", "system", string.Empty, request.Key, "completed")),
             context.CancellationToken).ConfigureAwait(false);
 
         return new DeleteCredentialResponse { Deleted = rows > 0 };

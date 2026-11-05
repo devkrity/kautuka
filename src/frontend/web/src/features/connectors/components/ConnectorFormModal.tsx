@@ -277,14 +277,17 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
       ? null
       : draft.toolCount;
 
-  const isHomeAssistantPreset = draft.id === 'homeassistant-mcp';
-
   return (
-    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
       <DialogContent hideClose className="max-w-lg gap-0 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <DialogTitle className="text-sm font-semibold">
-            {isNew ? 'Advanced Connector Import' : initial.name}
+            {isNew ? 'Add local or container MCP' : initial.name}
           </DialogTitle>
           <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} title="Close">
             <X className="h-4 w-4" />
@@ -346,34 +349,13 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
                   onChange={(e) => setDraftField('transport', e.target.value)}
                 >
                   <option value="local">Local Command (normalized to container)</option>
-                  <option value="http">HTTP (remote URL)</option>
                   <option value="container">Container (Manager managed)</option>
                 </select>
               </div>
             </>
           )}
 
-          {draft.transport === 'http' ? (
-            <div>
-              <label className="block text-xs font-medium mb-1" htmlFor="connector-http-url">
-                HTTP URL
-              </label>
-              <input
-                id="connector-http-url"
-                className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
-                value={draft.httpUrl}
-                onChange={(e) => setDraftField('httpUrl', e.target.value)}
-                placeholder="https://"
-              />
-              {isHomeAssistantPreset && (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Use your Home Assistant MCP endpoint, typically
-                  https://&lt;your-home-assistant&gt;/api/mcp. Provide MCP_AUTH_TOKEN below when
-                  validating, then set it at agent scope for runtime use.
-                </p>
-              )}
-            </div>
-          ) : draft.transport === 'container' ? (
+          {draft.transport === 'container' ? (
             <>
               <div>
                 <label
@@ -568,21 +550,10 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
             </>
           )}
 
-          {draft.transport !== 'http' && (
-            <Alert variant="info" className="px-3 py-2.5 text-xs">
-              <p className="font-semibold">Authentication note</p>
-              <ul className="ml-3 list-disc space-y-0.5 text-primary/80">
-                <li>
-                  <code className="font-mono">MCP_AUTH_TOKEN</code> is only for remote HTTP MCP
-                  servers that use bearer authentication.
-                </li>
-                <li>
-                  Local and container connectors typically require service-specific credential keys
-                  rather than <code className="font-mono">MCP_AUTH_TOKEN</code>.
-                </li>
-              </ul>
-            </Alert>
-          )}
+          <Alert variant="info" className="px-3 py-2.5 text-xs">
+            Use the credential names expected by the connector process. Values are stored in
+            CredentialsHost.
+          </Alert>
 
           <div>
             <label className="block text-xs font-medium mb-1" htmlFor="connector-credential-keys">
@@ -599,11 +570,6 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
               onChange={(e) => setDraftField('envKeys', e.target.value)}
               placeholder={'GITHUB_TOKEN\nANOTHER_API_KEY'}
             />
-            {draft.transport === 'http' && declaredEnvKeys.some((k) => k.toLowerCase().includes('token') || k.toLowerCase().includes('auth')) && (
-              <p className="mt-2 text-xs bg-attention/10 text-attention border border-attention/30 rounded px-2 py-1.5">
-                <strong>HTTP Transport Auth:</strong> If this MCP server requires authentication via Bearer token, the credential key must be exactly <code className="font-mono">MCP_AUTH_TOKEN</code> (case-sensitive). Other key names will cause 401 Unauthorized errors during validation.
-              </p>
-            )}
           </div>
 
           {draft.id === 'kautuka-m365-mail' ? (
@@ -613,7 +579,9 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
             </p>
           ) : null}
 
-          {declaredEnvKeys.filter((key) => !(draft.id === 'kautuka-m365-mail' && key === 'KAUTUKA_M365_REFRESH_TOKEN')).length > 0 && (
+          {declaredEnvKeys.filter(
+            (key) => !(draft.id === 'kautuka-m365-mail' && key === 'KAUTUKA_M365_REFRESH_TOKEN')
+          ).length > 0 && (
             <div className="rounded-lg border border-border bg-muted/20 p-3">
               <div className="mb-2 text-xs font-medium">Credentials</div>
               <p className="mb-3 text-xs text-muted-foreground">
@@ -622,25 +590,28 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
               </p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {declaredEnvKeys
-                  .filter((key) => !(draft.id === 'kautuka-m365-mail' && key === 'KAUTUKA_M365_REFRESH_TOKEN'))
+                  .filter(
+                    (key) =>
+                      !(draft.id === 'kautuka-m365-mail' && key === 'KAUTUKA_M365_REFRESH_TOKEN')
+                  )
                   .map((key) => (
-                  <div key={key}>
-                    <label
-                      className="mb-1 block text-xs text-muted-foreground"
-                      htmlFor={`connector-cred-${key}`}
-                    >
-                      {key}
-                    </label>
-                    <input
-                      id={`connector-cred-${key}`}
-                      type={getValidationCredentialInputType(key)}
-                      className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
-                      placeholder="Enter credential…"
-                      value={getValidationCredentialValue(key)}
-                      onChange={(e) => setValidationCredential(key, e.target.value)}
-                    />
-                  </div>
-                ))}
+                    <div key={key}>
+                      <label
+                        className="mb-1 block text-xs text-muted-foreground"
+                        htmlFor={`connector-cred-${key}`}
+                      >
+                        {key}
+                      </label>
+                      <input
+                        id={`connector-cred-${key}`}
+                        type={getValidationCredentialInputType(key)}
+                        className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
+                        placeholder="Enter credential…"
+                        value={getValidationCredentialValue(key)}
+                        onChange={(e) => setValidationCredential(key, e.target.value)}
+                      />
+                    </div>
+                  ))}
               </div>
             </div>
           )}
@@ -687,7 +658,13 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
 
         {/* footer */}
         <div className="flex items-center justify-between border-t border-border px-4 py-3">
-          <Button type="button" variant="outline" size="sm" disabled={testing || saving} onClick={handleTest}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={testing || saving}
+            onClick={handleTest}
+          >
             {testing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (

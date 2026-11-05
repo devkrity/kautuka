@@ -7,6 +7,20 @@ import { z } from 'zod';
 
 export const ownershipScopeSchema = z.enum(['system', 'user']);
 
+export const remoteMcpCredentialSchema = z.object({
+  key: z.string().min(1),
+  label: z.string().min(1),
+  required: z.boolean(),
+});
+export const remoteMcpHeaderSchema = z.object({
+  name: z.string().min(1),
+  value: z.string().nullable().optional(),
+  credentialKey: z.string().nullable().optional(),
+  prefix: z.string().nullable().optional(),
+});
+export type RemoteMcpCredential = z.infer<typeof remoteMcpCredentialSchema>;
+export type RemoteMcpHeader = z.infer<typeof remoteMcpHeaderSchema>;
+
 export const connectorSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -31,6 +45,8 @@ export const connectorSchema = z.object({
   toolCount: z.number().nullable().default(null),
   toolNames: z.array(z.string()).nullable().default(null),
   envKeys: z.array(z.string()).default([]),
+  credentials: z.array(remoteMcpCredentialSchema).optional(),
+  httpHeaders: z.array(remoteMcpHeaderSchema).optional(),
   scope: ownershipScopeSchema.default('system'),
   ownerUserId: z.string().nullable().default(null),
   createdAt: z.string().default(''),

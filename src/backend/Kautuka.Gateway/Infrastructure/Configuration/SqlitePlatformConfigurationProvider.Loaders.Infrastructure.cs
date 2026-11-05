@@ -106,7 +106,7 @@ internal partial class SqlitePlatformConfigurationProvider
                  tool_count, tool_names_json,
                  bundle_path, server_type,
                  runtime_artifact_type, runtime_artifact_source_digest, runtime_artifact_build_status,
-                 mcp_protocol_version
+                 mcp_protocol_version, remote_config_json
              FROM mcp_servers ORDER BY rowid
             """, conn),
             connection,
@@ -141,10 +141,12 @@ internal partial class SqlitePlatformConfigurationProvider
                 reader.IsDBNull(27) ? null : reader.GetString(27),
                 reader.IsDBNull(28) ? null : reader.GetString(28),
                 reader.IsDBNull(29) ? null : reader.GetString(29),
-                reader.IsDBNull(30) ? null : reader.GetString(30)))
+                reader.IsDBNull(30) ? null : reader.GetString(30),
+                reader.GetString(31)))
             .Select(r =>
             {
                 _ = Enum.TryParse<McpTransport>(r.Transport, ignoreCase: true, out McpTransport transport);
+                RemoteMcpConfiguration remote = JsonSerializer.Deserialize(r.RemoteConfigJson, jsonContext.RemoteMcpConfiguration) ?? new([], []);
                 return new McpServerDefinition
                 {
                     Id = r.Id,
@@ -155,6 +157,12 @@ internal partial class SqlitePlatformConfigurationProvider
                     Transport = transport,
                     HttpUrl = ParseAbsoluteUriOrNull(r.HttpUrl),
                     EnvKeys = JsonSerializer.Deserialize(r.EnvKeysJson, jsonContext.ListString) ?? [],
+                    CredentialNamespace = remote.CredentialNamespace,
+                    CredentialAssociationId = remote.CredentialAssociationId,
+                    CredentialOperationId = remote.CredentialOperationId,
+                    CredentialSourceId = remote.CredentialSourceId,
+                    Credentials = remote.Credentials,
+                    HttpHeaders = remote.HttpHeaders,
                     ContainerImage = r.ContainerImage,
                     ContainerCommand = r.ContainerCommand,
                     ContainerArgs = JsonSerializer.Deserialize(r.ContainerArgsJson, jsonContext.ListString) ?? [],

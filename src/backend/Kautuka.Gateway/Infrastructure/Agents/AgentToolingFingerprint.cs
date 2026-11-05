@@ -98,7 +98,8 @@ internal static class AgentToolingFingerprint
     public static string WithCaller(
         string configFingerprint,
         string? userId,
-        IReadOnlyList<(string ConnectorId, string Endpoint)> endpoints)
+        IReadOnlyList<(string ConnectorId, string Endpoint)> endpoints,
+        IReadOnlyList<(string ConnectorId, string Revision)>? revisions = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(configFingerprint);
         if (string.IsNullOrEmpty(userId) && endpoints.Count == 0)
@@ -118,6 +119,13 @@ internal static class AgentToolingFingerprint
             Append(builder, endpoint);
         }
 
+        foreach ((string connectorId, string revision) in (revisions ?? []).OrderBy(static item => item.ConnectorId, StringComparer.Ordinal))
+        {
+            Append(builder, "credential-revision");
+            Append(builder, connectorId);
+            Append(builder, revision);
+        }
+
         string caller = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
         return string.Concat(configFingerprint, caller);
     }
@@ -126,6 +134,9 @@ internal static class AgentToolingFingerprint
     {
         Append(builder, "connector");
         Append(builder, server.Id);
+        Append(builder, server.CredentialNamespace ?? string.Empty);
+        Append(builder, server.Scope);
+        Append(builder, server.OwnerUserId ?? string.Empty);
         Append(builder, server.Transport.ToString());
         Append(builder, server.HttpUrl?.AbsoluteUri ?? string.Empty);
         Append(builder, server.ContainerImage ?? string.Empty);
@@ -150,6 +161,19 @@ internal static class AgentToolingFingerprint
             Append(builder, envKey);
         }
 
+        foreach (RemoteMcpCredential credential in server.Credentials)
+        {
+            Append(builder, credential.Key);
+            Append(builder, credential.Label);
+            Append(builder, credential.Required ? "1" : "0");
+        }
+        foreach (RemoteMcpHeader header in server.HttpHeaders)
+        {
+            Append(builder, header.Name);
+            Append(builder, header.Value ?? string.Empty);
+            Append(builder, header.CredentialKey ?? string.Empty);
+            Append(builder, header.Prefix ?? string.Empty);
+        }
         Append(builder, server.Enabled ? "1" : "0");
         Append(builder, server.IsInternalSystemConnector ? "1" : "0");
     }

@@ -1,4 +1,4 @@
-import type { Connector } from '../schemas/connectorSchema';
+import type { Connector, RemoteMcpCredential, RemoteMcpHeader } from '../schemas/connectorSchema';
 
 export type ConnectorDraft = {
   id: string;
@@ -22,6 +22,8 @@ export type ConnectorDraft = {
   healthcheckIntervalMilliseconds: string;
   mcpProtocolVersion: string;
   envKeys: string; // raw textarea — one per line
+  credentials?: RemoteMcpCredential[];
+  httpHeaders?: RemoteMcpHeader[];
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -48,6 +50,8 @@ export type ConnectorSavePayload = {
   healthcheckIntervalMilliseconds: number | null;
   mcpProtocolVersion: string | null;
   envKeys: string[];
+  credentials?: RemoteMcpCredential[];
+  httpHeaders?: RemoteMcpHeader[];
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -65,6 +69,8 @@ export function blankDraft(): ConnectorDraft {
     localCommand: 'npx',
     localArgs: '-y\n',
     envKeys: '',
+    credentials: [],
+    httpHeaders: [],
     containerImage: '',
     containerCommand: '',
     containerArgs: '',
@@ -103,6 +109,8 @@ export function entryToDraft(c: Connector): ConnectorDraft {
       c.healthcheckIntervalMilliseconds == null ? '' : String(c.healthcheckIntervalMilliseconds),
     mcpProtocolVersion: c.mcpProtocolVersion ?? '',
     envKeys: (c.envKeys ?? []).join('\n'),
+    credentials: c.credentials ?? [],
+    httpHeaders: c.httpHeaders ?? [],
     iconUrl: c.iconUrl ?? '',
     toolCount: c.toolCount ?? null,
     toolNames: c.toolNames ?? null,
@@ -136,10 +144,15 @@ export function buildSavePayload(d: ConnectorDraft): ConnectorSavePayload {
     healthcheckUrl: d.healthcheckUrl || null,
     healthcheckIntervalMilliseconds: Number.parseInt(d.healthcheckIntervalMilliseconds, 10) || null,
     mcpProtocolVersion: d.mcpProtocolVersion || null,
-    envKeys: d.envKeys
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    credentials: d.transport === 'http' ? (d.credentials ?? []) : [],
+    httpHeaders: d.transport === 'http' ? (d.httpHeaders ?? []) : [],
+    envKeys:
+      d.transport === 'http'
+        ? []
+        : d.envKeys
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
     enabled: d.enabled,
     toolCount: d.toolCount ?? null,
     toolNames: d.toolNames ?? null,

@@ -40,6 +40,39 @@ internal static class CredentialsSchemaInitializer
                 created_at      TEXT NOT NULL,
                 updated_at      TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS connector_credential_drafts (
+                id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, connector_id TEXT NOT NULL,
+                credential_scope TEXT NOT NULL, candidate_json TEXT NOT NULL, base_updated_at TEXT NOT NULL, effective_endpoint TEXT NOT NULL, base_endpoint TEXT NOT NULL, use_durable INTEGER NOT NULL, credential_namespace TEXT NOT NULL,
+                declared_keys_json TEXT NOT NULL, remove_keys_json TEXT NOT NULL,
+                expires_at INTEGER NOT NULL, completed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS connector_credential_draft_entries (
+                draft_id TEXT NOT NULL, key TEXT NOT NULL, encrypted_value TEXT NOT NULL,
+                PRIMARY KEY (draft_id, key),
+                FOREIGN KEY (draft_id) REFERENCES connector_credential_drafts(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS connector_draft_sources (
+                draft_id TEXT PRIMARY KEY, association_id TEXT NOT NULL,
+                FOREIGN KEY (draft_id) REFERENCES connector_credential_drafts(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS connector_credential_associations (
+                id TEXT PRIMARY KEY, operation_id TEXT NOT NULL UNIQUE, actor_id TEXT NOT NULL,
+                connector_id TEXT NOT NULL, credential_namespace TEXT NOT NULL, source_id TEXT NOT NULL, credential_scope TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS connector_credential_association_entries (
+                association_id TEXT NOT NULL, scope TEXT NOT NULL, subject TEXT NOT NULL,
+                key TEXT NOT NULL, encrypted_value TEXT NOT NULL,
+                PRIMARY KEY (association_id, scope, subject, key),
+                FOREIGN KEY (association_id) REFERENCES connector_credential_associations(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS connector_association_draft_metadata (
+                association_id TEXT PRIMARY KEY, draft_id TEXT NOT NULL, actor_id TEXT NOT NULL, connector_id TEXT NOT NULL,
+                credential_scope TEXT NOT NULL, candidate_json TEXT NOT NULL, base_updated_at TEXT NOT NULL,
+                effective_endpoint TEXT NOT NULL, base_endpoint TEXT NOT NULL, use_durable INTEGER NOT NULL,
+                credential_namespace TEXT NOT NULL, declared_keys_json TEXT NOT NULL, remove_keys_json TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                FOREIGN KEY (association_id) REFERENCES connector_credential_associations(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS credential_mutation_receipts (
                 operation_id TEXT PRIMARY KEY,
                 actor_id TEXT NOT NULL,

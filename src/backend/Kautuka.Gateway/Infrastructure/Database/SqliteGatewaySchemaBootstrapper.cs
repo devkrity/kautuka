@@ -65,6 +65,7 @@ internal static class SqliteGatewaySchemaBootstrapper
             throw;
         }
 
+        Domain.Connectors.McpServerSchemaCompat.EnsureRemoteNamespaces(connection);
         ValidateExisting(connection);
     }
 
@@ -82,7 +83,7 @@ internal static class SqliteGatewaySchemaBootstrapper
             {
                 differences.Add($"missing {key.Type} '{key.Name}'");
             }
-            else if (!string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal))
+            else if (!SchemaDefinitionsMatch(key, expectedSql, actualSql))
             {
                 differences.Add($"incompatible {key.Type} '{key.Name}'");
             }
@@ -893,6 +894,20 @@ internal static class SqliteGatewaySchemaBootstrapper
 
     private static string NormalizeSql(string sql)
         => string.Concat(sql.Where(character => !char.IsWhiteSpace(character))).ToUpperInvariant();
+
+    private static bool SchemaDefinitionsMatch(SchemaObjectKey key, string expectedSql, string actualSql)
+    {
+        string expected = NormalizeSql(expectedSql);
+        string actual = NormalizeSql(actualSql);
+        if (string.Equals(expected, actual, StringComparison.Ordinal)) return true;
+        // SQLite appends additive columns to CREATE TABLE, whereas the canonical baseline
+        // places this column next to the other connector configuration fields. Accept only
+        // the exact same declaration in either position; every other difference still fails.
+        const string remoteColumn = ",REMOTE_CONFIG_JSONTEXTNOTNULLDEFAULT'{\"CREDENTIALS\":[],\"HTTPHEADERS\":[]}'";
+        if (key.Type != "table" || key.Name != "mcp_servers"
+            || !expected.Contains(remoteColumn, StringComparison.Ordinal) || !actual.Contains(remoteColumn, StringComparison.Ordinal)) return false;
+        return string.Equals(expected.Replace(remoteColumn, string.Empty, StringComparison.Ordinal), actual.Replace(remoteColumn, string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+    }
 
     private sealed record TableUpgrade(
         string Name,

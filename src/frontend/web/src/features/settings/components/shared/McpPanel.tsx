@@ -2,7 +2,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { HitlFunctionStat } from '@/features/approvals';
-import { matchesConnectorOAuth, useConnectorCredentialStatus, useConnectorOAuth, type Connector } from '@/features/connectors';
+import {
+  matchesConnectorOAuth,
+  useConnectorCredentialStatus,
+  useConnectorOAuth,
+  type Connector,
+} from '@/features/connectors';
 import { AlertCircle, CheckCircle2, ChevronRight, Plug } from 'lucide-react';
 import type { ReactNode } from 'react';
 
@@ -37,9 +42,13 @@ export function McpPanel({
   const knownTools = connector.toolNames ?? [];
   const oauth = useConnectorOAuth();
   const managed = (oauth.data ?? []).some((status) => matchesConnectorOAuth(connector.id, status));
-  const hasEnvKeys = !managed && (connector.envKeys?.length ?? 0) > 0;
+  const credentialDefinitions =
+    connector.transport === 'http'
+      ? (connector.credentials ?? [])
+      : (connector.envKeys ?? []).map((key) => ({ key, label: key, required: true }));
+  const hasCredentialDefinitions = !managed && credentialDefinitions.length > 0;
   const { data: credStatus } = useConnectorCredentialStatus(
-    hasEnvKeys && mode !== 'off' ? connector.id : null
+    hasCredentialDefinitions && mode !== 'off' ? connector.id : null
   );
 
   return (
@@ -111,10 +120,9 @@ export function McpPanel({
                     return (
                       <div
                         key={toolName}
-                        className={[
-                          'px-4 py-2',
-                          i > 0 ? 'border-t border-border/30' : '',
-                        ].join(' ')}
+                        className={['px-4 py-2', i > 0 ? 'border-t border-border/30' : ''].join(
+                          ' '
+                        )}
                       >
                         <div className="text-xs font-mono text-foreground/75 leading-snug break-words">
                           {toolName}
@@ -153,13 +161,15 @@ export function McpPanel({
         </div>
       )}
 
-      {mode !== 'off' && hasEnvKeys && (
+      {mode !== 'off' && hasCredentialDefinitions && (
         <div className="border-t border-border/50 px-4 py-3">
-          <div className="mb-2 text-xs font-medium text-muted-foreground">Required Credentials</div>
+          <div className="mb-2 text-xs font-medium text-muted-foreground">
+            {connector.transport === 'http' ? 'Credentials' : 'Required Credentials'}
+          </div>
           <div className="flex flex-wrap gap-2">
-            {(connector.envKeys ?? []).map((key) => {
+            {credentialDefinitions.map(({ key, label, required }) => {
               const isConfigured = credStatus?.configuredKeys.includes(key);
-              const isMissing = credStatus?.missingKeys.includes(key);
+              const isMissing = required && credStatus?.missingKeys.includes(key);
               return (
                 <Badge
                   key={`${ownerId}-${connector.id}-${key}`}
@@ -173,20 +183,24 @@ export function McpPanel({
                 >
                   {isConfigured ? (
                     <CheckCircle2 className="h-3 w-3 shrink-0" />
-                  ) : (
+                  ) : required ? (
                     <AlertCircle className="h-3 w-3 shrink-0" />
-                  )}
-                  {key}
+                  ) : null}
+                  {label}
+                  {!required ? ' (optional)' : ''}
                 </Badge>
               );
             })}
           </div>
-          {credStatus && credStatus.missingKeys.length > 0 && (
-            <p className="mt-2 text-[11px] text-attention">
-              Configure missing credentials in <strong>Connectors</strong> before using this
-              connector.
-            </p>
-          )}
+          {credStatus &&
+            credentialDefinitions.some(
+              (credential) => credential.required && credStatus.missingKeys.includes(credential.key)
+            ) && (
+              <p className="mt-2 text-[11px] text-attention">
+                Configure missing credentials in <strong>Connectors</strong> before using this
+                connector.
+              </p>
+            )}
         </div>
       )}
 

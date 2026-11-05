@@ -1,6 +1,13 @@
-export type McpImportEntry = {
+import {
+  parseRemoteImportHeaders,
+  parseRemoteMcpUrl,
+  type RemoteImportConfiguration,
+} from './remoteMcpConfiguration';
+
+export type McpImportEntry = Partial<RemoteImportConfiguration> & {
   id: string;
   name: string;
+  description?: string;
   transport: 'local' | 'http';
   command: string;
   args: string[];
@@ -37,14 +44,41 @@ export function parseMcpServersJson(raw: string): { entries: McpImportEntry[]; e
       .replace(/(^-|-$)/g, '');
     const name = key.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     const hasUrl = typeof v.url === 'string' && v.url.length > 0;
+    let remote: RemoteImportConfiguration | undefined;
+    if (hasUrl) {
+      try {
+        parseRemoteMcpUrl(v.url as string);
+        if (
+          Object.keys(v).some(
+            (field) => !['url', 'type', 'headers', 'name', 'description'].includes(field)
+          )
+        )
+          throw new Error(
+            'Remote imports support url, type, headers, name and description. Review unsupported fields before importing.'
+          );
+        if (
+          v.type != null &&
+          !['http', 'sse', 'streamable-http', 'streamableHttp'].includes(String(v.type))
+        )
+          throw new Error('Unsupported remote MCP transport type.');
+        remote = parseRemoteImportHeaders(v.headers);
+      } catch (error) {
+        return {
+          entries: [],
+          error: error instanceof Error ? error.message : 'Invalid remote MCP configuration.',
+        };
+      }
+    }
     entries.push({
       id,
-      name,
+      name: typeof v.name === 'string' ? v.name : name,
+      description: typeof v.description === 'string' ? v.description : '',
       transport: hasUrl ? 'http' : 'local',
       command: typeof v.command === 'string' ? v.command : '',
       args: Array.isArray(v.args) ? v.args.map(String) : [],
       url: typeof v.url === 'string' ? v.url : '',
       envKeys: v.env && typeof v.env === 'object' ? Object.keys(v.env as object) : [],
+      ...(remote ?? {}),
     });
   }
   if (entries.length === 0)

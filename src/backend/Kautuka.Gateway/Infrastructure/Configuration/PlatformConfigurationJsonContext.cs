@@ -10,6 +10,7 @@ namespace Kautuka.Gateway.Infrastructure.Configuration;
 [JsonSerializable(typeof(Dictionary<string, object?>))]
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(List<string>))]
+[JsonSerializable(typeof(RemoteMcpConfiguration))]
 [JsonSerializable(typeof(AgentSkillAttachmentDefinition))]
 [JsonSerializable(typeof(List<AgentSkillAttachmentDefinition>))]
 [JsonSerializable(typeof(EffectiveSkillManifestEntry))]

@@ -152,7 +152,7 @@ internal sealed partial class GatewayState
                                      runtime_artifact_type AS RuntimeArtifactType,
                                      runtime_artifact_source_digest AS RuntimeArtifactSourceDigest,
                                      runtime_artifact_build_status AS RuntimeArtifactBuildStatus,
-                                     mcp_protocol_version AS McpProtocolVersion
+                                     mcp_protocol_version AS McpProtocolVersion, remote_config_json AS RemoteConfigJson
             FROM mcp_servers ORDER BY rowid
             """))
         {
@@ -160,13 +160,14 @@ internal sealed partial class GatewayState
 
             IReadOnlyList<string>? toolNames = DeserializeStringList(row.ToolNamesJson);
             IReadOnlyList<string>? envKeys = DeserializeStringList(row.EnvKeysJson);
+            RemoteMcpConfiguration remote = JsonSerializer.Deserialize(row.RemoteConfigJson, PlatformConfigurationJsonContext.Default.RemoteMcpConfiguration) ?? new([], []);
             state.McpServers[row.Id] = new GatewayMcpServer(
                 row.Id, row.Name, row.Description, row.IconUrl,
                 row.PresetId, row.Transport, row.HttpUrl, row.ContainerImage, row.ContainerCommand, containerArgs, row.ContainerSidecarName,
                 row.BundlePath, row.ServerType,
                 row.ReadinessTimeoutSeconds, row.JitCooldownSeconds, row.HealthcheckUrl, row.HealthcheckIntervalMilliseconds,
                 row.Enabled != 0, row.IsInternalSystemConnector != 0, row.CreatedAt, row.UpdatedAt, row.Scope, row.OwnerUserId, row.ToolCount, toolNames, envKeys,
-                row.RuntimeArtifactType, row.RuntimeArtifactSourceDigest, row.RuntimeArtifactBuildStatus, row.McpProtocolVersion);
+                row.RuntimeArtifactType, row.RuntimeArtifactSourceDigest, row.RuntimeArtifactBuildStatus, row.McpProtocolVersion, remote.Credentials, remote.HttpHeaders, remote.CredentialNamespace, remote.CredentialAssociationId, remote.CredentialOperationId, remote.CredentialSourceId);
         }
     }
 
