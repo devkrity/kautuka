@@ -287,7 +287,7 @@ describe('App update banner', () => {
   });
 
   it('shows the update banner when discovery fails during a refresh', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-refresh',
       state: 'Current',
@@ -412,7 +412,7 @@ describe('App update banner', () => {
   });
 
   it('shows updater operation failures even when the status payload is not ok', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: false,
       message: 'update-apply-failed',
       state: 'Current',
@@ -457,7 +457,7 @@ describe('App update banner', () => {
   });
 
   it('shows the recovery failure when the failed release remains available', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-status',
       state: 'Available',
@@ -480,7 +480,7 @@ describe('App update banner', () => {
   });
 
   it('shows preflight progress messaging while apply is in progress', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-apply-accepted',
       state: 'Applying',
@@ -536,7 +536,7 @@ describe('App update banner', () => {
   });
 
   it('shows preflight failure messaging when activation checks fail and the release remains available', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-status',
       state: 'Available',
@@ -607,7 +607,7 @@ describe('App update banner', () => {
       return null;
     });
 
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'Current',
       state: 'Current',
@@ -651,7 +651,7 @@ describe('App update banner', () => {
   });
 
   it('keeps applied update state in the sidebar instead of a dismissible page banner', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'Current',
       state: 'Current',
@@ -695,7 +695,7 @@ describe('App update banner', () => {
   });
 
   it('does not promote historical apply errors into a banner after the release is current', async () => {
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'Current',
       state: 'Current',
@@ -751,7 +751,7 @@ describe('App update banner', () => {
       storage.delete(key);
     });
 
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-apply',
       state: 'Current',
@@ -793,7 +793,7 @@ describe('App update banner', () => {
 
     firstRender.unmount();
 
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-status',
       state: 'Current',
@@ -845,7 +845,7 @@ describe('App update banner', () => {
       isError: false,
     });
 
-    fetchUpdateStatusMock.mockResolvedValueOnce({
+    fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'Current',
       state: 'Current',
