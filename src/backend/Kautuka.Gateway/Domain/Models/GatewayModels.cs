@@ -699,6 +699,9 @@ internal sealed record GatewayChatProduceBoundarySuspended(string BoundaryReason
 
 internal sealed class GatewaySystemSettings
 {
+    public string? AuthenticationBrokerOrigin { get; init; }
+    public string? AuthenticationBrokerGoogleClientId { get; init; }
+    public string? AuthenticationBrokerMicrosoftClientId { get; init; }
     public string LogLevel { get; init; } = "WARNING";
 
     public string ReleaseChannel { get; init; } = "stable";

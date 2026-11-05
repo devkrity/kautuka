@@ -8,7 +8,8 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
     IMcpbPackageService mcpbPackageService,
     IMcpConnectorTestService mcpConnectorTestService,
     ILogger<BuiltInMcpPackageBootstrapService> logger,
-    Func<bool>? maintenanceActive = null) : BackgroundService
+    Func<bool>? maintenanceActive = null,
+    TimeSpan? retryDelay = null) : BackgroundService
 {
     private const string builtInBundleDirectoryName = "built-in-mcpb";
     private const string solutionRelativePath = "src/Kautuka.slnx";
@@ -67,13 +68,22 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
         }
 
-        foreach ((string fileName, string connectorId) in builtInBundles)
+        var pending = builtInBundles.ToList();
+        for (int attempt = 0; attempt < 2 && pending.Count > 0; attempt++)
         {
-            await ImportBundleAsync(fileName, connectorId, cancellationToken).ConfigureAwait(false);
+            foreach ((string fileName, string connectorId) in pending.ToArray())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (await ImportBundleAsync(fileName, connectorId, cancellationToken).ConfigureAwait(false))
+                    pending.Remove((fileName, connectorId));
+            }
+
+            if (attempt == 0 && pending.Count > 0)
+                await Task.Delay(retryDelay ?? TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task ImportBundleAsync(string fileName, string connectorId, CancellationToken cancellationToken)
+    private async Task<bool> ImportBundleAsync(string fileName, string connectorId, CancellationToken cancellationToken)
     {
         string bundlePath = ResolveBundlePath(fileName, connectorId);
         LogBootstrapStart(logger, bundlePath);
@@ -81,7 +91,7 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
         if (!File.Exists(bundlePath))
         {
             LogBundleMissing(logger, bundlePath);
-            return;
+            return true;
         }
 
         try
@@ -96,7 +106,7 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             if (!string.Equals(inspection.ServerId, connectorId, StringComparison.Ordinal))
             {
                 LogUnexpectedConnectorId(logger, bundlePath, inspection.ServerId, connectorId);
-                return;
+                return true;
             }
 
             bool hasExisting = catalog.TryGetMcpServer(connectorId, out GatewayMcpServer? existing) && existing is not null;
@@ -118,10 +128,18 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             }
 
             LogBootstrapCompleted(logger, connectorId);
+            return true;
+        }
+        catch (ConnectorActivationException ex)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LogImportFailed(logger, ex, bundlePath);
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException)
         {
             LogImportFailed(logger, ex, bundlePath);
+            return true;
         }
     }
 

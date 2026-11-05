@@ -263,6 +263,9 @@ internal sealed partial class GatewayState
 
         return new GatewaySystemSettings
         {
+            AuthenticationBrokerOrigin = ReadSetting(connection, "auth.broker.origin"),
+            AuthenticationBrokerGoogleClientId = ReadSetting(connection, "auth.broker.google_client_id"),
+            AuthenticationBrokerMicrosoftClientId = ReadSetting(connection, "auth.broker.microsoft_client_id"),
             LogLevel = logLevel,
             ReleaseChannel = releaseChannel,
             Locale = locale,

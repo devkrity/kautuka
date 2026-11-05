@@ -45,7 +45,7 @@ public static class OwnerOnlySecretFile
             security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
             security.AddAccessRule(new FileSystemAccessRule(
                 WindowsIdentity.GetCurrent().User!,
-                FileSystemRights.Read | FileSystemRights.Write,
+                FileSystemRights.Read | FileSystemRights.Write | FileSystemRights.Delete,
                 InheritanceFlags.None,
                 PropagationFlags.None,
                 AccessControlType.Allow));

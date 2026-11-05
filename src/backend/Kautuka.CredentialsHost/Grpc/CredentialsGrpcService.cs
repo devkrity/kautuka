@@ -101,9 +101,10 @@ internal sealed class CredentialsGrpcService(
     }
 
     private static bool IncludeResolvedKey(string key, bool includeHeldSecrets)
-        => includeHeldSecrets
+        => !key.StartsWith("kautuka.internal.", StringComparison.OrdinalIgnoreCase)
+            && (includeHeldSecrets
             || (!key.Contains("REFRESH_TOKEN", StringComparison.OrdinalIgnoreCase)
-                && !key.Contains("DPOP", StringComparison.OrdinalIgnoreCase));
+                && !key.Contains("DPOP", StringComparison.OrdinalIgnoreCase)));
 
     public override async Task<CredentialMapResponse> GetSystemCredential(
         GetSystemCredentialRequest request,

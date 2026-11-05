@@ -109,6 +109,19 @@ public sealed partial class AuthEndpointActivationTests
     }
 
     [Fact]
+    public async Task ExistingAppSessionSurvivesTokenStoreRestart()
+    {
+        await using var fixture = await AuthApiFixture.CreateAsync();
+        await fixture.SendAnonymousAsync(HttpMethod.Post, "/api/auth/setup", new { username = "admin", password = "Testing1", setupToken = fixture.SetupToken });
+        using HttpResponseMessage login = await fixture.SendAnonymousAsync(HttpMethod.Post, "/api/auth/login", new { username = "admin", password = "Testing1" });
+        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
+        using JsonDocument payload = JsonDocument.Parse(await login.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        string access = payload.RootElement.GetProperty("accessToken").GetString()!;
+        string refresh = Assert.Single(login.Headers.GetValues("Set-Cookie")).Split(';')[0].Split('=', 2)[1];
+        Assert.True(fixture.RestartedTokenStoreAccepts(access, refresh, fixture.GetUserId("admin")));
+    }
+
+    [Fact]
     public async Task LoginCookieIsSecureAndRefreshRotationRejectsReplay()
     {
         await using var fixture = await AuthApiFixture.CreateAsync();
@@ -778,6 +791,18 @@ public sealed partial class AuthEndpointActivationTests
         public string ExternalLoginCookie { get; set; } = string.Empty;
         public string? ExternalLoginSetCookie { get; set; }
 
+        public void SetBrokerSaveFailure(bool enabled)
+        {
+            using var connection = new SqliteConnection(app.Services.GetRequiredService<KautukaDatabase>().ConnectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            if (enabled)
+                command.CommandText = "CREATE TRIGGER fail_broker_save BEFORE INSERT ON system_settings WHEN NEW.key = 'auth.broker.google_client_id' BEGIN SELECT RAISE(ABORT, 'injected storage failure'); END;";
+            else
+                command.CommandText = "DROP TRIGGER fail_broker_save;";
+            command.ExecuteNonQuery();
+        }
+
         public void ExpireInviteCode(string code)
         {
             string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(code)));
@@ -793,6 +818,42 @@ public sealed partial class AuthEndpointActivationTests
         public string SetupToken => app.Services.GetRequiredService<SetupPossession>().Peek();
         public FakeChannelHostGrpcService ChannelHost => channelHost;
         public bool IsStopping => app.Lifetime.ApplicationStopping.IsCancellationRequested;
+        public bool RestartedTokenStoreAccepts(string access, string refresh, string expectedUserId)
+        {
+            var restarted = new GatewayTokenStore(app.Services.GetRequiredService<KautukaDatabase>(), TimeProvider.System);
+            return restarted.TryResolveAccessToken(access, out string? accessUser) && accessUser == expectedUserId
+                && restarted.TryResolveRefreshToken(refresh, out string? refreshUser) && refreshUser == expectedUserId;
+        }
+        public GatewayState ReloadState() => GatewayState.FromDatabase(
+            app.Services.GetRequiredService<KautukaDatabase>(), app.Services.GetRequiredService<ILogger<GatewayState>>(),
+            app.Services.GetRequiredService<Kautuka.Gateway.Domain.Memory.IGatewayMemoryStore>(), app.Services.GetRequiredService<IAgentDefinitionStore>(),
+            app.Services.GetRequiredService<IConfiguration>(), app.Services.GetRequiredService<Kautuka.Gateway.Domain.Sandbox.IWorkspaceRuntimeTool>());
+        public async Task<(string? Host, string? Google, bool Microsoft)> ReloadBrokerSnapshotAsync()
+        {
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = Environments.Development });
+            builder.Configuration.AddConfiguration(app.Configuration);
+            builder.WebHost.UseTestServer();
+            GatewayAppBootstrap.ConfigureServices(builder);
+            builder.Services.AddSingleton(new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())));
+            await using WebApplication restarted = builder.Build();
+            var endpoint = restarted.Services.GetRequiredService<Kautuka.Gateway.Domain.Connectors.ConnectorAuthEndpoint>();
+            var providers = restarted.Services.GetRequiredService<Kautuka.Gateway.Domain.Auth.ExternalLoginProviders>();
+            return (endpoint.Host, providers.GoogleClientId, providers.Microsoft);
+        }
+        public void RevokeSessions(string userId) => app.Services.GetRequiredService<IGatewayTokenStore>().RevokeUserSessions(userId);
+        public void SetPasswordlessForTest(string userId, bool value)
+        {
+            var flags = app.Services.GetRequiredService<GatewayState>().PasswordlessUserIds;
+            if (value) flags[userId] = 1; else flags.TryRemove(userId, out _);
+        }
+
+        public void AddMailConnector(string connectorId)
+        {
+            GatewayState state = app.Services.GetRequiredService<GatewayState>();
+            string now = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+            state.McpServers[connectorId] = new GatewayMcpServer(connectorId, "Mail", "Test", string.Empty, null, "local",
+                null, null, null, [], null, null, null, null, null, null, null, true, false, now, now, "system");
+        }
 
         public static Task<AuthApiFixture> CreateAsync() => CreateAsync(null, null, null);
 

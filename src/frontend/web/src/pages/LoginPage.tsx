@@ -6,7 +6,7 @@ import {
   getSetupStatus,
   createFirstAdmin,
   listExternalProviders,
-  startExternalLogin,
+  runBoundExternalLogin,
 } from '@/features/auth';
 import { BrandMark } from '@/components/BrandMark';
 import { SignInProviderLogo } from '@/components/SignInProviderLogo';
@@ -44,6 +44,8 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [providers, setProviders] = React.useState({ google: false, microsoft: false });
+  const externalAttempt = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => externalAttempt.current?.abort(), []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -69,6 +71,7 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
 
   const submitLogin: NonNullable<React.ComponentProps<'form'>['onSubmit']> = (event) => {
     event.preventDefault();
+    externalAttempt.current?.abort();
     const run = async () => {
       setLoading(true);
       setError(null);
@@ -135,25 +138,23 @@ export function LoginPage({ onLoginSuccess, initialNeedsSetup }: Readonly<LoginP
       return;
     }
 
+    externalAttempt.current?.abort();
+    const controller = new AbortController();
+    externalAttempt.current = controller;
     const run = async () => {
       setLoading(true);
       setError(null);
-      globalThis.sessionStorage.setItem(
-        'kautukaExternalLoginNext',
-        needsSetup ? '/onboarding' : '/dashboard'
-      );
-      if (needsSetup && setupToken.trim()) {
-        globalThis.sessionStorage.setItem('kautukaSetupToken', setupToken.trim());
-      }
-      if (authMode === 'signup' && inviteCode.trim()) {
-        globalThis.sessionStorage.setItem('kautukaInviteCode', inviteCode.trim());
-      } else {
-        globalThis.sessionStorage.removeItem('kautukaInviteCode');
-      }
-      const started = await startExternalLogin(provider, microsoftAccountType);
-      globalThis.location.assign(started.startUrl);
+      const result = await runBoundExternalLogin(provider, microsoftAccountType, 'login', {
+        ...(needsSetup && setupToken.trim() ? { setupToken: setupToken.trim() } : {}),
+        ...(authMode === 'signup' && inviteCode.trim() ? { inviteCode: inviteCode.trim() } : {}),
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      setAccessToken(result.accessToken, Date.now() + result.expiresInSeconds * 1000);
+      onLoginSuccess();
+      navigate(needsSetup ? '/onboarding' : '/dashboard', { replace: true });
     };
     run().catch((err: unknown) => {
+      if (controller.signal.aborted) return;
       setError(err instanceof Error ? err.message : 'Sign-in was not accepted.');
       setLoading(false);
     });

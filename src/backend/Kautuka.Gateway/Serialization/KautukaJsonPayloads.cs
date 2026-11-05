@@ -414,6 +414,24 @@ internal sealed class ExternalLoginStartRequest
 
 internal sealed record ExternalLoginStartResponse(string StartUrl);
 
+internal sealed class BoundExternalStartRequest
+{
+    public string Provider { get; init; } = string.Empty;
+    public string Intent { get; init; } = "login";
+    public string? MicrosoftAccountType { get; init; }
+}
+
+internal sealed record BoundExternalStartResponse(string StartUrl, string BrokerOrigin, string State, string FlowId, string TabHandle);
+
+internal sealed class BoundExternalOperationRequest
+{
+    public string State { get; init; } = string.Empty;
+    public string TabHandle { get; init; } = string.Empty;
+    public string? Nonce { get; init; }
+    public string? InviteCode { get; init; }
+    public string? SetupToken { get; init; }
+}
+
 internal sealed class ExternalLoginCompleteRequest
 {
     public string Code { get; init; } = string.Empty;
@@ -623,6 +641,9 @@ internal sealed record GatewaySystemSettingsPayload(
     GatewayUpdateSettingsPayload Updates,
     GatewayRuntimeGroundingSettingsPayload RuntimeGrounding,
     GatewayRuntimeLimitsSettingsPayload RuntimeLimits);
+
+internal sealed record AuthenticationBrokerSettings(string Origin, string? GoogleSocialClientId, string? MicrosoftSocialClientId);
+internal sealed record AuthenticationBrokerSettingsResponse(AuthenticationBrokerSettings Active, AuthenticationBrokerSettings? Pending, bool SwitchPending);
 
 internal sealed record GatewayWorkspaceSettingsPayload(
     string BaseRoot);

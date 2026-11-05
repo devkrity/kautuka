@@ -753,7 +753,73 @@ public sealed class GoogleMailConnectorTests
     }
 
     [Fact]
-    public void HostedSignInLeavesTheClientIdOnTheAuthHost()
+    public async Task HostedConnectorUsesBoundCoordinatorForStatusRefreshAndDisconnect()
+    {
+        const string id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        string original = "kmf1." + new string('x', 40), rotated = "kmf1." + new string('y', 40);
+        var calls = new List<string>();
+        var handler = new ScriptedHandler
+        {
+            Respond = request =>
+            {
+                if (request.RequestUri!.AbsolutePath == "/installation/register") return new HttpResponseMessage(HttpStatusCode.NoContent);
+                calls.Add(request.RequestUri!.AbsolutePath);
+                Assert.True(request.Headers.Contains("Kautuka-Installation-Proof"));
+                Assert.True(request.Headers.Contains("DPoP"));
+                if (request.RequestUri.AbsolutePath == "/installation/mail-refresh")
+                {
+                    string body = request.Content!.ReadAsStringAsync(TestContext.Current.CancellationToken).GetAwaiter().GetResult();
+                    Assert.Contains(original, body, StringComparison.Ordinal);
+                    Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
+                    return JsonResponse($$"""{"accessToken":"short-lived","refreshToken":"{{rotated}}","tokenType":"Bearer","issuedAt":{{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}},"expiresAt":null}""");
+                }
+                return new HttpResponseMessage(HttpStatusCode.NoContent);
+            },
+        };
+        var storage = new BrokerTestStorage();
+        using var credentialStore = new BrokerMailCredentialStore(storage);
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(credentialStore, handoff);
+        var credential = new BrokerMailCredential("google", id, id, 1, original, ConnectorDpop.CreatePrivateJwk(), "https://auth.kautuka.io");
+        await credentialStore.StageActivationAsync("owner", "kautuka-google-mail", new(credential, id), CancellationToken.None);
+        await credentialStore.PromoteActivationAsync("owner", "kautuka-google-mail", id, CancellationToken.None);
+        using var legacyClient = new ConnectorAuthorizationClient(new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") });
+        var wrongBroker = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), new MemoryTokens(), legacyClient,
+            new ConnectorOAuthSessionStore(), ConnectorAuthEndpoint.Parse("https://other.example"), coordinator);
+        var wrongStatus = (await wrongBroker.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single();
+        Assert.False(wrongStatus.Connected);
+        Assert.Contains("another broker", wrongStatus.Message, StringComparison.Ordinal);
+        var obsolete = new MemoryTokens();
+        obsolete.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "old-refresh";
+        obsolete.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = "old-key";
+        obsolete.Values["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"] = "old-nonce";
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), obsolete, legacyClient,
+            new ConnectorOAuthSessionStore(), Hosted, coordinator);
+        Assert.True((await service.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single().Connected);
+        var inputEnvironment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "must-not-reach-container",
+            ["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = "must-not-reach-container",
+            ["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"] = "must-not-reach-container",
+            ["KAUTUKA_GOOGLE_MAIL_ACCESS_TOKEN"] = "stale",
+            ["SAFE_VALUE"] = "preserved",
+        };
+        Dictionary<string, string> environment = await service.PrepareAsync("kautuka-google-mail", "owner", inputEnvironment, true, CancellationToken.None);
+        Assert.Equal("short-lived", environment["KAUTUKA_GOOGLE_MAIL_ACCESS_TOKEN"]);
+        Assert.False(environment.ContainsKey("KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"));
+        Assert.False(environment.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_KEY"));
+        Assert.False(environment.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"));
+        Assert.Equal("preserved", environment["SAFE_VALUE"]);
+        Assert.True((await service.DisconnectAsync("owner", "kautuka-google-mail", CancellationToken.None)).Disconnected);
+        Assert.Empty(obsolete.Values);
+        Assert.Equal(["/installation/mail-refresh", "/installation/mail-refresh-ack", "/installation/mail-disconnect"], calls);
+        Assert.False((await service.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single().Connected);
+    }
+
+    [Fact]
+    public void LegacyHostedSignInIsRejected()
     {
         using var client = new ConnectorAuthorizationClient(new ScriptedHandler
         {
@@ -768,13 +834,8 @@ public sealed class GoogleMailConnectorTests
 
         ConnectorOAuthBeginResponse begin = service.Begin("owner", "kautuka-google-mail", "http://127.0.0.1:20229");
 
-        Assert.Equal("redirect", begin.Status);
-        Assert.StartsWith("https://auth.kautuka.io/start#", begin.StartUrl, StringComparison.Ordinal);
-        Assert.Contains("connector=kautuka-google-mail", begin.StartUrl, StringComparison.Ordinal);
-        Assert.Contains("challenge=", begin.StartUrl, StringComparison.Ordinal);
-        Assert.DoesNotContain("client_id", begin.StartUrl, StringComparison.Ordinal);
-        Assert.DoesNotContain(googleClientId, begin.StartUrl, StringComparison.Ordinal);
-        Assert.DoesNotContain("accounts.google.com", begin.StartUrl, StringComparison.Ordinal);
+        Assert.Equal("rejected", begin.Status);
+        Assert.Null(begin.StartUrl);
     }
 
     [Fact]
@@ -831,116 +892,30 @@ public sealed class GoogleMailConnectorTests
     }
 
     [Fact]
-    public async Task BrokerExchangeKeepsTheClientSecretOffTheAppliance()
+    public async Task LegacyHostedExchangeCannotCallTheBroker()
     {
-        string? body = null;
-        string? dpop = null;
-        var handler = new ScriptedHandler
-        {
-            Respond = request =>
-            {
-                body = request.Content!.ReadAsStringAsync(TestContext.Current.CancellationToken).GetAwaiter().GetResult();
-                dpop = request.Headers.GetValues("DPoP").Single();
-                HttpResponseMessage response = JsonResponse(
-                    "{\"token_type\":\"Bearer\",\"expires_in\":3600,\"access_token\":\"access-token-value\",\"refresh_token\":\"krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA\"}");
-                response.Headers.TryAddWithoutValidation("DPoP-Nonce", "nonce-1");
-                return response;
-            },
-        };
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") };
         using var client = new ConnectorAuthorizationClient(handler);
-        var credentials = new MemoryTokens();
-        var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([BrokerProfile()]),
-            credentials,
-            client,
-            new ConnectorOAuthSessionStore(),
-            Hosted);
-        ConnectorOAuthBeginResponse begin = service.Begin("owner", "kautuka-google-mail", "http://127.0.0.1:20229");
-        string state = StateFrom(begin.StartUrl!);
-
-        ConnectorOAuthCompleteResponse complete = await service.CompleteAsync(
-            "owner",
-            "auth-code",
-            state,
-            TestContext.Current.CancellationToken,
-            "signed-broker-ticket").ConfigureAwait(true);
-
-        Assert.Equal("connected", complete.Status);
-        Assert.NotNull(body);
-        Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("client_id", body, StringComparison.Ordinal);
-        Assert.Contains("code_verifier=", body, StringComparison.Ordinal);
-        Assert.Contains("code=auth-code", body, StringComparison.Ordinal);
-        Assert.Contains("broker_ticket=signed-broker-ticket", body, StringComparison.Ordinal);
-        Assert.Contains("return_origin=http%3A%2F%2F127.0.0.1%3A20229", body, StringComparison.Ordinal);
-        Assert.Contains("https://auth.kautuka.io/google-mail/token", handler.LastUrl, StringComparison.Ordinal);
-        Assert.NotNull(dpop);
-        using JsonDocument proof = JsonDocument.Parse(DecodeJwtPayload(dpop));
-        Assert.Equal("https://auth.kautuka.io/google-mail/token", proof.RootElement.GetProperty("htu").GetString());
-        Assert.DoesNotContain("\"d\"", DecodeJwtPart(dpop.Split('.')[0]), StringComparison.Ordinal);
-        Assert.StartsWith("krt1.", credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"], StringComparison.Ordinal);
-        Assert.Contains("\"d\"", credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"], StringComparison.Ordinal);
-        Assert.Equal("nonce-1", credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"]);
-        string returned = JsonSerializer.Serialize(complete);
-        Assert.DoesNotContain("krt1.", returned, StringComparison.Ordinal);
-        Assert.DoesNotContain("access-token-value", returned, StringComparison.Ordinal);
+        var sessions = new ConnectorOAuthSessionStore();
+        sessions.Save("state", new ConnectorOAuthSession { UserId = "owner", ConnectorId = "kautuka-google-mail", CodeVerifier = "verifier", ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5) });
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), new MemoryTokens(), client, sessions, Hosted);
+        ConnectorOAuthCompleteResponse result = await service.CompleteAsync("owner", "code", "state", CancellationToken.None, "ticket");
+        Assert.Equal("rejected", result.Status);
+        Assert.Equal(0, handler.Calls);
     }
 
     [Fact]
-    public async Task RefreshRetriesWhenGoogleAsksForADpopNonce()
+    public async Task HostedRefreshFailsClosedWithoutCoordinator()
     {
-        var proofs = new List<string>();
-        int calls = 0;
-        var handler = new ScriptedHandler
-        {
-            Respond = request =>
-            {
-                calls++;
-                proofs.Add(request.Headers.GetValues("DPoP").Single());
-                string refreshBody = request.Content!.ReadAsStringAsync(TestContext.Current.CancellationToken).GetAwaiter().GetResult();
-                Assert.Contains("refresh_token=krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA", refreshBody, StringComparison.Ordinal);
-                if (calls == 1)
-                {
-                    HttpResponseMessage rejected = new(HttpStatusCode.BadRequest)
-                    {
-                        Content = new StringContent("{\"error\":\"use_dpop_nonce\"}", Encoding.UTF8, "application/json"),
-                    };
-                    rejected.Headers.TryAddWithoutValidation("DPoP-Nonce", "nonce-2");
-                    return rejected;
-                }
-
-                HttpResponseMessage accepted = JsonResponse("{\"token_type\":\"Bearer\",\"expires_in\":3600,\"access_token\":\"access-2\"}");
-                accepted.Headers.TryAddWithoutValidation("DPoP-Nonce", "nonce-3");
-                return accepted;
-            },
-        };
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") };
         var credentials = new MemoryTokens();
         credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA";
         credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = ConnectorDpop.CreatePrivateJwk();
         using var client = new ConnectorAuthorizationClient(handler);
-        var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([BrokerProfile()]),
-            credentials,
-            client,
-            new ConnectorOAuthSessionStore(),
-            Hosted);
-
-        Dictionary<string, string> prepared = await service.PrepareAsync(
-            "kautuka-google-mail",
-            "owner",
-            new Dictionary<string, string>(StringComparer.Ordinal),
-            exchangeAccessToken: true,
-            TestContext.Current.CancellationToken).ConfigureAwait(true);
-
-        Assert.Equal(2, calls);
-        Assert.Equal("access-2", prepared["KAUTUKA_GOOGLE_MAIL_ACCESS_TOKEN"]);
-        Assert.False(prepared.ContainsKey("KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"));
-        Assert.False(prepared.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_KEY"));
-        using JsonDocument first = JsonDocument.Parse(DecodeJwtPayload(proofs[0]));
-        using JsonDocument second = JsonDocument.Parse(DecodeJwtPayload(proofs[1]));
-        Assert.NotEqual(first.RootElement.GetProperty("jti").GetString(), second.RootElement.GetProperty("jti").GetString());
-        Assert.Equal("nonce-2", second.RootElement.GetProperty("nonce").GetString());
-        Assert.Equal("nonce-3", credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"]);
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), credentials, client, new ConnectorOAuthSessionStore(), Hosted);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.PrepareAsync("kautuka-google-mail", "owner", new(StringComparer.Ordinal), true, CancellationToken.None));
+        Assert.Equal(0, handler.Calls);
+        Assert.True(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"));
     }
 
     [Fact]
@@ -948,11 +923,11 @@ public sealed class GoogleMailConnectorTests
     {
         using var client = new ConnectorAuthorizationClient(new ScriptedHandler { Respond = _ => JsonResponse("{}") });
         var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([BrokerProfile()]),
+            new ConnectorAuthCatalog([Profile(googleClientId, googleClientSecret)]),
             new MemoryTokens(),
             client,
             new ConnectorOAuthSessionStore(),
-            Hosted);
+            ConnectorAuthEndpoint.Local);
 
         ConnectorOAuthBeginResponse[] attempts = Enumerable.Range(0, 11)
             .Select(_ => service.Begin("owner", "kautuka-google-mail", "http://127.0.0.1:20229"))
@@ -980,7 +955,7 @@ public sealed class GoogleMailConnectorTests
 
         ConnectorOAuthCatalogResponse status = await service.ListStatusAsync("owner", CancellationToken.None).ConfigureAwait(true);
         Assert.False(status.Connectors.Single().Connected);
-        Assert.Contains("Reconnect", status.Connectors.Single().Message, StringComparison.Ordinal);
+        Assert.Contains("unavailable", status.Connectors.Single().Message, StringComparison.Ordinal);
         InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.PrepareAsync(
             "kautuka-google-mail",
             "owner",
@@ -988,97 +963,78 @@ public sealed class GoogleMailConnectorTests
             exchangeAccessToken: true,
             CancellationToken.None)).ConfigureAwait(true);
 
-        Assert.Contains("needs to be renewed", error.Message, StringComparison.Ordinal);
+        Assert.Contains("unavailable", error.Message, StringComparison.Ordinal);
         Assert.Equal(0, handler.Calls);
         Assert.Equal(legacyToken, credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"]);
     }
 
     [Fact]
-    public async Task DisconnectRevokesTheBrokerKeyBeforeDeletingIt()
+    public async Task ObsoleteHostedCredentialsRequireReconnectAndCanBeRemoved()
     {
-        string privateJwk = ConnectorDpop.CreatePrivateJwk();
-        string jkt = ConnectorDpop.Thumbprint(privateJwk);
-        var proofs = new List<string>();
-        int revokeCalls = 0;
-        var handler = new ScriptedHandler
-        {
-            Respond = request =>
-            {
-                proofs.Add(request.Headers.GetValues("DPoP").Single());
-                revokeCalls++;
-                Assert.Equal(HttpMethod.Delete, request.Method);
-                string form = request.Content!.ReadAsStringAsync(TestContext.Current.CancellationToken).GetAwaiter().GetResult();
-                Assert.Contains("refresh_token=krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA", form, StringComparison.Ordinal);
-                if (revokeCalls == 1)
-                {
-                    var rejected = new HttpResponseMessage(HttpStatusCode.BadRequest)
-                    {
-                        Content = new StringContent("{\"error\":\"use_dpop_nonce\"}", Encoding.UTF8, "application/json"),
-                    };
-                    rejected.Headers.TryAddWithoutValidation("DPoP-Nonce", "nonce-revoke");
-                    return rejected;
-                }
+        var credentials = new MemoryTokens { FailDeleteOnceForKey = "KAUTUKA_GOOGLE_MAIL_DPOP_KEY" };
+        credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "obsolete-refresh";
+        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = "obsolete-key";
+        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"] = "obsolete-nonce";
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Retired broker endpoint was called.") };
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var storage = new BrokerMailCredentialStore(new BrokerTestStorage());
+        using var coordinator = new BrokerMailCoordinator(storage, handoff);
+        using var client = new ConnectorAuthorizationClient(handler);
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), credentials, client, new ConnectorOAuthSessionStore(), Hosted, coordinator);
+        var status = (await service.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single();
+        Assert.False(status.Connected);
+        Assert.Contains("Reconnect", status.Message, StringComparison.Ordinal);
+        var first = await service.DisconnectAsync("owner", "kautuka-google-mail", CancellationToken.None);
+        Assert.False(first.Disconnected);
+        Assert.Contains("try again", first.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Reconnect", (await service.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single().Message, StringComparison.Ordinal);
+        Assert.True((await service.DisconnectAsync("owner", "kautuka-google-mail", CancellationToken.None)).Disconnected);
+        Assert.Empty(credentials.Values);
+        Assert.Equal(0, handler.Calls);
+    }
 
-                return new HttpResponseMessage(HttpStatusCode.NoContent);
-            },
-        };
+    [Fact]
+    public async Task HostedDisconnectFailsClosedWithoutCoordinator()
+    {
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") };
         var credentials = new MemoryTokens();
         credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA";
-        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = privateJwk;
-        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"] = "nonce-1";
+        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = ConnectorDpop.CreatePrivateJwk();
         using var client = new ConnectorAuthorizationClient(handler);
-        var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([BrokerProfile()]),
-            credentials,
-            client,
-            new ConnectorOAuthSessionStore(),
-            Hosted);
-
-        ConnectorOAuthDisconnectResponse disconnect = await service.DisconnectAsync(
-            "owner",
-            "kautuka-google-mail",
-            TestContext.Current.CancellationToken).ConfigureAwait(true);
-
-        Assert.True(disconnect.Disconnected);
-        Assert.Equal("https://auth.kautuka.io/google-mail/keys/" + jkt, handler.LastUrl);
-        Assert.Equal(2, revokeCalls);
-        using JsonDocument proof = JsonDocument.Parse(DecodeJwtPayload(proofs[0]));
-        using JsonDocument retryProof = JsonDocument.Parse(DecodeJwtPayload(proofs[1]));
-        Assert.Equal("DELETE", proof.RootElement.GetProperty("htm").GetString());
-        Assert.Equal(handler.LastUrl, proof.RootElement.GetProperty("htu").GetString());
-        Assert.Equal("nonce-revoke", retryProof.RootElement.GetProperty("nonce").GetString());
-        Assert.NotEqual(proof.RootElement.GetProperty("jti").GetString(), retryProof.RootElement.GetProperty("jti").GetString());
-        Assert.False(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"));
-        Assert.False(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_KEY"));
-        Assert.False(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_NONCE"));
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), credentials, client, new ConnectorOAuthSessionStore(), Hosted);
+        ConnectorOAuthDisconnectResponse result = await service.DisconnectAsync("owner", "kautuka-google-mail", CancellationToken.None);
+        Assert.False(result.Disconnected);
+        Assert.Equal(0, handler.Calls);
+        Assert.True(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"));
     }
 
     [Fact]
     public async Task DisconnectKeepsTheSignInWhenTheBrokerRejectsRevocation()
     {
+        const string id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         var handler = new ScriptedHandler
         {
-            Respond = static _ => new HttpResponseMessage(HttpStatusCode.Unauthorized),
+            Respond = static request => new HttpResponseMessage(
+            request.RequestUri!.AbsolutePath == "/installation/register" ? HttpStatusCode.NoContent : HttpStatusCode.Unauthorized)
         };
-        var credentials = new MemoryTokens();
-        credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"] = "krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA";
-        credentials.Values["KAUTUKA_GOOGLE_MAIL_DPOP_KEY"] = ConnectorDpop.CreatePrivateJwk();
-        using var client = new ConnectorAuthorizationClient(handler);
-        var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([BrokerProfile()]),
-            credentials,
-            client,
-            new ConnectorOAuthSessionStore(),
-            Hosted);
-
-        ConnectorOAuthDisconnectResponse disconnect = await service.DisconnectAsync(
-            "owner",
-            "kautuka-google-mail",
-            TestContext.Current.CancellationToken).ConfigureAwait(true);
-
-        Assert.False(disconnect.Disconnected);
-        Assert.StartsWith("krt1.", credentials.Values["KAUTUKA_GOOGLE_MAIL_REFRESH_TOKEN"], StringComparison.Ordinal);
-        Assert.True(credentials.Values.ContainsKey("KAUTUKA_GOOGLE_MAIL_DPOP_KEY"));
+        using var store = new BrokerMailCredentialStore(new BrokerTestStorage());
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(store, handoff);
+        var credential = new BrokerMailCredential("google", id, id, 1, "kmf1." + new string('x', 40), ConnectorDpop.CreatePrivateJwk(), "https://auth.kautuka.io");
+        await store.StageActivationAsync("owner", "kautuka-google-mail", new(credential, id), CancellationToken.None);
+        await store.PromoteActivationAsync("owner", "kautuka-google-mail", id, CancellationToken.None);
+        using var legacyClient = new ConnectorAuthorizationClient(new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") });
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([BrokerProfile()]), new MemoryTokens(), legacyClient, new ConnectorOAuthSessionStore(), Hosted, coordinator);
+        ConnectorOAuthDisconnectResponse result = await service.DisconnectAsync("owner", "kautuka-google-mail", CancellationToken.None);
+        Assert.False(result.Disconnected);
+        Assert.Equal(2, handler.Calls);
+        Assert.Equal("https://auth.kautuka.io/installation/mail-disconnect", handler.LastUrl);
+        Assert.Equal(credential, (await store.ReadAsync("owner", "kautuka-google-mail", CancellationToken.None)).Active);
+        Assert.True((await store.ReadAsync("owner", "kautuka-google-mail", CancellationToken.None)).DisconnectPending);
     }
 
     [Theory]
@@ -1129,7 +1085,7 @@ public sealed class GoogleMailConnectorTests
         ConfigurationMessage = "Google mail sign-in is not configured on this appliance yet.",
     };
 
-    private static ConnectorAuthProfile BrokerProfile() => new()
+    internal static ConnectorAuthProfile BrokerProfile() => new()
     {
         Id = "kautuka-google-mail",
         Name = "Google mail",
@@ -1208,6 +1164,20 @@ public sealed class GoogleMailConnectorTests
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
 
+    private sealed class BrokerTestStorage : IBrokerMailCredentialStorage
+    {
+        private readonly Dictionary<string, string> values = new(StringComparer.Ordinal);
+        public Task<string?> ReadAsync(string key, CancellationToken ct) => Task.FromResult(values.GetValueOrDefault(key));
+        public Task WriteAsync(string key, string value, CancellationToken ct) { values[key] = value; return Task.CompletedTask; }
+    }
+
+    private sealed class BrokerTestIdentityStore : IBrokerInstallationIdentityStore
+    {
+        private string? value;
+        public Task<string?> ReadAsync(CancellationToken ct) => Task.FromResult(value);
+        public Task WriteAsync(string saved, CancellationToken ct) { value = saved; return Task.CompletedTask; }
+    }
+
     private sealed class FakeRefreshTokens : IConnectorRefreshTokenStore
     {
         public string? SavedRefreshToken { get; private set; }
@@ -1254,9 +1224,13 @@ public sealed class GoogleMailConnectorTests
         });
     }
 
-    private sealed class MemoryTokens : IConnectorRefreshTokenStore
+    internal sealed class MemoryTokens : IConnectorRefreshTokenStore
     {
         public Dictionary<string, string> Values { get; } = new(StringComparer.Ordinal);
+        public string? FailDeleteOnceForKey { get; set; }
+        public string? BlockDeleteForKey { get; set; }
+        public TaskCompletionSource DeleteStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ContinueDelete { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Task<string?> GetAsync(string userId, string key, CancellationToken cancellationToken)
             => Task.FromResult(Values.TryGetValue(key, out string? value) ? value : null);
@@ -1267,10 +1241,19 @@ public sealed class GoogleMailConnectorTests
             return Task.CompletedTask;
         }
 
-        public Task DeleteAsync(string userId, string key, CancellationToken cancellationToken)
+        public async Task DeleteAsync(string userId, string key, CancellationToken cancellationToken)
         {
+            if (key == BlockDeleteForKey)
+            {
+                DeleteStarted.TrySetResult();
+                await ContinueDelete.Task.WaitAsync(cancellationToken);
+            }
+            if (key == FailDeleteOnceForKey)
+            {
+                FailDeleteOnceForKey = null;
+                throw new Grpc.Core.RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.Unavailable, "Injected failure"));
+            }
             _ = Values.Remove(key);
-            return Task.CompletedTask;
         }
     }
 

@@ -91,6 +91,13 @@ internal static class GatewaySecurityModule
             AddAuthPolicy("AuthRefresh");
             AddAuthPolicy("AuthSetup");
             AddAuthPolicy("AuthExternal");
+            AddAuthPolicy("MailHandoff");
+            options.AddPolicy("AuthExternalPoll", context => RateLimitPartition.GetFixedWindowLimiter(
+                "AuthExternalPoll\n" + AuthClientAddress.ResolvePartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true }));
+            options.AddPolicy("MailHandoffPoll", context => RateLimitPartition.GetFixedWindowLimiter(
+                "MailHandoffPoll\n" + AuthClientAddress.ResolvePartitionKey(context),
+                _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true }));
 
             void AddAuthPolicy(string name)
             {
@@ -112,7 +119,7 @@ internal static class GatewaySecurityModule
         builder.Services.AddHttpClient(HttpExternalIdentityClient.HttpClientName);
         builder.Services.AddSingleton(static provider => ExternalLoginProviders.Create(
             provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
-            provider.GetRequiredService<ConnectorAuthEndpoint>()));
+            provider.GetRequiredService<ConnectorAuthEndpoint>(), provider.GetRequiredService<GatewayState>().SystemSettings));
         builder.Services.AddSingleton<ExternalLoginSessionStore>();
         builder.Services.AddSingleton<IExternalIdentityClient, HttpExternalIdentityClient>();
     }
@@ -134,11 +141,26 @@ internal static class GatewayCatalogModule
         services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
         services.AddHostedService<BuiltInMcpPackageBootstrapService>();
         services.AddSingleton(static provider => ConnectorAuthEndpoint.Parse(
-            provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>()["Kautuka:ConnectorAuth:Host"]));
+            provider.GetRequiredService<GatewayState>().SystemSettings.AuthenticationBrokerOrigin
+            ?? provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>()["Kautuka:ConnectorAuth:Host"]));
         services.AddSingleton(static provider => ConnectorAuthCatalog.Load(provider.GetRequiredService<IWebHostEnvironment>().ContentRootPath));
         services.AddSingleton<ConnectorOAuthSessionStore>();
         services.AddSingleton(static _ => new ConnectorAuthorizationClient());
         services.AddSingleton<IConnectorRefreshTokenStore, CredentialsHostConnectorRefreshTokenStore>();
+        services.AddSingleton<IBrokerMailCredentialStorage, CredentialsHostBrokerMailCredentialStorage>();
+        services.AddSingleton<BrokerMailCredentialStore>();
+        services.AddSingleton<BrokerSettingsCoordinator>();
+        services.AddSingleton<BrokerMailCoordinator>();
+        services.AddSingleton<BoundMailSessionStore>();
+        services.AddSingleton<IBrokerInstallationIdentityStore, CredentialsHostBrokerInstallationIdentityStore>();
+        services.AddSingleton<BrokerInstallationIdentityProvider>();
+        services.AddSingleton(static provider => new BrokerInstallationRegistration(
+            provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
+            new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })));
+        services.AddSingleton(static provider => new BrokerHandoffClient(
+            provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
+            provider.GetRequiredService<BrokerInstallationRegistration>(),
+            new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })));
         services.AddSingleton<ConnectorOAuthService>();
         services.AddHostedService<BuiltInConnectorCatalogService>();
         services.AddHostedService<BuiltInSkillPackageBootstrapService>();

@@ -7,11 +7,12 @@ using Kautuka.Gateway.Infrastructure.Connectors;
 
 namespace Kautuka.Gateway.Endpoints.Connectors;
 
-internal static class ConnectorOAuthEndpointMappings
+internal static partial class ConnectorOAuthEndpointMappings
 {
     private const string connectorOAuthCookie = "kautuka_connector_oauth";
     public static WebApplication MapConnectorOAuthEndpoints(this WebApplication app)
     {
+        MapBoundMailEndpoints(app);
         app.MapGet("/api/connectors/oauth", async (
             ConnectorOAuthService oauth,
             IGatewayAuthGuard auth,

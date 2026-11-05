@@ -23,12 +23,13 @@ internal sealed class ExternalLoginProviders
 
     public string? Host { get; }
 
-    public static ExternalLoginProviders Create(IConfiguration configuration, ConnectorAuthEndpoint endpoint)
+    public static ExternalLoginProviders Create(IConfiguration configuration, ConnectorAuthEndpoint endpoint, GatewaySystemSettings? system = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(endpoint);
-        string? google = BlankToNull(configuration["Kautuka:Auth:Google:ClientId"]);
-        string? microsoft = BlankToNull(configuration["Kautuka:Auth:Microsoft:ClientId"]);
+        bool hasOverride = system?.AuthenticationBrokerOrigin is not null;
+        string? google = BlankToNull(hasOverride ? system!.AuthenticationBrokerGoogleClientId : configuration["Kautuka:Auth:Google:ClientId"]);
+        string? microsoft = BlankToNull(hasOverride ? system!.AuthenticationBrokerMicrosoftClientId : configuration["Kautuka:Auth:Microsoft:ClientId"]);
         bool hosted = endpoint.IsHosted;
         return new ExternalLoginProviders(
             hosted && google is not null,

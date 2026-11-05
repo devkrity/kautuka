@@ -38,6 +38,35 @@ public sealed partial class AuthEndpointActivationTests
     }
 
     [Fact]
+    public void ExternalLoginTabBindingRejectsOtherBrowsersWithoutConsumingTheFlow()
+    {
+        var sessions = new ExternalLoginSessionStore();
+        string cookie = ExternalLoginSessionStore.CreateCookieBinding();
+        string tab = ExternalLoginSessionStore.CreateCookieBinding();
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        sessions.Save("flow", new ExternalLoginSession
+        {
+            Provider = "google",
+            CodeVerifier = "verifier",
+            Nonce = "nonce",
+            ReturnOrigin = applianceOrigin,
+            CookieBindingHash = ExternalLoginSessionStore.HashBinding(cookie),
+            TabBindingHash = ExternalLoginSessionStore.HashBinding(tab),
+            BrokerFlowId = "broker-flow",
+            Intent = "LOGIN",
+            ExpiresAt = now.AddMinutes(5),
+        });
+        Assert.False(sessions.TryConfirmBrowser("flow", cookie, "different-tab", now));
+        Assert.False(sessions.TryRemove("flow", "different-cookie", now, out _));
+        Assert.False(sessions.TryConfirmBrowser("flow", "different-cookie", tab, now));
+        Assert.True(sessions.TryGetBound("flow", cookie, tab, now, out ExternalLoginSession? pending));
+        Assert.False(pending!.BrowserConfirmed);
+        Assert.True(sessions.TryConfirmBrowser("flow", cookie, tab, now));
+        Assert.True(sessions.TryGetBound("flow", cookie, tab, now, out pending));
+        Assert.True(pending!.BrowserConfirmed);
+    }
+
+    [Fact]
     public async Task ExternalLoginRejectsMissingOrDifferentBrowserCookieBeforeCodeExchange()
     {
         ScriptedIdentityClient identities = new();

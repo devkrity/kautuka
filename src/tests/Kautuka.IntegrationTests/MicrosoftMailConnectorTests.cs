@@ -83,51 +83,87 @@ public sealed class MicrosoftMailConnectorTests
     }
 
     [Fact]
-    public async Task HostedExchangeKeepsTheClientIdOnTheAuthHost()
+    public async Task HostedMicrosoftConnectorUsesBoundRefreshAndDisconnect()
     {
-        string? body = null;
-        string? dpop = null;
+        const string id = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        string original = "kmf1." + new string('x', 40), rotated = "kmf1." + new string('y', 40);
+        var paths = new List<string>();
         var handler = new ScriptedHandler
         {
             Respond = request =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/installation/register") return new HttpResponseMessage(HttpStatusCode.NoContent);
+            paths.Add(request.RequestUri!.AbsolutePath);
+            Assert.True(request.Headers.Contains("Kautuka-Installation-Proof"));
+            Assert.True(request.Headers.Contains("DPoP"));
+            if (request.RequestUri.AbsolutePath == "/installation/mail-refresh")
             {
-                body = request.Content!.ReadAsStringAsync(CancellationToken.None).GetAwaiter().GetResult();
-                dpop = request.Headers.GetValues("DPoP").Single();
-                Assert.Contains("https://auth.kautuka.io/microsoft-mail/token", request.RequestUri?.AbsoluteUri, StringComparison.Ordinal);
-                return JsonResponse(
-                    """{"token_type":"Bearer","expires_in":3600,"access_token":"access-token-value","refresh_token":"krt1.kid.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA"}""");
-            },
+                string body = request.Content!.ReadAsStringAsync(CancellationToken.None).GetAwaiter().GetResult();
+                using JsonDocument payload = JsonDocument.Parse(body);
+                Assert.Equal("microsoft", payload.RootElement.GetProperty("provider").GetString());
+                Assert.Equal(id, payload.RootElement.GetProperty("connectionId").GetString());
+                return JsonResponse($$"""{"accessToken":"ms-access","refreshToken":"{{rotated}}","tokenType":"Bearer","issuedAt":{{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}},"expiresAt":null}""");
+            }
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        }
         };
+        using var store = new BrokerMailCredentialStore(new BrokerTestStorage());
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var coordinator = new BrokerMailCoordinator(store, handoff);
+        var credential = new BrokerMailCredential("microsoft", id, id, 1, original, ConnectorDpop.CreatePrivateJwk(), "https://auth.kautuka.io");
+        await store.StageActivationAsync("owner", "kautuka-m365-mail", new(credential, id), CancellationToken.None);
+        await store.PromoteActivationAsync("owner", "kautuka-m365-mail", id, CancellationToken.None);
+        using var oldClient = new ConnectorAuthorizationClient(new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker called.") });
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([Profile(null, hostedKey: true)]), new FakeRefreshTokens(), oldClient,
+            new ConnectorOAuthSessionStore(), ConnectorAuthEndpoint.Parse("https://auth.kautuka.io"), coordinator);
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal) { ["KAUTUKA_M365_REFRESH_TOKEN"] = "secret", ["KAUTUKA_M365_DPOP_KEY"] = "secret" };
+        await service.PrepareAsync("kautuka-m365-mail", "owner", environment, true, CancellationToken.None);
+        Assert.Equal("ms-access", environment["KAUTUKA_M365_ACCESS_TOKEN"]);
+        Assert.False(environment.ContainsKey("KAUTUKA_M365_REFRESH_TOKEN"));
+        Assert.False(environment.ContainsKey("KAUTUKA_M365_DPOP_KEY"));
+        Assert.True((await service.DisconnectAsync("owner", "kautuka-m365-mail", CancellationToken.None)).Disconnected);
+        Assert.Equal(["/installation/mail-refresh", "/installation/mail-refresh-ack", "/installation/mail-disconnect"], paths);
+    }
+
+    [Fact]
+    public async Task LegacyHostedExchangeCannotCallTheBroker()
+    {
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Legacy broker was called.") };
         using var client = new ConnectorAuthorizationClient(handler);
-        var credentials = new FakeRefreshTokens();
         var sessions = new ConnectorOAuthSessionStore();
-        var service = new ConnectorOAuthService(
-            new ConnectorAuthCatalog([Profile(clientId: null, hostedKey: true)]),
-            credentials,
-            client,
-            sessions,
+        sessions.Save("state", new ConnectorOAuthSession { UserId = "owner", ConnectorId = "kautuka-m365-mail", CodeVerifier = "verifier", ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5) });
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([Profile(clientId: null, hostedKey: true)]), new FakeRefreshTokens(), client, sessions,
             ConnectorAuthEndpoint.Parse("https://auth.kautuka.io"));
+        Assert.Equal("rejected", service.Begin("owner", "kautuka-m365-mail", "http://127.0.0.1:20229").Status);
+        ConnectorOAuthCompleteResponse result = await service.CompleteAsync("owner", "code", "state", CancellationToken.None, "ticket");
+        Assert.Equal("rejected", result.Status);
+    }
 
-        ConnectorOAuthBeginResponse begin = service.Begin("owner", "kautuka-m365-mail", "http://127.0.0.1:20229");
-        Assert.Equal("redirect", begin.Status);
-        Assert.DoesNotContain("client_id", begin.StartUrl, StringComparison.Ordinal);
-        string state = StateFrom(begin.StartUrl!);
+    [Fact]
+    public async Task ObsoleteHostedMicrosoftCredentialRequiresReconnectAndCanBeRemoved()
+    {
+        var credentials = new LegacyTokens();
+        await credentials.SetAsync("owner", "KAUTUKA_M365_REFRESH_TOKEN", "obsolete-refresh", CancellationToken.None);
+        await credentials.SetAsync("owner", "KAUTUKA_M365_DPOP_KEY", "obsolete-key", CancellationToken.None);
+        var handler = new ScriptedHandler { Respond = static _ => throw new InvalidOperationException("Retired broker was called.") };
+        using var identities = new BrokerInstallationIdentityProvider(new BrokerTestIdentityStore());
+        using var registration = new BrokerInstallationRegistration(identities, new HttpClient(handler, false));
+        using var handoff = new BrokerHandoffClient(identities, registration, new HttpClient(handler, false));
+        using var storage = new BrokerMailCredentialStore(new BrokerTestStorage());
+        using var coordinator = new BrokerMailCoordinator(storage, handoff);
+        using var client = new ConnectorAuthorizationClient(handler);
+        var service = new ConnectorOAuthService(new ConnectorAuthCatalog([Profile(null, hostedKey: true)]), credentials, client,
+            new ConnectorOAuthSessionStore(), ConnectorAuthEndpoint.Parse("https://auth.kautuka.io"), coordinator);
 
-        ConnectorOAuthCompleteResponse complete = await service.CompleteAsync("owner", "auth-code", state, CancellationToken.None, "signed-broker-ticket").ConfigureAwait(true);
-
-        Assert.Equal("connected", complete.Status);
-        Assert.NotNull(body);
-        Assert.DoesNotContain("client_id", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("client_secret", body, StringComparison.Ordinal);
-        Assert.Contains("code_verifier=", body, StringComparison.Ordinal);
-        Assert.Contains("broker_ticket=signed-broker-ticket", body, StringComparison.Ordinal);
-        Assert.Contains("return_origin=http%3A%2F%2F127.0.0.1%3A20229", body, StringComparison.Ordinal);
-        Assert.Contains("redirect_uri=https%3A%2F%2Fauth.kautuka.io%2Fcallback", body, StringComparison.Ordinal);
-        Assert.StartsWith("krt1.", credentials.SavedRefreshToken, StringComparison.Ordinal);
-        Assert.NotNull(dpop);
-        using JsonDocument proof = JsonDocument.Parse(DecodeJwtPayload(dpop));
-        Assert.Equal("https://auth.kautuka.io/microsoft-mail/token", proof.RootElement.GetProperty("htu").GetString());
-        Assert.False(string.IsNullOrWhiteSpace(credentials.SavedDpopKey));
+        var status = (await service.ListStatusAsync("owner", CancellationToken.None)).Connectors.Single();
+        Assert.False(status.Connected);
+        Assert.Contains("Reconnect", status.Message, StringComparison.Ordinal);
+        Assert.True((await service.DisconnectAsync("owner", "kautuka-m365-mail", CancellationToken.None)).Disconnected);
+        Assert.Null(await credentials.GetAsync("owner", "KAUTUKA_M365_REFRESH_TOKEN", CancellationToken.None));
+        Assert.Null(await credentials.GetAsync("owner", "KAUTUKA_M365_DPOP_KEY", CancellationToken.None));
+        Assert.Equal(0, handler.Calls);
     }
 
     [Fact]
@@ -926,7 +962,7 @@ public sealed class MicrosoftMailConnectorTests
         throw new InvalidOperationException("The start URL has no state.");
     }
 
-    private static ConnectorAuthProfile Profile(string? clientId, bool hostedKey = false) => new()
+    internal static ConnectorAuthProfile Profile(string? clientId, bool hostedKey = false) => new()
     {
         Id = "kautuka-m365-mail",
         Name = "Microsoft 365 mail",
@@ -972,6 +1008,20 @@ public sealed class MicrosoftMailConnectorTests
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
 
+    private sealed class BrokerTestStorage : IBrokerMailCredentialStorage
+    {
+        private readonly Dictionary<string, string> values = new(StringComparer.Ordinal);
+        public Task<string?> ReadAsync(string key, CancellationToken ct) => Task.FromResult(values.GetValueOrDefault(key));
+        public Task WriteAsync(string key, string value, CancellationToken ct) { values[key] = value; return Task.CompletedTask; }
+    }
+
+    private sealed class BrokerTestIdentityStore : IBrokerInstallationIdentityStore
+    {
+        private string? value;
+        public Task<string?> ReadAsync(CancellationToken ct) => Task.FromResult(value);
+        public Task WriteAsync(string saved, CancellationToken ct) { value = saved; return Task.CompletedTask; }
+    }
+
     private sealed class FakeRefreshTokens : IConnectorRefreshTokenStore
     {
         public string? SavedRefreshToken { get; private set; }
@@ -1000,6 +1050,14 @@ public sealed class MicrosoftMailConnectorTests
             SavedRefreshToken = null;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class LegacyTokens : IConnectorRefreshTokenStore
+    {
+        private readonly Dictionary<string, string> values = new(StringComparer.Ordinal);
+        public Task<string?> GetAsync(string userId, string key, CancellationToken cancellationToken) => Task.FromResult(values.GetValueOrDefault(key));
+        public Task SetAsync(string userId, string key, string value, CancellationToken cancellationToken) { values[key] = value; return Task.CompletedTask; }
+        public Task DeleteAsync(string userId, string key, CancellationToken cancellationToken) { values.Remove(key); return Task.CompletedTask; }
     }
 
     private sealed class ScriptedHandler : HttpMessageHandler

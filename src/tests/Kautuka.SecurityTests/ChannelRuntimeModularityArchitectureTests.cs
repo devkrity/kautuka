@@ -1,11 +1,30 @@
 using System.Text.RegularExpressions;
 
+using Kautuka.Gateway.Domain.Auth;
+using Kautuka.Gateway.Domain.Connectors;
+
+using Microsoft.Extensions.Configuration;
+
 namespace Kautuka.SecurityTests;
 
 /// <summary>Additional M4 auditability controls kept separate from projection ownership tests.</summary>
 public sealed class ChannelRuntimeModularityArchitectureTests
 {
     private static readonly string repositoryRoot = FindRepositoryRoot();
+
+    [Fact]
+    public void ProductionConfigurationEnablesHostedSocialSignIn()
+    {
+        IConfiguration configuration = new ConfigurationBuilder()
+            .AddJsonFile(Path.Combine(repositoryRoot, "src/backend/Kautuka.Gateway/appsettings.Production.json"))
+            .Build();
+        ConnectorAuthEndpoint endpoint = ConnectorAuthEndpoint.Parse(configuration["Kautuka:ConnectorAuth:Host"]);
+        ExternalLoginProviders providers = ExternalLoginProviders.Create(configuration, endpoint);
+
+        Assert.True(endpoint.IsHosted);
+        Assert.True(providers.Google);
+        Assert.True(providers.Microsoft);
+    }
 
     [Fact]
     public void ProviderWorkersCannotUsePartialDeclarationsToHideResponsibility()

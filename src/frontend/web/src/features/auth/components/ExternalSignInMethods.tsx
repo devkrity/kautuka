@@ -1,20 +1,23 @@
 import React from 'react';
 import { Button } from '@/components/ui/button';
-import { listExternalProviders, startExternalLogin } from '../api/auth';
+import { listExternalProviders, setAccessToken } from '../api/auth';
+import { runBoundExternalLogin } from '../api/boundExternalLogin';
+import { authQueryKeys } from '../api/queries';
+import { queryClient } from '@/lib/queryClient';
 
 interface ExternalSignInMethodsProps {
   linkedProviders: string[];
   onError: (message: string) => void;
-  onRedirect?: (url: string) => void;
 }
 
 export function ExternalSignInMethods({
   linkedProviders,
   onError,
-  onRedirect = (url) => globalThis.location.assign(url),
 }: Readonly<ExternalSignInMethodsProps>) {
   const [available, setAvailable] = React.useState({ google: false, microsoft: false });
   const [linking, setLinking] = React.useState<string | null>(null);
+  const attempt = React.useRef<AbortController | null>(null);
+  React.useEffect(() => () => attempt.current?.abort(), []);
 
   React.useEffect(() => {
     let active = true;
@@ -29,13 +32,20 @@ export function ExternalSignInMethods({
   const linked = new Set(linkedProviders.map((provider) => provider.toLowerCase()));
   const beginLink = async (provider: 'google' | 'microsoft', accountType?: 'organizations' | 'consumers') => {
     const key = accountType ? `${provider}-${accountType}` : provider;
+    attempt.current?.abort();
+    const controller = new AbortController();
+    attempt.current = controller;
     setLinking(key);
     try {
-      const started = await startExternalLogin(provider, accountType, 'link');
-      onRedirect(started.startUrl);
+      const result = await runBoundExternalLogin(provider, accountType, 'link', {}, controller.signal);
+      if (controller.signal.aborted) return;
+      setAccessToken(result.accessToken, Date.now() + result.expiresInSeconds * 1000);
+      await queryClient.invalidateQueries({ queryKey: authQueryKeys.profile() });
     } catch (error) {
+      if (controller.signal.aborted) return;
       onError(error instanceof Error ? error.message : 'Failed to start account linking.');
-      setLinking(null);
+    } finally {
+      if (!controller.signal.aborted) setLinking(null);
     }
   };
 
