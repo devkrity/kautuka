@@ -14,6 +14,14 @@ const buildScript = await readFile(path.join(root, 'scripts/build-release-assets
 const workflow = await readFile(path.join(root, '.github/workflows/release-build-platform-assets.yml'), 'utf8');
 const releasePipeline = await readFile(path.join(root, '.github/workflows/release-pipeline.yml'), 'utf8');
 const qualityWorkflow = await readFile(path.join(root, '.github/workflows/dotnet-quality.yml'), 'utf8');
+const automationJob = releasePipeline.match(/^  validate-release-automation:\s*\n([\s\S]*?)(?=^  validate-release-hygiene:)/mu)?.[1];
+assert.ok(automationJob, 'release automation validation job must exist');
+assert.match(automationJob, /ref:\s*\$\{\{\s*github\.sha\s*\}\}/u,
+  'release automation tests must run from the trusted workflow commit');
+assert.doesNotMatch(automationJob, /needs\.resolve-channel\.outputs\.source_sha/u,
+  'a selected release commit must not control scripts run in the trusted automation job');
+assert.match(automationJob, /persist-credentials:\s*false/u);
+assert.match(automationJob, /package-manager-cache:\s*false/u);
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'kautuka-release-source-'));
 
 try {
