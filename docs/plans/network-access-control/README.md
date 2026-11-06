@@ -214,3 +214,23 @@ The prototype ledger advances to version 2 and records hook/path, egress, nullab
 **Local OUTPUT is still disabled.** The current nft fixture denies it, and its kernel adapter explicitly rejects publication of local-output leases. This checkpoint adds typed evaluation/audit groundwork, not a resolver or enabled upstream route. Sixty focused C# tests pass on Windows and Linux, including wrong/missing/root UID, wrong interface, stale generation, separation from forwarded identity, durable expanded fields and persistent local-actor revocation. Linux Native AOT publication succeeds without new warnings; all twelve live kernel checks and both owners' combined observed/signed TLS acquisition positive/negative checks pass again, with no cleanup errors. The architect reviewed and approved this checkpoint.
 
 The next local-upstream transport fixture uses a **trusted-infrastructure-only gateway namespace**, with a dedicated unprivileged actor. A conntrack grant does not identify the current UDP receiving socket: closing an authorized socket and rebinding its port under another UID can preserve an old reply tuple. OUTPUT ownership checks alone do not establish hostile-UID receive isolation. Keep untrusted workloads out of this namespace and include a close/rebind diagnostic before enabling broader INPUT/OUTPUT claims. DNS parsing, query policy, caching and response validation remain separate work. Gate 1 remains **in progress**.
+
+
+### Trusted-infrastructure OUTPUT transport checkpoint (6 November 2026)
+
+A separate, opt-in `probe-output <ktng-namespace> <audit.sqlite> <queue> <dedicated-uid>` profile now exercises local upstream transport. The existing forwarded/registry profile still rejects local-output leases. The new fixture denies FORWARD, uses a distinct output-grant set, evaluates a positive socket-UID match with unconditional denial fallback before fast-path acceptance in both OUTPUT hooks, and permits INPUT only for the reverse fixture tuple/interface/reply direction with a live output grant. Publication verifies the typed path, UID, interface and fixture generation. NDP exceptions are narrowly scoped trusted-link control traffic; this is not a production neighbor-security policy.
+
+`scripts/network-gateway/probe-local-output.py --report <new-file> --admission-binary <published-AOT-path>` creates dedicated disposable resolver/other UIDs and an isolated simulated uplink. Its scope is **trusted infrastructure only** in the gateway namespace. It is not installed or used by Manager or the central resolver.
+
+The live Fedora/WSL result passes six checks:
+
+- Authorized TCP/UDP IPv4/IPv6 payloads arrive only after durable local-output admissions containing the resolver UID, hook, egress and namespace epoch.
+- Root and the other UID fail all eight outbound attempts, with kernel actor-denial counter hits and no sink payloads.
+- An extra UDP socket is closed and rebound under the other UID. It receives an old admitted reply, explicitly confirming **no hostile-UID receive isolation**. Its outbound send remains denied before the existing-flow fast path.
+- After consumer death, four new authorized-UID flows fail through the queue path, while the four original admitted sockets continue through kernel grants. Explicit unused source ports avoid accidental tuple reuse. The admission count remains at its five-row baseline.
+- Removing the output grant set stops both outbound and independently generated inbound payloads on the four original sockets.
+- All created processes/accounts/mappings/namespaces are cleaned up without errors.
+
+The first run exposed a harness assumption: a local OUTPUT drop can surface `EPERM` synchronously on UDP send. The bounded fixture client now reports send/receive socket errors; positive checks still require exact nonces and denial checks still require the relevant kernel counter plus sink silence. The failed run is preserved. Sixty focused C# tests pass on Windows and Linux, the Native AOT binary publishes/executes, and the twelve forwarding checks pass again after the client/namespace-helper changes. The architect reviewed and approved the checkpoint subject to these successful regressions.
+
+This is **local upstream transport**, not DNS parsing/query policy, production OUTPUT supervision or receive isolation for mutually hostile local actors. Untrusted workloads must remain outside the infrastructure namespace. Actual generation ownership, DNS, alternate-uplink/stale-path denial and native Linux security/session validation remain outstanding. Gate 1 remains **in progress**.

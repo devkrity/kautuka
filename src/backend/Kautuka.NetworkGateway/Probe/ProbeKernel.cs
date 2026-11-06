@@ -10,17 +10,7 @@ internal sealed class ProbeKernel : IAdmissionKernel
 {
     public ProbeKernel(string expectedNamespace, ushort queue)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(expectedNamespace);
-        if (!expectedNamespace.StartsWith("ktng-", StringComparison.Ordinal)
-            || expectedNamespace.Length > 48 || expectedNamespace.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '-'))
-        {
-            throw new ArgumentException("Only an explicitly named ktng-* test namespace is allowed.", nameof(expectedNamespace));
-        }
-        string actual = Command("ip", ["netns", "identify"]);
-        if (actual.Trim() != expectedNamespace)
-        {
-            throw new InvalidOperationException("Refusing to change rules outside the expected isolated test namespace.");
-        }
+        VerifyNamespace(expectedNamespace);
         string queueNumber = queue.ToString(CultureInfo.InvariantCulture);
         Apply($$"""
             destroy table inet ktng_admission
@@ -70,6 +60,21 @@ internal sealed class ProbeKernel : IAdmissionKernel
               }
             }
             """);
+    }
+
+    internal static void VerifyNamespace(string expectedNamespace)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedNamespace);
+        if (!expectedNamespace.StartsWith("ktng-", StringComparison.Ordinal)
+            || expectedNamespace.Length > 48 || expectedNamespace.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '-'))
+        {
+            throw new ArgumentException("Only an explicitly named ktng-* test namespace is allowed.", nameof(expectedNamespace));
+        }
+        string actual = Command("ip", ["netns", "identify"]);
+        if (actual.Trim() != expectedNamespace)
+        {
+            throw new InvalidOperationException("Refusing to change rules outside the expected isolated test namespace.");
+        }
     }
 
     public void Publish(AdmissionLease lease)

@@ -90,14 +90,17 @@ CLIENT_PROGRAM = r"""import json,socket,sys
 address,protocol=sys.argv[1],int(sys.argv[2])
 s=socket.socket(socket.AF_INET6 if ':' in address else socket.AF_INET,socket.SOCK_STREAM if protocol==6 else socket.SOCK_DGRAM)
 s.settimeout(0.6)
+if len(sys.argv)>3:
+    s.bind(('::' if ':' in address else '0.0.0.0',int(sys.argv[3])))
 s.connect((address,20199))
 print(json.dumps({'ready':True,'address':s.getsockname()[0],'port':s.getsockname()[1],'protocol':protocol}),flush=True)
 for line in sys.stdin:
     request=json.loads(line)
     result=None
-    if request['action']=='exchange':
-        s.sendall(request['payload'].encode()+(b'\n' if protocol==6 else b''))
+    error=None
     try:
+        if request['action']=='exchange':
+            s.sendall(request['payload'].encode()+(b'\n' if protocol==6 else b''))
         data=s.recv(1024)
         if protocol==6:
             while data and not data.endswith(b'\n'):
@@ -106,9 +109,9 @@ for line in sys.stdin:
                     break
                 data+=chunk
         result=data.decode().rstrip('\n')
-    except TimeoutError:
-        pass
-    print(json.dumps({'response':result}),flush=True)
+    except OSError as failure:
+        error=failure.errno
+    print(json.dumps({'response':result,'errno':error}),flush=True)
 """
 
 
