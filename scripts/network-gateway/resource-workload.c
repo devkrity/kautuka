@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <signal.h>
@@ -52,6 +53,60 @@ static int expected(const char *path, const char *wanted)
 
 int main(int argc, char **argv)
 {
+    if (argc == 4 && strcmp(argv[1], "dns4") == 0) {
+        unsigned char query[512] = {0x4b, 0x54, 1, 0, 0, 1};
+        size_t offset = 12;
+        const char *label = argv[3];
+        while (*label) {
+            const char *end = strchr(label, '.');
+            size_t length = end ? (size_t)(end - label) : strlen(label);
+            if (length == 0 || length > 63 || offset + length + 6 > sizeof(query)) return 2;
+            query[offset++] = (unsigned char)length;
+            memcpy(query + offset, label, length); offset += length;
+            if (!end) break;
+            label = end + 1;
+        }
+        query[offset++] = 0; query[offset++] = 0; query[offset++] = 1; query[offset++] = 0; query[offset++] = 1;
+        int descriptor = socket(AF_INET, SOCK_DGRAM, 0);
+        if (descriptor < 0) return 2;
+        struct timeval timeout = { .tv_sec = 1 };
+        struct sockaddr_in server = { .sin_family = AF_INET, .sin_port = htons(53) };
+        if (inet_pton(AF_INET, argv[2], &server.sin_addr) != 1
+                || setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0
+                || connect(descriptor, (struct sockaddr *)&server, sizeof(server)) != 0) { close(descriptor); return 2; }
+        unsigned char reply[1233];
+        ssize_t count = -1;
+        if (send(descriptor, query, offset, 0) == (ssize_t)offset) count = recv(descriptor, reply, sizeof(reply), 0);
+        int received = count >= 12 && reply[0] == 0x4b && reply[1] == 0x54;
+        printf("{\"dnsResponse\":%s}\n", received ? "true" : "false");
+        close(descriptor);
+        return received ? 0 : 3;
+    }
+    if (argc == 3 && (strcmp(argv[1], "lookup4") == 0 || strcmp(argv[1], "lookup6") == 0
+            || strcmp(argv[1], "lookup-hold4") == 0)) {
+        struct addrinfo hints = {0}, *addresses = NULL;
+        int ipv6 = strcmp(argv[1], "lookup6") == 0;
+        hints.ai_family = ipv6 ? AF_INET6 : AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        /* Explicit family, no AI_ADDRCONFIG: AAAA must not depend on host interfaces. */
+        int status = getaddrinfo(argv[2], NULL, &hints, &addresses);
+        if (status != 0) { printf("{\"lookupError\":%d}\n", status); return 3; }
+        printf("{\"family\":%d,\"addresses\":[", ipv6 ? 6 : 4);
+        unsigned count = 0;
+        for (struct addrinfo *item = addresses; item != NULL && count < 16; item = item->ai_next) {
+            char text[INET6_ADDRSTRLEN];
+            if (item->ai_family != hints.ai_family) { freeaddrinfo(addresses); return 2; }
+            const void *address = ipv6 ? (const void *)&((struct sockaddr_in6 *)item->ai_addr)->sin6_addr
+                : (const void *)&((struct sockaddr_in *)item->ai_addr)->sin_addr;
+            if (inet_ntop(hints.ai_family, address, text, sizeof(text)) == NULL) { freeaddrinfo(addresses); return 2; }
+            printf("%s\"%s\"", count++ ? "," : "", text);
+        }
+        puts("]}");
+        freeaddrinfo(addresses);
+        fflush(stdout);
+        if (strcmp(argv[1], "lookup-hold4") == 0) sleep(8);
+        return count ? 0 : 2;
+    }
     if (argc == 3 && strcmp(argv[1], "artifact") == 0) { puts(argv[2]); return 0; }
     if (argc == 3 && strncmp(argv[1], "echo-", 5) == 0) {
         int ipv6 = strstr(argv[1], "6") != NULL;

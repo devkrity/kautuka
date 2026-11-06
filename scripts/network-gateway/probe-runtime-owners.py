@@ -19,6 +19,7 @@ import pwd
 import secrets
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -163,7 +164,7 @@ class RuntimeOwners:
         self.inspect_program = inspect_program or INSPECT
         self.owners = []
 
-    def build_workload(self, source):
+    def build_workload(self, source, *, name_service_files=()):
         binary = self.root / "probe"
         run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)])
         dependencies = run(["ldd", str(binary)])
@@ -182,6 +183,10 @@ class RuntimeOwners:
             output.add(binary, arcname="probe")
             for library in sorted(libraries):
                 output.add(library, arcname=str(library).lstrip("/"))
+            for entry in name_service_files:
+                if entry["logical"] not in ("/etc/nsswitch.conf", "/etc/hosts"):
+                    raise RuntimeError("Only NSS and hosts policy files belong in the offline DNS workload")
+                output.add(entry["source"], arcname=entry["logical"].lstrip("/"))
         archive.chmod(0o644)
         self.archive = archive
         return {"source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -240,6 +245,36 @@ class RuntimeOwners:
         run(["ip", "-n", name, "link", "set", "lo", "up"])
         return owner
 
+    def configure_resolver(self, owner, *, blocked_socket):
+        if not any(item is owner for item in self.owners):
+            raise RuntimeError("Resolver configuration requires this fixture's registered owner")
+        blocked_socket = Path(blocked_socket)
+        if not blocked_socket.is_relative_to(self.root) or blocked_socket.is_symlink() or not stat.S_ISSOCK(blocked_socket.stat().st_mode):
+            raise RuntimeError("Host socket canary must belong to this fixture")
+        directory = self.root / ("dns-" + owner["name"])
+        directory.mkdir(mode=0o755)
+        contents = {
+            "/etc/resolv.conf": "nameserver 10.231.251.1\noptions timeout:1 attempts:1\n",
+            "/etc/nsswitch.conf": "passwd: files\ngroup: files\nshadow: files\nhosts: files dns\nnetworks: files\n",
+            "/etc/hosts": "127.0.0.1 localhost\n::1 localhost\n",
+        }
+        files = []
+        for logical, content in contents.items():
+            target = Path(logical).resolve(strict=True)
+            source = directory / Path(logical).name
+            source.write_text(content)
+            source.chmod(0o444)
+            files.append({"logical": logical, "target": str(target), "source": str(source),
+                          "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                          "host_sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+        owner["resolver_files"] = files
+        # Mask socket paths rather than the whole resolved directory, which may
+        # also contain the host's symlink target for resolv.conf on native Linux.
+        owner["blocked_host_sockets"] = [str(blocked_socket), "/run/dbus/system_bus_socket",
+            "/run/systemd/resolve/io.systemd.Resolve", "/run/systemd/resolve/io.systemd.Resolve.Monitor",
+            "/run/nscd/socket", "/var/run/nscd/socket"]
+        return files
+
     def start_user_manager(self, owner):
         uid = str(owner["uid"])
         unit = "user@" + uid + ".service"
@@ -248,10 +283,21 @@ class RuntimeOwners:
             raise RuntimeError("Refusing existing user-manager configuration or running instance")
         directory.mkdir(mode=0o755)
         owner["manager_dropin"] = str(directory)
+        private_configuration = ""
+        if owner.get("resolver_files"):
+            private_configuration = "PrivateMounts=yes\n"
+            for entry in owner["resolver_files"]:
+                source = Path(entry["source"])
+                status = source.lstat()
+                if source.is_symlink() or status.st_uid != 0 or status.st_mode & 0o022 or not source.is_relative_to(self.root):
+                    raise RuntimeError("Resolver source file lost its trusted ownership")
+                private_configuration += "BindReadOnlyPaths=" + str(source) + ":" + entry["target"] + "\n"
+            private_configuration += "InaccessiblePaths=" + " ".join("-" + path for path in owner["blocked_host_sockets"]) + "\n"
+            private_configuration += "UnsetEnvironment=RES_OPTIONS LOCALDOMAIN HOSTALIASES\n"
         (directory / "90-ktng-fixture.conf").write_text(
             "[Service]\nPAMName=\nEnvironment=HOME=" + owner["home"] + "\nEnvironment=XDG_RUNTIME_DIR=/run/user/" + uid +
             "\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + uid + "/bus\nNetworkNamespacePath=/run/netns/" + owner["name"] +
-            "\nMemoryMax=256M\nMemorySwapMax=0\nTasksMax=128\nCPUQuota=100%\nRuntimeMaxSec=120\n")
+            "\nMemoryMax=256M\nMemorySwapMax=0\nTasksMax=128\nCPUQuota=100%\nRuntimeMaxSec=120\n" + private_configuration)
         run(["systemctl", "daemon-reload"])
         owner["manager_started"] = True
         run(["systemctl", "start", unit])
@@ -280,7 +326,7 @@ class RuntimeOwners:
                 "--property", "TasksMax=128", "--property", "CPUQuota=100%",
                 "--property", "RuntimeMaxSec=75", "--property", "NetworkNamespacePath=/run/netns/" + owner["name"],
                 "--property", "WorkingDirectory=" + owner["home"],
-                "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy",
+                "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy RES_OPTIONS LOCALDOMAIN HOSTALIASES",
                 "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + str(home / "runtime"),
                 "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
                 sys.executable, "-c", self.inspect_program, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
@@ -291,7 +337,7 @@ class RuntimeOwners:
                            "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus"]
             user_command = ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", owner["unit"],
                             "--property", "Delegate=yes", "--property", "WorkingDirectory=" + owner["home"],
-                            "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy",
+                            "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy RES_OPTIONS LOCALDOMAIN HOSTALIASES",
                             "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + runtime,
                             "--setenv", "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus",
                             "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
@@ -403,7 +449,7 @@ class RuntimeOwners:
                 raise RuntimeError("Session bus broker namespace was not observed")
         if "resources" in result:
             validate_resources(result["resources"])
-        return {"acquisition": result.get("acquisition"), "network": result.get("network"), "resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
+        return {"dns": result.get("dns"), "acquisition": result.get("acquisition"), "network": result.get("network"), "resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
                 "subid_start": owner["subid_start"], "requested_cgroup_manager": self.cgroup_manager,
                 "effective_cgroup_manager": effective, "outer": result["outer"], "inner": result["inner"],
                 "podman_version": result["podman"]["version"]["Version"], "warnings": result["warnings"]}
@@ -420,7 +466,7 @@ class RuntimeOwners:
                     directory = Path(owner["manager_dropin"])
                     if directory != Path("/run/systemd/system") / ("user@" + str(owner["uid"]) + ".service.d"):
                         raise RuntimeError("Unexpected user-manager drop-in cleanup path")
-                    (directory / "90-ktng-fixture.conf").unlink()
+                    (directory / "90-ktng-fixture.conf").unlink(missing_ok=True)
                     directory.rmdir()
                     run(["systemctl", "daemon-reload"])
                 if owner["user_created"]:
