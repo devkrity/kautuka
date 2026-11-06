@@ -9,7 +9,8 @@ namespace Kautuka.Gateway.Domain.Connectors;
 internal sealed class McpConnectorTestService(
     ILogger<McpConnectorTestService> logger,
     IManagerGrpcService workspaceGrpcService,
-    WorkspaceRuntimeContextResolver contextResolver) : IMcpConnectorTestService
+    WorkspaceRuntimeContextResolver contextResolver,
+    IMcpHttpClientFactory httpClientFactory) : IMcpConnectorTestService
 {
     private static readonly SemaphoreSlim probeSlots = new(2, 2);
 
@@ -36,51 +37,46 @@ internal sealed class McpConnectorTestService(
         Dictionary<string, string> testEnv = ReadTestEnv(request);
         return transport switch
         {
-            "HTTP" => TestHttpAsync(request, testEnv, ct),
+            "HTTP" => TestHttpAsync(request, ct),
             "CONTAINER" => TestContainerAsync(request, testEnv, ct),
             _ => TestLocalAsync(request, testEnv, ct),
         };
     }
 
-    private async Task<McpConnectorTestResult> TestHttpAsync(GatewayConnectorTestRequest request, IReadOnlyDictionary<string, string> testEnv, CancellationToken ct)
+    private async Task<McpConnectorTestResult> TestHttpAsync(GatewayConnectorTestRequest request, CancellationToken ct)
     {
         string? httpUrl = string.IsNullOrWhiteSpace(request.HttpUrl) ? null : request.HttpUrl.Trim();
         if (string.IsNullOrWhiteSpace(httpUrl))
             return new McpConnectorTestResult(false, "HTTP transport requires a URL.");
 
         if (!Uri.TryCreate(httpUrl, UriKind.Absolute, out Uri? uri))
-            return new McpConnectorTestResult(false, $"'{httpUrl}' is not a valid URL.");
+            return new McpConnectorTestResult(false, "Connector destination is invalid.");
 
-        if (!ProbeNetworkPolicy.IsAllowed(httpUrl, request.AllowPrivateDestination))
-            return new McpConnectorTestResult(false, "Connector test destination is not allowed.");
+        string? policyFailure = ProbeNetworkPolicy.GetDestinationFailure(httpUrl, request.AllowPrivateDestination);
+        if (policyFailure is not null)
+            return new McpConnectorTestResult(false, policyFailure);
 
         try
         {
-            var transportOptions = new HttpClientTransportOptions
+            var transportOptions = new HttpClientTransportOptions { Endpoint = uri, Name = "probe" };
+            RemoteMcpRequestContext remoteContext = request.RemoteContext
+                ?? throw new InvalidOperationException("Remote MCP test context is required.");
+            McpClient client = await httpClientFactory.CreateAsync(transportOptions, request.AllowPrivateDestination, remoteContext, ct).ConfigureAwait(false);
+            await using (client.ConfigureAwait(false))
             {
-                Endpoint = uri,
-                Name = "probe",
-                AdditionalHeaders = McpHttpAuthHeaders.Create(testEnv),
-            };
-            using var probeHandler = ProbeNetworkPolicy.CreateProbeHandler(request.AllowPrivateDestination);
-            using var probeClient = new HttpClient(probeHandler, disposeHandler: false);
-            var transport = new HttpClientTransport(transportOptions, probeClient, loggerFactory: null, ownsHttpClient: false);
-            await using (transport.ConfigureAwait(false))
-            {
-                McpClient client = await McpClient.CreateAsync(transport, cancellationToken: ct).ConfigureAwait(false);
-                await using (client.ConfigureAwait(false))
-                {
-                    IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
-                    IReadOnlyList<string> toolNames = tools.Select(t => t.Name).ToList();
-                    IReadOnlyDictionary<string, string?> toolDescriptions = tools.ToDictionary(t => t.Name, t => (string?)t.Description);
-                    return new McpConnectorTestResult(true, $"Connected. {tools.Count} tool(s) available.", tools.Count, ToolNames: toolNames, ToolDescriptions: toolDescriptions);
-                }
+                IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
+                IReadOnlyList<string> toolNames = tools.Select(t => t.Name).ToList();
+                IReadOnlyDictionary<string, string?> toolDescriptions = tools.ToDictionary(t => t.Name, t => (string?)t.Description);
+                return new McpConnectorTestResult(true, $"Connected. {tools.Count} tool(s) available.", tools.Count, ToolNames: toolNames, ToolDescriptions: toolDescriptions);
             }
         }
-        catch (HttpRequestException ex)
+        catch (RemoteMcpConfigurationException ex)
         {
-            McpConnectorTestServiceLog.HttpProbeFailed(logger, ex, httpUrl);
-            return new McpConnectorTestResult(false, $"Connection failed: {ex.Message}");
+            return new McpConnectorTestResult(false, ex.Message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new McpConnectorTestResult(false, RemoteMcpFailureMessages.Describe(ex));
         }
     }
 

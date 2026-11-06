@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 
+using Kautuka.Gateway.Domain.Connectors;
+
 namespace Kautuka.Gateway.Domain.Stores;
 
 internal sealed partial class GatewayUserStore : IGatewayUserStore
@@ -8,14 +10,16 @@ internal sealed partial class GatewayUserStore : IGatewayUserStore
     private readonly GatewayState state;
     private readonly IGatewayTokenStore tokenStore;
     private readonly IGatewayUserCommandRepository commandRepository;
+    private readonly RemoteMcpCredentialRevisionTracker? remoteRevisions;
     private readonly object mutationLock = new();
     private readonly Dictionary<string, string> issuedInviteCodes = new(StringComparer.Ordinal);
 
-    public GatewayUserStore(GatewayState state, IGatewayTokenStore tokenStore, IGatewayUserCommandRepository commandRepository)
+    public GatewayUserStore(GatewayState state, IGatewayTokenStore tokenStore, IGatewayUserCommandRepository commandRepository, RemoteMcpCredentialRevisionTracker? remoteRevisions = null)
     {
         this.state = state;
         this.tokenStore = tokenStore;
         this.commandRepository = commandRepository;
+        this.remoteRevisions = remoteRevisions;
     }
 
     public string? IssuedInviteCode(string userId)
@@ -195,6 +199,7 @@ internal sealed partial class GatewayUserStore : IGatewayUserStore
             return false;
         }
 
+        using IDisposable? remoteChange = !string.Equals(user.Role, role, StringComparison.OrdinalIgnoreCase) ? remoteRevisions?.BeginPolicyChange("caller", userId) : null;
         GatewayUser updated = user with
         {
             Role = role,
@@ -231,6 +236,7 @@ internal sealed partial class GatewayUserStore : IGatewayUserStore
             return false;
         }
 
+        using IDisposable? remoteChange = user.IsActive != isActive ? remoteRevisions?.BeginPolicyChange("caller", userId) : null;
         GatewayUser updated = user with { IsActive = isActive };
         commandRepository.Upsert(updated);
         state.Users[user.Username] = updated;

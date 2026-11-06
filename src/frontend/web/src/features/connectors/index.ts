@@ -8,5 +8,5 @@ export * from './types/connectorDraft';
 export * from './types/mcpImport';
 export { ConnectorCard } from './components/ConnectorCard';
 export { matchesConnectorOAuth } from './components/MailSignInPanel';
-export { ConnectorFormModal } from './components/ConnectorFormModal';
-export { ImportModal } from './components/ImportModal';
+export { ConnectorFormModal, ImportModal } from './components/LazyConnectorDialogs';
+export { RemoteMcpConnectionDialog } from './components/LazyRemoteMcpConnectionDialog';

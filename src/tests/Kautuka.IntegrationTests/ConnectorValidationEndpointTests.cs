@@ -12,6 +12,7 @@ using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Connectors;
+using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Manager.Protos;
@@ -23,6 +24,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 using Xunit.Sdk;
 
@@ -31,6 +33,34 @@ namespace Kautuka.IntegrationTests;
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ConnectorValidationEndpointTests
 {
+    [Fact]
+    public async Task RemoteConnectorOperationsEmitMetadataOnlyAuditEvents()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument created = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/audited-remote", new
+        {
+            name = "Audited",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            credentials = new[] { new { key = "api-key", label = "API key", required = false } },
+            httpHeaders = new[] { new { name = "x-api-key", credentialKey = "api-key" } },
+        }, accessToken);
+        foreach (string value in new[] { "synthetic-audit-first", "synthetic-audit-second" })
+        {
+            using JsonDocument updated = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/audited-remote",
+                new { entries = new Dictionary<string, string> { ["api-key"] = value } }, accessToken);
+        }
+        using JsonDocument removed = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/audited-remote",
+            new { entries = new Dictionary<string, string>(), removeKeys = new[] { "api-key" } }, accessToken);
+        using JsonDocument tested = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/test", new { id = "audited-remote", transport = "http" }, accessToken);
+        using JsonDocument disabled = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/audited-remote",
+            new { name = "Audited", transport = "http", httpUrl = "https://example.com/mcp", enabled = false }, accessToken);
+        foreach (string operation in new[] { "connector.created", "connector.updated", "connector.disabled", "credential.added", "credential.replaced", "credential.removed", "connection.tested" })
+            Assert.Contains(fixture.AuditMessages, entry => entry.Contains("operation=" + operation, StringComparison.Ordinal));
+        Assert.All(fixture.AuditMessages, entry => Assert.DoesNotContain("synthetic-audit", entry, StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ConnectorOAuthSessionsPruneExpiredEntriesBeforeAcceptingNewOnes()
     {
@@ -85,27 +115,18 @@ public sealed class ConnectorValidationEndpointTests
     };
 
     [Fact]
-    public async Task ConnectorValidationEndpointPassesTestEnvPayloadToService()
+    public async Task ConnectorValidationRejectsPlaintextRemoteTestSecrets()
     {
         await using var fixture = await ConnectorApiFixture.CreateAsync();
         string accessToken = await fixture.LoginAsBootstrapAdminAsync();
-
-        using JsonDocument response = await fixture.SendJsonAsync(
-            HttpMethod.Post,
-            "/api/connectors/test",
-            new
-            {
-                transport = "http",
-                httpUrl = "https://ha.example.com/api/mcp",
-                testEnv = new
-                {
-                    MCP_AUTH_TOKEN = "secret-token",
-                },
-            },
-            accessToken).ConfigureAwait(true);
-
-        Assert.True(response.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal("secret-token", response.RootElement.GetProperty("message").GetString());
+        using var probe = new HttpRequestMessage(HttpMethod.Post, "/api/connectors/test")
+        {
+            Content = JsonContent.Create(new { transport = "http", httpUrl = "https://ha.example.com/api/mcp", testEnv = new { MCP_AUTH_TOKEN = "secret-token" } }, options: jsonOptions),
+        };
+        probe.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using HttpResponseMessage response = await fixture.Client.SendAsync(probe, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.DoesNotContain("secret-token", await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -123,7 +144,8 @@ public sealed class ConnectorValidationEndpointTests
                 description = "Test connector",
                 transport = "http",
                 httpUrl = "https://ha.example.com/api/mcp",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
                 enabled = true,
             },
             accessToken).ConfigureAwait(true);
@@ -148,12 +170,18 @@ public sealed class ConnectorValidationEndpointTests
                 id = "homeassistant-mcp",
                 transport = "http",
                 httpUrl = "https://ha.example.com/api/mcp",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
             },
             accessToken).ConfigureAwait(true);
 
         Assert.True(response.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal("saved-token", response.RootElement.GetProperty("message").GetString());
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
+        Assert.Null(captured.TestEnv);
+        Assert.NotNull(captured.RemoteContext);
+        string key = fixture.RemoteCredentialKey("homeassistant-mcp", "https://ha.example.com/api/mcp", "MCP_AUTH_TOKEN");
+        IReadOnlyDictionary<string, string> resolved = await captured.RemoteContext.Resolve([key], TestContext.Current.CancellationToken);
+        Assert.Equal("saved-token", resolved[key]);
     }
 
     [Fact]
@@ -175,54 +203,50 @@ public sealed class ConnectorValidationEndpointTests
         Assert.True(ProbeNetworkPolicy.IsAllowed("https://1.1.1.1/mcp", allowPrivate: false));
     }
 
-    [Fact]
-    public async Task RuntimeConnectorClientBlocksPrivateConnectAndStillFollowsRedirect()
+    [Theory]
+    [InlineData(301)]
+    [InlineData(302)]
+    [InlineData(303)]
+    [InlineData(307)]
+    [InlineData(308)]
+    public async Task RuntimeConnectorClientBlocksPrivateConnectAndDoesNotForwardCustomCredentialsOnRedirect(int statusCode)
     {
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         using SocketsHttpHandler blocked = ProbeNetworkPolicy.CreateRuntimeHandler(allowPrivate: false);
-        Assert.True(blocked.AllowAutoRedirect);
+        Assert.False(blocked.UseProxy);
+        Assert.False(blocked.AllowAutoRedirect);
         using var blockedClient = new HttpClient(blocked) { Timeout = TimeSpan.FromSeconds(5) };
         HttpRequestException denied = await Assert.ThrowsAsync<HttpRequestException>(() =>
             blockedClient.GetAsync(new Uri("http://127.0.0.1:9/mcp"), cancellationToken));
-        Assert.Contains("not allowed", denied.Message, StringComparison.Ordinal);
+        Assert.Contains("isn't allowed", denied.Message, StringComparison.Ordinal);
 
-        var target = new TcpListener(IPAddress.Loopback, 0);
-        var redirector = new TcpListener(IPAddress.Loopback, 0);
-        Task? targetAccepted = null;
-        Task? redirectAccepted = null;
+        using var target = new TcpListener(IPAddress.Loopback, 0);
+        using var redirector = new TcpListener(IPAddress.Loopback, 0);
         try
         {
             target.Start();
             redirector.Start();
             int targetPort = ((IPEndPoint)target.LocalEndpoint).Port;
             int redirectPort = ((IPEndPoint)redirector.LocalEndpoint).Port;
-#pragma warning disable CA2025 // Both accept tasks are awaited before the listeners are stopped.
-            targetAccepted = AcceptOnceAsync(
-                target,
-                "HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nlanded",
-                cancellationToken);
-            redirectAccepted = AcceptOnceAsync(
+#pragma warning disable CA2025 // The response task is awaited before either listener is stopped.
+            Task redirectAccepted = AcceptOnceAsync(
                 redirector,
-                $"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{targetPort}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                $"HTTP/1.1 {statusCode} Redirect\r\nLocation: http://127.0.0.1:{targetPort}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 cancellationToken);
 #pragma warning restore CA2025
-
             using SocketsHttpHandler allowed = ProbeNetworkPolicy.CreateRuntimeHandler(allowPrivate: true);
             using var allowedClient = new HttpClient(allowed) { Timeout = TimeSpan.FromSeconds(5) };
-            string body = await allowedClient.GetStringAsync(new Uri($"http://127.0.0.1:{redirectPort}/"), cancellationToken).ConfigureAwait(true);
-            Assert.Equal("landed", body);
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"http://127.0.0.1:{redirectPort}/"));
+            request.Headers.Add("x-api-key", "synthetic-redirect-regression-key");
+            using HttpResponseMessage response = await allowedClient.SendAsync(request, cancellationToken);
+            Assert.Equal(statusCode, (int)response.StatusCode);
+            await redirectAccepted.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+            Assert.False(target.Pending());
         }
         finally
         {
-            if (targetAccepted is not null && redirectAccepted is not null)
-            {
-                await Task.WhenAll(targetAccepted, redirectAccepted).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(true);
-            }
-
             target.Stop();
             redirector.Stop();
-            target.Dispose();
-            redirector.Dispose();
         }
     }
 
@@ -260,7 +284,8 @@ public sealed class ConnectorValidationEndpointTests
                 description = "Test connector",
                 transport = "http",
                 httpUrl = "https://ha.example.com/api/mcp",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
                 enabled = true,
             },
             accessToken).ConfigureAwait(true);
@@ -284,7 +309,8 @@ public sealed class ConnectorValidationEndpointTests
                 id = "homeassistant-mcp",
                 transport = "http",
                 httpUrl = "https://attacker.example/collect",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
             }, options: jsonOptions),
         };
         probe.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -300,17 +326,6 @@ public sealed class ConnectorValidationEndpointTests
         await using var fixture = await ConnectorApiFixture.CreateAsync();
         string adminToken = await fixture.LoginAsBootstrapAdminAsync();
         _ = await fixture.SendJsonAsync(
-            HttpMethod.Put,
-            "/api/credentials/system",
-            new
-            {
-                entries = new
-                {
-                    MCP_AUTH_TOKEN = "system-token",
-                },
-            },
-            adminToken).ConfigureAwait(true);
-        _ = await fixture.SendJsonAsync(
             HttpMethod.Post,
             "/api/connectors/shared-http",
             new
@@ -319,10 +334,13 @@ public sealed class ConnectorValidationEndpointTests
                 description = "System connector",
                 transport = "http",
                 httpUrl = "https://ha.example.com/api/mcp",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
                 enabled = true,
             },
             adminToken).ConfigureAwait(true);
+        string sharedKey = fixture.RemoteCredentialKey("shared-http", "https://ha.example.com/api/mcp", "MCP_AUTH_TOKEN");
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/shared-http/system", new { entries = new { MCP_AUTH_TOKEN = "system-token" } }, adminToken).ConfigureAwait(true);
         using JsonDocument systemProbe = await fixture.SendJsonAsync(
             HttpMethod.Post,
             "/api/connectors/test",
@@ -335,7 +353,11 @@ public sealed class ConnectorValidationEndpointTests
             adminToken).ConfigureAwait(true);
         Assert.True(systemProbe.RootElement.GetProperty("success").GetBoolean());
         GatewayConnectorTestRequest systemCaptured = fixture.GetCapturedTestRequestForUrl("https://ha.example.com/api/mcp");
-        Assert.Equal("system-token", systemCaptured.TestEnv!["MCP_AUTH_TOKEN"]);
+        Assert.Null(systemCaptured.TestEnv);
+        Assert.NotNull(systemCaptured.RemoteContext);
+        Assert.True(systemCaptured.RemoteContext.IncludeSystemScope);
+        IReadOnlyDictionary<string, string> systemResolved = await systemCaptured.RemoteContext.Resolve([sharedKey], TestContext.Current.CancellationToken);
+        Assert.Equal("system-token", systemResolved[sharedKey]);
         Assert.True(systemCaptured.AllowPrivateDestination);
         (string systemScope, string? systemOwner) = fixture.ReadStoredConnectorOwnership("shared-http");
         Assert.Equal("system", systemScope);
@@ -373,7 +395,8 @@ public sealed class ConnectorValidationEndpointTests
                 description = "User connector",
                 transport = "http",
                 httpUrl = "https://member.example/mcp",
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
                 enabled = true,
             },
             memberToken).ConfigureAwait(true);
@@ -404,9 +427,139 @@ public sealed class ConnectorValidationEndpointTests
             memberToken).ConfigureAwait(true);
         Assert.True(memberProbe.RootElement.GetProperty("success").GetBoolean());
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForUrl("https://member.example/mcp");
-        Assert.Equal("user-token", captured.TestEnv!["MCP_AUTH_TOKEN"]);
-        Assert.False(captured.TestEnv.ContainsValue("system-token"));
+        Assert.Null(captured.TestEnv);
+        Assert.NotNull(captured.RemoteContext);
+        Assert.False(captured.RemoteContext.IncludeSystemScope);
+        string memberKey = fixture.RemoteCredentialKey("member-http", "https://member.example/mcp", "MCP_AUTH_TOKEN");
+        IReadOnlyDictionary<string, string> memberResolved = await captured.RemoteContext.Resolve([memberKey, sharedKey], TestContext.Current.CancellationToken);
+        Assert.Equal("user-token", memberResolved[memberKey]);
+        Assert.False(memberResolved.ContainsKey(sharedKey));
         Assert.False(captured.AllowPrivateDestination);
+    }
+
+    [Theory]
+    [InlineData("user")]
+    [InlineData("system")]
+    [InlineData("headers")]
+    public async Task ConnectorTestRejectsChangesWhileEndpointIsResolving(string change)
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        object Candidate(string header) => new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = header, credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/snapshot", Candidate("X-Api-Key"), admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/snapshot", new { entries = new { key = "before" } }, admin);
+        TaskCompletionSource<bool> release = fixture.Credentials.BlockNextAssociationRead();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/connectors/test") { Content = JsonContent.Create(new { id = "snapshot", transport = "http", httpUrl = "https://example.com/mcp" }, options: jsonOptions) };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+#pragma warning disable CA2025 // The finally block releases the barrier and awaits this request before disposal.
+        Task<HttpResponseMessage> pending = fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+#pragma warning restore CA2025
+        HttpResponseMessage? response = null;
+        try
+        {
+            await fixture.Credentials.BlockStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            if (change == "headers") _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/snapshot", Candidate("Authorization"), admin);
+            else _ = await fixture.SendJsonAsync(HttpMethod.Put, change == "system" ? "/api/credentials/connector/snapshot/system" : "/api/credentials/connector/snapshot", new { entries = new { key = "after" } }, admin);
+        }
+        finally { release.TrySetResult(true); response = await pending; }
+        using (response)
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("user")]
+    [InlineData("system")]
+    [InlineData("headers")]
+    public async Task DraftTestRejectsChangesWhileEndpointIsResolving(string change)
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        object Candidate(string header) => new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = header, credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/draft-snapshot", Candidate("X-Api-Key"), admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/draft-snapshot", new { entries = new { key = "before" } }, admin);
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "draft-snapshot", candidate = Candidate("X-Api-Key"), credentialScope = "user", entries = new { }, removeKeys = Array.Empty<string>() }, admin);
+        string id = draft.RootElement.GetProperty("draftId").GetString()!;
+        TaskCompletionSource<bool> release = fixture.Credentials.BlockNextAssociationRead();
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{id}/test");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+#pragma warning disable CA2025 // The finally block releases the barrier and awaits this request before disposal.
+        Task<HttpResponseMessage> pending = fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+#pragma warning restore CA2025
+        HttpResponseMessage? response = null;
+        try
+        {
+            await fixture.Credentials.BlockStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            if (change == "headers") _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/draft-snapshot", Candidate("Authorization"), admin);
+            else _ = await fixture.SendJsonAsync(HttpMethod.Put, change == "system" ? "/api/credentials/connector/draft-snapshot/system" : "/api/credentials/connector/draft-snapshot", new { entries = new { key = "after" } }, admin);
+        }
+        finally { release.TrySetResult(true); response = await pending; }
+        using (response) Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task TestRejectsAdminDemotionBeforeLeaseAndPrivateDestinationSend()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new
+        {
+            scope = "user",
+            name = "Private",
+            transport = "http",
+            httpUrl = "http://127.0.0.1:4567/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/private-snapshot", candidate, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/private-snapshot", new { entries = new { key = "before" } }, admin);
+        TaskCompletionSource<bool> release = fixture.Credentials.BlockNextAssociationRead();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/connectors/test") { Content = JsonContent.Create(new { id = "private-snapshot", transport = "http", httpUrl = "http://127.0.0.1:4567/mcp" }, options: jsonOptions) };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+#pragma warning disable CA2025 // The finally block releases the barrier and awaits this request before disposal.
+        Task<HttpResponseMessage> pending = fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+#pragma warning restore CA2025
+        HttpResponseMessage? response = null;
+        try
+        {
+            await fixture.Credentials.BlockStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            fixture.DemoteBootstrapAdmin();
+        }
+        finally { release.TrySetResult(true); response = await pending; }
+        using (response) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForUrl("http://127.0.0.1:4567/mcp");
+        Assert.True(captured.AllowPrivateDestination);
+        var inner = new FailIfSentHandler();
+        using var invoker = new HttpMessageInvoker(new RemoteMcpRequestHandler(captured.RemoteContext!, inner));
+        using var outgoing = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:4567/mcp");
+        await Assert.ThrowsAsync<HttpRequestException>(() => invoker.SendAsync(outgoing, TestContext.Current.CancellationToken));
+        Assert.False(inner.WasSent);
+    }
+
+    private sealed class FailIfSentHandler : HttpMessageHandler
+    {
+        public bool WasSent { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            WasSent = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        }
     }
 
     [Fact]
@@ -703,6 +856,318 @@ public sealed class ConnectorValidationEndpointTests
     }
 
     [Fact]
+    public async Task DraftApiTestsAndSavesOnlyTheBoundCandidate()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new
+        {
+            name = "Draft",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = true } },
+            httpHeaders = new[] { new { name = "Authorization", credentialKey = "key", prefix = "Bearer " } }
+        };
+        using JsonDocument created = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "new-draft", candidate, credentialScope = "user", entries = new { key = "synthetic-secret" }, removeKeys = Array.Empty<string>() }, token);
+        string id = created.RootElement.GetProperty("draftId").GetString()!;
+        Assert.DoesNotContain("synthetic-secret", created.RootElement.GetRawText(), StringComparison.Ordinal);
+        using JsonDocument pending = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector-drafts", null, token);
+        Assert.Equal(id, pending.RootElement.GetProperty("drafts")[0].GetProperty("draftId").GetString());
+        Assert.DoesNotContain("synthetic-secret", pending.RootElement.GetRawText(), StringComparison.Ordinal);
+        using JsonDocument tested = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/test", null, token);
+        Assert.True(tested.RootElement.GetProperty("success").GetBoolean());
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
+        Assert.Null(captured.TestEnv);
+        Assert.NotNull(captured.RemoteContext);
+        string storageKey = ConnectorCredentialKeys.BuildRemoteCredentialKey(captured.RemoteContext.CredentialNamespace!, captured.RemoteContext.Endpoint, "key");
+        IReadOnlyDictionary<string, string> resolved = await captured.RemoteContext.Resolve([storageKey], TestContext.Current.CancellationToken);
+        Assert.Equal("synthetic-secret", resolved[storageKey]);
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, token);
+        Assert.Equal("new-draft", saved.RootElement.GetProperty("id").GetString());
+        Assert.DoesNotContain("synthetic-secret", saved.RootElement.GetRawText(), StringComparison.Ordinal);
+        Assert.Contains(fixture.AuditMessages, message => message.Contains("operation=connector.created", StringComparison.Ordinal) && message.Contains("connector=new-draft", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.AuditMessages, message => message.Contains("synthetic-secret", StringComparison.Ordinal));
+        Assert.Equal(JsonValueKind.Null, saved.RootElement.GetProperty("toolCount").ValueKind);
+        using JsonDocument repeated = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, token);
+        Assert.Equal("new-draft", repeated.RootElement.GetProperty("id").GetString());
+        using JsonDocument status = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/new-draft", null, token);
+        Assert.Equal("user", status.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+    }
+
+    [Fact]
+    public async Task OwnerCredentialOnlyDraftPreservesSharedTimestampAndOtherCallerLease()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/owner-draft", candidate, admin);
+        string updatedAt = fixture.ConnectorUpdatedAt("owner-draft");
+        using RemoteMcpOperationLease otherLease = fixture.AcquireConnectorLease("owner-draft", "other-user");
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "owner-draft", candidate, credentialScope = "user", entries = new { key = "owner-secret" }, removeKeys = Array.Empty<string>() }, admin);
+        string id = draft.RootElement.GetProperty("draftId").GetString()!;
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, admin);
+        Assert.Equal(updatedAt, fixture.ConnectorUpdatedAt("owner-draft"));
+        Assert.False(otherLease.Token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task LegacyMarkerRejectsPreviouslyCreatedUnconfirmedDraftUntilReviewedReplacement()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new { name = "Legacy", transport = "http", httpUrl = "https://example.com/mcp", enabled = true, credentials = Array.Empty<object>(), httpHeaders = Array.Empty<object>() };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/legacy-review", candidate, admin);
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "legacy-review", candidate, credentialScope = "user", entries = new { } }, admin);
+        string id = draft.RootElement.GetProperty("draftId").GetString()!;
+        fixture.MarkConnectorLegacy("legacy-review");
+        foreach (string action in new[] { "test", "save" })
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{id}/{action}");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+            using HttpResponseMessage response = await fixture.Client.SendAsync(request, TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        }
+        var confirmed = new { name = "Legacy", transport = "http", httpUrl = "https://example.com/mcp", enabled = true, credentials = Array.Empty<object>(), httpHeaders = Array.Empty<object>(), confirmLegacyAuthReplacement = true };
+        using JsonDocument replacement = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "legacy-review", candidate = confirmed, credentialScope = "user", entries = new { } }, admin);
+        string replacementId = replacement.RootElement.GetProperty("draftId").GetString()!;
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{replacementId}/save", null, admin);
+        Assert.False(saved.RootElement.GetProperty("requiresCredentialReentry").GetBoolean());
+    }
+
+    [Fact]
+    public async Task DraftApiReauthorizesOwnerAndPreventsSharedConnectorTakeover()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var candidate = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://example.com/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/shared-draft", candidate, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "draft-user", email = "draft@example.com", password = "Testing1", role = "user" }, admin);
+        string member = await fixture.LoginAsAsync("draft-user", "Testing1");
+        using JsonDocument created = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "shared-draft", candidate, credentialScope = "user", entries = new { key = "member-secret" }, removeKeys = Array.Empty<string>() }, member);
+        string id = created.RootElement.GetProperty("draftId").GetString()!;
+        using var foreign = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{id}/save");
+        foreign.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+        using HttpResponseMessage denied = await fixture.Client.SendAsync(foreign, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotFound, denied.StatusCode);
+        var changed = new
+        {
+            name = "Taken",
+            transport = "http",
+            httpUrl = "https://other.example/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        using var takeover = new HttpRequestMessage(HttpMethod.Post, "/api/credentials/connector-drafts") { Content = JsonContent.Create(new { connectorId = "shared-draft", candidate = changed, credentialScope = "user", entries = new { key = "member-secret" } }, options: jsonOptions) };
+        takeover.Headers.Authorization = new AuthenticationHeaderValue("Bearer", member);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(takeover, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Forbidden, rejected.StatusCode);
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, member);
+        Assert.Equal("Shared", saved.RootElement.GetProperty("name").GetString());
+        Assert.Equal("https://example.com/mcp", saved.RootElement.GetProperty("httpUrl").GetString());
+    }
+
+    [Fact]
+    public async Task PersonalDraftCanChangeDestinationWithoutForwardingOldCredential()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var shared = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://shared.example/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        var personal = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://1.1.1.1/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/personal-draft", shared, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "personal-user", email = "personal@example.com", password = "Testing1", role = "user" }, admin);
+        string member = await fixture.LoginAsAsync("personal-user", "Testing1");
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/personal-draft", new { entries = new { key = "old-secret" } }, member);
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "personal-draft", candidate = personal, credentialScope = "user", entries = new { key = "new-secret" }, removeKeys = Array.Empty<string>() }, member);
+        string id = draft.RootElement.GetProperty("draftId").GetString()!;
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/test", null, member);
+        GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
+        Assert.Equal("https://1.1.1.1/mcp", captured.HttpUrl);
+        Assert.False(captured.RemoteContext!.IncludeSystemScope);
+        string key = ConnectorCredentialKeys.BuildRemoteCredentialKey(captured.RemoteContext.CredentialNamespace!, captured.RemoteContext.Endpoint, "key");
+        Assert.Equal("new-secret", (await captured.RemoteContext.Resolve([key], TestContext.Current.CancellationToken))[key]);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, member);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, member);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{id}/save", null, member);
+        using JsonDocument sharedAfter = await fixture.SendJsonAsync(HttpMethod.Get, "/api/connectors/personal-draft", null, member);
+        Assert.Equal("https://shared.example/mcp", sharedAfter.RootElement.GetProperty("httpUrl").GetString());
+        using JsonDocument status = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/personal-draft", null, member);
+        Assert.Equal("https://1.1.1.1/mcp", status.RootElement.GetProperty("httpUrl").GetString());
+        Assert.Equal("user", status.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        using var cancel = new HttpRequestMessage(HttpMethod.Delete, $"/api/credentials/connector-drafts/{id}");
+        cancel.Headers.Authorization = new AuthenticationHeaderValue("Bearer", member);
+        using HttpResponseMessage canceled = await fixture.Client.SendAsync(cancel, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, canceled.StatusCode);
+        using var retry = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{id}/save");
+        retry.Headers.Authorization = new AuthenticationHeaderValue("Bearer", member);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(retry, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NotFound, rejected.StatusCode);
+        using JsonDocument retained = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/personal-draft", null, member);
+        Assert.Equal("user", retained.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+    }
+
+    [Fact]
+    public async Task SharedDestinationEditAndRecreatedIdDoNotReuseOldCredentials()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        var first = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://old.example/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        var moved = new
+        {
+            name = "Shared",
+            transport = "http",
+            httpUrl = "https://new.example/mcp",
+            enabled = true,
+            credentials = new[] { new { key = "key", label = "Key", required = false } },
+            httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } }
+        };
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/shared-binding", first, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "binding-user", email = "binding@example.com", password = "Testing1", role = "user" }, admin);
+        string member = await fixture.LoginAsAsync("binding-user", "Testing1");
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/shared-binding", new { entries = new { key = "old-secret" } }, member);
+        using JsonDocument before = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/shared-binding", null, member);
+        Assert.Equal("user", before.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        using JsonDocument draft = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "shared-binding", candidate = moved, credentialScope = "user", entries = new { }, removeKeys = Array.Empty<string>() }, admin);
+        string draftId = draft.RootElement.GetProperty("draftId").GetString()!;
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, $"/api/connectors/drafts/{draftId}/save", null, admin);
+        using JsonDocument afterMove = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/shared-binding", null, member);
+        Assert.Equal("none", afterMove.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/shared-binding", new { entries = new { key = "new-secret" } }, member);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/shared-binding", new { entries = new { }, httpUrl = "https://1.1.1.1/mcp" }, member);
+        using JsonDocument stale = await fixture.SendJsonAsync(HttpMethod.Post, "/api/credentials/connector-drafts", new { connectorId = "shared-binding", candidate = moved, credentialScope = "user", entries = new { }, removeKeys = Array.Empty<string>() }, admin);
+        string staleId = stale.RootElement.GetProperty("draftId").GetString()!;
+        _ = await fixture.SendJsonAsync(HttpMethod.Delete, "/api/connectors/shared-binding", null, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/shared-binding", moved, admin);
+        using JsonDocument afterRecreate = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/shared-binding", null, member);
+        Assert.Equal("none", afterRecreate.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        Assert.Equal(JsonValueKind.Null, afterRecreate.RootElement.GetProperty("httpUrl").ValueKind);
+        using var retry = new HttpRequestMessage(HttpMethod.Post, $"/api/connectors/drafts/{staleId}/save");
+        retry.Headers.Authorization = new AuthenticationHeaderValue("Bearer", admin);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(retry, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+    }
+
+    [Fact]
+    public async Task ConnectorAndCallerChangesCancelOnlyMatchingOperationLeases()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/lease-test", new { name = "Lease", transport = "http", httpUrl = "https://example.com/mcp", enabled = true }, token);
+        using JsonDocument invited = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "lease-user", email = "lease@example.com", password = "Testing1", role = "user" }, token);
+        string userId = invited.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/settings/agents/lease-agent", new { name = "Lease agent", modelId = "model-1", systemPrompt = "", mcpBindings = new[] { new { connectorId = "lease-test", context = "OwnContext" } } }, token);
+        using RemoteMcpOperationLease agentLease = fixture.AcquireRemoteLease("other", userId, "lease-agent", false);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/settings/agents/lease-agent", new { name = "Lease agent", modelId = "model-1", systemPrompt = "", mcpBindings = Array.Empty<object>() }, token);
+        Assert.True(agentLease.Token.IsCancellationRequested);
+        using RemoteMcpOperationLease connectorLease = fixture.AcquireRemoteLease("lease-test", userId, "agent-a", false);
+        using RemoteMcpOperationLease otherLease = fixture.AcquireRemoteLease("other", "other-user", "agent-b", false);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/lease-test", new { name = "Lease", transport = "http", httpUrl = "https://example.com/mcp", enabled = false }, token);
+        Assert.True(connectorLease.Token.IsCancellationRequested);
+        Assert.False(otherLease.Token.IsCancellationRequested);
+        using RemoteMcpOperationLease callerLease = fixture.AcquireRemoteLease("other", userId, "agent-a", false);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, $"/api/settings/users/{userId}/active", new { isActive = false }, token);
+        Assert.True(callerLease.Token.IsCancellationRequested);
+        Assert.False(otherLease.Token.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task RemoteCredentialMutationsPreserveBlankAndReportEffectiveFallback()
+    {
+        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        foreach (string id in new[] { "first", "second" })
+            _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/" + id,
+                new { name = id, transport = "http", httpUrl = "https://example.com/mcp", credentials = new[] { new { key = "key", label = "Key", required = false } }, httpHeaders = new[] { new { name = "X-Api-Key", credentialKey = "key" } } }, token);
+        string userId = fixture.AdminUserId();
+        string otherBefore = fixture.GetCredentialRevision("second", userId, true);
+        string before = fixture.GetCredentialRevision("first", userId, true);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first/system", new { entries = new { key = "system-value" } }, token);
+        string after = fixture.GetCredentialRevision("first", userId, true);
+        Assert.NotEqual(before, after);
+        Assert.Equal(otherBefore, fixture.GetCredentialRevision("second", userId, true));
+        using JsonDocument system = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/first", null, token);
+        Assert.Equal("system", system.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { key = "user-value" } }, token);
+        Assert.NotEqual(after, fixture.GetCredentialRevision("first", userId, true));
+        using JsonDocument personal = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/first", null, token);
+        Assert.Equal("user", personal.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        string beforeReplace = fixture.GetCredentialRevision("first", userId, true);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { key = "replacement-value" } }, token);
+        Assert.NotEqual(beforeReplace, fixture.GetCredentialRevision("first", userId, true));
+        string unchanged = fixture.GetCredentialRevision("first", userId, true);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { key = " " } }, token);
+        Assert.Equal(unchanged, fixture.GetCredentialRevision("first", userId, true));
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { }, removeKeys = new[] { "key" } }, token);
+        using JsonDocument fallback = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/first", null, token);
+        Assert.Equal("system", fallback.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { }, httpUrl = "https://personal.example/mcp" }, token);
+        using JsonDocument overrideStatus = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/first", null, token);
+        Assert.Equal("none", overrideStatus.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        Assert.False(overrideStatus.RootElement.GetProperty("credentials")[0].GetProperty("systemConfigured").GetBoolean());
+        using var bypass = new HttpRequestMessage(HttpMethod.Put, "/api/credentials/user")
+        {
+            Content = JsonContent.Create(new { entries = new Dictionary<string, string> { [fixture.RemoteCredentialKey("first", "https://example.com/mcp", "key")] = "invalid" } }, options: jsonOptions),
+        };
+        bypass.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(bypass, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        using JsonDocument isolated = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/second", null, token);
+        Assert.Equal("none", isolated.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+        using var rejectedSystem = new HttpRequestMessage(HttpMethod.Put, "/api/credentials/connector/first/system")
+        {
+            Content = JsonContent.Create(new { entries = new { }, removeKeys = new[] { "key" } }, options: jsonOptions),
+        };
+        rejectedSystem.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using HttpResponseMessage rejectedSystemResponse = await fixture.Client.SendAsync(rejectedSystem, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedSystemResponse.StatusCode);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first", new { entries = new { }, httpUrl = "https://example.com/mcp" }, token);
+        _ = await fixture.SendJsonAsync(HttpMethod.Put, "/api/credentials/connector/first/system", new { entries = new { }, removeKeys = new[] { "key" } }, token);
+        using JsonDocument missing = await fixture.SendJsonAsync(HttpMethod.Get, "/api/credentials/connector/first", null, token);
+        Assert.Equal("none", missing.RootElement.GetProperty("credentials")[0].GetProperty("effectiveScope").GetString());
+    }
+
+    [Fact]
     public async Task PersonalHttpUrlOverrideDoesNotReceiveSystemCredentials()
     {
         await using var fixture = await ConnectorApiFixture.CreateAsync();
@@ -717,22 +1182,14 @@ public sealed class ConnectorValidationEndpointTests
                 description = "Test connector",
                 transport = "http",
                 httpUrl = (string?)null,
-                envKeys = new[] { "MCP_AUTH_TOKEN" },
+                credentials = new[] { new { key = "MCP_AUTH_TOKEN", label = "Token", required = false } },
+                httpHeaders = new[] { new { name = "Authorization", credentialKey = "MCP_AUTH_TOKEN", prefix = "Bearer " } },
                 enabled = true,
             },
             accessToken).ConfigureAwait(true);
 
-        _ = await fixture.SendJsonAsync(
-            HttpMethod.Put,
-            "/api/credentials/system",
-            new
-            {
-                entries = new
-                {
-                    MCP_AUTH_TOKEN = "system-token",
-                },
-            },
-            accessToken).ConfigureAwait(true);
+        string key = fixture.RemoteCredentialKey("homeassistant-mcp", "https://attacker.example/collect", "MCP_AUTH_TOKEN");
+        await fixture.SetSystemCredentialAsync(key, "system-token");
 
         _ = await fixture.SendJsonAsync(
             HttpMethod.Put,
@@ -758,11 +1215,14 @@ public sealed class ConnectorValidationEndpointTests
             accessToken).ConfigureAwait(true);
 
         Assert.True(response.RootElement.GetProperty("success").GetBoolean());
-        Assert.Equal("user-token", response.RootElement.GetProperty("message").GetString());
+        Assert.Equal("https://attacker.example/collect", response.RootElement.GetProperty("message").GetString());
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
         Assert.Equal("https://attacker.example/collect", captured.HttpUrl);
-        Assert.NotNull(captured.TestEnv);
-        Assert.False(captured.TestEnv!.ContainsValue("system-token"));
+        Assert.Null(captured.TestEnv);
+        Assert.NotNull(captured.RemoteContext);
+        Assert.False(captured.RemoteContext.IncludeSystemScope);
+        IReadOnlyDictionary<string, string> resolved = await captured.RemoteContext.Resolve([key], TestContext.Current.CancellationToken);
+        Assert.Equal("user-token", resolved[key]);
     }
 
     [Fact]
@@ -923,8 +1383,7 @@ public sealed class ConnectorValidationEndpointTests
 
         Assert.True(response.RootElement.GetProperty("success").GetBoolean());
 
-        WorkspaceMcpContainerProbeRequest captured = manager.LastContainerProbeRequest
-            ?? throw new XunitException("Container probe request was not captured.");
+        WorkspaceMcpContainerProbeRequest captured = Assert.Single(manager.ContainerProbeRequests, request => request.ConnectorId == "splose-mcp");
 
         Dictionary<string, string> environment = captured.Environment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         Assert.Equal("/opt/kautuka/mcpb/config", environment["SPLOSE_ROOT"]);
@@ -1004,8 +1463,7 @@ public sealed class ConnectorValidationEndpointTests
         Assert.True(response.RootElement.GetProperty("success").GetBoolean());
         Assert.Equal(1, response.RootElement.GetProperty("toolCount").GetInt32());
 
-        WorkspaceMcpContainerProbeRequest captured = manager.LastContainerProbeRequest
-            ?? throw new XunitException("Container probe request was not captured.");
+        WorkspaceMcpContainerProbeRequest captured = Assert.Single(manager.ContainerProbeRequests, request => request.ConnectorId == "probe-local-normalized");
 
         Assert.Equal(McpCommandTransportMapper.UvImage, captured.Image);
         Assert.Equal("npx", captured.Command);
@@ -1199,21 +1657,57 @@ public sealed class ConnectorValidationEndpointTests
         Assert.False(fixture.OAuthSessionExists(state));
     }
 
+    private sealed class AuditCapture : ILoggerProvider
+    {
+        public ConcurrentQueue<string> Messages { get; } = new();
+        public ILogger CreateLogger(string categoryName) => new AuditLogger(Messages);
+        public void Dispose() { }
+        private sealed class AuditLogger(ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                if (eventId.Id == 7340) messages.Enqueue(formatter(state, exception));
+            }
+        }
+    }
+
     private sealed class ConnectorApiFixture : IAsyncDisposable
     {
         private readonly string root;
         private readonly string? previousEnvironment;
         private readonly WebApplication app;
 
-        private ConnectorApiFixture(string root, string? previousEnvironment, WebApplication app)
+        private ConnectorApiFixture(string root, string? previousEnvironment, WebApplication app, AuditCapture audit, FakeCredentialsServiceClient credentials)
         {
             this.root = root;
             this.previousEnvironment = previousEnvironment;
             this.app = app;
             Client = app.GetTestClient();
+            AuditMessages = audit.Messages;
+            Credentials = credentials;
         }
 
         public HttpClient Client { get; }
+        public ConcurrentQueue<string> AuditMessages { get; }
+        public FakeCredentialsServiceClient Credentials { get; }
+
+        public string ConnectorUpdatedAt(string id) => app.Services.GetRequiredService<GatewayState>().McpServers[id].UpdatedAt;
+        public void MarkConnectorLegacy(string id)
+        {
+            GatewayState state = app.Services.GetRequiredService<GatewayState>();
+            state.McpServers[id] = state.McpServers[id] with { RequiresCredentialReentry = true };
+        }
+        public RemoteMcpOperationLease AcquireConnectorLease(string id, string userId)
+            => app.Services.GetRequiredService<RemoteMcpCredentialRevisionTracker>().Acquire(id, userId, null, includeSystem: false);
+
+        public void DemoteBootstrapAdmin()
+        {
+            GatewayState state = app.Services.GetRequiredService<GatewayState>();
+            KeyValuePair<string, GatewayUser> entry = state.Users.Single(pair => pair.Value.Role == "admin");
+            state.Users[entry.Key] = entry.Value with { Role = "user" };
+        }
 
         public void SaveLoopbackOAuthSession(string state, string userId)
         {
@@ -1280,6 +1774,8 @@ public sealed class ConnectorValidationEndpointTests
 
             builder.WebHost.UseTestServer();
             GatewayAppBootstrap.ConfigureServices(builder);
+            var audit = new AuditCapture();
+            builder.Logging.AddProvider(audit);
             if (captureConnectorTests)
             {
                 builder.Services.RemoveAll<IMcpConnectorTestService>();
@@ -1290,9 +1786,8 @@ public sealed class ConnectorValidationEndpointTests
             builder.Services.AddSingleton(managerGrpcService ?? new FakeManagerGrpcService());
 
             builder.Services.RemoveAll<CredentialResolverService>();
-            builder.Services.AddSingleton(
-                new CredentialResolverService(
-                    new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())));
+            var credentials = new FakeCredentialsServiceClient();
+            builder.Services.AddSingleton(new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(credentials)));
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
             WebApplication app = builder.Build();
@@ -1300,7 +1795,7 @@ public sealed class ConnectorValidationEndpointTests
             GatewayAppBootstrap.ConfigureApp(app, database);
             await app.StartAsync().ConfigureAwait(true);
 
-            return new ConnectorApiFixture(root, previousEnvironment, app);
+            return new ConnectorApiFixture(root, previousEnvironment, app, audit, credentials);
         }
 
         public async Task<string> LoginAsBootstrapAdminAsync()
@@ -1433,6 +1928,26 @@ public sealed class ConnectorValidationEndpointTests
                     ?? throw new XunitException("No connector test request was captured for the imported bundle.")
                 : throw new XunitException("Capturing connector test service is not registered.");
 
+        public string RemoteCredentialKey(string id, string endpoint, string key)
+        {
+            GatewayMcpServer server = app.Services.GetRequiredService<IGatewayCatalogStore>().ListMcpServers().Single(item => item.Id == id);
+            return ConnectorCredentialKeys.BuildRemoteCredentialKey(server.CredentialNamespace!, new Uri(endpoint), key);
+        }
+
+        public string AdminUserId() => app.Services.GetRequiredService<GatewayState>().Users.Values.Single(user => user.Role == "admin").Id;
+
+        public RemoteMcpOperationLease AcquireRemoteLease(string connectorId, string userId, string? agentId, bool includeSystem)
+            => app.Services.GetRequiredService<RemoteMcpCredentialRevisionTracker>().Acquire(connectorId, userId, agentId, includeSystem);
+
+        public string GetCredentialRevision(string connectorId, string userId, bool includeSystem)
+            => app.Services.GetRequiredService<RemoteMcpCredentialRevisionTracker>().Get(connectorId, userId, includeSystem);
+
+        public async Task SetSystemCredentialAsync(string key, string value)
+        {
+            var resolver = app.Services.GetRequiredService<CredentialResolverService>();
+            await resolver.SetSystemAsync(new Dictionary<string, string> { [key] = value }, TestContext.Current.CancellationToken);
+        }
+
         public GatewayConnectorTestRequest GetCapturedTestRequestForUrl(string url)
             => app.Services.GetRequiredService<IMcpConnectorTestService>() is CapturingConnectorTestService service
                 ? service.Requests.Single(request => request.HttpUrl == url)
@@ -1520,7 +2035,7 @@ public sealed class ConnectorValidationEndpointTests
     private sealed class FakeManagerGrpcService(
         WorkspaceMcpProbeResponse? containerProbeResponse = null) : IManagerGrpcService
     {
-        public WorkspaceMcpContainerProbeRequest? LastContainerProbeRequest { get; private set; }
+        public ConcurrentQueue<WorkspaceMcpContainerProbeRequest> ContainerProbeRequests { get; } = new();
 
         public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new WorkspaceBoolResponse { Ok = true });
@@ -1535,7 +2050,7 @@ public sealed class ConnectorValidationEndpointTests
             => throw new NotSupportedException();
 
         public Task<WorkspaceContextResponse> RebuildWorkspaceAsync(WorkspaceResolvedRequest request, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
+            => throw new RpcException(new Status(StatusCode.Unavailable, "Test manager unavailable."));
 
         public Task<WorkspaceDeleteResponse> DeleteWorkspaceAsync(WorkspaceResolvedRequest request, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
@@ -1557,7 +2072,7 @@ public sealed class ConnectorValidationEndpointTests
 
         public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
         {
-            LastContainerProbeRequest = request;
+            ContainerProbeRequests.Enqueue(request);
             return Task.FromResult(containerProbeResponse ?? new WorkspaceMcpProbeResponse
             {
                 Ok = true,
@@ -1577,6 +2092,112 @@ public sealed class ConnectorValidationEndpointTests
 
     private sealed class FakeCredentialsServiceClient : CredentialsService.CredentialsServiceClient
     {
+        private TaskCompletionSource<bool>? blocked;
+        public TaskCompletionSource<bool> BlockStarted { get; private set; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> BlockNextAssociationRead()
+        {
+            BlockStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            blocked = release; return release;
+        }
+        private sealed record Association(Dictionary<string, Dictionary<string, string>> Users, Dictionary<string, string> System);
+        private readonly Dictionary<string, Association> associations = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> operations = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, (string Actor, ConnectorDraftMetadata Metadata)> stagedDrafts = new(StringComparer.Ordinal);
+        private Association CloneAssociation(string source)
+        {
+            if (source.Length == 0) return new(new(StringComparer.Ordinal), new(StringComparer.Ordinal));
+            Association existing = associations[source];
+            return new(existing.Users.ToDictionary(pair => pair.Key, pair => new Dictionary<string, string>(pair.Value, StringComparer.Ordinal), StringComparer.Ordinal), new(existing.System, StringComparer.Ordinal));
+        }
+        private string Stage(string operation, string source, string actor, string scope, IEnumerable<KeyValuePair<string, string>> changes, IEnumerable<string> removals)
+        {
+            if (operations.TryGetValue(operation, out string? known)) return known;
+            Association association = CloneAssociation(source);
+            if (!association.Users.TryGetValue(actor, out Dictionary<string, string>? user)) association.Users[actor] = user = new(StringComparer.Ordinal);
+            Dictionary<string, string> target = scope == "system" ? association.System : user;
+            foreach ((string key, string value) in changes) target[key] = value;
+            foreach (string key in removals) target.Remove(key);
+            string id = Guid.NewGuid().ToString("N"); associations[id] = association; operations[operation] = id; return id;
+        }
+        public override AsyncUnaryCall<StageConnectorAssociationResponse> StageConnectorMutationAsync(StageConnectorMutationRequest request, CallOptions options)
+            => Wrap(new StageConnectorAssociationResponse { AssociationId = Stage(request.OperationId, request.SourceAssociationId, request.Access.ActorId, request.CredentialScope, request.Entries, request.RemoveKeys) });
+        public override AsyncUnaryCall<StageConnectorAssociationResponse> StageConnectorAssociationAsync(StageConnectorAssociationRequest request, CallOptions options)
+        {
+            var draft = drafts[request.DraftId].Request;
+            stagedDrafts[request.DraftId] = (request.Access.ActorId, drafts[request.DraftId].Metadata.Clone());
+            return Wrap(new StageConnectorAssociationResponse { AssociationId = Stage(request.DraftId, request.SourceAssociationId, request.Access.ActorId, draft.CredentialScope, draft.Entries, draft.RemoveKeys) });
+        }
+        public override AsyncUnaryCall<ConnectorDraftMetadata> GetStagedConnectorDraftAsync(ConnectorDraftAccessRequest request, CallOptions options)
+        {
+            if (!stagedDrafts.TryGetValue(request.DraftId, out var staged) || staged.Actor != request.Access.ActorId) throw new RpcException(new Status(StatusCode.NotFound, "Draft not found."));
+            return Wrap(staged.Metadata.Clone());
+        }
+        public override AsyncUnaryCall<CredentialMapResponse> ResolveConnectorAssociationAsync(ResolveConnectorAssociationRequest request, CallOptions options)
+        {
+            Association association = associations[request.AssociationId]; var response = new CredentialMapResponse();
+            association.Users.TryGetValue(request.UserId, out Dictionary<string, string>? user);
+            foreach (string key in request.RequiredKeys)
+            {
+                if (user is not null && user.TryGetValue(key, out string? value)) response.Entries[key] = value;
+                else if (request.IncludeSystemScope && association.System.TryGetValue(key, out value)) response.Entries[key] = value;
+            }
+            TaskCompletionSource<bool>? barrier = Interlocked.Exchange(ref blocked, null);
+            if (barrier is null) return Wrap(response);
+            BlockStarted.TrySetResult(true);
+            async Task<CredentialMapResponse> CompleteAsync() { await barrier.Task.ConfigureAwait(false); return response; }
+            return new AsyncUnaryCall<CredentialMapResponse>(CompleteAsync(), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), static () => { });
+        }
+        public override AsyncUnaryCall<ConnectorAssociationPresenceResponse> GetConnectorAssociationPresenceAsync(ResolveConnectorAssociationRequest request, CallOptions options)
+        {
+            Association association = associations[request.AssociationId]; var response = new ConnectorAssociationPresenceResponse();
+            association.Users.TryGetValue(request.UserId, out Dictionary<string, string>? user);
+            foreach (string key in request.RequiredKeys)
+            {
+                if (user?.ContainsKey(key) == true) response.UserKeys.Add(key);
+                if (request.IncludeSystemScope && association.System.ContainsKey(key)) response.SystemKeys.Add(key);
+            }
+            return Wrap(response);
+        }
+        private readonly Dictionary<string, (CreateConnectorDraftRequest Request, ConnectorDraftMetadata Metadata)> drafts = new(StringComparer.Ordinal);
+        public override AsyncUnaryCall<ConnectorDraftListResponse> ListConnectorDraftsAsync(ListConnectorDraftsRequest request, CallOptions options)
+        {
+            var response = new ConnectorDraftListResponse();
+            response.Drafts.AddRange(drafts.Values.Where(entry => entry.Request.Access.ActorId == request.Access.ActorId).Select(entry => entry.Metadata.Clone()));
+            return Wrap(response);
+        }
+        public override AsyncUnaryCall<ConnectorDraftMetadata> CreateConnectorDraftAsync(CreateConnectorDraftRequest request, CallOptions options)
+        {
+            var metadata = new ConnectorDraftMetadata { DraftId = request.DraftId, ConnectorId = request.ConnectorId, CredentialScope = request.CredentialScope, CandidateJson = request.CandidateJson, BaseUpdatedAt = request.BaseUpdatedAt, EffectiveEndpoint = request.EffectiveEndpoint, BaseEndpoint = request.BaseEndpoint, UseDurableCredentials = request.UseDurableCredentials, CredentialNamespace = request.CredentialNamespace, SourceAssociationId = request.SourceAssociationId, ExpiresAtUnixSeconds = DateTimeOffset.UtcNow.AddMinutes(15).ToUnixTimeSeconds() };
+            drafts[request.DraftId] = (request.Clone(), metadata);
+            return Wrap(metadata.Clone());
+        }
+        public override AsyncUnaryCall<ConnectorDraftMetadata> GetConnectorDraftAsync(ConnectorDraftAccessRequest request, CallOptions options)
+        {
+            if (!drafts.TryGetValue(request.DraftId, out var entry) || entry.Request.Access.ActorId != request.Access.ActorId)
+                throw new RpcException(new Status(StatusCode.NotFound, "Draft not found."));
+            return Wrap(entry.Metadata.Clone());
+        }
+        public override AsyncUnaryCall<CredentialMapResponse> ResolveConnectorDraftAsync(ResolveConnectorDraftRequest request, CallOptions options)
+        {
+            var entry = drafts[request.DraftId];
+            var result = new CredentialMapResponse();
+            foreach (string key in request.RequiredKeys)
+                if (entry.Request.Entries.TryGetValue(key, out string? value)) result.Entries[key] = value;
+            return Wrap(result);
+        }
+        public override AsyncUnaryCall<DeleteCredentialResponse> CancelConnectorDraftAsync(ConnectorDraftAccessRequest request, CallOptions options)
+        {
+            bool deleted = drafts.Remove(request.DraftId) | stagedDrafts.Remove(request.DraftId);
+            return Wrap(new DeleteCredentialResponse { Deleted = deleted });
+        }
+        public override AsyncUnaryCall<DeleteCredentialResponse> DiscardConnectorDraftInputAsync(ConnectorDraftAccessRequest request, CallOptions options)
+            => Wrap(new DeleteCredentialResponse { Deleted = drafts.Remove(request.DraftId) });
+        private Dictionary<string, string> GetUserStore(string id)
+        {
+            if (!userStore.TryGetValue(id, out Dictionary<string, string>? values)) userStore[id] = values = new(StringComparer.Ordinal);
+            return values;
+        }
         private readonly Dictionary<string, string> systemStore = new(StringComparer.Ordinal);
         private readonly Dictionary<string, Dictionary<string, string>> userStore = new(StringComparer.Ordinal);
 
@@ -1629,7 +2250,7 @@ public sealed class ConnectorValidationEndpointTests
                     continue;
                 }
 
-                if (systemStore.TryGetValue(key, out string? systemValue))
+                if (request.IncludeSystemScope && systemStore.TryGetValue(key, out string? systemValue))
                 {
                     response.Entries[key] = systemValue;
                 }

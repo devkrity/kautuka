@@ -20,11 +20,11 @@ function createDraft(): ConnectorDraft {
     description: 'Official Home Assistant MCP endpoint',
     iconUrl: '',
     presetId: null,
-    transport: 'http',
-    httpUrl: 'https://ha.example.com/api/mcp',
+    transport: 'container',
+    httpUrl: '',
     localCommand: '',
     localArgs: '',
-    containerImage: '',
+    containerImage: 'example/container',
     containerCommand: '',
     containerArgs: '',
     containerSidecarName: '',
@@ -35,16 +35,129 @@ function createDraft(): ConnectorDraft {
     healthcheckUrl: '',
     healthcheckIntervalMilliseconds: '',
     mcpProtocolVersion: '',
-    envKeys: 'MCP_AUTH_TOKEN',
+    envKeys: 'CONNECTOR_TOKEN',
     enabled: false,
     toolCount: null,
     toolNames: null,
   };
 }
 
-describe('ConnectorFormModal validation credentials', () => {
+describe('ConnectorFormModal container validation credentials', () => {
   beforeEach(() => {
     mutateSpy.mockReset();
+  });
+
+  it('adds, renames and removes masked credential rows without moving entered values', () => {
+    const onSave = vi.fn();
+    render(
+      <ConnectorFormModal
+        draft={createDraft()}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.getByLabelText('Value for CONNECTOR_TOKEN')).toHaveAttribute('type', 'password');
+    fireEvent.change(screen.getByLabelText('Value for CONNECTOR_TOKEN'), {
+      target: { value: 'synthetic-old' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add key' }));
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'CONNECTOR_TOKEN' },
+    });
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'OTHER_KEY' },
+    });
+    expect(screen.getByLabelText('Value for CONNECTOR_TOKEN')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Value for OTHER_KEY'), {
+      target: { value: 'synthetic-new' },
+    });
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'RENAMED_KEY' },
+    });
+    expect(screen.getByLabelText('Value for RENAMED_KEY')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Value for RENAMED_KEY'), {
+      target: { value: 'synthetic-final' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(mutateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        envKeys: ['CONNECTOR_TOKEN', 'RENAMED_KEY'],
+        testEnv: { RENAMED_KEY: 'synthetic-final' },
+      }),
+      expect.any(Object)
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove environment key 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ envKeys: 'CONNECTOR_TOKEN' }),
+      {}
+    );
+  });
+
+  it('keeps the managed mailbox credential declaration hidden and unchanged', () => {
+    const draft = {
+      ...createDraft(),
+      id: 'kautuka-m365-mail',
+      envKeys: 'KAUTUKA_M365_REFRESH_TOKEN\nOTHER_KEY',
+    };
+    const onSave = vi.fn();
+    render(
+      <ConnectorFormModal
+        draft={draft}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.queryByDisplayValue('KAUTUKA_M365_REFRESH_TOKEN')).not.toBeInTheDocument();
+    expect(screen.getByText(/Mailbox sign-in is on the connector card/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ envKeys: draft.envKeys }), {});
+  });
+
+  it('preserves saved custom commands and applies runner defaults only on selection', () => {
+    const onSave = vi.fn();
+    const draft = {
+      ...createDraft(),
+      transport: 'local',
+      localCommand: 'my-runner',
+      localArgs: '--existing\nvalue',
+    };
+    render(
+      <ConnectorFormModal
+        draft={draft}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.getByLabelText('Runner')).toHaveValue('custom');
+    expect(screen.getByLabelText('Command')).toHaveValue('my-runner');
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue(
+      '--existing\nvalue'
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ localCommand: 'my-runner', localArgs: '--existing\nvalue' }),
+      {}
+    );
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'npx' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('-y');
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'uvx' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'python' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(mutateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ localCommand: 'python', localArgs: [] }),
+      expect.any(Object)
+    );
   });
 
   it('keeps discovered tools visible and in the save payload after parent rerenders', () => {
@@ -80,9 +193,13 @@ describe('ConnectorFormModal validation credentials', () => {
       />
     );
 
+    expect(screen.getByText('Advanced container settings').closest('details')).not.toHaveAttribute(
+      'open'
+    );
+    fireEvent.click(screen.getByText('Advanced container settings'));
     expect(screen.getByLabelText('MCP protocol')).toHaveValue('');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(screen.getByText('2 tools found')).toBeInTheDocument();
     expect(screen.getByText('read_file')).toBeInTheDocument();
@@ -101,7 +218,7 @@ describe('ConnectorFormModal validation credentials', () => {
     expect(screen.getByText('2 tools found')).toBeInTheDocument();
     expect(screen.getByText('read_file')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     const [savedDraft] = onSave.mock.calls[0] as [ConnectorDraft, Record<string, string>];
     expect(savedDraft.toolCount).toBe(2);
@@ -124,21 +241,21 @@ describe('ConnectorFormModal validation credentials', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('MCP_AUTH_TOKEN'), {
+    fireEvent.change(screen.getByLabelText('Value for CONNECTOR_TOKEN'), {
       target: { value: credentialValue },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         testEnv: {
-          MCP_AUTH_TOKEN: credentialValue,
+          CONNECTOR_TOKEN: credentialValue,
         },
       }),
       expect.any(Object)
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     const [savedDraft, savedCredValues] = onSave.mock.calls[0] as [
       ConnectorDraft,
@@ -149,8 +266,8 @@ describe('ConnectorFormModal validation credentials', () => {
       expect.not.objectContaining({ testEnv: expect.anything() }),
       expect.any(Object)
     );
-    expect(savedDraft.envKeys).toBe('MCP_AUTH_TOKEN');
-    expect(savedCredValues).toMatchObject({ MCP_AUTH_TOKEN: credentialValue });
+    expect(savedDraft.envKeys).toBe('CONNECTOR_TOKEN');
+    expect(savedCredValues).toMatchObject({ CONNECTOR_TOKEN: credentialValue });
   });
 
   it('includes imported bundle metadata in the validation payload', () => {
@@ -174,7 +291,7 @@ describe('ConnectorFormModal validation credentials', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({

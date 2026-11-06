@@ -147,5 +147,5 @@ internal partial class SqlitePlatformConfigurationProvider
         int Enabled, int IsInternalSystemConnector, string Scope, string? OwnerUserId, string CreatedAt, string UpdatedAt,
         int? ToolCount, string? ToolNamesJson, string? BundlePath, string? ServerType,
         string? RuntimeArtifactType, string? RuntimeArtifactSourceDigest, string? RuntimeArtifactBuildStatus,
-        string? McpProtocolVersion);
+        string? McpProtocolVersion, string RemoteConfigJson);
 }

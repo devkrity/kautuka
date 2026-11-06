@@ -25,6 +25,11 @@ internal sealed partial class McpAgentToolProvider
             McpAgentToolProviderLog.ConnectorToolsLoaded(logger, serverDef.Id, entries.Count);
             return (serverDef.Id, entries);
         }
+        catch (Exception ex) when (serverDef.Transport == McpTransport.Http && ex is not OperationCanceledException)
+        {
+            McpAgentToolProviderLog.LoadToolsFailed(logger, new InvalidOperationException("Remote MCP connection failed."), serverDef.Id, "Remote MCP connection failed.", noInnerMessage);
+            return (serverDef.Id, null);
+        }
         catch (InvalidOperationException ex)
         {
             McpAgentToolProviderLog.LoadToolsFailed(logger, ex, serverDef.Id, ex.Message, ex.InnerException?.Message ?? noInnerMessage);
@@ -58,30 +63,11 @@ internal sealed partial class McpAgentToolProvider
         AgentToolContext context,
         CancellationToken ct)
     {
-        McpServerDefinition storedDefinition = serverDef;
-        serverDef = await ResolveHttpUrlOverrideAsync(serverDef, context.UserId, ct).ConfigureAwait(false);
-
-        Dictionary<string, string> env = await ResolveEnvAsync(
-            serverDef,
-            context.UserId ?? string.Empty,
-            includeSystemScope: IncludeSystemCredentials(
-                storedDefinition,
-                IsPersonalHttpDestination(storedDefinition, serverDef)),
-            ct).ConfigureAwait(false);
-        ValidateRequiredEnv(serverDef, env);
-        env = await PrepareConnectorAuthEnvironmentAsync(serverDef, context.UserId, env, exchangeAccessToken: false, ct).ConfigureAwait(false);
-
-        string injectedEnvKeys = env.Count == 0
-            ? "(none)"
-            : string.Join(",", env.Keys.OrderBy(static key => key, StringComparer.Ordinal));
-        McpAgentToolProviderLog.ConnectorEnvResolved(
-            logger,
-            serverDef.Id,
-            injectedEnvKeys,
-            "agent");
-
         if (serverDef.Transport == McpTransport.Container)
         {
+            Dictionary<string, string> env = await ResolveEnvAsync(serverDef, context.UserId ?? string.Empty, ct).ConfigureAwait(false);
+            ValidateRequiredEnv(serverDef, env);
+            env = await PrepareConnectorAuthEnvironmentAsync(serverDef, context.UserId, env, exchangeAccessToken: false, ct).ConfigureAwait(false);
             return await ListContainerEntriesAsync(serverDef, binding, env, context, ct).ConfigureAwait(false);
         }
 
@@ -89,9 +75,8 @@ internal sealed partial class McpAgentToolProvider
         {
             McpClient client = await CreateHttpClientAsync(
                 serverDef,
-                env,
                 context.UserId,
-                IsPersonalHttpDestination(storedDefinition, serverDef),
+                context,
                 ct).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
@@ -166,11 +151,23 @@ internal sealed partial class McpAgentToolProvider
 
     private async Task<McpClient> CreateHttpClientAsync(
         McpServerDefinition serverDef,
-        Dictionary<string, string> env,
         string? userId,
-        bool personalDestination,
+        AgentToolContext toolContext,
         CancellationToken ct)
     {
+        string userRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: false);
+        string combinedRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: true);
+        PlatformConfiguration snapshot = configProvider.GetCurrent();
+        McpServerDefinition storedDefinition = snapshot.McpServers.FirstOrDefault(candidate => candidate.Id == serverDef.Id)
+            ?? throw new HttpRequestException("Remote MCP connector is unavailable.");
+        string fingerprint = AgentToolingFingerprint.Compute(toolContext.AgentDefinition, snapshot);
+        serverDef = await ResolveHttpUrlOverrideAsync(storedDefinition, userId, ct).ConfigureAwait(false);
+        bool personalDestination = IsPersonalHttpDestination(storedDefinition, serverDef);
+        bool includeSystem = IncludeSystemCredentials(serverDef, personalDestination);
+        string revision = includeSystem ? combinedRevision : userRevision;
+        if (!string.Equals(revision, credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem), StringComparison.Ordinal)
+            || !string.Equals(fingerprint, AgentToolingFingerprint.Compute(toolContext.AgentDefinition, configProvider.GetCurrent()), StringComparison.Ordinal))
+            throw new HttpRequestException("Remote MCP authorization or configuration changed. Retry the operation.");
         if (serverDef.HttpUrl is null)
             throw new InvalidOperationException($"MCP server '{serverDef.Id}' has http transport but no URL configured.");
 
@@ -178,14 +175,38 @@ internal sealed partial class McpAgentToolProvider
         {
             Endpoint = serverDef.HttpUrl,
             Name = serverDef.Name,
-            AdditionalHeaders = McpHttpAuthHeaders.Create(env),
         };
         bool allowPrivateDestination = AllowsPrivateRuntimeDestination(
             serverDef.Scope,
             personalDestination,
             IsAdminUser(userId ?? string.Empty));
 
-        return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, ct).ConfigureAwait(false);
+        Uri approvedEndpoint = serverDef.HttpUrl;
+        async Task RevalidateAsync(CancellationToken token)
+        {
+            PlatformConfiguration current = configProvider.GetCurrent();
+            AgentDefinition? agent = current.Agents.FirstOrDefault(candidate => string.Equals(candidate.Id, toolContext.AgentId, StringComparison.Ordinal));
+            McpServerDefinition? stored = current.McpServers.FirstOrDefault(candidate => string.Equals(candidate.Id, serverDef.Id, StringComparison.Ordinal));
+            if (agent is null || !agent.Enabled || !GatewayOwnershipAccess.CallerCanUse(userId, agent.Scope, agent.OwnerUserId)
+                || stored is null || !(stored.Enabled || stored.IsInternalSystemConnector)
+                || !GatewayOwnershipAccess.CallerCanUse(userId, stored.Scope, stored.OwnerUserId)
+                || AllowsPrivateRuntimeDestination(stored.Scope, personalDestination, IsAdminUser(userId ?? string.Empty)) != allowPrivateDestination
+                || (gatewayState is not null && !string.IsNullOrEmpty(userId) && !gatewayState.Users.Values.Any(user => user.IsActive && string.Equals(user.Id, userId, StringComparison.Ordinal)))
+                || !string.Equals(fingerprint, AgentToolingFingerprint.Compute(agent, current), StringComparison.Ordinal)
+                || !string.Equals(revision, credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem), StringComparison.Ordinal))
+                throw new HttpRequestException("Remote MCP authorization or configuration changed. Retry the operation.");
+            McpServerDefinition effective = await ResolveHttpUrlOverrideAsync(stored, userId, token).ConfigureAwait(false);
+            if (effective.HttpUrl is null || effective.HttpUrl != approvedEndpoint || IsPersonalHttpDestination(stored, effective) != personalDestination
+                || IncludeSystemCredentials(stored, personalDestination) != includeSystem)
+                throw new HttpRequestException("Remote MCP destination changed. Retry the operation.");
+        }
+        var requestContext = new RemoteMcpRequestContext(approvedEndpoint, serverDef.Id, userId ?? string.Empty,
+            includeSystem, [.. serverDef.Credentials], [.. serverDef.HttpHeaders],
+            (keys, token) => credentialResolver.ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId ?? string.Empty, keys, includeSystem, token), RevalidateAsync,
+            () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion,
+            PreferIpv4: approvedEndpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
+            RequiresCredentialReentry: serverDef.RequiresCredentialReentry);
+        return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 
     private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListContainerEntriesAsync(
@@ -351,11 +372,6 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (string.IsNullOrEmpty(context.UserId))
-        {
-            return [];
-        }
-
         PlatformConfiguration config = configProvider.GetCurrent();
         var endpoints = new List<(string ConnectorId, string Endpoint)>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -394,9 +410,9 @@ internal sealed partial class McpAgentToolProvider
             return serverDef;
         }
 
-        string overrideKey = ConnectorCredentialKeys.BuildHttpUrlOverrideKey(serverDef.Id);
+        string overrideKey = ConnectorCredentialKeys.BuildHttpUrlOverrideKey(serverDef.Id, serverDef.CredentialNamespace);
         IReadOnlyDictionary<string, string> resolved = await credentialResolver
-            .GetResolvedAsync(userId, [overrideKey], ct)
+            .ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId, [overrideKey], false, ct)
             .ConfigureAwait(false);
 
         if (!resolved.TryGetValue(overrideKey, out string? overrideUrl)
@@ -427,6 +443,13 @@ internal sealed partial class McpAgentToolProvider
             HealthcheckIntervalMilliseconds = serverDef.HealthcheckIntervalMilliseconds,
             McpProtocolVersion = serverDef.McpProtocolVersion,
             EnvKeys = serverDef.EnvKeys,
+            CredentialNamespace = serverDef.CredentialNamespace,
+            CredentialAssociationId = serverDef.CredentialAssociationId,
+            CredentialOperationId = serverDef.CredentialOperationId,
+            CredentialSourceId = serverDef.CredentialSourceId,
+            RequiresCredentialReentry = serverDef.RequiresCredentialReentry,
+            Credentials = serverDef.Credentials,
+            HttpHeaders = serverDef.HttpHeaders,
             CreatedAt = serverDef.CreatedAt,
             UpdatedAt = serverDef.UpdatedAt,
             Enabled = serverDef.Enabled,

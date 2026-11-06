@@ -38,6 +38,7 @@ internal static class BackgroundWorkDeliveryCatalog
         new("BuiltInMcpPackageBootstrapService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),
         new("BuiltInSkillPackageBootstrapService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),
         new("BuiltInConnectorCatalogService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),
+        new("RemoteMcpPresetBootstrapService", BackgroundWorkGuarantee.RecoverableDerived, 0, "three local preset definitions", "retry local writes; durable receipts preserve edits and deliberate removal"),
         new("ChannelApprovalRecoveryService", BackgroundWorkGuarantee.RecoverableDerived, 0, "periodic database scan", "rebuild channel notifications from pending approvals"),
         new("HitlExpirySweeperService", BackgroundWorkGuarantee.RecoverableDerived, 0, "periodic database scan", "repeat on interval and restart until due approvals expire"),
         new("ConversationAssetRecoveryService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup staging scan", "repeat on restart until orphan cleanup completes"),

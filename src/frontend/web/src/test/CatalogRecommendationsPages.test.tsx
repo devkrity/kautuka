@@ -4,15 +4,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const {
-  catalogRecommendationsHookMock,
-  installCatalogRecommendationMock,
-  getSystemSettingsMock,
-} = vi.hoisted(() => ({
-  catalogRecommendationsHookMock: vi.fn(),
-  installCatalogRecommendationMock: vi.fn(),
-  getSystemSettingsMock: vi.fn(),
-}));
+const { catalogRecommendationsHookMock, installCatalogRecommendationMock, getSystemSettingsMock } =
+  vi.hoisted(() => ({
+    catalogRecommendationsHookMock: vi.fn(),
+    installCatalogRecommendationMock: vi.fn(),
+    getSystemSettingsMock: vi.fn(),
+  }));
 
 vi.mock('@/features/auth', () => ({
   useCurrentUser: () => ({
@@ -47,6 +44,7 @@ vi.mock('@/features/settings', async (importOriginal) => {
 vi.mock('@/features/connectors', () => ({
   ConnectorCard: ({ connector }: { connector: { name: string } }) => <div>{connector.name}</div>,
   ConnectorFormModal: () => null,
+  RemoteMcpConnectionDialog: () => <div>Remote MCP setup</div>,
   ImportModal: () => null,
   blankDraft: () => ({ id: '', name: '' }),
   buildSavePayload: (value: unknown) => value,
@@ -77,6 +75,11 @@ function renderWithQueryClient(node: React.ReactNode) {
 }
 
 describe('Catalog recommendations on management pages', () => {
+  it('opens remote MCP setup directly from the page', () => {
+    renderWithQueryClient(<ConnectorsPage />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add remote MCP' })[0]);
+    expect(screen.getByText('Remote MCP setup')).toBeInTheDocument();
+  });
   beforeEach(() => {
     getSystemSettingsMock.mockReset();
     catalogRecommendationsHookMock.mockReset();
@@ -174,10 +177,7 @@ describe('Catalog recommendations on management pages', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Install' }));
 
     await waitFor(() => {
-      expect(installCatalogRecommendationMock).toHaveBeenCalledWith(
-        'skill',
-        'kautuka-docs'
-      );
+      expect(installCatalogRecommendationMock).toHaveBeenCalledWith('skill', 'kautuka-docs');
     });
   });
 

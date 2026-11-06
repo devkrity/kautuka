@@ -1,4 +1,4 @@
-import type { Connector } from '../schemas/connectorSchema';
+import type { Connector, RemoteMcpCredential, RemoteMcpHeader } from '../schemas/connectorSchema';
 
 export type ConnectorDraft = {
   id: string;
@@ -22,6 +22,9 @@ export type ConnectorDraft = {
   healthcheckIntervalMilliseconds: string;
   mcpProtocolVersion: string;
   envKeys: string; // raw textarea — one per line
+  credentials?: RemoteMcpCredential[];
+  httpHeaders?: RemoteMcpHeader[];
+  confirmLegacyAuthReplacement?: boolean;
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -48,6 +51,9 @@ export type ConnectorSavePayload = {
   healthcheckIntervalMilliseconds: number | null;
   mcpProtocolVersion: string | null;
   envKeys: string[];
+  credentials?: RemoteMcpCredential[];
+  httpHeaders?: RemoteMcpHeader[];
+  confirmLegacyAuthReplacement?: boolean;
   enabled: boolean;
   toolCount: number | null;
   toolNames: string[] | null;
@@ -65,6 +71,8 @@ export function blankDraft(): ConnectorDraft {
     localCommand: 'npx',
     localArgs: '-y\n',
     envKeys: '',
+    credentials: [],
+    httpHeaders: [],
     containerImage: '',
     containerCommand: '',
     containerArgs: '',
@@ -103,6 +111,8 @@ export function entryToDraft(c: Connector): ConnectorDraft {
       c.healthcheckIntervalMilliseconds == null ? '' : String(c.healthcheckIntervalMilliseconds),
     mcpProtocolVersion: c.mcpProtocolVersion ?? '',
     envKeys: (c.envKeys ?? []).join('\n'),
+    credentials: c.credentials ?? [],
+    httpHeaders: c.httpHeaders ?? [],
     iconUrl: c.iconUrl ?? '',
     toolCount: c.toolCount ?? null,
     toolNames: c.toolNames ?? null,
@@ -117,29 +127,46 @@ export function buildSavePayload(d: ConnectorDraft): ConnectorSavePayload {
     presetId: d.presetId,
     transport: d.transport,
     httpUrl: d.httpUrl || null,
-    localCommand: d.localCommand || null,
-    localArgs: d.localArgs
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    containerImage: d.containerImage || null,
-    containerCommand: d.containerCommand || null,
-    containerArgs: d.containerArgs
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    containerSidecarName: d.containerSidecarName || null,
-    bundlePath: d.bundlePath || null,
-    serverType: d.serverType || null,
-    readinessTimeoutSeconds: Number.parseInt(d.readinessTimeoutSeconds, 10) || null,
-    jitCooldownSeconds: Number.parseInt(d.jitCooldownSeconds, 10) || null,
-    healthcheckUrl: d.healthcheckUrl || null,
-    healthcheckIntervalMilliseconds: Number.parseInt(d.healthcheckIntervalMilliseconds, 10) || null,
+    localCommand: d.transport === 'http' ? null : d.localCommand || null,
+    localArgs:
+      d.transport === 'http'
+        ? []
+        : d.localArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    containerImage: d.transport === 'http' ? null : d.containerImage || null,
+    containerCommand: d.transport === 'http' ? null : d.containerCommand || null,
+    containerArgs:
+      d.transport === 'http'
+        ? []
+        : d.containerArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    containerSidecarName: d.transport === 'http' ? null : d.containerSidecarName || null,
+    bundlePath: d.transport === 'http' ? null : d.bundlePath || null,
+    serverType: d.transport === 'http' ? null : d.serverType || null,
+    readinessTimeoutSeconds:
+      d.transport === 'http' ? null : Number.parseInt(d.readinessTimeoutSeconds, 10) || null,
+    jitCooldownSeconds:
+      d.transport === 'http' ? null : Number.parseInt(d.jitCooldownSeconds, 10) || null,
+    healthcheckUrl: d.transport === 'http' ? null : d.healthcheckUrl || null,
+    healthcheckIntervalMilliseconds:
+      d.transport === 'http'
+        ? null
+        : Number.parseInt(d.healthcheckIntervalMilliseconds, 10) || null,
     mcpProtocolVersion: d.mcpProtocolVersion || null,
-    envKeys: d.envKeys
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    credentials: d.transport === 'http' ? (d.credentials ?? []) : [],
+    httpHeaders: d.transport === 'http' ? (d.httpHeaders ?? []) : [],
+    confirmLegacyAuthReplacement: d.confirmLegacyAuthReplacement ?? false,
+    envKeys:
+      d.transport === 'http'
+        ? []
+        : d.envKeys
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
     enabled: d.enabled,
     toolCount: d.toolCount ?? null,
     toolNames: d.toolNames ?? null,

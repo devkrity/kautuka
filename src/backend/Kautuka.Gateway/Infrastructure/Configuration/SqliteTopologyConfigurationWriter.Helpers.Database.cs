@@ -22,7 +22,7 @@ internal partial class SqliteTopologyConfigurationWriter
                  container_image, container_command, container_args_json, container_sidecar_name,
                  readiness_timeout_seconds, jit_cooldown_seconds, healthcheck_url, healthcheck_interval_milliseconds,
                  mcp_protocol_version,
-                 encrypted_env_json, env_keys_json, enabled, is_internal_system_connector,
+                 encrypted_env_json, env_keys_json, remote_config_json, enabled, is_internal_system_connector,
                  scope, owner_user_id,
                  tool_count, tool_names_json,
                   created_at, updated_at, bundle_path, server_type,
@@ -33,7 +33,7 @@ internal partial class SqliteTopologyConfigurationWriter
                  @containerImage, @containerCommand, @containerArgs, @containerSidecarName,
                  @readinessTimeoutSeconds, @jitCooldownSeconds, @healthcheckUrl, @healthcheckIntervalMilliseconds,
                  @mcpProtocolVersion,
-                 @encEnv, @envKeys, @enabled, @isInternalSystemConnector,
+                 @encEnv, @envKeys, @remoteConfig, @enabled, @isInternalSystemConnector,
                  @scope, @ownerUserId,
                  @toolCount, @toolNames,
                   COALESCE((SELECT created_at FROM mcp_servers WHERE id = @id), @now),
@@ -57,12 +57,13 @@ internal partial class SqliteTopologyConfigurationWriter
                 mcp_protocol_version = excluded.mcp_protocol_version,
                 encrypted_env_json = excluded.encrypted_env_json,
                 env_keys_json      = excluded.env_keys_json,
+                remote_config_json = excluded.remote_config_json,
                 enabled            = excluded.enabled,
                 is_internal_system_connector = excluded.is_internal_system_connector,
                 scope              = excluded.scope,
                 owner_user_id      = excluded.owner_user_id,
-                tool_count         = COALESCE(excluded.tool_count, mcp_servers.tool_count),
-                tool_names_json    = COALESCE(excluded.tool_names_json, mcp_servers.tool_names_json),
+                tool_count         = CASE WHEN json_extract(excluded.remote_config_json, '$.credentialOperationId') IS NOT NULL AND json_extract(excluded.remote_config_json, '$.credentialOperationId') IS NOT json_extract(mcp_servers.remote_config_json, '$.credentialOperationId') THEN excluded.tool_count ELSE COALESCE(excluded.tool_count, mcp_servers.tool_count) END,
+                tool_names_json    = CASE WHEN json_extract(excluded.remote_config_json, '$.credentialOperationId') IS NOT NULL AND json_extract(excluded.remote_config_json, '$.credentialOperationId') IS NOT json_extract(mcp_servers.remote_config_json, '$.credentialOperationId') THEN excluded.tool_names_json ELSE COALESCE(excluded.tool_names_json, mcp_servers.tool_names_json) END,
                 updated_at         = excluded.updated_at,
                 bundle_path        = COALESCE(excluded.bundle_path, mcp_servers.bundle_path),
                 server_type        = COALESCE(excluded.server_type, mcp_servers.server_type),
@@ -102,7 +103,8 @@ internal partial class SqliteTopologyConfigurationWriter
                 server.RuntimeArtifactType,
                 server.RuntimeArtifactSourceDigest,
                 server.RuntimeArtifactBuildStatus,
-                server.McpProtocolVersion)));
+                server.McpProtocolVersion,
+                JsonSerializer.Serialize(new RemoteMcpConfiguration([.. server.Credentials], [.. server.HttpHeaders], server.CredentialNamespace, server.CredentialAssociationId, server.CredentialOperationId, server.CredentialSourceId, server.RequiresCredentialReentry), jsonContext.RemoteMcpConfiguration))));
     }
 
     private static void ExecuteNonQuery(SqliteConnection connection, Func<SqliteConnection, SqliteTransaction?, SqliteCommand> commandFactory, Action<SqliteCommand>? configure = null, SqliteTransaction? transaction = null)
@@ -176,6 +178,7 @@ internal partial class SqliteTopologyConfigurationWriter
         command.Parameters.AddWithValue("@mcpProtocolVersion", (object?)parameters.McpProtocolVersion ?? DBNull.Value);
         command.Parameters.AddWithValue("@encEnv", (object?)parameters.EncEnv ?? DBNull.Value);
         command.Parameters.AddWithValue("@envKeys", parameters.EnvKeys);
+        command.Parameters.AddWithValue("@remoteConfig", parameters.RemoteConfig);
         command.Parameters.AddWithValue("@enabled", parameters.Enabled);
         command.Parameters.AddWithValue("@isInternalSystemConnector", parameters.IsInternalSystemConnector);
         command.Parameters.AddWithValue("@scope", parameters.Scope);

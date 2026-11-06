@@ -16,7 +16,11 @@ internal interface ITopologyConfigurationWriter
 
     PlatformConfiguration SaveMcpServer(McpServerDefinition server);
 
+    void SwitchMcpCredentialAssociation(string serverId, string credentialNamespace, string expectedSource, string associationId, string operationId) => throw new NotSupportedException();
+
     PlatformConfiguration DeleteMcpServer(string serverId);
+
+    PlatformConfiguration ClearMcpServerDiscovery(string serverId) => throw new NotSupportedException();
 
     PlatformConfiguration SaveSkill(SkillDefinition skill);
 

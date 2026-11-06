@@ -30,6 +30,7 @@ Read these in order:
 19. [Runtime image mirrors](operations/runtime-image-mirrors.md) — GHCR packages, upstream sources, licenses, and source archives.
 20. [Maintainer process](operations/maintainers.md) — issue triage, dependency updates, and release handling.
 21. [Support policy](../SUPPORT.md) — supported Stable baseline and best-effort Preview policy.
+22. [Remote MCP configuration](operations/remote-mcp-configuration-spec.md) — connector setup, credential handling, transport security, and acceptance requirements.
 
 ## Authority map
 

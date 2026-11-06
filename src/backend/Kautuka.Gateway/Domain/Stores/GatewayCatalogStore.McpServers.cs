@@ -26,13 +26,91 @@ internal sealed partial class GatewayCatalogStore
     public GatewayMcpServer SaveMcpServer(string serverId, GatewayConnectorUpsertRequest request, string scope, string? ownerUserId)
         => SaveMcpServerAsync(serverId, request, scope, ownerUserId).GetAwaiter().GetResult();
 
-    public Task<GatewayMcpServer> SaveSystemMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, CancellationToken cancellationToken = default)
-        => SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, ownerUserId: null, isInternalSystemConnectorOverride: true, cancellationToken);
+    private readonly SemaphoreSlim[] connectorMutationLocks = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    private SemaphoreSlim ConnectorMutationLock(string serverId) => connectorMutationLocks[(StringComparer.Ordinal.GetHashCode(serverId) & int.MaxValue) % connectorMutationLocks.Length];
+
+    public async Task WithMcpServerLockAsync(string serverId, Func<CancellationToken, Task> action, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { await action(cancellationToken).ConfigureAwait(false); }
+        finally { mutex.Release(); }
+    }
+
+    public async Task<GatewayMcpServer> SaveSystemMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, null, true, cancellationToken).ConfigureAwait(false); }
+        finally { mutex.Release(); }
+    }
 
     public async Task<GatewayMcpServer> SaveMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, string scope, string? ownerUserId, CancellationToken cancellationToken = default)
-        => await SaveMcpServerCoreAsync(serverId, request, scope, ownerUserId, isInternalSystemConnectorOverride: null, cancellationToken).ConfigureAwait(false);
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await SaveMcpServerCoreAsync(serverId, request, scope, ownerUserId, null, cancellationToken).ConfigureAwait(false); }
+        finally { mutex.Release(); }
+    }
 
-    private async Task<GatewayMcpServer> SaveMcpServerCoreAsync(string serverId, GatewayConnectorUpsertRequest request, string scope, string? ownerUserId, bool? isInternalSystemConnectorOverride, CancellationToken cancellationToken)
+    // The configuration, association and operation receipt are written in one topology row.
+    public async Task<GatewayMcpServer> ActivateAssociationDraftAsync(string serverId, GatewayConnectorUpsertRequest request, string expectedUpdatedAt, string credentialNamespace, string expectedSource, string operationId, string scope, string? ownerUserId, Func<GatewayMcpServer?, bool> authorize, Func<CancellationToken, Task<string>> stage, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            state.McpServers.TryGetValue(serverId, out GatewayMcpServer? current);
+            if (!authorize(current)) throw new InvalidOperationException("Connector draft is no longer authorized.");
+            if (current is not null && !string.Equals(current.CredentialNamespace, credentialNamespace, StringComparison.Ordinal))
+                throw new InvalidOperationException("Connector was replaced since the draft was created.");
+            if (current is not null && string.Equals(current.CredentialOperationId, operationId, StringComparison.Ordinal))
+            {
+                if (!string.Equals(current.CredentialSourceId ?? string.Empty, expectedSource, StringComparison.Ordinal)
+                    || string.IsNullOrEmpty(current.CredentialAssociationId) || !RemoteCandidateMatches(current, request))
+                    throw new InvalidOperationException("Connector draft operation no longer matches the saved connector.");
+                return current;
+            }
+            bool unchanged = current is null ? string.IsNullOrEmpty(expectedUpdatedAt) : string.Equals(current.UpdatedAt, expectedUpdatedAt, StringComparison.Ordinal);
+            if (!unchanged || !string.Equals(current?.CredentialAssociationId ?? string.Empty, expectedSource, StringComparison.Ordinal))
+                throw new InvalidOperationException("Connector configuration or credentials changed since the draft was created.");
+            string association = await stage(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(association)) throw new InvalidOperationException("Credential association staging failed.");
+            if (!authorize(current)) throw new InvalidOperationException("Connector draft is no longer authorized.");
+            return await SaveMcpServerCoreAsync(serverId, request, scope, ownerUserId, null, cancellationToken, credentialNamespace, association, operationId, expectedSource).ConfigureAwait(false);
+        }
+        finally { mutex.Release(); }
+    }
+
+    public async Task<GatewayMcpServer> MutateMcpCredentialAssociationAsync(string serverId, Func<GatewayMcpServer, CancellationToken, Task<(string AssociationId, string OperationId)>> stage, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!state.McpServers.TryGetValue(serverId, out GatewayMcpServer? current) || current.CredentialNamespace is null || !string.Equals(current.Transport, "http", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Remote connector is unavailable.");
+            (string association, string operation) = await stage(current, cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(association) || string.IsNullOrWhiteSpace(operation)) throw new InvalidOperationException("Credential association staging failed.");
+            if (current.CredentialOperationId == operation && current.CredentialAssociationId == association) return current;
+            string source = current.CredentialAssociationId ?? string.Empty;
+            topologyWriter.SwitchMcpCredentialAssociation(serverId, current.CredentialNamespace, source, association, operation);
+            GatewayMcpServer updated = current with { CredentialAssociationId = association, CredentialOperationId = operation, CredentialSourceId = source };
+            state.McpServers[serverId] = updated;
+            return updated;
+        }
+        finally { mutex.Release(); }
+    }
+
+    internal static bool RemoteCandidateMatches(GatewayMcpServer server, GatewayConnectorUpsertRequest request, bool ignoreHttpUrl = false)
+        => string.Equals(server.Transport, "http", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(server.Name, (request.Name ?? server.Id).Trim(), StringComparison.Ordinal)
+            && string.Equals(server.Description, request.Description?.Trim() ?? string.Empty, StringComparison.Ordinal)
+            && string.Equals(server.IconUrl, request.IconUrl?.Trim() ?? string.Empty, StringComparison.Ordinal)
+            && string.Equals(server.PresetId, request.PresetId, StringComparison.Ordinal)
+            && (ignoreHttpUrl || string.Equals(server.HttpUrl, request.HttpUrl?.Trim(), StringComparison.Ordinal))
+            && string.Equals(server.McpProtocolVersion, McpProtocolVersions.Normalize(request.McpProtocolVersion), StringComparison.Ordinal)
+            && server.Enabled == (request.Enabled ?? true)
+            && (server.Credentials ?? []).SequenceEqual(request.Credentials ?? [])
+            && (server.HttpHeaders ?? []).SequenceEqual(request.HttpHeaders ?? []);
+
+    private async Task<GatewayMcpServer> SaveMcpServerCoreAsync(string serverId, GatewayConnectorUpsertRequest request, string scope, string? ownerUserId, bool? isInternalSystemConnectorOverride, CancellationToken cancellationToken, string? draftNamespace = null, string? associationId = null, string? associationOperationId = null, string? associationSourceId = null)
     {
         bool hasExisting = state.McpServers.TryGetValue(serverId, out GatewayMcpServer? existingServer);
         string name = string.IsNullOrWhiteSpace(request.Name) ? serverId : request.Name.Trim();
@@ -75,6 +153,11 @@ internal sealed partial class GatewayCatalogStore
         // Preserve existing tool_names if none provided in body
         if (toolNames is null && state.McpServers.TryGetValue(serverId, out GatewayMcpServer? prev))
             toolNames = prev.ToolNames is { Count: > 0 } ? [.. prev.ToolNames] : null;
+        if (associationOperationId is not null)
+        {
+            toolCount = null;
+            toolNames = null;
+        }
         // Preserve existing env_keys if none provided in body
         string[]? envKeysFinal = envKeys is { Length: > 0 } ? envKeys : null;
         if (envKeysFinal is null && state.McpServers.TryGetValue(serverId, out GatewayMcpServer? prevForEnv))
@@ -147,15 +230,32 @@ internal sealed partial class GatewayCatalogStore
             }
         }
 
+        RemoteMcpCredential[] credentials = request.Credentials ?? existingServer?.Credentials?.ToArray() ?? [];
+        RemoteMcpHeader[] headers = request.HttpHeaders ?? existingServer?.HttpHeaders?.ToArray() ?? [];
+        RemoteMcpConfigurationValidator.Validate(transport, credentials, headers);
+        if (string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(httpUrl))
+        {
+            _ = Uri.TryCreate(httpUrl, UriKind.Absolute, out Uri? endpoint);
+            RemoteMcpConfigurationValidator.ValidateEndpoint(endpoint);
+        }
+
+        string? credentialNamespace = string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase)
+            ? existingServer?.CredentialNamespace ?? draftNamespace ?? Guid.NewGuid().ToString("N") : null;
+        bool configuredRequiredHeader = associationOperationId is not null && request.ConfirmLegacyAuthReplacement;
+        bool requiresCredentialReentry = string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase)
+            && existingServer?.RequiresCredentialReentry == true && !configuredRequiredHeader;
         var server = new GatewayMcpServer(serverId, name, description, iconUrl, presetId, transport,
             httpUrl, containerImage, containerCommand, containerArgs, containerSidecarName,
             bundlePath, serverType,
             readinessTimeoutSeconds, jitCooldownSeconds, healthcheckUrl, healthcheckIntervalMilliseconds,
             enabled, isInternalSystemConnector, createdAt, now, scopeValue, ownerUserIdValue, toolCount, toolNames, envKeysFinal,
-            runtimeArtifactType, runtimeArtifactSourceDigest, runtimeArtifactBuildStatus, mcpProtocolVersion);
+            runtimeArtifactType, runtimeArtifactSourceDigest, runtimeArtifactBuildStatus, mcpProtocolVersion, credentials, headers, credentialNamespace,
+            associationId ?? existingServer?.CredentialAssociationId, associationOperationId ?? existingServer?.CredentialOperationId, associationSourceId ?? existingServer?.CredentialSourceId,
+            requiresCredentialReentry);
 
         McpTransport parsedTransport = ParsePersistedTransport(transport);
 
+        using IDisposable? remoteChange = remoteRevisions?.BeginPolicyChange("connector", serverId);
         topologyWriter.SaveMcpServer(new McpServerDefinition
         {
             Id = serverId,
@@ -188,6 +288,13 @@ internal sealed partial class GatewayCatalogStore
             ToolCount = toolCount,
             ToolNames = toolNames,
             EnvKeys = envKeysFinal ?? [],
+            Credentials = credentials,
+            HttpHeaders = headers,
+            CredentialNamespace = credentialNamespace,
+            CredentialAssociationId = server.CredentialAssociationId,
+            CredentialOperationId = server.CredentialOperationId,
+            CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
         });
 
         state.McpServers[serverId] = server;
@@ -237,12 +344,21 @@ internal sealed partial class GatewayCatalogStore
 
     public async Task<bool> DeleteMcpServerAsync(string serverId, CancellationToken cancellationToken = default)
     {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return await DeleteMcpServerCoreAsync(serverId, cancellationToken).ConfigureAwait(false); }
+        finally { mutex.Release(); }
+    }
+
+    private async Task<bool> DeleteMcpServerCoreAsync(string serverId, CancellationToken cancellationToken)
+    {
+        if (RemoteMcpPresets.Contains(serverId)) RecordRemotePresetReceipt(serverId);
         if (state.McpServers.TryGetValue(serverId, out GatewayMcpServer? existing)
             && existing.IsInternalSystemConnector)
         {
             return false;
         }
 
+        using IDisposable? remoteChange = remoteRevisions?.BeginPolicyChange("connector", serverId);
         topologyWriter.DeleteMcpServer(serverId);
         bool removed = state.McpServers.Remove(serverId);
         if (removed)
@@ -256,7 +372,14 @@ internal sealed partial class GatewayCatalogStore
     public GatewayMcpServer SaveMcpServerDiscovery(string serverId, int? toolCount, IReadOnlyList<string>? toolNames)
         => SaveMcpServerDiscoveryAsync(serverId, toolCount, toolNames).GetAwaiter().GetResult();
 
-    public Task<GatewayMcpServer> SaveMcpServerDiscoveryAsync(string serverId, int? toolCount, IReadOnlyList<string>? toolNames, CancellationToken cancellationToken = default)
+    public async Task<GatewayMcpServer> SaveMcpServerDiscoveryAsync(string serverId, int? toolCount, IReadOnlyList<string>? toolNames, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try { return SaveMcpServerDiscoveryCore(serverId, toolCount, toolNames); }
+        finally { mutex.Release(); }
+    }
+
+    private GatewayMcpServer SaveMcpServerDiscoveryCore(string serverId, int? toolCount, IReadOnlyList<string>? toolNames)
     {
         if (!state.McpServers.TryGetValue(serverId, out GatewayMcpServer? existingServer) || existingServer is null)
         {
@@ -310,12 +433,19 @@ internal sealed partial class GatewayCatalogStore
             ToolCount = toolCount,
             ToolNames = normalizedToolNames,
             EnvKeys = [.. server.EnvKeys ?? []],
+            Credentials = [.. server.Credentials ?? []],
+            HttpHeaders = [.. server.HttpHeaders ?? []],
+            CredentialNamespace = server.CredentialNamespace,
+            CredentialAssociationId = server.CredentialAssociationId,
+            CredentialOperationId = server.CredentialOperationId,
+            CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
             CreatedAt = server.CreatedAt,
             UpdatedAt = now,
         });
 
         state.McpServers[serverId] = server;
-        return Task.FromResult(server);
+        return server;
     }
 
     private static string[] NormalizeStringArray(string[]? values) =>
@@ -354,6 +484,13 @@ internal sealed partial class GatewayCatalogStore
             ToolCount = server.ToolCount,
             ToolNames = server.ToolNames,
             EnvKeys = [.. server.EnvKeys ?? []],
+            Credentials = [.. server.Credentials ?? []],
+            HttpHeaders = [.. server.HttpHeaders ?? []],
+            CredentialNamespace = server.CredentialNamespace,
+            CredentialAssociationId = server.CredentialAssociationId,
+            CredentialOperationId = server.CredentialOperationId,
+            CredentialSourceId = server.CredentialSourceId,
+            RequiresCredentialReentry = server.RequiresCredentialReentry,
             CreatedAt = server.CreatedAt,
             UpdatedAt = server.UpdatedAt,
         };

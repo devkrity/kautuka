@@ -10,7 +10,7 @@ internal static class GatewayConnectorEndpointMappings
 {
     public static WebApplication MapGatewayConnectorEndpoints(this WebApplication app)
     {
-        app.MapPost("/api/connectors/test", async (IMcpConnectorTestService testService, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, IGatewayCatalogStore catalog, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        app.MapPost("/api/connectors/test", async (IMcpConnectorTestService testService, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, IGatewayCatalogStore catalog, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
@@ -27,6 +27,9 @@ internal static class GatewayConnectorEndpointMappings
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            string revisionKey = request.Id ?? string.Empty;
+            string initialUserRevision = revisions.Get(revisionKey, user.Id, includeSystem: false);
+            string initialCombinedRevision = revisions.Get(revisionKey, user.Id, includeSystem: true);
             bool savedConnector = TryGetAccessibleConnector(request, user, catalog, out GatewayMcpServer? saved);
             if (savedConnector && saved is not null)
             {
@@ -42,18 +45,95 @@ internal static class GatewayConnectorEndpointMappings
                 return Results.Json(new GatewayErrorResponse("Forbidden."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
             }
             else if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase)
-                && !ProbeNetworkPolicy.IsAllowed(request.HttpUrl, GatewayOwnershipAccess.IsAdmin(user)))
+                && ProbeNetworkPolicy.GetDestinationFailure(request.HttpUrl, GatewayOwnershipAccess.IsAdmin(user)) is string destinationFailure)
             {
-                return Results.Json(new GatewayErrorResponse("Connector test destination is not allowed."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                return Results.Json(new GatewayErrorResponse(destinationFailure), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
             else if (IsUntrustedBundlePath(user, database, request.BundlePath))
             {
                 return Results.Json(new GatewayErrorResponse("Connector bundle path is not allowed."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            request = await MergeResolvedCredentialsAsync(request, user, savedConnector ? saved : null, credentialResolver, connectorOAuth, ct).ConfigureAwait(false);
+            if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
+            {
+                if (request.TestEnv is { Count: > 0 })
+                    return Results.Json(new GatewayErrorResponse("Remote MCP tests require stored credential references."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                // Saved connector definitions are trusted only after the access and destination checks above.
+                string? effectiveUrl = request.HttpUrl;
+                bool personalDestination = false;
+                if (saved is not null)
+                {
+                    string overrideKey = ConnectorCredentialKeys.BuildHttpUrlOverrideKey(saved.Id, saved.CredentialNamespace);
+                    IReadOnlyDictionary<string, string> overrides = await credentialResolver.ResolveRemoteAsync(saved.CredentialAssociationId, saved.Id, saved.CredentialNamespace, user.Id, [overrideKey], false, ct).ConfigureAwait(false);
+                    if (overrides.TryGetValue(overrideKey, out string? candidate)
+                        && Uri.TryCreate(candidate, UriKind.Absolute, out Uri? overrideUri)
+                        && overrideUri.Scheme is "http" or "https"
+                        && string.IsNullOrEmpty(overrideUri.UserInfo)
+                        && (!ProbeNetworkPolicy.IsConfirmedPrivate(candidate) || GatewayOwnershipAccess.IsAdmin(user)))
+                    {
+                        effectiveUrl = overrideUri.AbsoluteUri;
+                        personalDestination = !string.Equals(effectiveUrl, saved.HttpUrl, StringComparison.Ordinal);
+                    }
+                }
+                if (!Uri.TryCreate(effectiveUrl, UriKind.Absolute, out Uri? endpoint) || endpoint.Scheme is not ("http" or "https") || !string.IsNullOrEmpty(endpoint.UserInfo))
+                    return Results.Json(new GatewayErrorResponse("Connector destination is invalid."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                bool includeSystem = saved is not null && !personalDestination && !string.Equals(saved.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase);
+                string revision = includeSystem ? initialCombinedRevision : initialUserRevision;
+                if (!string.Equals(revision, revisions.Get(saved?.Id ?? revisionKey, user.Id, includeSystem), StringComparison.Ordinal)
+                    || (saved is not null && (!catalog.TryGetMcpServer(saved.Id, out GatewayMcpServer? latestSnapshot) || latestSnapshot is null
+                        || latestSnapshot.UpdatedAt != saved.UpdatedAt || latestSnapshot.CredentialNamespace != saved.CredentialNamespace)))
+                    return Results.Json(new GatewayErrorResponse("Remote MCP configuration changed. Retry the operation."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status409Conflict);
+                string? savedUpdatedAt = saved?.UpdatedAt;
+                bool allowPrivate = GatewayOwnershipAccess.IsAdmin(user) || (saved is not null && !personalDestination && !string.Equals(saved.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase));
+                async Task RevalidateAsync(CancellationToken token)
+                {
+                    GatewayUser? currentUser = ActiveUser(users, user.Id);
+                    if (currentUser is null)
+                        throw new HttpRequestException("Caller is no longer active.");
+                    bool currentPrivate = GatewayOwnershipAccess.IsAdmin(currentUser) || (saved is not null && !personalDestination && !string.Equals(saved.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase));
+                    if (currentPrivate != allowPrivate) throw new HttpRequestException("Remote MCP destination permission changed.");
+                    if (!string.Equals(revision, revisions.Get(saved?.Id ?? revisionKey, user.Id, includeSystem), StringComparison.Ordinal))
+                        throw new HttpRequestException("Remote MCP credentials changed. Retry the operation.");
+                    if (saved is not null)
+                    {
+                        if (!catalog.TryGetMcpServer(saved.Id, out GatewayMcpServer? current) || current is null
+                            || !GatewayOwnershipAccess.CanAccessConnector(currentUser, current) || !string.Equals(savedUpdatedAt, current.UpdatedAt, StringComparison.Ordinal))
+                            throw new HttpRequestException("Remote MCP configuration changed. Retry the operation.");
+                        string key = ConnectorCredentialKeys.BuildHttpUrlOverrideKey(saved.Id, saved.CredentialNamespace);
+                        IReadOnlyDictionary<string, string> latest = await credentialResolver.ResolveRemoteAsync(current.CredentialAssociationId, current.Id, current.CredentialNamespace, user.Id, [key], false, token).ConfigureAwait(false);
+                        string? candidate = latest.TryGetValue(key, out string? value) && Uri.TryCreate(value, UriKind.Absolute, out Uri? parsed)
+                            && parsed.Scheme is "http" or "https" && string.IsNullOrEmpty(parsed.UserInfo)
+                            && (!ProbeNetworkPolicy.IsConfirmedPrivate(value) || GatewayOwnershipAccess.IsAdmin(currentUser))
+                            ? parsed.AbsoluteUri : current.HttpUrl;
+                        if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri? latestEndpoint) || latestEndpoint != endpoint)
+                            throw new HttpRequestException("Remote MCP destination changed. Retry the operation.");
+                    }
+                }
+                request = new GatewayConnectorTestRequest
+                {
+                    Id = request.Id,
+                    Transport = "http",
+                    HttpUrl = endpoint.AbsoluteUri,
+                    McpProtocolVersion = request.McpProtocolVersion,
+                    AllowPrivateDestination = allowPrivate,
+                    RemoteContext = new RemoteMcpRequestContext(endpoint, saved?.Id ?? string.Empty, user.Id,
+                        saved is not null && !personalDestination && !string.Equals(saved.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase),
+                        [.. saved?.Credentials ?? []], [.. saved?.HttpHeaders ?? []],
+                        (keys, token) => credentialResolver.ResolveRemoteAsync(saved?.CredentialAssociationId, saved?.Id ?? string.Empty, saved?.CredentialNamespace, user.Id, keys, includeSystem, token), RevalidateAsync,
+                        () => revisions.Acquire(saved?.Id ?? revisionKey, user.Id, agentId: null, includeSystem), saved?.CredentialNamespace, request.McpProtocolVersion,
+                        PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
+                        RequiresCredentialReentry: saved?.RequiresCredentialReentry == true),
+                };
+            }
+            else
+            {
+                request = await MergeResolvedCredentialsAsync(request, user, savedConnector ? saved : null, credentialResolver, connectorOAuth, ct).ConfigureAwait(false);
+            }
 
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
+            if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
+                RemoteMcpAudit.Write(context, "connection.tested", user.Id,
+                    request.Id ?? "unsaved", saved?.Scope ?? GatewayOwnershipScopes.User, result.Success ? "succeeded" : "failed");
             return Results.Json(
                 new GatewayConnectorTestResponse(
                     result.Success,
@@ -302,12 +382,21 @@ internal static class GatewayConnectorEndpointMappings
             }
             catch (InvalidOperationException ex)
             {
+                if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
+                    RemoteMcpAudit.Write(context, hasExisting ? "connector.updated" : "connector.created",
+                        user.Id, serverId, scope, "failed");
                 return Results.Json(
                     new GatewayErrorResponse(ex.Message),
                     KautukaJsonContext.Default.GatewayErrorResponse,
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            if (string.Equals(saved.Transport, "http", StringComparison.OrdinalIgnoreCase))
+            {
+                RemoteMcpAudit.Write(context, hasExisting ? "connector.updated" : "connector.created", user.Id, serverId, saved.Scope, "succeeded");
+                if (existing is not null && existing.Enabled != saved.Enabled)
+                    RemoteMcpAudit.Write(context, saved.Enabled ? "connector.enabled" : "connector.disabled", user.Id, serverId, saved.Scope, "succeeded");
+            }
             return Results.Json(ToConnectorPayload(saved), KautukaJsonContext.Default.GatewayConnectorListItem);
         });
 
@@ -335,6 +424,8 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             bool removed = await catalog.DeleteMcpServerAsync(serverId, ct).ConfigureAwait(false);
+            if (string.Equals(server.Transport, "http", StringComparison.OrdinalIgnoreCase))
+                RemoteMcpAudit.Write(context, "connector.deleted", user.Id, serverId, server.Scope, removed ? "succeeded" : "unchanged");
             return removed
                 ? Results.Json(new GatewayDeletedResponse(true), KautukaJsonContext.Default.GatewayDeletedResponse)
                 : Results.Json(new GatewayErrorResponse("Connector not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
@@ -342,6 +433,9 @@ internal static class GatewayConnectorEndpointMappings
 
         return app;
     }
+
+    private static GatewayUser? ActiveUser(IGatewayUserStore users, string id)
+        => users.TryGetUserById(id, out GatewayUser? user) && user is { IsActive: true } ? user : null;
 
     private static bool TryGetAccessibleConnector(
         GatewayConnectorTestRequest request,
@@ -410,7 +504,6 @@ internal static class GatewayConnectorEndpointMappings
         string? effectiveHttpUrl = request.HttpUrl;
         string? effectiveId = request.Id;
         bool storedDestination = server is not null && UsesStoredDestination(request, server);
-        bool personalHttpDestination = false;
 
         if (storedDestination && server is not null)
         {
@@ -421,32 +514,6 @@ internal static class GatewayConnectorEndpointMappings
                 effectiveId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(user.Id, server.Id);
             }
 
-            if (string.IsNullOrWhiteSpace(effectiveHttpUrl)
-                && string.Equals(server.Transport, "http", StringComparison.OrdinalIgnoreCase))
-            {
-                string overrideKey = ConnectorCredentialKeys.BuildHttpUrlOverrideKey(server.Id);
-                IReadOnlyDictionary<string, string> userOverride = await credentialResolver
-                    .GetResolvedAsync(user.Id, [overrideKey], includeSystemScope: false, includeHeldSecrets: false, ct)
-                    .ConfigureAwait(false);
-                if (userOverride.TryGetValue(overrideKey, out string? userOverrideUrl)
-                    && !string.IsNullOrWhiteSpace(userOverrideUrl))
-                {
-                    effectiveHttpUrl = userOverrideUrl.Trim();
-                    personalHttpDestination = true;
-                }
-                else
-                {
-                    IReadOnlyDictionary<string, string> systemOverride = await credentialResolver
-                        .GetResolvedAsync(user.Id, [overrideKey], includeSystemScope: true, includeHeldSecrets: false, ct)
-                        .ConfigureAwait(false);
-                    if (systemOverride.TryGetValue(overrideKey, out string? systemOverrideUrl)
-                        && !string.IsNullOrWhiteSpace(systemOverrideUrl))
-                    {
-                        effectiveHttpUrl = systemOverrideUrl.Trim();
-                    }
-                }
-            }
-
             string[] requiredKeys = server.EnvKeys is { Count: > 0 } ? [.. server.EnvKeys] : [];
             if (requiredKeys.Length > 0)
             {
@@ -454,8 +521,7 @@ internal static class GatewayConnectorEndpointMappings
                     .GetResolvedAsync(
                         user.Id,
                         requiredKeys,
-                        includeSystemScope: !personalHttpDestination
-                            && !string.Equals(server.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase),
+                        includeSystemScope: !string.Equals(server.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase),
                         includeHeldSecrets: false,
                         ct)
                     .ConfigureAwait(false);
@@ -494,7 +560,6 @@ internal static class GatewayConnectorEndpointMappings
             TestEnv = merged,
             AllowPrivateDestination = GatewayOwnershipAccess.IsAdmin(user)
                 || (server is not null
-                    && !personalHttpDestination
                     && !string.Equals(server.Scope, GatewayOwnershipScopes.User, StringComparison.OrdinalIgnoreCase)),
         };
     }
@@ -564,7 +629,7 @@ internal static class GatewayConnectorEndpointMappings
             AllowPrivateDestination = true,
         };
 
-    private static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server) => new(
+    internal static GatewayConnectorListItem ToConnectorPayload(GatewayMcpServer server) => new(
         server.Id,
         server.Name,
         server.Description,
@@ -594,7 +659,10 @@ internal static class GatewayConnectorEndpointMappings
         server.OwnerUserId,
         server.CreatedAt,
         server.UpdatedAt,
-        server.McpProtocolVersion);
+        server.McpProtocolVersion,
+        [.. server.Credentials ?? []],
+        [.. server.HttpHeaders ?? []],
+        server.RequiresCredentialReentry);
 
     private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector)
         => new()
@@ -638,6 +706,8 @@ internal static class GatewayConnectorEndpointMappings
             HealthcheckUrl = connector.HealthcheckUrl,
             HealthcheckIntervalMilliseconds = connector.HealthcheckIntervalMilliseconds,
             EnvKeys = connector.EnvKeys,
+            Credentials = connector.Credentials,
+            HttpHeaders = connector.HttpHeaders,
             Enabled = connector.Enabled,
             ToolCount = validation.ToolCount,
             ToolNames = validation.ToolNames?.ToArray(),

@@ -502,12 +502,30 @@ internal sealed class GatewayConnectorUpsertRequest
 
     public string[]? EnvKeys { get; init; }
 
+    public RemoteMcpCredential[]? Credentials { get; init; }
+    public RemoteMcpHeader[]? HttpHeaders { get; init; }
+    public bool ConfirmLegacyAuthReplacement { get; init; }
+
     public bool? Enabled { get; init; }
 
     public int? ToolCount { get; init; }
 
     public string[]? ToolNames { get; init; }
 }
+
+internal sealed class CreateConnectorDraftPayload
+{
+    public string ConnectorId { get; init; } = string.Empty;
+    public GatewayConnectorUpsertRequest? Candidate { get; init; }
+    public string CredentialScope { get; init; } = "user";
+    public Dictionary<string, string>? Entries { get; init; }
+    public string[]? RemoveKeys { get; init; }
+}
+
+internal sealed record ConnectorDraftCreatedResponse(string DraftId, DateTimeOffset ExpiresAt);
+internal sealed record ConnectorDraftPendingItem(string DraftId, string ConnectorId, DateTimeOffset ExpiresAt, string CredentialScope, GatewayConnectorUpsertRequest Candidate, string EffectiveEndpoint);
+internal sealed record ConnectorDraftListPayload(ConnectorDraftPendingItem[] Drafts);
+
 
 internal sealed class GatewayConnectorTestRequest
 {
@@ -546,6 +564,9 @@ internal sealed class GatewayConnectorTestRequest
     public Dictionary<string, string>? TestEnv { get; init; }
 
     public string? Id { get; init; }
+
+    [JsonIgnore]
+    public RemoteMcpRequestContext? RemoteContext { get; init; }
 
     [JsonIgnore]
     public bool AllowPrivateDestination { get; init; }
@@ -830,7 +851,10 @@ internal sealed record GatewayConnectorListItem(
     string? OwnerUserId,
     string CreatedAt,
     string UpdatedAt,
-    string? McpProtocolVersion = null);
+    string? McpProtocolVersion = null,
+    RemoteMcpCredential[]? Credentials = null,
+    RemoteMcpHeader[]? HttpHeaders = null,
+    bool RequiresCredentialReentry = false);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 
@@ -938,14 +962,18 @@ internal sealed record CredentialUpdateResponse(string Detail);
 
 internal sealed record SetCredentialsRequest(
     Dictionary<string, string> Entries,
-    string? HttpUrl = null);
+    string? HttpUrl = null,
+    string[]? RemoveKeys = null);
+
+internal sealed record RemoteCredentialPresence(string Key, bool UserConfigured, bool SystemConfigured, string EffectiveScope);
 
 /// <summary>Tells the UI which of a connector's declared env_keys are configured in system scope.</summary>
 internal sealed record ConnectorCredentialStatusResponse(
     string ConnectorId,
     string[] ConfiguredKeys,
     string[] MissingKeys,
-    string? HttpUrl = null);
+    string? HttpUrl = null,
+    RemoteCredentialPresence[]? Credentials = null);
 
 internal sealed record ChannelDispatchOptionPayload(string Label, string Value);
 

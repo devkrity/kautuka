@@ -8,6 +8,7 @@ import { useCurrentUser } from '@/features/auth';
 import {
   ConnectorCard,
   ConnectorFormModal,
+  RemoteMcpConnectionDialog,
   ImportModal,
   blankDraft,
   buildSavePayload,
@@ -118,6 +119,7 @@ export const ConnectorsPage: React.FC = () => {
   }, []);
   const [modalTarget, setModalTarget] = useState<'new' | Connector | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [remoteCreateOpen, setRemoteCreateOpen] = useState(false);
 
   const canManageConnector = (connector: Connector | null | undefined): boolean => {
     if (!connector || !currentUser) {
@@ -235,6 +237,8 @@ export const ConnectorsPage: React.FC = () => {
     <div className="page-shell">
       {importOpen && canImportConnectors && (
         <ImportModal
+          canManageConnector={canManageConnector}
+          canManageSystemCredentials={currentUser?.role === ROLE_ADMIN}
           existingIds={existingIds}
           onImported={() => {
             queryClient.invalidateQueries({ queryKey: ['connectors'] });
@@ -242,7 +246,30 @@ export const ConnectorsPage: React.FC = () => {
           onClose={() => setImportOpen(false)}
         />
       )}
-      {modalDraft != null && (
+      {(remoteCreateOpen ||
+        (modalTarget && modalTarget !== 'new' && modalTarget.transport === 'http')) && (
+        <RemoteMcpConnectionDialog
+          connector={modalTarget && modalTarget !== 'new' ? modalTarget : undefined}
+          existingIds={existingIds}
+          canManage={
+            modalTarget && modalTarget !== 'new'
+              ? canManageConnector(modalTarget)
+              : canImportConnectors
+          }
+          canManageSystemCredentials={currentUser?.role === ROLE_ADMIN}
+          onSaved={() => {
+            void queryClient.invalidateQueries({ queryKey: ['connectors'] });
+            setRemoteCreateOpen(false);
+            setModalTarget(null);
+            toast.success('Remote connector saved. Assign it to an agent to grant tool access.');
+          }}
+          onClose={() => {
+            setRemoteCreateOpen(false);
+            setModalTarget(null);
+          }}
+        />
+      )}
+      {modalDraft != null && (modalTarget === 'new' || modalTarget?.transport !== 'http') && (
         <ConnectorFormModal
           key={modalTarget != null && modalTarget !== 'new' ? modalTarget.id : 'new'}
           draft={modalDraft}
@@ -301,7 +328,15 @@ export const ConnectorsPage: React.FC = () => {
               }}
               disabled={!canImportConnectors}
             >
-              <Plus className="h-4 w-4" /> Advanced Connector Import
+              <Plus className="h-4 w-4" /> Add local or container MCP
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={!canImportConnectors}
+              onClick={() => setRemoteCreateOpen(true)}
+            >
+              <Plus className="h-4 w-4" /> Add remote MCP
             </Button>
           </div>
         }
@@ -376,11 +411,11 @@ export const ConnectorsPage: React.FC = () => {
                 return;
               }
 
-              setModalTarget('new');
+              setRemoteCreateOpen(true);
             }}
             disabled={!canImportConnectors}
           >
-            <Plus className="h-4 w-4" /> Start advanced connector import
+            <Plus className="h-4 w-4" /> Add remote MCP
           </Button>
         </div>
       )}

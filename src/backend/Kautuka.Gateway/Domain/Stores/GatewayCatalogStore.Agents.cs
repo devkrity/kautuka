@@ -103,6 +103,15 @@ internal sealed partial class GatewayCatalogStore
         string storageLocatorKey = agentDefinitionStore.GetStorageLocatorKey(agentId);
         AgentRegistryEntry registryEntry = CreateAgentRegistryEntry(agent, storageLocatorKey);
 
+        bool remotePolicyChanged = existingAgent is null
+            || existingAgent.Enabled != agent.Enabled
+            || !string.Equals(existingAgent.Scope, agent.Scope, StringComparison.Ordinal)
+            || !string.Equals(existingAgent.OwnerUserId, agent.OwnerUserId, StringComparison.Ordinal)
+            || !string.Equals(existingAgent.SuperExecMode, agent.SuperExecMode, StringComparison.Ordinal)
+            || !JsonNode.DeepEquals(existingAgent.Sandbox, agent.Sandbox)
+            || !JsonNode.DeepEquals(existingAgent.ApprovalConfig, agent.ApprovalConfig)
+            || !(existingAgent.McpBindings ?? []).SequenceEqual(agent.McpBindings ?? []);
+        using IDisposable? remoteChange = remotePolicyChanged ? remoteRevisions?.BeginPolicyChange("agent", agentId) : null;
         if (agentDefinitionStore is IAtomicAgentDefinitionStore { SupportsAtomicRegistryTransactions: true } atomicAgentDefinitionStore)
         {
             long revision = atomicAgentDefinitionStore.SaveDefinitionAndRegistryAtomically(registryEntry, definition, snapshotMetadata);
@@ -138,6 +147,7 @@ internal sealed partial class GatewayCatalogStore
             return false;
         }
 
+        using IDisposable? remoteChange = remoteRevisions?.BeginPolicyChange("agent", agentId);
         string storageLocatorKey = state.AgentStorageLocators.TryGetValue(agentId, out string? configuredStorageLocatorKey)
             ? configuredStorageLocatorKey
             : agentDefinitionStore.GetStorageLocatorKey(agentId);

@@ -72,6 +72,7 @@ public sealed class AgentToolCompositionTests
             Id = "agent-1",
             Name = "Agent 1",
             ModelId = "phi",
+            Scope = "system",
         });
 
         var catalog = new AgentToolCatalog(
@@ -80,7 +81,7 @@ public sealed class AgentToolCompositionTests
                 new FakeToolProvider("second_tool"),
             ],
             new MemoryAgentToolSurfaceStore(),
-            new StaticPlatformConfigurationProvider(new PlatformConfiguration()));
+            new StaticPlatformConfigurationProvider(new PlatformConfiguration { Agents = [context.AgentDefinition] }));
 
         IReadOnlyList<AIFunction> tools = await catalog.BuildToolsAsync(context, TestContext.Current.CancellationToken).ConfigureAwait(true);
 

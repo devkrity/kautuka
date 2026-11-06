@@ -46,13 +46,15 @@ internal sealed partial class McpAgentToolProvider
             return new AgentToolSurfaceContribution([], Complete: true);
         }
 
+        bool skippedLegacy = activeDefs.RemoveAll(static item => item.Definition.Transport == McpTransport.Http && item.Definition.RequiresCredentialReentry) > 0;
+
         Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)>[] tasks = activeDefs
             .Select(binding => ConnectSafeAsync(binding.Definition, binding.Binding, context, ct))
             .ToArray();
         (string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
 
         var entries = new List<AgentToolSurfaceEntry>();
-        bool complete = true;
+        bool complete = !skippedLegacy;
         foreach ((_, IReadOnlyList<AgentToolSurfaceEntry>? listed) in results)
         {
             if (listed is null)
@@ -98,7 +100,7 @@ internal sealed partial class McpAgentToolProvider
 
             McpServerDefinition? server = config.McpServers.FirstOrDefault(candidate =>
                 string.Equals(candidate.Id, group.Key, StringComparison.Ordinal));
-            if (server is null
+            if (server is null || !(server.Enabled || server.IsInternalSystemConnector)
                 || !GatewayOwnershipAccess.CallerCanUse(context.UserId, server.Scope, server.OwnerUserId))
             {
                 continue;
@@ -140,12 +142,38 @@ internal sealed partial class McpAgentToolProvider
             async (arguments, cancellationToken) =>
             {
                 PlatformConfiguration config = configProvider.GetCurrent();
+                if (gatewayState is not null && !string.IsNullOrEmpty(context.UserId)
+                    && !gatewayState.Users.Values.Any(user => user.IsActive && string.Equals(user.Id, context.UserId, StringComparison.Ordinal)))
+                    throw new InvalidOperationException("Caller is no longer active.");
                 McpServerDefinition serverDef = config.McpServers.FirstOrDefault(candidate =>
                     string.Equals(candidate.Id, connectorId, StringComparison.Ordinal))
                     ?? throw new InvalidOperationException($"MCP connector '{connectorId}' is no longer registered.");
-                if (!GatewayOwnershipAccess.CallerCanUse(context.UserId, serverDef.Scope, serverDef.OwnerUserId))
-                {
+                if (!(serverDef.Enabled || serverDef.IsInternalSystemConnector)
+                    || !GatewayOwnershipAccess.CallerCanUse(context.UserId, serverDef.Scope, serverDef.OwnerUserId))
                     throw new InvalidOperationException($"MCP connector '{connectorId}' is not available to this caller.");
+
+                AgentDefinition? currentAgent = config.Agents.FirstOrDefault(candidate => string.Equals(candidate.Id, context.AgentId, StringComparison.Ordinal));
+                if (currentAgent is null || !currentAgent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, currentAgent.Scope, currentAgent.OwnerUserId))
+                    throw new InvalidOperationException("Agent is no longer available to this caller.");
+                ResolvedAgentConnectorBinding? currentBinding = ResolveAgentConnectorBindings(currentAgent, toolExecutionPolicyService)
+                    .FirstOrDefault(candidate => string.Equals(candidate.ConnectorId, connectorId, StringComparison.Ordinal));
+                if (currentBinding is null || currentBinding.ExecutionContext != binding.ExecutionContext)
+                    throw new InvalidOperationException($"MCP connector '{connectorId}' is no longer permitted for this agent.");
+                ToolApprovalDirective originalApproval = toolExecutionPolicyService.EvaluateApproval(new ToolApprovalRequest(
+                    new ToolIdentity(ToolPolicyCategory.Connector, toolName, connectorId), context.AgentDefinition.ApprovalPolicy));
+                ToolApprovalDirective currentApproval = toolExecutionPolicyService.EvaluateApproval(new ToolApprovalRequest(
+                    new ToolIdentity(ToolPolicyCategory.Connector, toolName, connectorId), currentAgent.ApprovalPolicy));
+                if (!currentApproval.Include || (currentApproval.RequiresApproval && !originalApproval.RequiresApproval))
+                    throw new InvalidOperationException($"MCP tool '{toolName}' permissions changed. Refresh the tool catalogue.");
+
+                if (serverDef.Transport == McpTransport.Http && serverDef.RequiresCredentialReentry)
+                {
+                    bool canManage = string.Equals(serverDef.Scope, GatewayOwnershipScopes.System, StringComparison.OrdinalIgnoreCase)
+                        ? IsAdminUser(context.UserId ?? string.Empty)
+                        : !string.IsNullOrEmpty(context.UserId) && string.Equals(context.UserId, serverDef.OwnerUserId, StringComparison.Ordinal);
+                    throw new InvalidOperationException(canManage
+                        ? $"Remote connector '{serverDef.Name}' needs its authentication reviewed in connector settings before it can be used."
+                        : $"Remote connector '{serverDef.Name}' needs its authentication updated. Ask the connector owner or an administrator.");
                 }
 
                 AgentToolInvocationContextState? invocationContext = AgentToolInvocationContext.Current;
@@ -162,7 +190,18 @@ internal sealed partial class McpAgentToolProvider
 
                 if (serverDef.Transport == McpTransport.Http)
                 {
-                    return await InvokeHttpAsync(serverDef, toolName, arguments, context, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        return await InvokeHttpAsync(serverDef, toolName, arguments, context, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (RemoteMcpConfigurationException ex)
+                    {
+                        throw new InvalidOperationException(ex.Message);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        throw new InvalidOperationException(RemoteMcpFailureMessages.Describe(ex));
+                    }
                 }
 
                 if (serverDef.Transport == McpTransport.Container)
@@ -181,22 +220,10 @@ internal sealed partial class McpAgentToolProvider
         AgentToolContext context,
         CancellationToken cancellationToken)
     {
-        McpServerDefinition storedDefinition = serverDef;
-        serverDef = await ResolveHttpUrlOverrideAsync(serverDef, context.UserId, cancellationToken).ConfigureAwait(false);
-        Dictionary<string, string> env = await ResolveEnvAsync(
-            serverDef,
-            context.UserId ?? string.Empty,
-            includeSystemScope: IncludeSystemCredentials(
-                storedDefinition,
-                IsPersonalHttpDestination(storedDefinition, serverDef)),
-            cancellationToken).ConfigureAwait(false);
-        ValidateRequiredEnv(serverDef, env);
-        env = await PrepareConnectorAuthEnvironmentAsync(serverDef, context.UserId, env, exchangeAccessToken: true, cancellationToken).ConfigureAwait(false);
         McpClient client = await CreateHttpClientAsync(
             serverDef,
-            env,
             context.UserId,
-            IsPersonalHttpDestination(storedDefinition, serverDef),
+            context,
             cancellationToken).ConfigureAwait(false);
         await using (client.ConfigureAwait(false))
         {

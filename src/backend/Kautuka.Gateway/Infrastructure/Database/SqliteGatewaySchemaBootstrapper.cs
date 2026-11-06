@@ -18,11 +18,13 @@ internal static class SqliteGatewaySchemaBootstrapper
         telegramEraSchemaId,
     };
     private const string previousCurrentSchemaId = "gateway-2026-10-23.2";
+    private const string previousRemoteMcpSchemaId = "gateway-2026-10-26.1";
     private static readonly HashSet<string> priorSupportedSchemaIds = new(priorTelegramSchemaIds, StringComparer.Ordinal)
     {
         previousCurrentSchemaId,
+        previousRemoteMcpSchemaId,
     };
-    public const string SchemaId = "gateway-2026-10-26.1";
+    public const string SchemaId = "gateway-2026-11-06.1";
 
     public static void EnsureCurrent(SqliteConnection connection)
     {
@@ -65,6 +67,7 @@ internal static class SqliteGatewaySchemaBootstrapper
             throw;
         }
 
+        EnsureRemoteMcpNamespaces(connection);
         ValidateExisting(connection);
     }
 
@@ -115,12 +118,12 @@ internal static class SqliteGatewaySchemaBootstrapper
 
     private static void ApplyCompatibleUpgrades(SqliteConnection connection)
     {
+        UpgradeMcpServers(connection);
         Domain.Stores.ToolApprovalSchemaCompat.EnsureAgentDefinitionRevisionColumn(connection);
         EnsureHitlStatsIndexes(connection);
         MovePreviousWorkflowJournalToCurrent(connection);
         EnsureWorkflowTables(connection);
         Domain.Stores.ToolApprovalSchemaCompat.EnsureWorkflowReviewColumns(connection);
-        Domain.Connectors.McpServerSchemaCompat.EnsureProtocolVersionColumn(connection);
         Domain.Channels.ChannelInteractionSchemaCompat.EnsureInteractionGroupColumn(connection);
         SqliteGatewaySchemaSeeder.EnsureBuiltinProviderCatalogRows(connection, transaction: null);
         Domain.Stores.ExternalLoginSchemaCompat.EnsureIdentityColumns(connection);
@@ -132,6 +135,93 @@ internal static class SqliteGatewaySchemaBootstrapper
         {
             UpgradeLegacyTelegramSchema(connection);
         }
+    }
+
+    private static void UpgradeMcpServers(SqliteConnection connection)
+    {
+        string? sourceSchemaId = ReadGatewaySchemaId(connection);
+        if (sourceSchemaId is null || !priorSupportedSchemaIds.Contains(sourceSchemaId)) return;
+        if (ReadObjectSql(connection, "table", "mcp_servers") is null) return;
+        IReadOnlyDictionary<SchemaObjectKey, string> expected = CreateExpectedSchema();
+        if (!expected.TryGetValue(new SchemaObjectKey("table", "mcp_servers"), out string? definition))
+            throw new InvalidOperationException("The current Gateway schema does not define mcp_servers.");
+
+        string[] current = GetTableColumnsFromDefinition(connection, definition);
+        string[] withoutRemote = [.. current.Where(column => !column.Equals("remote_config_json", StringComparison.OrdinalIgnoreCase))];
+        string[] withoutRemoteAndProtocol = [.. withoutRemote.Where(column => !column.Equals("mcp_protocol_version", StringComparison.OrdinalIgnoreCase))];
+        string[] actual = [.. GetTableColumns(connection, "mcp_servers")];
+        bool knownSourceShape = actual.SequenceEqual(current, StringComparer.OrdinalIgnoreCase)
+            || actual.SequenceEqual(withoutRemote, StringComparer.OrdinalIgnoreCase)
+            || actual.SequenceEqual(withoutRemoteAndProtocol, StringComparer.OrdinalIgnoreCase)
+            || actual.SequenceEqual([.. withoutRemote, "remote_config_json"], StringComparer.OrdinalIgnoreCase);
+        if (!knownSourceShape)
+            throw new InvalidOperationException("The registered mcp_servers upgrade does not recognize this table shape; no changes were made.");
+
+        string actualDefinition = NormalizeSql(ReadObjectSql(connection, "table", "mcp_servers")!);
+        string canonical = NormalizeSql(definition);
+        const string remote = ",REMOTE_CONFIG_JSONTEXTNOTNULLDEFAULT'{\"CREDENTIALS\":[],\"HTTPHEADERS\":[]}'";
+        const string protocol = ",MCP_PROTOCOL_VERSIONTEXTNULL";
+        string prior = canonical.Replace(remote, string.Empty, StringComparison.Ordinal);
+        string earlier = prior.Replace(protocol, string.Empty, StringComparison.Ordinal);
+        string appended = prior[..^1] + remote + ")";
+        if (actualDefinition != canonical && actualDefinition != prior && actualDefinition != earlier && actualDefinition != appended)
+            throw new InvalidOperationException("The registered mcp_servers upgrade does not recognize this table definition; no changes were made.");
+
+        bool needsRebuild = !actual.SequenceEqual(current, StringComparer.OrdinalIgnoreCase);
+        using SqliteCommand foreignKeys = connection.CreateCommand();
+        foreignKeys.CommandText = "PRAGMA foreign_keys";
+        bool wasEnabled = Convert.ToInt64(foreignKeys.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+        if (wasEnabled) Execute(connection, "PRAGMA foreign_keys=OFF", transaction: null);
+        try
+        {
+            using SqliteTransaction transaction = connection.BeginTransaction();
+            try
+            {
+                if (needsRebuild)
+                    RebuildTable(connection, transaction, new TableUpgrade("mcp_servers", actual, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)), expected);
+
+                if (!actual.Contains("mcp_protocol_version", StringComparer.OrdinalIgnoreCase))
+                {
+                    Execute(connection, "UPDATE mcp_servers SET mcp_protocol_version='2024-11-05' WHERE id='markitdown' AND (mcp_protocol_version IS NULL OR mcp_protocol_version='')", transaction);
+                }
+
+                Execute(connection,
+                    "UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.requiresCredentialReentry',json('true')) WHERE lower(transport)='http' AND json_array_length(env_keys_json)>0 AND COALESCE(json_array_length(json_extract(remote_config_json,'$.credentials')),0)=0 AND COALESCE(json_array_length(json_extract(remote_config_json,'$.httpHeaders')),0)=0",
+                    transaction);
+
+                EnsureRemoteMcpNamespaces(connection, transaction);
+                using (SqliteCommand check = connection.CreateCommand())
+                {
+                    check.Transaction = transaction; check.CommandText = "PRAGMA foreign_key_check";
+                    using SqliteDataReader reader = check.ExecuteReader();
+                    if (reader.Read()) throw new InvalidOperationException("The connector upgrade would leave a foreign-key violation.");
+                }
+                transaction.Commit();
+            }
+            catch
+            {
+                transaction.Rollback();
+                throw;
+            }
+        }
+        finally { if (wasEnabled) Execute(connection, "PRAGMA foreign_keys=ON", transaction: null); }
+    }
+
+    private static void EnsureRemoteMcpNamespaces(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        Execute(connection,
+            "UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.credentialNamespace',lower(hex(randomblob(16)))) WHERE lower(transport)='http' AND (json_extract(remote_config_json,'$.credentialNamespace') IS NULL OR json_extract(remote_config_json,'$.credentialNamespace')='')",
+            transaction);
+    }
+
+    private static string[] GetTableColumnsFromDefinition(SqliteConnection connection, string definition)
+    {
+        const string temporary = "__gateway_expected_mcp_servers";
+        if (ReadObjectSql(connection, "table", temporary) is not null)
+            throw new InvalidOperationException($"Unexpected temporary table '{temporary}' exists.");
+        Execute(connection, definition.Replace("CREATE TABLE mcp_servers", $"CREATE TABLE {temporary}", StringComparison.Ordinal), transaction: null);
+        try { return [.. GetTableColumns(connection, temporary)]; }
+        finally { Execute(connection, $"DROP TABLE {temporary}", transaction: null); }
     }
 
     private static bool HasLegacyTelegramSchema(SqliteConnection connection)
@@ -395,6 +485,8 @@ internal static class SqliteGatewaySchemaBootstrapper
             {
                 if (reader.IsDBNull(4))
                 {
+                    // SQLite supplies NULL for a nullable column that has no explicit default.
+                    if (reader.GetInt32(3) == 0 && reader.GetInt32(5) == 0) return "NULL";
                     throw new InvalidOperationException(
                         $"Gateway schema upgrade cannot supply required column '{tableName}.{columnName}'.");
                 }

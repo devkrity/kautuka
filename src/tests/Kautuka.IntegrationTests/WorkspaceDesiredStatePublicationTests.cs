@@ -2,6 +2,10 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+using Grpc.Core;
+
+using Kautuka.CredentialsHost.Database;
+using Kautuka.CredentialsHost.Security;
 using Kautuka.Gateway.Domain.Assets;
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Connectors;
@@ -10,6 +14,7 @@ using Kautuka.Gateway.Domain.Memory;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.Gateway.Endpoints.Connectors;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.Hosting.Hosting;
 using Kautuka.Telemetry.Telemetry;
@@ -2597,6 +2602,238 @@ public sealed class WorkspaceDesiredStatePublicationTests
 
         Assert.Equal(1, saved.ToolCount);
         Assert.Equal(["kautuka_web_fetch"], saved.ToolNames);
+    }
+
+    [Fact]
+    public async Task RemoteSearchPresetsSeedOnceAndPreserveEditsOwnershipAndDeletionAcrossRestart()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions);
+        GatewayCatalogStore MakeCatalog(GatewayState snapshot) => new(snapshot, definitions, new SqliteTopologyConfigurationWriter(database, provider),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        GatewayCatalogStore catalog = MakeCatalog(state);
+        await catalog.SaveMcpServerAsync("exa", new GatewayConnectorUpsertRequest
+        {
+            Name = "Owner's existing connector",
+            Transport = "http",
+            HttpUrl = "https://custom.example/mcp",
+            Enabled = true,
+        }, GatewayOwnershipScopes.User, "owner", TestContext.Current.CancellationToken);
+        foreach ((string id, GatewayConnectorUpsertRequest preset) in RemoteMcpPresets.Create())
+        {
+            RemoteMcpConfigurationValidator.Validate(preset.Transport!, preset.Credentials ?? [], preset.HttpHeaders ?? []);
+            RemoteMcpConfigurationValidator.ValidateEndpoint(new Uri(preset.HttpUrl!));
+            bool created = await catalog.SeedRemoteMcpPresetAsync(id, preset, TestContext.Current.CancellationToken);
+            Assert.Equal(id != "exa", created);
+        }
+        Assert.Equal("owner", state.McpServers["exa"].OwnerUserId);
+        Assert.Equal("https://custom.example/mcp", state.McpServers["exa"].HttpUrl);
+        foreach (string id in new[] { "tavily", "firecrawl" })
+        {
+            GatewayMcpServer preset = state.McpServers[id];
+            Assert.False(preset.Enabled);
+            Assert.False(preset.IsInternalSystemConnector);
+            Assert.False(Assert.Single(preset.Credentials!).Required);
+            Assert.Empty(preset.EnvKeys ?? []);
+        }
+        await catalog.SaveMcpServerAsync("firecrawl", new GatewayConnectorUpsertRequest
+        {
+            Name = "Owner's edited search",
+            Transport = "http",
+            HttpUrl = "https://edited.example/mcp",
+            Enabled = true,
+        }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        Assert.True(await catalog.DeleteMcpServerAsync("tavily", TestContext.Current.CancellationToken));
+        GatewayState restarted = CreateState(temp.SqlitePath);
+        GatewayCatalogStore afterRestart = MakeCatalog(restarted);
+        foreach ((string id, GatewayConnectorUpsertRequest preset) in RemoteMcpPresets.Create())
+            Assert.False(await afterRestart.SeedRemoteMcpPresetAsync(id, preset, TestContext.Current.CancellationToken));
+        Assert.False(restarted.McpServers.ContainsKey("tavily"));
+        Assert.True(restarted.McpServers["firecrawl"].Enabled);
+        Assert.Equal("Owner's edited search", restarted.McpServers["firecrawl"].Name);
+        Assert.Equal("owner", restarted.McpServers["exa"].OwnerUserId);
+    }
+
+    [Fact]
+    public async Task RemoteConnectorConfigurationSurvivesBothReadersDiscoveryAndToggle()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions);
+        var catalog = new GatewayCatalogStore(state, definitions, new SqliteTopologyConfigurationWriter(database, provider),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var credential = new RemoteMcpCredential("api-key", "API key", false);
+        var headers = new[] { new RemoteMcpHeader("X-Mode", "free"), new RemoteMcpHeader("Authorization", CredentialKey: "api-key", Prefix: "Bearer ") };
+        var request = new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://example.com/mcp", Credentials = [credential], HttpHeaders = headers };
+        await catalog.SaveMcpServerAsync("remote-test", request, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        await catalog.SaveMcpServerDiscoveryAsync("remote-test", 1, ["search"], TestContext.Current.CancellationToken);
+        await catalog.SaveMcpServerAsync("remote-test", new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://example.com/mcp", Enabled = false }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        GatewayMcpServer loaded = CreateState(temp.SqlitePath).McpServers["remote-test"];
+        McpServerDefinition topology = Assert.Single(provider.GetCurrent().McpServers, x => x.Id == "remote-test");
+        Assert.Equal([credential], loaded.Credentials);
+        Assert.Equal(headers, loaded.HttpHeaders);
+        Assert.Equal([credential], topology.Credentials);
+        Assert.Equal(headers, topology.HttpHeaders);
+        Assert.False(loaded.Enabled);
+        Assert.Equal(1, loaded.ToolCount);
+
+        await catalog.SaveMcpServerAsync("container-test", new GatewayConnectorUpsertRequest { Name = "Container", Transport = "container", ContainerImage = "example/image", EnvKeys = ["TOKEN"], BundlePath = "/bundle.mcpb" }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        GatewayMcpServer container = CreateState(temp.SqlitePath).McpServers["container-test"];
+        Assert.Equal(["TOKEN"], container.EnvKeys);
+        Assert.Equal("/bundle.mcpb", container.BundlePath);
+        Assert.Empty(container.Credentials!);
+    }
+
+    [Fact]
+    public async Task LegacyCredentialReentrySurvivesOrdinaryEditsUntilRequiredHeaderSetup()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState initialState = CreateState(temp.SqlitePath); IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config); var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions); var writer = new SqliteTopologyConfigurationWriter(database, provider);
+        GatewayCatalogStore Catalog(GatewayState state) => new(state, definitions, writer, new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(), new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        var original = new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Credentials = [], HttpHeaders = [] };
+        _ = await Catalog(initialState).SaveMcpServerAsync("legacy", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        await using (SqliteConnection connection = new(database.ConnectionString))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await using var mark = new SqliteCommand("UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.requiresCredentialReentry',json('true')) WHERE id='legacy'", connection);
+            _ = await mark.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+        GatewayState state = CreateState(temp.SqlitePath); GatewayCatalogStore catalog = Catalog(state);
+        GatewayMcpServer changed = await catalog.SaveMcpServerAsync("legacy", new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Enabled = false }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        Assert.True(changed.RequiresCredentialReentry);
+        Assert.True(CreateState(temp.SqlitePath).McpServers["legacy"].RequiresCredentialReentry);
+        Assert.True(Assert.Single(provider.GetCurrent().McpServers, server => server.Id == "legacy").RequiresCredentialReentry);
+        Assert.True(GatewayConnectorEndpointMappings.ToConnectorPayload(changed).RequiresCredentialReentry);
+        var configured = new GatewayConnectorUpsertRequest
+        {
+            Name = "Legacy",
+            Transport = "http",
+            HttpUrl = "https://example.com/mcp",
+            Enabled = false,
+            Credentials = [new("api-key", "API key", true)],
+            HttpHeaders = [new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")]
+        };
+        string association = Guid.NewGuid().ToString("N");
+        GatewayMcpServer unconfirmed = await catalog.ActivateAssociationDraftAsync("legacy", configured, changed.UpdatedAt, changed.CredentialNamespace!, "", Guid.NewGuid().ToString("N"), GatewayOwnershipScopes.System, null, _ => true, _ => Task.FromResult(association), TestContext.Current.CancellationToken);
+        Assert.True(unconfirmed.RequiresCredentialReentry);
+        var confirmed = new GatewayConnectorUpsertRequest { Name = "Legacy", Transport = "http", HttpUrl = "https://example.com/mcp", Enabled = false, ConfirmLegacyAuthReplacement = true, Credentials = [], HttpHeaders = [] };
+        GatewayMcpServer saved = await catalog.ActivateAssociationDraftAsync("legacy", confirmed, unconfirmed.UpdatedAt, unconfirmed.CredentialNamespace!, association, Guid.NewGuid().ToString("N"), GatewayOwnershipScopes.System, null, _ => true, _ => Task.FromResult(Guid.NewGuid().ToString("N")), TestContext.Current.CancellationToken);
+        Assert.False(saved.RequiresCredentialReentry);
+        Assert.False(CreateState(temp.SqlitePath).McpServers["legacy"].RequiresCredentialReentry);
+    }
+
+    [Fact]
+    public async Task AssociationDraftSaveRetriesAfterTemporaryInputExpires()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        string vaultRoot = Path.Combine(Path.GetDirectoryName(temp.SqlitePath)!, "draft-vault");
+        try
+        {
+            var credentials = new CredentialsDatabase(vaultRoot); CredentialsSchemaInitializer.EnsureReady(credentials);
+            using var ring = new CredentialKeyRing(vaultRoot); var vault = new CredentialsVaultService(ring); var clock = new DraftClock();
+            var drafts = new ConnectorDraftRepository(credentials, vault, clock); var associations = new ConnectorAssociationRepository(credentials, vault, clock);
+            GatewayState state = CreateState(temp.SqlitePath); IConfiguration config = CreateConfiguration(temp.SqlitePath);
+            var definitions = new SqliteAgentDefinitionStore(config); var database = new KautukaDatabase(config);
+            var writer = new SqliteTopologyConfigurationWriter(database, new SqlitePlatformConfigurationProvider(database, definitions));
+            GatewayCatalogStore Catalog(RecordingDesiredStatePublisher publisher) => new(state, definitions, writer, new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), publisher, new NoOpContinuationStore(), new NoOpConversationAssetStore());
+            GatewayCatalogStore catalog = Catalog(new RecordingDesiredStatePublisher());
+            var original = new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://old.example/mcp", Credentials = [], HttpHeaders = [] };
+            GatewayMcpServer existing = await catalog.SaveMcpServerAsync("atomic-expiry", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+            var candidate = new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://new.example/mcp", Credentials = [new("key", "Key", true)], HttpHeaders = [new("Authorization", CredentialKey: "key")] };
+            string id = Guid.NewGuid().ToString("N"); string key = "__connector_remote__:" + existing.CredentialNamespace + ":destination:key";
+            drafts.Create(id, "alice", "atomic-expiry", "user", "candidate-metadata", existing.UpdatedAt, "https://new.example/mcp", "https://old.example/mcp", false, existing.CredentialNamespace!, [key], new Dictionary<string, string> { [key] = "synthetic" }, []);
+            Task<string> Stage(CancellationToken _) => Task.FromResult(associations.Stage(id, "alice", ""));
+            await Assert.ThrowsAsync<ConnectorActivationException>(() => Catalog(new RecordingDesiredStatePublisher { RejectFirst = true }).ActivateAssociationDraftAsync("atomic-expiry", candidate, existing.UpdatedAt, existing.CredentialNamespace!, "", id, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken));
+            Assert.Equal(original.HttpUrl, CreateState(temp.SqlitePath).McpServers["atomic-expiry"].HttpUrl);
+            clock.Now = clock.Now.AddMinutes(16); drafts.CleanupExpired();
+            ConnectorDraftRecord retained = associations.GetStagedDraft(id, "alice");
+            Assert.Equal("candidate-metadata", retained.Candidate);
+            GatewayMcpServer saved = await catalog.ActivateAssociationDraftAsync("atomic-expiry", candidate, retained.BaseUpdatedAt, retained.CredentialNamespace, retained.SourceAssociationId, id, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken);
+            Assert.Equal(candidate.HttpUrl, CreateState(temp.SqlitePath).McpServers["atomic-expiry"].HttpUrl);
+            Assert.Equal("synthetic", associations.Resolve(saved.CredentialAssociationId!, "atomic-expiry", retained.CredentialNamespace, "alice", [key], false)[key]);
+            string cancelId = Guid.NewGuid().ToString("N");
+            drafts.Create(cancelId, "alice", "atomic-expiry", "user", "next-candidate", saved.UpdatedAt, "https://old.example/mcp", "https://new.example/mcp", false, retained.CredentialNamespace, [key], new Dictionary<string, string>(), [], saved.CredentialAssociationId!);
+            var staged = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<string> StageAndWait(CancellationToken token)
+            {
+                string association = associations.Stage(cancelId, "alice", saved.CredentialAssociationId!);
+                staged.TrySetResult(true); await release.Task.WaitAsync(token); return association;
+            }
+            Task<GatewayMcpServer> save = catalog.ActivateAssociationDraftAsync("atomic-expiry", original, saved.UpdatedAt, retained.CredentialNamespace, saved.CredentialAssociationId!, cancelId, GatewayOwnershipScopes.System, null, _ => true, StageAndWait, TestContext.Current.CancellationToken);
+            await staged.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task cancel = catalog.WithMcpServerLockAsync("atomic-expiry", _ => { Assert.True(drafts.Cancel(cancelId, "alice")); return Task.CompletedTask; }, TestContext.Current.CancellationToken);
+            Assert.False(cancel.IsCompleted);
+            release.SetResult(true);
+            GatewayMcpServer savedBeforeCancel = await save;
+            await cancel;
+            Assert.Throws<RpcException>(() => associations.GetStagedDraft(cancelId, "alice"));
+            Assert.Equal("synthetic", associations.Resolve(savedBeforeCancel.CredentialAssociationId!, "atomic-expiry", retained.CredentialNamespace, "alice", [key], false)[key]);
+        }
+        finally { SqliteTestPoolCleanup.ClearPoolsUnderDirectory(vaultRoot); }
+    }
+
+    private sealed class DraftClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.Parse("2026-11-05T00:00:00Z", CultureInfo.InvariantCulture);
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [Fact]
+    public async Task AssociationActivationWritesConfigurationAndReceiptTogetherAndRetriesWithoutRestaging()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions);
+        var writer = new SqliteTopologyConfigurationWriter(database, provider);
+        GatewayCatalogStore Catalog(RecordingDesiredStatePublisher publisher) => new(state, definitions, writer, new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), publisher, new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        GatewayCatalogStore catalog = Catalog(new RecordingDesiredStatePublisher());
+        var original = new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://old.example/mcp", Credentials = [], HttpHeaders = [] };
+        GatewayMcpServer initial = await catalog.SaveMcpServerAsync("atomic", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        await catalog.SaveMcpServerDiscoveryAsync("atomic", 1, ["old"], TestContext.Current.CancellationToken);
+        string baseVersion = state.McpServers["atomic"].UpdatedAt;
+        var candidate = new GatewayConnectorUpsertRequest { Name = "Remote", Transport = "http", HttpUrl = "https://new.example/mcp", Credentials = [], HttpHeaders = [] };
+        string association = Guid.NewGuid().ToString("N"); string operation = Guid.NewGuid().ToString("N"); int stages = 0;
+        Task<string> Stage(CancellationToken _) { stages++; return Task.FromResult(association); }
+        GatewayCatalogStore rejecting = Catalog(new RecordingDesiredStatePublisher { RejectFirst = true });
+        await Assert.ThrowsAsync<ConnectorActivationException>(() => rejecting.ActivateAssociationDraftAsync("atomic", candidate, baseVersion, initial.CredentialNamespace!, "", operation, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken));
+        GatewayMcpServer afterFailure = CreateState(temp.SqlitePath).McpServers["atomic"];
+        Assert.Equal(original.HttpUrl, afterFailure.HttpUrl); Assert.Null(afterFailure.CredentialAssociationId); Assert.Null(afterFailure.CredentialOperationId);
+        GatewayMcpServer saved = await catalog.ActivateAssociationDraftAsync("atomic", candidate, baseVersion, initial.CredentialNamespace!, "", operation, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken);
+        GatewayMcpServer reloaded = CreateState(temp.SqlitePath).McpServers["atomic"];
+        McpServerDefinition topology = Assert.Single(provider.GetCurrent().McpServers, item => item.Id == "atomic");
+        Assert.Equal(candidate.HttpUrl, reloaded.HttpUrl); Assert.Equal(association, reloaded.CredentialAssociationId); Assert.Equal(operation, reloaded.CredentialOperationId);
+        Assert.Equal(association, topology.CredentialAssociationId); Assert.Equal(operation, topology.CredentialOperationId); Assert.Null(reloaded.ToolCount);
+        GatewayMcpServer retried = await catalog.ActivateAssociationDraftAsync("atomic", candidate, baseVersion, initial.CredentialNamespace!, "", operation, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken);
+        Assert.Equal(saved.UpdatedAt, retried.UpdatedAt); Assert.Equal(2, stages);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ActivateAssociationDraftAsync("atomic", candidate, baseVersion, initial.CredentialNamespace!, "wrong-source", operation, GatewayOwnershipScopes.System, null, _ => true, Stage, TestContext.Current.CancellationToken));
+        bool authorized = true;
+        Task<string> RevokeDuringStage(CancellationToken _) { authorized = false; return Task.FromResult(Guid.NewGuid().ToString("N")); }
+        string nextOperation = Guid.NewGuid().ToString("N");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ActivateAssociationDraftAsync("atomic", original, saved.UpdatedAt, initial.CredentialNamespace!, association, nextOperation, GatewayOwnershipScopes.System, null, _ => authorized, RevokeDuringStage, TestContext.Current.CancellationToken));
+        Assert.Equal(association, CreateState(temp.SqlitePath).McpServers["atomic"].CredentialAssociationId);
+        authorized = true;
+        await catalog.SaveMcpServerAsync("atomic", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ActivateAssociationDraftAsync("atomic", candidate, saved.UpdatedAt, initial.CredentialNamespace!, association, nextOperation, GatewayOwnershipScopes.System, null, _ => authorized, Stage, TestContext.Current.CancellationToken));
+        Assert.Equal(association, CreateState(temp.SqlitePath).McpServers["atomic"].CredentialAssociationId);
+        Assert.True(await catalog.DeleteMcpServerAsync("atomic", TestContext.Current.CancellationToken));
+        GatewayMcpServer recreated = await catalog.SaveMcpServerAsync("atomic", original, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        Assert.NotEqual(initial.CredentialNamespace, recreated.CredentialNamespace);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => catalog.ActivateAssociationDraftAsync("atomic", candidate, saved.UpdatedAt, initial.CredentialNamespace!, association, nextOperation, GatewayOwnershipScopes.System, null, _ => authorized, Stage, TestContext.Current.CancellationToken));
     }
 
     [Fact]

@@ -17,6 +17,7 @@ internal static class GatewayEndpointMappings
         app.MapGatewayAuthEndpoints();
         app.MapGatewayCatalogEndpoints();
         app.MapGatewayConnectorEndpoints();
+        app.MapConnectorDraftEndpoints();
         app.MapGatewaySkillEndpoints();
         app.MapGatewayCredentialEndpoints();
         app.MapGatewayRuntimeEndpoints();

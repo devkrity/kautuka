@@ -659,6 +659,69 @@ public sealed class CredentialSecurityBoundaryTests
         }
     }
 
+    [Fact]
+    public async Task DraftRpcEnforcesOwnerScopeAndDeclaredReferences()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-draft-rpc", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var database = new CredentialsDatabase(root); CredentialsSchemaInitializer.EnsureReady(database);
+            using var ring = new CredentialKeyRing(root); var vault = new CredentialsVaultService(ring); var audit = new CredentialAuditStore(database);
+            var service = new CredentialsGrpcService(database, new CredentialRepository(database, vault, audit), vault, audit,
+                new CredentialClientIdentityState("test", DateTimeOffset.UtcNow.AddDays(1)), NullLogger<CredentialsGrpcService>.Instance);
+            var user = new CredentialAccessContext { ActorId = "alice", Capability = CredentialCapability.OwnUserAdmin };
+            var create = new CreateConnectorDraftRequest { Access = user, DraftId = Guid.NewGuid().ToString("N"), ConnectorId = "test", CredentialScope = "user", CandidateJson = "{}", EffectiveEndpoint = "https://example.com/mcp", CredentialNamespace = Guid.NewGuid().ToString("N") };
+            create.DeclaredKeys.Add("test-key"); create.Entries.Add("test-key", "synthetic-secret");
+            ConnectorDraftMetadata draft = await service.CreateConnectorDraft(create, TestCallContext.Instance);
+            Assert.DoesNotContain("synthetic-secret", draft.CandidateJson, StringComparison.Ordinal);
+            RpcException wrongOwner = await Assert.ThrowsAsync<RpcException>(() => service.GetConnectorDraft(new ConnectorDraftAccessRequest { DraftId = draft.DraftId, Access = new CredentialAccessContext { ActorId = "bob", Capability = CredentialCapability.OwnUserAdmin } }, TestCallContext.Instance));
+            Assert.Equal(StatusCode.NotFound, wrongOwner.StatusCode);
+            var resolve = new ResolveConnectorDraftRequest { DraftId = draft.DraftId, Access = user };
+            resolve.RequiredKeys.Add("not-declared");
+            Assert.Equal(StatusCode.PermissionDenied, (await Assert.ThrowsAsync<RpcException>(() => service.ResolveConnectorDraft(resolve, TestCallContext.Instance))).StatusCode);
+            var badSystem = new CreateConnectorDraftRequest { Access = user, DraftId = Guid.NewGuid().ToString("N"), ConnectorId = "test", CredentialScope = "system", CandidateJson = "{}", EffectiveEndpoint = "https://example.com/mcp", CredentialNamespace = Guid.NewGuid().ToString("N") };
+            Assert.Equal(StatusCode.PermissionDenied, (await Assert.ThrowsAsync<RpcException>(() => service.CreateConnectorDraft(badSystem, TestCallContext.Instance))).StatusCode);
+        }
+        finally
+        {
+            SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AssociationPresenceEnforcesScopeAndCallerWithoutResolvingValues()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-draft-gate", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var database = new CredentialsDatabase(root); CredentialsSchemaInitializer.EnsureReady(database);
+            using var ring = new CredentialKeyRing(root); var vault = new CredentialsVaultService(ring); var audit = new CredentialAuditStore(database);
+            var service = new CredentialsGrpcService(database, new CredentialRepository(database, vault, audit), vault, audit,
+                new CredentialClientIdentityState("test", DateTimeOffset.UtcNow.AddDays(1)), NullLogger<CredentialsGrpcService>.Instance);
+            var admin = new CredentialAccessContext { ActorId = "admin", Capability = CredentialCapability.SystemAdmin };
+            string ns = Guid.NewGuid().ToString("N"); string key = "__connector_remote__:" + ns + ":endpoint:key";
+            var mutation = new StageConnectorMutationRequest { Access = admin, OperationId = Guid.NewGuid().ToString("N"), ConnectorId = "test", CredentialScope = "system", CredentialNamespace = ns };
+            mutation.Entries.Add(key, "synthetic");
+            StageConnectorAssociationResponse staged = await service.StageConnectorMutation(mutation, TestCallContext.Instance);
+            var runtime = new CredentialAccessContext { ActorId = "alice", Capability = CredentialCapability.RuntimeResolve };
+            var request = new ResolveConnectorAssociationRequest { Access = runtime, AssociationId = staged.AssociationId, ConnectorId = "test", CredentialNamespace = ns, UserId = "alice", IncludeSystemScope = true };
+            request.RequiredKeys.Add(key);
+            Assert.Equal(key, Assert.Single((await service.GetConnectorAssociationPresence(request, TestCallContext.Instance)).SystemKeys));
+            request.IncludeSystemScope = false;
+            Assert.Empty((await service.GetConnectorAssociationPresence(request, TestCallContext.Instance)).SystemKeys);
+            request.ConnectorId = "other";
+            Assert.Equal(StatusCode.FailedPrecondition, (await Assert.ThrowsAsync<RpcException>(() => service.GetConnectorAssociationPresence(request, TestCallContext.Instance))).StatusCode);
+            request.ConnectorId = "test"; request.UserId = "bob";
+            Assert.Equal(StatusCode.PermissionDenied, (await Assert.ThrowsAsync<RpcException>(() => service.GetConnectorAssociationPresence(request, TestCallContext.Instance))).StatusCode);
+        }
+        finally
+        {
+            SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root);
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private sealed class TestCallContext : ServerCallContext
     {
         public static readonly TestCallContext Instance = new();

@@ -5,6 +5,7 @@ using Kautuka.Gateway.Domain.Assets;
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
+using Kautuka.Gateway.Domain.Connectors;
 
 namespace Kautuka.Gateway.Domain.Stores;
 
@@ -21,6 +22,7 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
     private readonly IGatewaySettingsStore? settingsStore;
     private readonly IProviderTypeCatalog? providerTypeCatalog;
     private readonly IRuntimeEventLifecycle? runtimeEventLifecycle;
+    private readonly RemoteMcpCredentialRevisionTracker? remoteRevisions;
 
     public GatewayCatalogStore(
         GatewayState state,
@@ -57,7 +59,8 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
         IConversationAssetStore assetStore,
         IGatewaySettingsStore? settingsStore,
         IProviderTypeCatalog? providerTypeCatalog = null,
-        IRuntimeEventLifecycle? runtimeEventLifecycle = null)
+        IRuntimeEventLifecycle? runtimeEventLifecycle = null,
+        RemoteMcpCredentialRevisionTracker? remoteRevisions = null)
     {
         this.state = state;
         this.agentDefinitionStore = agentDefinitionStore;
@@ -70,6 +73,7 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
         this.settingsStore = settingsStore;
         this.providerTypeCatalog = providerTypeCatalog;
         this.runtimeEventLifecycle = runtimeEventLifecycle;
+        this.remoteRevisions = remoteRevisions;
     }
 
     public bool TryGetProvider(string id, out GatewayProvider? provider) =>

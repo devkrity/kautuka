@@ -85,6 +85,31 @@ internal partial class SqliteTopologyConfigurationWriter(KautukaDatabase databas
         }
     }
 
+    public PlatformConfiguration ClearMcpServerDiscovery(string serverId)
+    {
+        lock (lockObject)
+        {
+            using var connection = new SqliteConnection(database.ConnectionString);
+            connection.Open();
+            ExecuteNonQuery(connection, static (conn, tx) => new SqliteCommand("UPDATE mcp_servers SET tool_count=NULL, tool_names_json=NULL WHERE id=$id", conn, tx), command => command.Parameters.AddWithValue("$id", serverId));
+            return configurationProvider.GetCurrent();
+        }
+    }
+
+    public void SwitchMcpCredentialAssociation(string serverId, string credentialNamespace, string expectedSource, string associationId, string operationId)
+    {
+        lock (lockObject)
+        {
+            using var connection = new SqliteConnection(database.ConnectionString);
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE mcp_servers SET remote_config_json=json_set(remote_config_json,'$.credentialAssociationId',$association,'$.credentialOperationId',$operation,'$.credentialSourceId',$source) WHERE id=$id AND json_extract(remote_config_json,'$.credentialNamespace')=$namespace AND COALESCE(json_extract(remote_config_json,'$.credentialAssociationId'),'')=$source";
+            command.Parameters.AddWithValue("$id", serverId); command.Parameters.AddWithValue("$namespace", credentialNamespace);
+            command.Parameters.AddWithValue("$source", expectedSource); command.Parameters.AddWithValue("$association", associationId); command.Parameters.AddWithValue("$operation", operationId);
+            if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("Connector credential association changed.");
+        }
+    }
+
     public PlatformConfiguration DeleteMcpServer(string serverId)
     {
         lock (lockObject)

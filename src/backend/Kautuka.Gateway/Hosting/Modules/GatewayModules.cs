@@ -163,6 +163,7 @@ internal static class GatewayCatalogModule
             new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })));
         services.AddSingleton<ConnectorOAuthService>();
         services.AddHostedService<BuiltInConnectorCatalogService>();
+        services.AddHostedService<RemoteMcpPresetBootstrapService>();
         services.AddHostedService<BuiltInSkillPackageBootstrapService>();
         services.AddSingleton<IModelProbeService, ModelProbeService>();
         services.AddSingleton<IProviderValidationService, ProviderValidationService>();
@@ -173,6 +174,7 @@ internal static class GatewayCatalogModule
     {
         app.MapGatewayCatalogEndpoints();
         app.MapGatewayConnectorEndpoints();
+        app.MapConnectorDraftEndpoints();
         app.MapConnectorOAuthEndpoints();
         app.MapGatewaySkillEndpoints();
         app.MapGatewayCredentialEndpoints();

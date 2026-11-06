@@ -4,7 +4,7 @@ CREATE TABLE gateway_schema (
     schema_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL
 );
-INSERT INTO gateway_schema(schema_id, created_at) VALUES ('gateway-2026-10-26.1', CURRENT_TIMESTAMP);
+INSERT INTO gateway_schema(schema_id, created_at) VALUES ('gateway-2026-11-06.1', CURRENT_TIMESTAMP);
 CREATE TABLE providers (
             id           TEXT PRIMARY KEY,
             name         TEXT NOT NULL,
@@ -45,6 +45,7 @@ CREATE TABLE mcp_servers (
             http_url                       TEXT NULL,
             encrypted_env_json              TEXT NULL,
             env_keys_json                   TEXT NOT NULL DEFAULT '[]',
+            remote_config_json               TEXT NOT NULL DEFAULT '{"credentials":[],"httpHeaders":[]}',
             requiresApproval              INTEGER NOT NULL DEFAULT 0,
             requiresApprovalFunctionsJson TEXT NULL,
             tool_count                     INTEGER NULL,
