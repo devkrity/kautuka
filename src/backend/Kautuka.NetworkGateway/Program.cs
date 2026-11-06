@@ -11,16 +11,21 @@ if (args.Length == 4 && args[0] == "probe-verify-artifact")
     return ArtifactProbeCommand.Run(args[1], args[2], args[3]);
 }
 
+if (args.Length == 4 && args[0] == "probe-dns-resolver")
+{
+    return DnsProbeCommand.Run(args[1], args[2], args[3]);
+}
+
 // Deliberately not an installable service yet. This command accepts only the isolated
 // primitive fixture's source/sink and verifies its namespace before touching nftables.
 uint outputUid = 0;
-bool outputMode = args.Length == 5 && args[0] == "probe-output"
+bool outputMode = args.Length == 5 && (args[0] is "probe-output" or "probe-dns-admission")
     && uint.TryParse(args[4], NumberStyles.None, CultureInfo.InvariantCulture, out outputUid)
     && outputUid is > 0 and < uint.MaxValue;
 if ((!outputMode && (args.Length != 4 || args[0] is not ("probe-admission" or "probe-registry"))) || !OperatingSystem.IsLinux()
     || !ushort.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out ushort queueNumber))
 {
-    Console.Error.WriteLine("Linux fixture only: probe-admission/probe-registry <ktng-namespace> <audit.sqlite> <queue>; probe-output <ktng-namespace> <audit.sqlite> <queue> <dedicated-uid>; probe-verify-artifact <manifest> <signature> <trusted-public-key>");
+    Console.Error.WriteLine("Linux fixture only: probe-admission/probe-registry <ktng-namespace> <audit.sqlite> <queue>; probe-output/probe-dns-admission <ktng-namespace> <audit.sqlite> <queue> <dedicated-uid>; probe-dns-resolver <ktng-namespace> <dns.sqlite> <core|work>; probe-verify-artifact <manifest> <signature> <trusted-public-key>");
     return 2;
 }
 
@@ -31,14 +36,18 @@ using var termination = System.Runtime.InteropServices.PosixSignalRegistration.C
 
 try
 {
-    IAdmissionKernel kernel = outputMode ? new ProbeLocalOutputKernel(args[1], queueNumber, outputUid) : new ProbeKernel(args[1], queueNumber);
+    bool dnsMode = args[0] == "probe-dns-admission";
+    IAdmissionKernel kernel = dnsMode ? new ProbeDnsKernel(args[1], queueNumber, outputUid)
+        : outputMode ? new ProbeLocalOutputKernel(args[1], queueNumber, outputUid) : new ProbeKernel(args[1], queueNumber);
     uint ingress = uint.Parse(File.ReadAllText("/sys/class/net/g0/ifindex").Trim(), CultureInfo.InvariantCulture);
     string subject = outputMode ? "probe-resolver" : args[0] == "probe-registry" ? "probe-artifacts" : "probe-source";
     SourceRegistration[] sources = outputMode ? [] : [
         new(IPAddress.Parse("10.231.251.2"), subject, 1, ingress),
         new(IPAddress.Parse("fd7a:6b74:251::2"), subject, 1, ingress),
     ];
-    EndpointRule[] rules = args[0] == "probe-registry"
+    EndpointRule[] rules = dnsMode
+        ? [new(subject, IPAddress.Parse("10.231.252.2"), 2053, 6), new(subject, IPAddress.Parse("10.231.252.2"), 2053, 17)]
+        : args[0] == "probe-registry"
         ? [new(subject, IPAddress.Parse("10.231.252.2"), 20443, 6)]
         : [
         new(subject, IPAddress.Parse("10.231.252.2"), 20199, 17),

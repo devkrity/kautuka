@@ -102,17 +102,46 @@ public sealed class NfQueueProtocolTests
     public void MissingOutputSocketUidIsDeniedRatherThanBecomingUidZero()
         => Assert.Null(NfQueueProtocol.Decode(Packet(hook: 3, egress: 12), 23199).Flow);
 
-    private static byte[] Packet(bool includeConntrack = true, bool duplicateInput = false, byte hook = 2, uint? uid = null, uint egress = 0)
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void KernelZeroCopyPayloadCanEndWithoutAlignmentPadding(int payloadBytes)
     {
-        byte[] udp = new byte[28];
+        byte[] message = Packet(hook: 3, uid: 215, egress: 12, terminalPayloadBytes: payloadBytes);
+        QueuedPacket packet = NfQueueProtocol.Decode(message, 23199);
+        Assert.NotNull(packet.Flow);
+        Assert.Equal(42u, packet.Flow.ConntrackId);
+        Assert.Equal(215u, packet.Flow.SocketUid);
+        Assert.Equal((ushort)41000, packet.Flow.SourcePort);
+    }
+
+    [Fact]
+    public void UnpaddedPayloadDoesNotPermitPartialPaddingTruncationOrOtherAttributeTypes()
+    {
+        byte[] unpadded = Packet(terminalPayloadBytes: 1);
+        byte[] partialPadding = [.. unpadded, 0];
+        BinaryPrimitives.WriteUInt32LittleEndian(partialPadding, (uint)partialPadding.Length);
+        Assert.Throws<InvalidDataException>(() => NfQueueProtocol.Decode(partialPadding, 23199));
+        byte[] truncated = unpadded[..^1];
+        BinaryPrimitives.WriteUInt32LittleEndian(truncated, (uint)truncated.Length);
+        Assert.Throws<InvalidDataException>(() => NfQueueProtocol.Decode(truncated, 23199));
+        int payloadAttributeStart = unpadded.Length - (28 + 1 + 4);
+        BinaryPrimitives.WriteUInt16LittleEndian(unpadded.AsSpan(payloadAttributeStart + 2), 99);
+        Assert.Throws<InvalidDataException>(() => NfQueueProtocol.Decode(unpadded, 23199));
+    }
+
+    private static byte[] Packet(bool includeConntrack = true, bool duplicateInput = false, byte hook = 2, uint? uid = null, uint egress = 0, int terminalPayloadBytes = 0)
+    {
+        byte[] udp = new byte[28 + terminalPayloadBytes];
         udp[0] = 0x45;
         udp[9] = 17;
-        BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(2), 28);
+        BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(2), (ushort)udp.Length);
         IPAddress.Parse("10.231.251.2").GetAddressBytes().CopyTo(udp, 12);
         IPAddress.Parse("10.231.252.2").GetAddressBytes().CopyTo(udp, 16);
         BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(20), 41000);
         BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(22), 20199);
-        BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(24), 8);
+        BinaryPrimitives.WriteUInt16BigEndian(udp.AsSpan(24), (ushort)(8 + terminalPayloadBytes));
         byte[] header = new byte[7];
         BinaryPrimitives.WriteUInt32BigEndian(header, 17);
         header[4] = 8;
@@ -137,6 +166,11 @@ public sealed class NfQueueProtocolTests
         if (duplicateInput)
         {
             attributes.Add(Attribute(5, NetworkInt(12)));
+        }
+        if (terminalPayloadBytes != 0)
+        {
+            attributes.RemoveAt(1);
+            attributes.Add(Attribute(10, udp)[..(udp.Length + 4)]);
         }
         byte[] message = new byte[20 + attributes.Sum(attribute => attribute.Length)];
         BinaryPrimitives.WriteUInt32LittleEndian(message, (uint)message.Length);

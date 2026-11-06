@@ -41,7 +41,7 @@ internal static class NfQueueProtocol
             throw new InvalidDataException("Invalid NFQUEUE packet envelope.");
         }
 
-        Dictionary<ushort, byte[]> attributes = Attributes(message[20..]);
+        Dictionary<ushort, byte[]> attributes = Attributes(message[20..], allowTerminalPayload: true);
         if (!attributes.TryGetValue(1, out byte[]? header) || header.Length != 7)
         {
             throw new InvalidDataException("Missing NFQUEUE packet identifier.");
@@ -104,7 +104,7 @@ internal static class NfQueueProtocol
         return BinaryPrimitives.ReadInt32LittleEndian(message[16..]);
     }
 
-    private static Dictionary<ushort, byte[]> Attributes(ReadOnlySpan<byte> data)
+    private static Dictionary<ushort, byte[]> Attributes(ReadOnlySpan<byte> data, bool allowTerminalPayload = false)
     {
         var attributes = new Dictionary<ushort, byte[]>();
         while (!data.IsEmpty)
@@ -116,11 +116,18 @@ internal static class NfQueueProtocol
             int length = BinaryPrimitives.ReadUInt16LittleEndian(data);
             ushort type = (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(data[2..]) & 0x3FFF);
             int aligned = (length + 3) & ~3;
-            if (length < 4 || aligned > data.Length || !attributes.TryAdd(type, data.Slice(4, length - 4).ToArray()))
+            // nfqnl_build_packet_message appends the zero-copy NFQA_PAYLOAD last,
+            // without tail alignment. All other/nested attributes retain strict alignment.
+            bool terminalPayload = allowTerminalPayload && type == 10 && length == data.Length;
+            if (length < 4 || length > data.Length || (aligned > data.Length && !terminalPayload))
             {
-                throw new InvalidDataException("Truncated or duplicate netlink attribute.");
+                throw new InvalidDataException($"Truncated netlink attribute: type={type}, length={length}, remaining={data.Length}.");
             }
-            data = data[aligned..];
+            if (!attributes.TryAdd(type, data.Slice(4, length - 4).ToArray()))
+            {
+                throw new InvalidDataException($"Duplicate netlink attribute: type={type}, length={length}.");
+            }
+            data = terminalPayload ? [] : data[aligned..];
         }
         return attributes;
     }
