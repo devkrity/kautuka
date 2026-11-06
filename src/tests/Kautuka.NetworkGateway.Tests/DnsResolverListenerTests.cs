@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 
 using Kautuka.NetworkGateway.Admission;
 using Kautuka.NetworkGateway.Dns;
@@ -12,6 +13,30 @@ public sealed class DnsResolverListenerTests
 {
     private static readonly DnsQuestion question = new(0x1234, "allowed.ktng.test", 1, 1);
     private static readonly IPAddress answer = IPAddress.Parse("192.0.2.7");
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TestFixtureRetriesAnUnavailableProtocolPairWithoutReleasingTheSuccessfulPair(bool ipv6)
+    {
+        IPAddress address = ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback;
+        using var occupied = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        if (ipv6)
+        {
+            occupied.DualMode = false;
+        }
+        occupied.Bind(new IPEndPoint(address, 0));
+        occupied.Listen(1);
+        int unavailablePort = ((IPEndPoint)occupied.LocalEndPoint!).Port;
+        var fixture = new Fixture(ipv6, candidates: new[] { unavailablePort }.Concat(Fixture.CandidatePorts()));
+        await using var lifetime = fixture.ConfigureAwait(true);
+        Assert.Contains(fixture.BindFailures, failure => failure.Port == unavailablePort
+            && failure.Error is SocketError.AccessDenied or SocketError.AddressAlreadyInUse);
+        Assert.NotEqual(unavailablePort, fixture.Endpoint.Port);
+        byte[] response = await new SocketDnsUpstream(fixture.Endpoint).ExchangeAsync(DnsWire.Query(question), 17, fixture.Token).ConfigureAwait(true);
+        Assert.True(DnsWire.TryParseAnswer(response, question, out _));
+        Assert.Equal(unavailablePort, ((IPEndPoint)occupied.LocalEndPoint!).Port);
+    }
 
     [Theory]
     [InlineData(6, false)]
@@ -222,16 +247,59 @@ public sealed class DnsResolverListenerTests
         public bool ExpectedFault { get; set; }
         public Task Completion => running;
         public IPEndPoint Endpoint => listener.LocalEndPoint;
+        public List<(int Port, SocketError Error)> BindFailures { get; } = [];
 
-        public Fixture(bool ipv6 = false, TimeSpan? deadline = null, int concurrency = 16)
+        public Fixture(bool ipv6 = false, TimeSpan? deadline = null, int concurrency = 16, IEnumerable<int>? candidates = null)
         {
             cancellation.CancelAfter(TimeSpan.FromSeconds(10));
             IPAddress address = ipv6 ? IPAddress.IPv6Loopback : IPAddress.Loopback;
             var policy = new DnsQueryPolicy(1, [new SourceRegistration(address, "core", 1, 11, 9)],
                 [new DnsNameRule("core", question.Name, answer, IPAddress.Parse("2001:db8::7"))]);
             coordinator = new DnsQueryCoordinator(policy, Ledger, Upstream, TimeProvider.System, TimeSpan.FromSeconds(2));
-            listener = new DnsResolverListener(new IPEndPoint(address, 0), 11, 9, coordinator, deadline ?? TimeSpan.FromSeconds(2), concurrency);
+            try
+            {
+                listener = BindListener(address, deadline ?? TimeSpan.FromSeconds(2), concurrency, candidates ?? CandidatePorts());
+            }
+            catch
+            {
+                coordinator.Dispose();
+                cancellation.Dispose();
+                throw;
+            }
             running = listener.RunAsync(Token);
+        }
+
+        public static IEnumerable<int> CandidatePorts()
+        {
+            var used = new HashSet<int>();
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                // Unprivileged ports across the complete range; TCP and UDP may
+                // have different OS exclusions, so neither allocator alone suffices.
+                int port = RandomNumberGenerator.GetInt32(1024, 65536);
+                while (!used.Add(port))
+                {
+                    port = port == 65535 ? 1024 : port + 1;
+                }
+                yield return port;
+            }
+        }
+
+        private DnsResolverListener BindListener(IPAddress address, TimeSpan deadline, int concurrency, IEnumerable<int> candidates)
+        {
+            foreach (int port in candidates.Take(32).Distinct())
+            {
+                try
+                {
+                    // Retain both sockets on success: never probe/close/rebind a port.
+                    return new DnsResolverListener(new IPEndPoint(address, port), 11, 9, coordinator, deadline, concurrency);
+                }
+                catch (SocketException error) when (error.SocketErrorCode is SocketError.AccessDenied or SocketError.AddressAlreadyInUse)
+                {
+                    BindFailures.Add((port, error.SocketErrorCode));
+                }
+            }
+            throw new IOException($"Cannot bind a test TCP/UDP pair on {address.AddressFamily}; candidates: {string.Join(", ", BindFailures.Select(failure => $"{failure.Port}:{failure.Error}"))}");
         }
 
         public async Task Stop()
