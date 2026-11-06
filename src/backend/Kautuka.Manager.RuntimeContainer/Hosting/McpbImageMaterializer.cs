@@ -3,16 +3,20 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+
 using Microsoft.Extensions.Logging;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
-public sealed class McpbImageMaterializer(
+public sealed partial class McpbImageMaterializer(
     PodmanCommandRunner podmanCommandRunner,
     ILogger<McpbImageMaterializer> logger,
     RuntimeImageAllowlist? allowlist = null,
-    PodmanImageArchiveStore? imageArchives = null)
+    PodmanImageArchiveStore? imageArchives = null,
+    ContainerEgressRuntime? egressRuntime = null)
 {
+    internal bool UsesControlledEgress => egressRuntime?.Enabled == true;
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
@@ -33,9 +37,12 @@ public sealed class McpbImageMaterializer(
 
     public async Task<string> EnsureImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
+
+        if (egressRuntime?.Enabled == true)
+            return await EnsureEgressImageAsync(connector, BundleWorkdir, false, workspaceContext, cancellationToken).ConfigureAwait(false);
 
         string? serverType = connector.ServerType;
         if (string.IsNullOrWhiteSpace(serverType))
@@ -165,10 +172,13 @@ public sealed class McpbImageMaterializer(
     public async Task<string> EnsureSandboxArtifactImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string installRoot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(installRoot);
+
+        if (egressRuntime?.Enabled == true)
+            return await EnsureEgressImageAsync(connector, installRoot, true, workspaceContext, cancellationToken).ConfigureAwait(false);
 
         ValidateBundleConnector(connector);
         connector = UseReleasedSandboxBase(connector, connector.ServerType);

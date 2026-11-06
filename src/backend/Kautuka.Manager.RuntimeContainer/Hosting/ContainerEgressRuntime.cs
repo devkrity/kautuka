@@ -24,6 +24,7 @@ public sealed class ContainerEgressRuntime(
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<string, ScopeNetwork> networks = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Source> sources = new(StringComparer.Ordinal);
+    private readonly HashSet<string> ownedMaterializers = new(StringComparer.Ordinal);
     private readonly HashSet<string> retiring = new(StringComparer.Ordinal);
     private readonly HashSet<string> pendingHelpers = new(StringComparer.Ordinal);
     private readonly string configurationRoot = Path.Combine(stateRoot, "egress", "config");
@@ -37,6 +38,7 @@ public sealed class ContainerEgressRuntime(
     private bool ready;
 
     public bool Enabled => options.Enabled;
+    internal string MaterializationRoot { get; } = Path.Combine(stateRoot, "egress", "builds");
 
     public void Dispose()
     {
@@ -86,14 +88,15 @@ public sealed class ContainerEgressRuntime(
         WorkspaceMcpContainerConnectorDefinition connector, string containerName, Scope scope,
         Func<string, string, List<string>> buildCreate, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null)
-        => PrepareAndAuthorizeAsync(new SourceIdentity(scope, "connector", connector.ConnectorId), containerName, buildCreate, cancellationToken, environment);
+        => PrepareAndAuthorizeAsync(new SourceIdentity(scope, "connector", connector.ConnectorId,
+            PackageEligible: !string.IsNullOrWhiteSpace(connector.ServerType) || McpbImageMaterializer.InferServerType(connector.Command) is not null), containerName, buildCreate, cancellationToken, environment);
 
     internal async Task<PreparedPodmanContainer> PrepareAndAuthorizeAsync(
         SourceIdentity identity, string containerName, Func<string, string, List<string>> buildCreate, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null)
     {
         Scope scope = identity.Scope;
-        if (identity.Role is not ("connector" or "agent" or "package")) throw new ArgumentException("Unsupported source role.", nameof(identity));
+        if (identity.Role is not ("connector" or "agent" or "package" or "materializer")) throw new ArgumentException("Unsupported source role.", nameof(identity));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -130,6 +133,7 @@ public sealed class ContainerEgressRuntime(
             {
                 if (packageBoundaryChanged) await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
                 await PublishAsync(CompileCurrent(), cancellationToken).ConfigureAwait(false);
+                if (identity.Role == "materializer") ownedMaterializers.Add(prepared.Id);
                 return prepared;
             }
             catch
@@ -147,6 +151,8 @@ public sealed class ContainerEgressRuntime(
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ownedMaterializers.Remove(id);
+            retiring.Add(id);
             await EnsureReadyCoreAsync(cancellationToken).ConfigureAwait(false);
             await RetireCoreAsync(id, cancellationToken).ConfigureAwait(false);
         }
@@ -240,10 +246,12 @@ public sealed class ContainerEgressRuntime(
         cancellationToken.ThrowIfCancellationRequested();
         if (exists.ExitCode != 1 || exists.TerminationReason != ProcessTerminationReason.NonZeroExit)
         {
+            ready = false;
             throw new InvalidOperationException("Egress retirement could not confirm address allocation removal.");
         }
 
         sources.Remove(id);
+        ownedMaterializers.Remove(id);
         retiring.Remove(id);
         await RetireEmptyScopesAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -348,6 +356,7 @@ public sealed class ContainerEgressRuntime(
         foreach (string id in inactive)
         {
             _ = await RunAsync(["rm", "--force", id], cancellationToken).ConfigureAwait(false);
+            retiring.Remove(id);
         }
         await RetireEmptyScopesAsync(cancellationToken).ConfigureAwait(false);
         ready = true;
@@ -583,7 +592,15 @@ public sealed class ContainerEgressRuntime(
             JsonElement container = inspected.RootElement[0];
             JsonElement labels = container.GetProperty("Config").GetProperty("Labels");
             string? state = container.GetProperty("State").GetProperty("Status").GetString();
-            if (state is not ("running" or "initialized" or "paused")) { inactive.Add(id); continue; }
+            string? role = labels.GetProperty("kautuka.egress.source-role").GetString();
+            if (role is not ("connector" or "agent" or "package" or "materializer")) throw new InvalidOperationException("Unknown managed source role.");
+            if (retiring.Contains(id) || role == "materializer" && !ownedMaterializers.Contains(id)) { inactive.Add(id); continue; }
+            if (state is not ("running" or "initialized" or "paused"))
+            {
+                // A live request may still need its exited installer's filesystem for commit.
+                if (role != "materializer") inactive.Add(id);
+                continue;
+            }
             string? kind = labels.GetProperty("kautuka.egress.scope-kind").GetString();
             if (kind is not ("agent" or "management" or "core")) throw new InvalidOperationException("Unknown managed connector scope kind.");
             var scope = new Scope(labels.GetProperty("kautuka.egress.user").GetString()!, labels.GetProperty("kautuka.egress.agent").GetString()!, kind);
@@ -598,8 +615,6 @@ public sealed class ContainerEgressRuntime(
             if (sources.Values.Any(source => source.Container.NetworkName == network.Name && source.Container.Address == address))
                 throw new InvalidOperationException("Native source ownership is ambiguous; egress recovery is deferred.");
             var prepared = new PreparedPodmanContainer(id, network.Name, address!, sandbox);
-            string? role = labels.GetProperty("kautuka.egress.source-role").GetString();
-            if (role is not ("connector" or "agent" or "package")) throw new InvalidOperationException("Unknown managed source role.");
             var identity = new SourceIdentity(scope, role, labels.GetProperty("kautuka.egress.component").GetString()!,
                 labels.GetProperty("kautuka.egress.packages").GetString() == "true");
             sources[id] = new Source(prepared, container.GetProperty("Name").GetString()!.TrimStart('/'), identity, Authorized: !retiring.Contains(id));

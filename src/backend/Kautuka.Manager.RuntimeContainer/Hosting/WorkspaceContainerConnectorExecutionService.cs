@@ -58,16 +58,23 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             // Non-agent validation/setup retains its explicit user/system instance.
             yield return new(connector, WorkspaceMcpExecutionContext.Isolated, null);
-            int separator = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
-            string owner = separator > 0 ? connector.ConnectorId[..separator] : "system";
             foreach (ContainerContext workspace in workspaces.Where(workspace =>
                 string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(workspace.UserId ?? "system", owner, StringComparison.Ordinal)))
+                && ConnectorBelongsToWorkspace(connector.ConnectorId, workspace)))
             {
                 yield return new(connector, WorkspaceMcpExecutionContext.Isolated, workspace);
                 yield return new(connector, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, workspace);
             }
         }
+    }
+
+    public static bool ConnectorBelongsToWorkspace(string connectorId, ContainerContext workspace)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
+        ArgumentNullException.ThrowIfNull(workspace);
+        int separator = connectorId.IndexOf("::", StringComparison.Ordinal);
+        string owner = separator > 0 ? connectorId[..separator] : "system";
+        return string.Equals(workspace.UserId ?? "system", owner, StringComparison.Ordinal);
     }
 
     private sealed record ConnectorInstance(
@@ -160,6 +167,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 continue;
             }
             WorkspaceMcpContainerConnectorDefinition connector = instance.Connector;
+            if (egressRuntime?.Enabled == true) connector = mcpbImageMaterializer.ResolveControlledRuntimeConnector(connector);
             string containerName = instance.Name;
             string runtimeKey = instance.RuntimeKey;
             ContainerContext? mountedWorkspace = ResolveMountedWorkspace(instance.Mode, instance.Workspace);
@@ -264,14 +272,19 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(workspaceContext);
         ArgumentNullException.ThrowIfNull(desiredConnectorIds);
-        if (egressRuntime?.Enabled == true && desiredConnectorIds.Count != 0)
-            throw new InvalidOperationException("AgentSandbox MCP artifact materialization is not integrated with egress; legacy install containers are disabled.");
+        foreach (string connectorId in desiredConnectorIds)
+        {
+            if (!ConnectorBelongsToWorkspace(connectorId, workspaceContext))
+                throw new InvalidOperationException("A sandbox cannot install another user's connector.");
+            _ = ResolveConnectorDefinition(connectorId);
+        }
+        if (desiredConnectorIds.Count != 0) RequireMaterializerMode();
 
         string sandboxProvisionKey = BuildSandboxProvisionKey(workspaceContext);
         await using var sandboxProvisionLease = (await sandboxProvisionLocks
             .AcquireAsync(sandboxProvisionKey, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
-        AgentSandboxInstalledManifest desiredManifest = await BuildDesiredAgentSandboxManifestAsync(desiredConnectorIds, cancellationToken).ConfigureAwait(false);
+        AgentSandboxInstalledManifest desiredManifest = await BuildDesiredAgentSandboxManifestAsync(desiredConnectorIds, workspaceContext, cancellationToken).ConfigureAwait(false);
         OciSandboxSession session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
         AgentSandboxInstalledManifest? installedManifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
 
@@ -676,12 +689,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         WorkspaceMcpExecutionContext effectiveExecutionContext = NormalizeExecutionContext(executionContext);
 
-        if (egressRuntime?.Enabled == true)
+        if (egressRuntime?.Enabled == true && effectiveExecutionContext != WorkspaceMcpExecutionContext.AgentSandbox)
         {
-            if (effectiveExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox)
-                throw new InvalidOperationException("AgentSandbox egress is not integrated; the legacy network cannot be used.");
-            if (!string.IsNullOrWhiteSpace(connector.BundlePath) || !string.IsNullOrWhiteSpace(connector.ServerType))
-                throw new InvalidOperationException("Connector image acquisition/build and package endpoint integration are not ready in egress mode. Use a verified preloaded self-contained image.");
+            connector = await PrepareRuntimeConnectorAsync(connector, cancellationToken, workspaceContext).ConfigureAwait(false);
             return await CreateEgressTransportAsync(connector, workspaceContext, effectiveExecutionContext, cancellationToken).ConfigureAwait(false);
         }
 
@@ -816,6 +826,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task<AgentSandboxInstalledManifest> BuildDesiredAgentSandboxManifestAsync(
         IReadOnlyList<string> desiredConnectorIds,
+        ContainerContext workspaceContext,
         CancellationToken cancellationToken)
     {
         List<AgentSandboxInstalledContract> contracts = [];
@@ -830,14 +841,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             string installRoot = AgentSandboxInstallContract.BuildInstallRoot(sourceConnector);
             string artifactImage = await mcpbImageMaterializer
-                .EnsureSandboxArtifactImageAsync(sourceConnector, installRoot, cancellationToken)
+                .EnsureSandboxArtifactImageAsync(sourceConnector, installRoot, cancellationToken, workspaceContext)
                 .ConfigureAwait(false);
 
             (string executablePath, IReadOnlyList<string> argsTemplate) = AgentSandboxInstallContract.RewriteLaunch(
                 sourceConnector.ServerType,
                 McpbImageMaterializer.RewriteBundlePlaceholder(sourceConnector.Command, installRoot),
                 [.. sourceConnector.Args.Select(arg => McpbImageMaterializer.RewriteBundlePlaceholder(arg, installRoot))],
-                installRoot);
+                installRoot, egressRuntime?.Enabled == true);
 
             contracts.Add(new AgentSandboxInstalledContract(
                 sourceConnector.ConnectorId,
@@ -859,14 +870,18 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             contracts);
     }
 
-    private string[] ResolveDesiredSandboxConnectorIds(ContainerContext workspaceContext)
-        => desiredStateStore.Snapshot.DesiredSandboxConnectorBindings
+    public string[] ResolveDesiredSandboxConnectorIds(ContainerContext workspaceContext)
+    {
+        ArgumentNullException.ThrowIfNull(workspaceContext);
+        return desiredStateStore.Snapshot.DesiredSandboxConnectorBindings
             .Where(binding => string.Equals(binding.ScopeType, workspaceContext.ScopeType, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(binding.ScopeId, workspaceContext.ScopeId, StringComparison.OrdinalIgnoreCase))
             .SelectMany(static binding => binding.ConnectorIds)
+            .Where(id => ConnectorBelongsToWorkspace(id, workspaceContext))
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static connectorId => connectorId, StringComparer.Ordinal)
             .ToArray();
+    }
 
     private async Task<AgentSandboxInstalledContract> GetInstalledAgentSandboxContractAsync(
         ContainerContext workspaceContext,
@@ -936,45 +951,29 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     }
 
     private async Task InstallAgentSandboxConnectorAsync(
-        ContainerContext workspaceContext,
-        string sandboxContainerName,
-        AgentSandboxInstalledContract contract,
+        ContainerContext workspaceContext, string sandboxContainerName, AgentSandboxInstalledContract contract,
         CancellationToken cancellationToken)
     {
-        string stagingContainerName = $"kautuka-stage-{SanitizeSegment(contract.ConnectorId)}-{Guid.NewGuid():N}";
-
+        string operation = Guid.NewGuid().ToString("N");
+        string stagingContainerName = "kautuka-stage-" + operation;
         try
         {
-            PodmanCommandResult createResult = await podmanCommandRunner
-                .RunAsync(["create", "--name", stagingContainerName, contract.RuntimeImage], 30, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (createResult.ExitCode != 0)
-            {
-                throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
-                    $"Create staging container for connector '{contract.ConnectorId}'",
-                    createResult));
-            }
-
-            await RunSandboxShellAsync(
-                workspaceContext,
-                $"rm -rf {AgentSandboxInstallContract.QuoteShell(contract.InstallRoot)} && mkdir -p {AgentSandboxInstallContract.QuoteShell(contract.InstallRoot)}",
-                cancellationToken).ConfigureAwait(false);
-
-            PodmanCommandResult copyResult = await podmanCommandRunner
-                .RunAsync(["cp", $"{stagingContainerName}:{McpbImageMaterializer.SandboxArtifactRoot}/.", $"{sandboxContainerName}:{contract.InstallRoot}"], 180, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (copyResult.ExitCode != 0)
-            {
-                throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
-                    $"Install sandbox connector '{contract.ConnectorId}'",
-                    copyResult));
-            }
+            PodmanCommandResult created = await podmanCommandRunner.RunAsync(["create", "--pull=never", "--network=none", "--name", stagingContainerName,
+                "--label", "kautuka.managed=manager", "--label", "kautuka.preparation=" + operation, contract.RuntimeImage], 30, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (created.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Create offline connector staging container", created));
+            string stagingId = created.StdOut.Trim();
+            if (stagingId.Length != 64 || !stagingId.All(char.IsAsciiHexDigit)) throw new InvalidOperationException("Staging did not return an immutable container ID.");
+            await RunSandboxShellAsync(workspaceContext,
+                $"rm -rf {AgentSandboxInstallContract.QuoteShell(contract.InstallRoot)} && mkdir -p {AgentSandboxInstallContract.QuoteShell(contract.InstallRoot)}", cancellationToken).ConfigureAwait(false);
+            PodmanCommandResult copied = await podmanCommandRunner.RunAsync(["cp", stagingId + ":" + McpbImageMaterializer.SandboxArtifactRoot + "/.",
+                sandboxContainerName + ":" + contract.InstallRoot], 180, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (copied.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Install sandbox connector", copied));
         }
         finally
         {
-            _ = await podmanCommandRunner.RunAsync(["rm", "-f", stagingContainerName], 15, CancellationToken.None).ConfigureAwait(false);
+            await new PodmanContainerPreparation(podmanCommandRunner).RetireOperationAsync(operation).ConfigureAwait(false);
         }
     }
 
@@ -1003,9 +1002,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
     }
 
+    private void RequireMaterializerMode()
+    {
+        if (egressRuntime?.Enabled == true && !mcpbImageMaterializer.UsesControlledEgress)
+            throw new InvalidOperationException("The controlled materializer is not configured; legacy install containers are disabled.");
+    }
+
     private async Task<WorkspaceMcpContainerConnectorDefinition> PrepareRuntimeConnectorAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
         string? serverType = connector.ServerType;
         if (string.IsNullOrWhiteSpace(serverType))
@@ -1018,8 +1023,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return connector;
         }
 
+        RequireMaterializerMode();
+        connector = connector with { ServerType = serverType };
         string runtimeImage = await mcpbImageMaterializer
-            .EnsureImageAsync(connector, cancellationToken)
+            .EnsureImageAsync(connector, cancellationToken, workspaceContext)
             .ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(connector.BundlePath))
@@ -1027,7 +1034,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return connector with { Image = runtimeImage };
         }
 
-        return AgentSandboxInstallContract.ApplyRuntime(connector, runtimeImage);
+        return AgentSandboxInstallContract.ApplyRuntime(connector, runtimeImage, egressRuntime?.Enabled == true);
     }
 
     private async Task EnsureConnectorContainerRunningAsync(

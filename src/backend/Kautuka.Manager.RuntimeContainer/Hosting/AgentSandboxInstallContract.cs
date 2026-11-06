@@ -43,7 +43,7 @@ internal static class AgentSandboxInstallContract
 
     public static WorkspaceMcpContainerConnectorDefinition ApplyRuntime(
         WorkspaceMcpContainerConnectorDefinition connector,
-        string runtimeImage)
+        string runtimeImage, bool useVirtualEnvironment = false)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(runtimeImage);
@@ -51,7 +51,7 @@ internal static class AgentSandboxInstallContract
             connector.ServerType,
             McpbImageMaterializer.RewriteBundlePlaceholder(connector.Command),
             [.. connector.Args.Select(McpbImageMaterializer.RewriteBundlePlaceholder)],
-            McpbImageMaterializer.BundleWorkdir);
+            McpbImageMaterializer.BundleWorkdir, useVirtualEnvironment);
         return connector with
         {
             Image = runtimeImage,
@@ -66,8 +66,11 @@ internal static class AgentSandboxInstallContract
         string? serverType,
         string command,
         IReadOnlyList<string> args,
-        string bundleRoot)
+        string bundleRoot, bool useVirtualEnvironment = false)
     {
+        if (useVirtualEnvironment && string.Equals(serverType, "python", StringComparison.OrdinalIgnoreCase)
+            && IsShippedPythonCommand(command))
+            return (bundleRoot + "/.venv/bin/python", args);
         if (!string.Equals(serverType, "uv", StringComparison.OrdinalIgnoreCase)
             || (!string.Equals(command, "uv", StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(command, "uvx", StringComparison.OrdinalIgnoreCase))
@@ -99,6 +102,15 @@ internal static class AgentSandboxInstallContract
         string entryPoint = remaining[0];
         remaining.RemoveAt(0);
         return ($"{bundleRoot}/.venv/bin/{entryPoint}", remaining);
+    }
+
+    private static bool IsShippedPythonCommand(string command)
+    {
+        string name = command;
+        if (command.StartsWith("/usr/bin/", StringComparison.Ordinal)) name = command[9..];
+        else if (command.StartsWith("/usr/local/bin/", StringComparison.Ordinal)) name = command[15..];
+        return name is "python" or "python3" || name.StartsWith("python3.", StringComparison.Ordinal)
+            && name[8..].Length > 0 && name[8..].All(char.IsAsciiDigit);
     }
 
     private static string ComputeBundleDigest(WorkspaceMcpContainerConnectorDefinition connector)

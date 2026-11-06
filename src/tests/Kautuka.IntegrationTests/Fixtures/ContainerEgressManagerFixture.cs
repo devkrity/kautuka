@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -30,8 +31,10 @@ internal static class ContainerEgressManagerFixture
         var trace = new List<string[]>();
         var native = new PodmanCommandRunner();
         bool failAdmin = false;
+        ContainerEgressRuntime? recoveryRuntime = null;
+        bool recoveredBeforeCommit = false;
         string? forceAddress = null;
-        var runner = new PodmanCommandRunner(async (arguments, token) =>
+        var runner = new PodmanCommandRunner(async (arguments, timeout, token, environment) =>
         {
             var actual = arguments.ToList();
             if (actual[0] == "create" && forceAddress is not null && actual.Contains("kautuka.egress.connector=owner::b"))
@@ -39,15 +42,22 @@ internal static class ContainerEgressManagerFixture
                 actual.InsertRange(1, ["--ip", forceAddress]); forceAddress = null;
             }
             trace.Add(actual.ToArray());
+            if (actual[0] == "commit" && !recoveredBeforeCommit && recoveryRuntime is not null)
+            {
+                recoveredBeforeCommit = true;
+                await native.RunAsync(["stop", "--time", "1", "kautuka-egress-envoy"], 15, token);
+                await recoveryRuntime.EnsureReadyAsync(token);
+            }
             if (failAdmin && actual.Contains("http://127.0.0.1:9901/config_dump")) return new PodmanCommandResult(1, "", "fixture control-plane outage");
             if (actual[0] == "stop" && actual.Contains("kautuka-egress-envoy")) failAdmin = false;
-            return await native.RunAsync(actual, 30, token);
+            return await native.RunAsync(actual, timeout, token, environment);
         });
         var allowlist = new RuntimeImageAllowlist(1, [
          new("egress-setup",data.GetProperty("helper").GetString()!,null),
          new("egress-envoy",data.GetProperty("envoy").GetString()!,null),
          new("egress-dns",data.GetProperty("dns").GetString()!,null),
-         new("git-pkgs-proxy",data.GetProperty("pkgs").GetString()!,null)]);
+         new("git-pkgs-proxy",data.GetProperty("pkgs").GetString()!,null),
+         new("kautuka-base",data.GetProperty("sandbox").GetString()!,null)]);
         var options = new ContainerEgressOptions
         {
             Enabled = true,
@@ -58,9 +68,10 @@ internal static class ContainerEgressManagerFixture
          new(){UserId="owner",AgentId="beta",ComponentId="owner::c",Destination="allowed.kautuka.test",Port=8443}]
         };
         using var runtime = new ContainerEgressRuntime(runner, options, allowlist, stateRoot);
+        recoveryRuntime = runtime;
         var store = new WorkspaceDesiredStateStore();
         var alpha = Context("alpha"); var beta = Context("beta");
-        WorkspaceMcpContainerConnectorDefinition[] definitions = [Definition("a"), Definition("b"), Definition("c"), Definition("d")];
+        List<WorkspaceMcpContainerConnectorDefinition> definitions = [Definition("a"), Definition("b"), Definition("c"), Definition("d")];
         void Apply(long version, ContainerContext workspace) => store.ApplyDesiredState(version, WorkspaceDesiredStateSyncReason.Bootstrap,
          new ManagerRuntimeSettings(new WorkspaceDefinition { BaseRoot = stateRoot }, new SandboxRuntimeDefinition(), new WorkspaceTelemetryDefinition()), [workspace], definitions, []);
         ContainerContext Context(string agent) => new("agent", agent, "owner", Path.Combine(stateRoot, agent), "/workspace", image, 1, "512m", 20, [], new Dictionary<string, string> { { "AGENT_PRIVATE", "fixture-no-forward" } });
@@ -98,7 +109,8 @@ internal static class ContainerEgressManagerFixture
         await File.AppendAllTextAsync(data.GetProperty("dnsHosts").GetString()!, package.Address + " rebind.kautuka.test\n", ct);
         await Task.Delay(1200, ct);
         var sandbox = new PodmanContainerTool(runner, runtime);
-        ContainerContext packageWorkspace = alpha with { Image = data.GetProperty("sandbox").GetString()! };
+        ContainerContext packageWorkspace = alpha with { Image = data.GetProperty("sandbox").GetString()!, DesiredStateVersion = 1, SpecFingerprint = "native-fixture-shipped-base-v1" };
+        var firstSandbox = await sandbox.SpawnSandboxAsync(packageWorkspace, ct);
         var workspaceWrite = await sandbox.RunShellAsync(packageWorkspace, "printf fixture-write > /workspace/native-fixture.txt && cat /workspace/native-fixture.txt", cancellationToken: ct);
         if (workspaceWrite.ExitCode != 0 || workspaceWrite.StdOut != "fixture-write") throw new InvalidOperationException("Shipped sandbox workspace write failed: " + workspaceWrite.StdErr);
         var pkgHealth = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --fail --show-error --max-time 8 http://kautuka-pkgs-proxy:20101/health", cancellationToken: ct);
@@ -116,14 +128,18 @@ internal static class ContainerEgressManagerFixture
                 .Select(item => item.GetProperty("rule").GetProperty("expr")).Where(expr => expr.EnumerateArray().Any(item => item.TryGetProperty("reject", out _)))
                 .Sum(expr => expr.EnumerateArray().Where(item => item.TryGetProperty("counter", out _)).Sum(item => item.GetProperty("counter").GetProperty("packets").GetInt64()));
         }
+        if ((await sandbox.SpawnSandboxAsync(packageWorkspace, ct)).ContainerId != firstSandbox.ContainerId)
+            throw new InvalidOperationException("Unchanged sandbox was replaced across shell calls: " + string.Join("; ", sandbox.TakeDriftNotes()));
         long beforeRebind = await RejectedPackets();
         var rebind = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --insecure --fail --max-time 4 https://rebind.kautuka.test:20101/", cancellationToken: ct);
-        if (rebind.ExitCode == 0 || await RejectedPackets() <= beforeRebind) throw new InvalidOperationException("Ordinary external grant bypassed the package boundary through DNS rebinding");
+        long afterRebind = await RejectedPackets();
+        if (rebind.ExitCode == 0 || afterRebind <= beforeRebind) throw new InvalidOperationException($"DNS rebinding boundary check failed: exit={rebind.ExitCode}, reject counters={beforeRebind}->{afterRebind}, stdout={rebind.StdOut}, stderr={rebind.StdErr}");
         await sandbox.CloseSandboxAsync(packageWorkspace, ct);
         report["actualPackageServiceHealthyAndAdopted"] = true; report["sandboxPackageMetadataFetched"] = true;
+        report["sandboxAdoptedAcrossShellCalls"] = true;
         report["directCorePackageDenied"] = true; report["externalGrantRebindingDenied"] = true;
         await Console.Error.WriteLineAsync("fixture: actual package path and sandbox passed");
-        var service = new WorkspaceContainerConnectorExecutionService(store, runner, new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+        var service = new WorkspaceContainerConnectorExecutionService(store, runner, new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance, allowlist, null, runtime),
          new PodmanContainerTool(runner, runtime), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, runtime);
         try
         {
@@ -205,12 +221,113 @@ internal static class ContainerEgressManagerFixture
             report["agentScopeReusedCapacity"] = true; report["agentGrantDidNotLeak"] = true;
         }
         finally { await service.DisposeAsync(); }
+        ContainerContext bundleWorkspace = alpha with { Image = data.GetProperty("sandbox").GetString()!, DesiredStateVersion = 1, SpecFingerprint = "native-fixture-shipped-base-v1" };
+        foreach (string language in new[] { "node", "python", "uv", "binary" })
+        {
+            string bundle = WriteDependencyBundle(stateRoot, language);
+            var environment = language == "node"
+                ? new List<KeyValuePair<string, string>> { new("NPM_CONFIG_REGISTRY", "http://kautuka-pkgs-proxy:20101/npm/") }
+                : [new("PIP_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/"), new("PIP_TRUSTED_HOST", "kautuka-pkgs-proxy")];
+            if (language == "binary") environment.Clear();
+            if (language == "uv") environment.Add(new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/"));
+            var definition = new WorkspaceMcpContainerConnectorDefinition("owner::bundle-" + language, bundleWorkspace.Image,
+                language == "node" ? "node" : language == "python" ? "python3" : language == "binary" ? "${__dirname}/server.py" : "uv",
+                language == "uv" ? ["run", "python", "${__dirname}/server.py"] : language == "binary" ? [] : [language == "node" ? "${__dirname}/index.js" : "${__dirname}/server.py"],
+                true, false, bundle, language, environment, 30, 600);
+            definitions.Add(definition);
+            string foreignId = "foreign::bundle-" + language;
+            definitions.Add(definition with { ConnectorId = foreignId });
+            store.ApplyDesiredState(3 + definitions.Count, WorkspaceDesiredStateSyncReason.Bootstrap, settings, [bundleWorkspace], definitions,
+                [new WorkspaceSandboxConnectorBindingsDefinition("agent", "alpha", [definition.ConnectorId, foreignId])]);
+            await using var bundleService = new WorkspaceContainerConnectorExecutionService(store, runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance, allowlist, null, runtime), sandbox,
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, runtime);
+            if (!bundleService.ResolveDesiredSandboxConnectorIds(bundleWorkspace).SequenceEqual(new[] { definition.ConnectorId }))
+                throw new InvalidOperationException("Foreign connector leaked into a user's sandbox projection");
+            foreach (WorkspaceMcpExecutionContext mode in new[] { WorkspaceMcpExecutionContext.Isolated, WorkspaceMcpExecutionContext.AgentSandbox })
+            {
+                var result = await bundleService.CallToolAsync(definition.ConnectorId, null, "dependency", "{}", 30, false, bundleWorkspace, mode, ct);
+                if (!result.Ok || result.Result?.Contains("dependency:true", StringComparison.Ordinal) != true)
+                    throw new InvalidOperationException("Materialized " + language + "/" + mode + " failed: " + result.FailureMessage + " " + result.Result);
+                report[language + mode + "DependencyExecuted"] = true;
+            }
+            await sandbox.CloseSandboxAsync(bundleWorkspace, ct);
+            await Console.Error.WriteLineAsync("fixture: materialized " + language + " isolated and sandbox passed");
+        }
+        if (!recoveredBeforeCommit) throw new InvalidOperationException("The live exited installer recovery test did not run");
+        report["exitedInstallerSurvivedRecoveryForCommit"] = true;
+        if (trace.Any(command => command[0] == "pull" || command.Contains("kautuka-sandbox")
+            || command[0] == "build" && (!command.Contains("--pull=never") || !command.Contains("--network=none"))))
+            throw new InvalidOperationException("Materialization used a legacy or networked build path");
+        // Simulate a previous Manager's abandoned installer, then hand off to a fresh runtime owner.
+        string orphanName = "kautuka-orphan-installer-fixture";
+        var orphan = await runtime.PrepareAndAuthorizeAsync(new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("owner", "alpha"), "materializer", "owner::orphan", true),
+            orphanName, (network, dns) => ["create", "--pull=never", "--restart=no", "--name", orphanName, "--label", "kautuka.managed=manager", "--label", "kautuka.role=materializer",
+                "--network", network, "--dns", dns, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--entrypoint", "/usr/bin/sleep", data.GetProperty("helper").GetString()!, "300"], ct);
+        await runtime.StartWithAdmissionAsync(orphan, token => native.RunAsync(orphan.StartArguments(false), 15, token), ct);
+        using (var replacement = new ContainerEgressRuntime(runner, options, allowlist, stateRoot)) await replacement.EnsureReadyAsync(ct);
+        var absent = await native.RunAsync(["container", "exists", orphan.Id], 10, ct);
+        if (absent.ExitCode != 1) throw new InvalidOperationException("Fresh Manager did not retire the unowned materializer");
+        report["abandonedMaterializerRevokedAndRemoved"] = true;
         var remaining = await native.RunAsync(["network", "ls", "--filter", "label=kautuka.egress=true", "--format", "{{.Name}}"], 15, ct);
         string[] names = remaining.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (names.Length != 2 || !names.Contains("kautuka-core") || !names.Contains("kautuka-outside")) throw new InvalidOperationException("Private scope capacity was not recovered: " + remaining.StdOut);
         report["emptyScopesRetired"] = true; report["passed"] = true;
         return report;
     }
+    private static string WriteDependencyBundle(string root, string language)
+    {
+        string path = Path.Combine(root, "bundle-" + language + ".mcpb");
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        void Add(string name, string value)
+        {
+            using var writer = new StreamWriter(archive.CreateEntry(name).Open()); writer.Write(value);
+        }
+        Add("manifest.json", "{\"server\":{\"type\":\"" + language + "\",\"entry_point\":\"" + (language == "node" ? "index.js" : "server.py") + "\"}}");
+        if (language == "node")
+        {
+            Add("package.json", "{\"name\":\"native-egress-fixture\",\"version\":\"1.0.0\",\"dependencies\":{\"is-number\":\"7.0.0\"}}");
+            Add("index.js", """
+                const readline = require('node:readline');
+                const isNumber = require('is-number');
+                readline.createInterface({input:process.stdin}).on('line', line => {
+                  const q=JSON.parse(line); if(q.id===undefined) return;
+                  let result;
+                  if(q.method==='initialize') result={protocolVersion:q.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture',version:'1'}};
+                  else if(q.method==='tools/list') result={tools:[{name:'dependency',inputSchema:{type:'object'}}]};
+                  else if(q.method==='tools/call') result={content:[{type:'text',text:'dependency:'+isNumber(42)}]};
+                  else {console.log(JSON.stringify({jsonrpc:'2.0',id:q.id,error:{code:-32601,message:'Method not found'}}));return;}
+                  console.log(JSON.stringify({jsonrpc:'2.0',id:q.id,result}));
+                });
+                """);
+        }
+        else
+        {
+            if (language != "binary") Add("requirements.txt", "requests==2.32.5\n");
+            string python = """
+                import sys,json,requests
+                for line in sys.stdin:
+                    q=json.loads(line)
+                    if 'id' not in q: continue
+                    method=q['method']
+                    if method=='initialize': result={'protocolVersion':q['params']['protocolVersion'],'capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+                    elif method=='tools/list': result={'tools':[{'name':'dependency','inputSchema':{'type':'object'}}]}
+                    elif method=='tools/call': result={'content':[{'type':'text','text':'dependency:'+str(requests.__version__=='2.32.5').lower()}]}
+                    else:
+                        print(json.dumps({'jsonrpc':'2.0','id':q['id'],'error':{'code':-32601,'message':'Method not found'}}),flush=True)
+                        continue
+                    print(json.dumps({'jsonrpc':'2.0','id':q['id'],'result':result}),flush=True)
+                """;
+            if (language == "binary")
+            {
+                python = "#!/usr/bin/python3\n" + python.Replace(",requests", "", StringComparison.Ordinal).Replace("requests.__version__=='2.32.5'", "True", StringComparison.Ordinal);
+                Add("pathlib.py", "raise RuntimeError('untrusted bundle module ran during offline setup')\n");
+            }
+            Add("server.py", python);
+        }
+        return path;
+    }
+
     private sealed class UnusedHttpClientFactory : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => throw new InvalidOperationException("The package service must use its native health check.");

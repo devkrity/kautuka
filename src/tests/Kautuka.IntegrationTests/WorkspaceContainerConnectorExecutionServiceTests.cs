@@ -871,7 +871,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             .GetMethod("PrepareRuntimeConnectorAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("PrepareRuntimeConnectorAsync method was not found.");
 
-        var task = (Task)method.Invoke(service, [connector, CancellationToken.None])!;
+        var task = (Task)method.Invoke(service, [connector, CancellationToken.None, null])!;
         await task.ConfigureAwait(false);
         var resultProperty = task.GetType().GetProperty("Result")!;
         return (WorkspaceMcpContainerConnectorDefinition)resultProperty.GetValue(task)!;

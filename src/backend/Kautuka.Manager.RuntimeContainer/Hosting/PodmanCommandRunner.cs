@@ -6,13 +6,19 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 public sealed class PodmanCommandRunner
 {
     public const string BinaryName = "podman";
-    private readonly Func<IReadOnlyList<string>, CancellationToken, Task<PodmanCommandResult>>? commandHandler;
+    private readonly Func<IReadOnlyList<string>, int, CancellationToken, IReadOnlyDictionary<string, string>?, Task<PodmanCommandResult>>? commandHandler;
 
     public PodmanCommandRunner()
     {
     }
 
     internal PodmanCommandRunner(Func<IReadOnlyList<string>, CancellationToken, Task<PodmanCommandResult>> commandHandler)
+    {
+        ArgumentNullException.ThrowIfNull(commandHandler);
+        this.commandHandler = (arguments, _, token, _) => commandHandler(arguments, token);
+    }
+
+    internal PodmanCommandRunner(Func<IReadOnlyList<string>, int, CancellationToken, IReadOnlyDictionary<string, string>?, Task<PodmanCommandResult>> commandHandler)
     {
         ArgumentNullException.ThrowIfNull(commandHandler);
         this.commandHandler = commandHandler;
@@ -27,7 +33,7 @@ public sealed class PodmanCommandRunner
         ArgumentNullException.ThrowIfNull(args);
         if (commandHandler is not null)
         {
-            return await commandHandler(args, cancellationToken).ConfigureAwait(false);
+            return await commandHandler(args, timeoutSeconds, cancellationToken, environment).ConfigureAwait(false);
         }
 
         var startInfo = new ProcessStartInfo

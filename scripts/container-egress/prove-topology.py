@@ -526,7 +526,7 @@ while True:
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
             'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts)}))
         native_input.chmod(0o644)
-        p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=320)
+        p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
         # Account/store are disposable; capture immutable IDs even after a failed preparation.
         # Capture non-infra containers; pods own their infra container lifecycle.

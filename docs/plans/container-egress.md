@@ -459,10 +459,62 @@ sources and the shared fixture match the Linux AOT snapshot by normalized-text
 SHA-256. Two focused regression groups pass: 34 passed/one Linux-only skip, and
 58 passed.
 
-Bundle/language image materialization and MCP connector installation inside an
-AgentSandbox remain explicitly blocked in enabled mode while their install
-containers are migrated. Direct sandbox shell execution and the package route
-are implemented; this does not claim every sandbox provisioning path is finished.
+Bundle/language image materialization now uses the controlled runtime. Trusted
+filesystem setup builds run with `--pull=never --network=none`; only that offline
+setup receives CHOWN and DAC_OVERRIDE to traverse the shipped private home and
+prepare the install directory. Binary metadata/chmod uses Python isolated mode,
+so a copied bundle cannot shadow its standard-library imports. Dependency
+lifecycle scripts run separately in prepared UID-1000 containers with no
+capabilities, on the owner's user-agent network and the designated package route.
+Their package-index inputs must match the fixed package-service endpoints.
+
+Waiting for an installer and committing its filesystem happen outside the short
+network-publication gate. An exited installer remains owned by its live request
+until commit and retirement; a fresh Manager excludes abandoned installers from
+recovered policy before removing them. Image removal is non-forced and follows
+container retirement. Cache identity includes the controlled recipe, bundle,
+base and install root. No networked Buildah step or implicit pull is used.
+
+Python bundle execution uses the installed virtual environment, including known
+shipped absolute interpreter paths. AgentSandbox artifacts retain `/artifact`
+and `/contract.json`; copy-only staging containers have no network, never start,
+and are copied and retired by immutable ID. Shared-agent binding payloads are
+filtered by connector owner before provisioning, and explicit foreign connector
+requests are rejected before any build. Sandbox processes retain their sandbox's
+shared network identity.
 Core application containers, host artifact transport, update transactions,
 policy persistence, logs/approval UI and broader platform evidence remain in the
 overall goal.
+
+
+The next service-container checkpoint uses the existing Unix-socket RPC and mTLS
+contracts: CredentialsHost on `--network=none`, then Gateway on the admitted core
+network. CredentialsHost retains its private vault; Gateway receives only the
+intended client transport material and relevant socket directories. Read-only
+mounts do not by themselves hide CA/server private keys from a shared mapped UID.
+Certificate renewal is local and must retain replacement visibility. Disable
+CredentialsHost's network telemetry export while it has no network. ChannelHost
+and the actual WebHost binary/assets follow; WebHost alone publishes a browser
+port. Existing AOT Dockerfiles for Gateway, CredentialsHost and ChannelHost are
+build inputs, not evidence of installed container deployment. UpdateService's
+host-unit checks and restarts must move to Manager-owned application activation
+and health before the installed deployment changes; UpdateService remains the
+release transaction owner, with no second Podman controller.
+
+
+The final materialization report
+`artifacts/container-egress/runtime-proof-7d53f7a6.json` passed on Fedora 44 WSL
+with Podman 5.8.9 and the shipped package/base images, with no cleanup errors.
+Node (`is-number`), Python and uv (`requests`) executed their installed dependencies
+in both isolated and AgentSandbox modes. The binary fixture exercised executable
+setup and launch with a hostile shadow module present; it is a script fixture,
+not an ELF ABI compatibility test. The report also confirms stable sandbox IDs
+across shell calls, exited-installer recovery before commit, fresh-Manager removal
+of an abandoned installer, recovered empty scopes and prior egress regressions.
+Changed runtime sources, the shared fixture and smoke entry point match the Linux
+AOT snapshot by normalized-text SHA-256. The focused Windows group passed 48 tests
+with one Linux-only skip; actual Linux behavior was exercised by the native run.
+The native test wrapper now preserves subprocess timeout and environment inputs;
+earlier wrapper/fingerprint failures are retained as diagnostic runs, not passing
+enforcement evidence. These results do not establish application-managed image
+acquisition or an installed application release/update transaction.

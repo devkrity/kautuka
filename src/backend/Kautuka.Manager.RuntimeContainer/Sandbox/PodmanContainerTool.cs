@@ -251,7 +251,12 @@ public sealed class PodmanContainerTool(
             ? await runtime.FindSourceAsync(name, cancellationToken).ConfigureAwait(false) : null;
         if (admitted is null)
         {
-            if (inspection.Exists) await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
+            if (inspection.Exists)
+            {
+                string reason = inspection.Drift ?? "its state or desired specification changed";
+                driftNotes.Enqueue(name + " was replaced because " + reason + ".");
+                await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
+            }
             admitted = await runtime.PrepareAndAuthorizeAsync(new ContainerEgressRuntime.SourceIdentity(scope, "agent", context.ScopeId, PackageEligible: true), name,
                 (network, dns) => BuildRunArguments(context, name, network, dns), cancellationToken, context.ContainerEnvironment).ConfigureAwait(false);
             try

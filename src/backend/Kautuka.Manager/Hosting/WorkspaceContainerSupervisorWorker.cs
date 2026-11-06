@@ -271,11 +271,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         }
 
         int sandboxMaxParallelism = startupOptions.GetEffectiveSandboxMaxConcurrency();
-        Dictionary<string, IReadOnlyList<string>> sandboxConnectorIdsByWorkspace = snapshot.DesiredSandboxConnectorBindings
-            .ToDictionary(
-                static binding => BuildWorkspaceKey(binding.ScopeType, binding.ScopeId),
-                static binding => (IReadOnlyList<string>)binding.ConnectorIds,
-                StringComparer.OrdinalIgnoreCase);
         Stopwatch sandboxStartupStopwatch = Stopwatch.StartNew();
         var sandboxFailures = new ConcurrentQueue<string>();
         await Parallel.ForEachAsync(
@@ -292,8 +287,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
                     string sandboxImage = runtimeAdapter.ResolveSandboxImage(desiredWorkspace.Image);
                     LogEnsuringAgentSandbox(logger, desiredWorkspace.ScopeId, sandboxImage, desiredWorkspace.HostWorkspacePath);
 
-                    sandboxConnectorIdsByWorkspace.TryGetValue(BuildWorkspaceKey(desiredWorkspace.ScopeType, desiredWorkspace.ScopeId), out IReadOnlyList<string>? connectorIds);
-                    connectorIds ??= [];
+                    IReadOnlyList<string> connectorIds = connectorExecutionService.ResolveDesiredSandboxConnectorIds(desiredWorkspace);
                     ContainerContext resolvedWorkspace = desiredWorkspace with { Image = sandboxImage };
                     ContainerContext versionedWorkspace = resolvedWorkspace with
                     {
@@ -444,6 +438,4 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         return Task.CompletedTask;
     }
 
-    private static string BuildWorkspaceKey(string scopeType, string scopeId)
-        => string.Join('|', scopeType, scopeId);
 }

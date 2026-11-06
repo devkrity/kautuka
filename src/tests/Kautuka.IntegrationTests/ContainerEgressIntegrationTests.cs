@@ -58,7 +58,7 @@ public sealed class ContainerEgressIntegrationTests
     }
 
     [Fact]
-    public async Task SupervisorProvisioningCannotStartLegacyMcpArtifactInstallContainers()
+    public async Task SupervisorProvisioningRejectsUnknownConnectorBeforeMaterialization()
     {
         var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No legacy build/run may occur."));
         using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
@@ -67,7 +67,7 @@ public sealed class ContainerEgressIntegrationTests
             NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, runtime);
         var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureAgentSandboxProvisionedAsync(
             Workspace("alpha", "owner"), ["owner::mail"], TestContext.Current.CancellationToken));
-        Assert.Contains("legacy install containers are disabled", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("not found in desired state", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
