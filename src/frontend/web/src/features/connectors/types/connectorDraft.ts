@@ -127,24 +127,35 @@ export function buildSavePayload(d: ConnectorDraft): ConnectorSavePayload {
     presetId: d.presetId,
     transport: d.transport,
     httpUrl: d.httpUrl || null,
-    localCommand: d.localCommand || null,
-    localArgs: d.localArgs
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    containerImage: d.containerImage || null,
-    containerCommand: d.containerCommand || null,
-    containerArgs: d.containerArgs
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    containerSidecarName: d.containerSidecarName || null,
-    bundlePath: d.bundlePath || null,
-    serverType: d.serverType || null,
-    readinessTimeoutSeconds: Number.parseInt(d.readinessTimeoutSeconds, 10) || null,
-    jitCooldownSeconds: Number.parseInt(d.jitCooldownSeconds, 10) || null,
-    healthcheckUrl: d.healthcheckUrl || null,
-    healthcheckIntervalMilliseconds: Number.parseInt(d.healthcheckIntervalMilliseconds, 10) || null,
+    localCommand: d.transport === 'http' ? null : d.localCommand || null,
+    localArgs:
+      d.transport === 'http'
+        ? []
+        : d.localArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    containerImage: d.transport === 'http' ? null : d.containerImage || null,
+    containerCommand: d.transport === 'http' ? null : d.containerCommand || null,
+    containerArgs:
+      d.transport === 'http'
+        ? []
+        : d.containerArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean),
+    containerSidecarName: d.transport === 'http' ? null : d.containerSidecarName || null,
+    bundlePath: d.transport === 'http' ? null : d.bundlePath || null,
+    serverType: d.transport === 'http' ? null : d.serverType || null,
+    readinessTimeoutSeconds:
+      d.transport === 'http' ? null : Number.parseInt(d.readinessTimeoutSeconds, 10) || null,
+    jitCooldownSeconds:
+      d.transport === 'http' ? null : Number.parseInt(d.jitCooldownSeconds, 10) || null,
+    healthcheckUrl: d.transport === 'http' ? null : d.healthcheckUrl || null,
+    healthcheckIntervalMilliseconds:
+      d.transport === 'http'
+        ? null
+        : Number.parseInt(d.healthcheckIntervalMilliseconds, 10) || null,
     mcpProtocolVersion: d.mcpProtocolVersion || null,
     credentials: d.transport === 'http' ? (d.credentials ?? []) : [],
     httpHeaders: d.transport === 'http' ? (d.httpHeaders ?? []) : [],

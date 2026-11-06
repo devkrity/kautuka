@@ -30,6 +30,21 @@ type Props = {
   onDraftChanged?: () => void;
   credentialStatusWarning?: string;
 };
+
+function requestFailureMessage(error: unknown): string | null {
+  if (error && typeof error === 'object' && 'response' in error) {
+    const response = (error as { response?: { data?: unknown } }).response;
+    const data = response?.data;
+    if (data && typeof data === 'object') {
+      const record = data as { detail?: unknown; message?: unknown };
+      const detail = typeof record.detail === 'string' ? record.detail.trim() : '';
+      const message = typeof record.message === 'string' ? record.message.trim() : '';
+      if (detail) return detail;
+      if (message) return message;
+    }
+  }
+  return error instanceof Error && error.message.trim() ? error.message : null;
+}
 const inputClass = 'w-full rounded border border-border bg-background px-3 py-2 text-sm';
 
 export function RemoteMcpEditor({
@@ -176,11 +191,12 @@ export function RemoteMcpEditor({
     try {
       if (kind === 'test') setResult(await onTest(candidate, mutations(), credentialScope));
       else await onSave(candidate, mutations(), credentialScope);
-    } catch {
+    } catch (failure) {
       setError(
         kind === 'save'
           ? 'Could not save this connector. Your entries are retained; correct any configuration errors and retry.'
-          : 'Connection test failed. Check the endpoint and credentials, then retry.'
+          : (requestFailureMessage(failure) ??
+            'Connection test failed. Check the endpoint and credentials, then retry.')
       );
     } finally {
       setBusy(null);

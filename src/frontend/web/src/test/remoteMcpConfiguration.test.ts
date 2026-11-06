@@ -38,10 +38,35 @@ describe('remote MCP configuration', () => {
       transport: 'container',
       envKeys: 'TOKEN\nOTHER',
       containerImage: 'example/image',
+      localCommand: 'npx',
+      localArgs: '-y\npackage',
+      containerCommand: 'node',
+      containerArgs: 'one\ntwo',
+      containerSidecarName: 'sidecar',
+      bundlePath: '/bundle',
+      serverType: 'node',
+      readinessTimeoutSeconds: '8',
+      jitCooldownSeconds: '9',
+      healthcheckUrl: 'https://health.example',
+      healthcheckIntervalMilliseconds: '500',
     });
     expect(payload.envKeys).toEqual(['TOKEN', 'OTHER']);
     expect(payload.credentials).toEqual([]);
     expect(payload.httpHeaders).toEqual([]);
+    expect(payload).toMatchObject({
+      localCommand: 'npx',
+      localArgs: ['-y', 'package'],
+      containerImage: 'example/image',
+      containerCommand: 'node',
+      containerArgs: ['one', 'two'],
+      containerSidecarName: 'sidecar',
+      bundlePath: '/bundle',
+      serverType: 'node',
+      readinessTimeoutSeconds: 8,
+      jitCooldownSeconds: 9,
+      healthcheckUrl: 'https://health.example',
+      healthcheckIntervalMilliseconds: 500,
+    });
   });
 
   it('extracts imported authentication into credential administration values, never header literals', () => {

@@ -35,10 +35,37 @@ for (const viewport of [
         return json({ ready: true, code: 'READY', message: 'Ready', dependencies: [] });
       if (path === '/api/connectors') return json({ connectors: [] });
       if (path === '/api/connectors/oauth') return json({ connectors: [] });
-      if (path === '/api/credentials/connector-drafts')
-        return request.method() === 'POST'
-          ? json({ draftId: 'opaque-browser-draft', expiresAt: '2026-11-05T23:00:00Z' })
-          : json({ drafts: [] });
+      if (path === '/api/credentials/connector-drafts') {
+        if (request.method() !== 'POST') return json({ drafts: [] });
+        const body = request.postDataJSON() as { candidate?: Record<string, unknown> };
+        const candidate = body.candidate ?? {};
+        const scalars = [
+          'localCommand',
+          'containerImage',
+          'containerCommand',
+          'containerSidecarName',
+          'bundlePath',
+          'serverType',
+          'runtimeArtifactType',
+          'runtimeArtifactSourceDigest',
+          'runtimeArtifactBuildStatus',
+          'readinessTimeoutSeconds',
+          'jitCooldownSeconds',
+          'healthcheckUrl',
+          'healthcheckIntervalMilliseconds',
+        ];
+        const arrays = ['localArgs', 'containerArgs', 'envKeys'];
+        if (
+          candidate.transport !== 'http' ||
+          scalars.some((key) => candidate[key] != null && candidate[key] !== '') ||
+          arrays.some((key) => Array.isArray(candidate[key]) && candidate[key].length > 0)
+        )
+          return route.fulfill({
+            status: 400,
+            json: { message: 'Draft requires a complete remote connector configuration.' },
+          });
+        return json({ draftId: 'opaque-browser-draft', expiresAt: '2026-11-05T23:00:00Z' });
+      }
       if (path === '/api/connectors/drafts/opaque-browser-draft/test')
         return json({ success: true, message: 'Connected.', toolCount: 1, toolNames: ['search'] });
       if (path === '/api/connectors/drafts/opaque-browser-draft/save')
@@ -77,7 +104,24 @@ for (const viewport of [
     ]);
     expect(requests.find((request) => request.path.endsWith('/test'))?.body).toBeNull();
     expect(requests.find((request) => request.path.endsWith('/save'))?.body).toBeNull();
-    const draft = JSON.parse(secretRequests[0]!.body!) as { candidate: unknown };
+    const draft = JSON.parse(secretRequests[0]!.body!) as { candidate: Record<string, unknown> };
     expect(JSON.stringify(draft.candidate)).not.toContain('synthetic-browser-only-key');
+    expect(draft.candidate).toMatchObject({
+      transport: 'http',
+      httpUrl: 'https://search.example/mcp',
+      localCommand: null,
+      localArgs: [],
+      containerImage: null,
+      containerCommand: null,
+      containerArgs: [],
+      containerSidecarName: null,
+      bundlePath: null,
+      serverType: null,
+      readinessTimeoutSeconds: null,
+      jitCooldownSeconds: null,
+      healthcheckUrl: null,
+      healthcheckIntervalMilliseconds: null,
+      envKeys: [],
+    });
   });
 }
