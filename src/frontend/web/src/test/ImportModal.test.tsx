@@ -24,6 +24,22 @@ vi.mock('@/features/connectors/api/connectors', () => ({
 describe('ImportModal JSON preview', () => {
   beforeEach(() => vi.resetAllMocks());
 
+  it('returns to the import result when a remote review is canceled', async () => {
+    const onClose = vi.fn();
+    render(<ImportModal existingIds={new Set()} onImported={vi.fn()} onClose={onClose} />);
+    fireEvent.change(screen.getByLabelText('Paste JSON'), {
+      target: {
+        value: JSON.stringify({ mcpServers: { remote: { url: 'https://example.com/mcp' } } }),
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Import 1 connector' }));
+    expect(await screen.findByLabelText('Server URL')).toHaveValue('https://example.com/mcp');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByRole('dialog', { name: 'Import connector' })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(saveRemoteMcpDraft).not.toHaveBeenCalled();
+  });
+
   it('rejects replacement of an existing connector the importer cannot manage', async () => {
     vi.mocked(fetchConnector).mockResolvedValue(
       connectorSchema.parse({ id: 'shared', name: 'Shared', transport: 'http', scope: 'system' })

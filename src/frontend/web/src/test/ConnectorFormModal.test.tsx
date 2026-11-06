@@ -80,9 +80,13 @@ describe('ConnectorFormModal container validation credentials', () => {
       />
     );
 
+    expect(screen.getByText('Advanced container settings').closest('details')).not.toHaveAttribute(
+      'open'
+    );
+    fireEvent.click(screen.getByText('Advanced container settings'));
     expect(screen.getByLabelText('MCP protocol')).toHaveValue('');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(screen.getByText('2 tools found')).toBeInTheDocument();
     expect(screen.getByText('read_file')).toBeInTheDocument();
@@ -101,7 +105,7 @@ describe('ConnectorFormModal container validation credentials', () => {
     expect(screen.getByText('2 tools found')).toBeInTheDocument();
     expect(screen.getByText('read_file')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     const [savedDraft] = onSave.mock.calls[0] as [ConnectorDraft, Record<string, string>];
     expect(savedDraft.toolCount).toBe(2);
@@ -127,7 +131,7 @@ describe('ConnectorFormModal container validation credentials', () => {
     fireEvent.change(screen.getByLabelText('CONNECTOR_TOKEN'), {
       target: { value: credentialValue },
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -138,7 +142,7 @@ describe('ConnectorFormModal container validation credentials', () => {
       expect.any(Object)
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     const [savedDraft, savedCredValues] = onSave.mock.calls[0] as [
       ConnectorDraft,
@@ -174,7 +178,7 @@ describe('ConnectorFormModal container validation credentials', () => {
       />
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Validate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
 
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({

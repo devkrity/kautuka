@@ -5,6 +5,7 @@ import { RemoteMcpConnectionDialog } from '@/features/connectors/components/Remo
 import {
   cancelRemoteMcpDraft,
   createRemoteMcpDraft,
+  fetchConnectorCredentialStatus,
   saveRemoteMcpDraft,
   testRemoteMcpDraft,
 } from '@/features/connectors/api/connectors';
@@ -108,6 +109,33 @@ describe('RemoteMcpConnectionDialog credential custody', () => {
     await screen.findByRole('status');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(cancelRemoteMcpDraft).toHaveBeenCalledWith('draft-1');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps entered values and the tested draft on outside pointer down, then cancels explicitly', async () => {
+    const onClose = vi.fn();
+    render(<RemoteMcpConnectionDialog onSaved={vi.fn()} onClose={onClose} />);
+    enter();
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    await screen.findByRole('status');
+    fireEvent.pointerDown(document.body, { button: 0, pointerType: 'mouse' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(cancelRemoteMcpDraft).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Server URL')).toHaveValue('https://mcp.example.com/mcp');
+    expect(screen.getByLabelText('API key (required)')).toHaveValue('synthetic-owner-key');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(cancelRemoteMcpDraft).toHaveBeenCalledExactlyOnceWith('draft-1');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('does not dismiss while credential status is loading when clicking outside', () => {
+    vi.mocked(fetchConnectorCredentialStatus).mockReturnValue(new Promise(() => {}));
+    const onClose = vi.fn();
+    render(<RemoteMcpConnectionDialog connector={saved} onSaved={vi.fn()} onClose={onClose} />);
+    fireEvent.pointerDown(document.body, { button: 0, pointerType: 'mouse' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('Checking saved credential status…')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onClose).toHaveBeenCalledOnce();
   });
 

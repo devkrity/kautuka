@@ -85,7 +85,8 @@ export function RemoteMcpEditor({
   const destinationChanged =
     canonicalEndpoint(draft.httpUrl) !== canonicalEndpoint(initialEndpoint.current);
   const personalDestinationChanged = !canManage && destinationChanged;
-  const sharedDestinationChanged = !!connector && connector.scope === 'system' && canManage && destinationChanged;
+  const sharedDestinationChanged =
+    !!connector && connector.scope === 'system' && canManage && destinationChanged;
   const credentials = draft.credentials ?? [];
   const headers = draft.httpHeaders ?? [];
   const authentication = headers.find(
@@ -171,7 +172,9 @@ export function RemoteMcpEditor({
         throw new Error('Confirm the new authentication choice before testing or saving.');
       if (connector?.requiresCredentialReentry) candidate.confirmLegacyAuthReplacement = true;
       if (kind === 'save' && sharedDestinationChanged && !sharedUrlChangeAcknowledged)
-        throw new Error('Confirm that everyone will need to enter credentials again before saving this address change.');
+        throw new Error(
+          'Confirm that everyone will need to enter credentials again before saving this address change.'
+        );
       if (kind === 'save' && personalDestinationChanged) {
         const referenced = new Set(
           headers.flatMap((header) => (header.credentialKey ? [header.credentialKey] : []))
@@ -196,7 +199,7 @@ export function RemoteMcpEditor({
         kind === 'save'
           ? 'Could not save this connector. Your entries are retained; correct any configuration errors and retry.'
           : (requestFailureMessage(failure) ??
-            'Connection test failed. Check the endpoint and credentials, then retry.')
+              'Connection test failed. Check the endpoint and credentials, then retry.')
       );
     } finally {
       setBusy(null);
@@ -215,9 +218,7 @@ export function RemoteMcpEditor({
         onEscapeKeyDown={(event) => {
           if (busy) event.preventDefault();
         }}
-        onPointerDownOutside={(event) => {
-          if (busy) event.preventDefault();
-        }}
+        onPointerDownOutside={(event) => event.preventDefault()}
       >
         <DialogTitle>{connector ? 'Configure remote MCP' : 'Add remote MCP'}</DialogTitle>
         <div className="space-y-4">
@@ -267,22 +268,37 @@ export function RemoteMcpEditor({
           )}
           {sharedDestinationChanged && (
             <div className="space-y-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-              <p role="alert">Changing this shared address means everyone who uses it will need to enter their key again.</p>
+              <p role="alert">
+                Changing this shared address means everyone who uses it will need to enter their key
+                again.
+              </p>
               <label className="flex items-start gap-2">
-                <input type="checkbox" checked={sharedUrlChangeAcknowledged} disabled={!!busy}
-                  onChange={(event) => setSharedUrlChangeAcknowledged(event.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={sharedUrlChangeAcknowledged}
+                  disabled={!!busy}
+                  onChange={(event) => setSharedUrlChangeAcknowledged(event.target.checked)}
+                />
                 <span>I understand that users will need to enter their keys again.</span>
               </label>
             </div>
           )}
           {connector?.requiresCredentialReentry && canManage && (
             <label className="flex items-start gap-2 rounded border border-amber-500/50 bg-amber-500/10 p-3 text-sm">
-              <input type="checkbox" checked={legacyAuthAcknowledged} disabled={!!busy} onChange={(event) => {
-                setLegacyAuthAcknowledged(event.target.checked);
-                onDraftChanged?.();
-                setResult(null);
-              }} />
-              <span>I reviewed the new authentication choice. If I choose no key or an optional key, this connector may connect without one.</span>
+              <input
+                type="checkbox"
+                checked={legacyAuthAcknowledged}
+                disabled={!!busy}
+                onChange={(event) => {
+                  setLegacyAuthAcknowledged(event.target.checked);
+                  onDraftChanged?.();
+                  setResult(null);
+                }}
+              />
+              <span>
+                I reviewed the new authentication choice. If I choose no key or an optional key,
+                this connector may connect without one.
+              </span>
             </label>
           )}
           <label className="block text-sm">
@@ -486,8 +502,17 @@ export function RemoteMcpEditor({
               {authKind === 'api-key' && authentication && (
                 <label className="block text-sm">
                   API key header name
-                  <input className={inputClass} value={authentication.name} disabled={!canManage || !!busy}
-                    onChange={(event) => updateHeader(headers.indexOf(authentication), { ...authentication, name: event.target.value })} />
+                  <input
+                    className={inputClass}
+                    value={authentication.name}
+                    disabled={!canManage || !!busy}
+                    onChange={(event) =>
+                      updateHeader(headers.indexOf(authentication), {
+                        ...authentication,
+                        name: event.target.value,
+                      })
+                    }
+                  />
                 </label>
               )}
               {!connector && (
@@ -591,7 +616,11 @@ export function RemoteMcpEditor({
             >
               {busy === 'test' ? 'Testing…' : 'Test connection'}
             </Button>
-            <Button type="button" disabled={!!busy || (sharedDestinationChanged && !sharedUrlChangeAcknowledged)} onClick={() => void run('save')}>
+            <Button
+              type="button"
+              disabled={!!busy || (sharedDestinationChanged && !sharedUrlChangeAcknowledged)}
+              onClick={() => void run('save')}
+            >
               {busy === 'save' ? 'Saving…' : 'Save'}
             </Button>
           </div>

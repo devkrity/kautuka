@@ -134,7 +134,7 @@ export function RemoteMcpConnectionDialog({
           if (!open) onClose();
         }}
       >
-        <DialogContent>
+        <DialogContent onPointerDownOutside={(event) => event.preventDefault()}>
           <DialogTitle>Configure remote MCP</DialogTitle>
           <p>Checking saved credential status…</p>
           <Button type="button" variant="outline" onClick={onClose}>

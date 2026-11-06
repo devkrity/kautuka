@@ -232,7 +232,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
         >
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <DialogTitle className="flex items-center gap-2 text-sm font-semibold">
-              <Upload className="h-4 w-4" /> Import from mcpServers JSON
+              <Upload className="h-4 w-4" /> Import connector
             </DialogTitle>
             {phase !== 'importing' && (
               <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} title="Close">
@@ -416,17 +416,16 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                   </div>
                 </>
               ) : (
-                <div className="p-4 space-y-3">
-                  <Alert variant="info" className="px-3 py-2.5 text-xs">
-                    <p className="font-semibold">MCPB bundle import</p>
-                    <ul className="ml-3 list-disc space-y-0.5 text-primary/80">
-                      <li>Upload a single MCPB bundle file with the .mcpb extension.</li>
-                      <li>Generic .zip archives are rejected by the UI and backend.</li>
-                      <li>The import creates or updates exactly one connector from the bundle.</li>
-                    </ul>
-                  </Alert>
+                <div className="space-y-4 p-4 sm:p-5">
+                  <div>
+                    <h3 className="text-sm font-semibold">Import an MCPB bundle</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Choose one .mcpb file to create or update its connector. Generic .zip archives
+                      are not supported.
+                    </p>
+                  </div>
 
-                  <label className="block rounded-lg border border-dashed border-border p-3">
+                  <label className="block rounded-lg border border-dashed border-border bg-muted/20 p-4">
                     <span className="mb-2 block text-xs font-medium">Choose MCPB file</span>
                     <input
                       type="file"

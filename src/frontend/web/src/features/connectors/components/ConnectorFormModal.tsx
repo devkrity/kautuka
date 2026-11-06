@@ -262,7 +262,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
     if (saveLabel) {
       return saveLabel;
     }
-    return isNew ? 'Import Connector' : 'Save';
+    return isNew ? 'Add connector' : 'Save changes';
   })();
 
   const discoveredToolNames = testResult?.success
@@ -284,7 +284,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         if (!next) onClose();
       }}
     >
-      <DialogContent hideClose className="max-w-lg gap-0 overflow-hidden p-0">
+      <DialogContent hideClose className="max-w-xl gap-0 overflow-hidden p-0">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <DialogTitle className="text-sm font-semibold">
             {isNew ? 'Add local or container MCP' : initial.name}
@@ -295,10 +295,10 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         </div>
 
         {/* body */}
-        <div className="space-y-3 p-4 max-h-[60vh] overflow-y-auto">
+        <div className="max-h-[65vh] space-y-4 overflow-y-auto p-4 sm:p-5">
           {isNew && (
             <>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <label className="block text-xs font-medium mb-1" htmlFor="connector-name">
                     Name <span className="text-destructive">*</span>
@@ -339,7 +339,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
               </div>
               <div>
                 <label className="block text-xs font-medium mb-1" htmlFor="connector-transport">
-                  Transport
+                  How to run
                 </label>
                 <select
                   id="connector-transport"
@@ -348,8 +348,8 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
                   value={draft.transport}
                   onChange={(e) => setDraftField('transport', e.target.value)}
                 >
-                  <option value="local">Local Command (normalized to container)</option>
-                  <option value="container">Container (Manager managed)</option>
+                  <option value="local">Local command (runs in a managed container)</option>
+                  <option value="container">Container image</option>
                 </select>
               </div>
             </>
@@ -357,6 +357,12 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
 
           {draft.transport === 'container' ? (
             <>
+              <div className="border-t border-border pt-4">
+                <h3 className="text-sm font-semibold">Container setup</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Choose an image and configure how it starts.
+                </p>
+              </div>
               <div>
                 <label
                   className="block text-xs font-medium mb-1"
@@ -372,151 +378,170 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
                   placeholder="mcp/markitdown"
                 />
               </div>
-              <div>
-                <label className="block text-xs font-medium mb-1" htmlFor="connector-mcp-protocol">
-                  MCP protocol
-                </label>
-                <select
-                  id="connector-mcp-protocol"
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
-                  value={draft.mcpProtocolVersion}
-                  onChange={(e) => setDraftField('mcpProtocolVersion', e.target.value)}
-                >
-                  <option value="">Automatic</option>
-                  <option value="2024-11-05">2024-11-05</option>
-                  <option value="2025-03-26">2025-03-26</option>
-                  <option value="2025-06-18">2025-06-18</option>
-                  <option value="2025-11-25">2025-11-25</option>
-                  <option value="2026-07-28">2026-07-28</option>
-                </select>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Automatic uses the current handshake. A selected date is requested exactly.
-                </p>
-              </div>
-              <div>
-                <label
-                  className="block text-xs font-medium mb-1"
-                  htmlFor="connector-container-command"
-                >
-                  Container Command
-                </label>
-                <input
-                  id="connector-container-command"
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
-                  value={draft.containerCommand}
-                  onChange={(e) => setDraftField('containerCommand', e.target.value)}
-                  placeholder=""
-                />
-              </div>
-              <div>
-                <label
-                  className="block text-xs font-medium mb-1"
-                  htmlFor="connector-container-args"
-                >
-                  Container Arguments{' '}
-                  <span className="font-normal text-muted-foreground">(one per line)</span>
-                </label>
-                <textarea
-                  id="connector-container-args"
-                  rows={4}
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
-                  value={draft.containerArgs}
-                  onChange={(e) => setDraftField('containerArgs', e.target.value)}
-                  placeholder={'mcp\n--transport sse https://example.invalid/mcp'}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label
-                    className="block text-xs font-medium mb-1"
-                    htmlFor="connector-readiness-timeout"
-                  >
-                    Readiness Timeout (seconds)
-                  </label>
-                  <input
-                    id="connector-readiness-timeout"
-                    type="number"
-                    min={1}
-                    className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
-                    value={draft.readinessTimeoutSeconds}
-                    onChange={(e) => setDraftField('readinessTimeoutSeconds', e.target.value)}
-                    placeholder="45"
-                  />
+              <details className="rounded-lg border border-border p-3">
+                <summary className="cursor-pointer text-sm font-medium">
+                  Advanced container settings
+                </summary>
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <label
+                      className="block text-xs font-medium mb-1"
+                      htmlFor="connector-mcp-protocol"
+                    >
+                      MCP protocol
+                    </label>
+                    <select
+                      id="connector-mcp-protocol"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
+                      value={draft.mcpProtocolVersion}
+                      onChange={(e) => setDraftField('mcpProtocolVersion', e.target.value)}
+                    >
+                      <option value="">Automatic</option>
+                      <option value="2024-11-05">2024-11-05</option>
+                      <option value="2025-03-26">2025-03-26</option>
+                      <option value="2025-06-18">2025-06-18</option>
+                      <option value="2025-11-25">2025-11-25</option>
+                      <option value="2026-07-28">2026-07-28</option>
+                    </select>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Automatic uses the current handshake. A selected date is requested exactly.
+                    </p>
+                  </div>
+                  <div>
+                    <label
+                      className="block text-xs font-medium mb-1"
+                      htmlFor="connector-container-command"
+                    >
+                      Container Command
+                    </label>
+                    <input
+                      id="connector-container-command"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                      value={draft.containerCommand}
+                      onChange={(e) => setDraftField('containerCommand', e.target.value)}
+                      placeholder=""
+                    />
+                  </div>
+                  <div>
+                    <label
+                      className="block text-xs font-medium mb-1"
+                      htmlFor="connector-container-args"
+                    >
+                      Container Arguments{' '}
+                      <span className="font-normal text-muted-foreground">(one per line)</span>
+                    </label>
+                    <textarea
+                      id="connector-container-args"
+                      rows={4}
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                      value={draft.containerArgs}
+                      onChange={(e) => setDraftField('containerArgs', e.target.value)}
+                      placeholder={'mcp\n--transport sse https://example.invalid/mcp'}
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label
+                        className="block text-xs font-medium mb-1"
+                        htmlFor="connector-readiness-timeout"
+                      >
+                        Readiness Timeout (seconds)
+                      </label>
+                      <input
+                        id="connector-readiness-timeout"
+                        type="number"
+                        min={1}
+                        className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
+                        value={draft.readinessTimeoutSeconds}
+                        onChange={(e) => setDraftField('readinessTimeoutSeconds', e.target.value)}
+                        placeholder="45"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        className="block text-xs font-medium mb-1"
+                        htmlFor="connector-jit-cooldown"
+                      >
+                        Idle cooldown (seconds)
+                      </label>
+                      <input
+                        id="connector-jit-cooldown"
+                        type="number"
+                        min={0}
+                        className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
+                        value={draft.jitCooldownSeconds}
+                        onChange={(e) => setDraftField('jitCooldownSeconds', e.target.value)}
+                        placeholder="600"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label
+                      className="block text-xs font-medium mb-1"
+                      htmlFor="connector-sidecar-name"
+                    >
+                      Container Sidecar Name
+                    </label>
+                    <input
+                      id="connector-sidecar-name"
+                      className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                      value={draft.containerSidecarName}
+                      onChange={(e) => setDraftField('containerSidecarName', e.target.value)}
+                      placeholder="markitdown"
+                    />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label
+                        className="block text-xs font-medium mb-1"
+                        htmlFor="connector-healthcheck-url"
+                      >
+                        Healthcheck URL
+                      </label>
+                      <input
+                        id="connector-healthcheck-url"
+                        className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
+                        value={draft.healthcheckUrl}
+                        onChange={(e) => setDraftField('healthcheckUrl', e.target.value)}
+                        placeholder="http://127.0.0.1:20011/health"
+                      />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Example endpoint only. Manager uses this URL to probe the connector sidecar
+                        you configure.
+                      </p>
+                    </div>
+                    <div>
+                      <label
+                        className="block text-xs font-medium mb-1"
+                        htmlFor="connector-healthcheck-interval"
+                      >
+                        Healthcheck Interval (ms)
+                      </label>
+                      <input
+                        id="connector-healthcheck-interval"
+                        type="number"
+                        min={100}
+                        step={100}
+                        className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
+                        value={draft.healthcheckIntervalMilliseconds}
+                        onChange={(e) =>
+                          setDraftField('healthcheckIntervalMilliseconds', e.target.value)
+                        }
+                        placeholder="2000"
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <label
-                    className="block text-xs font-medium mb-1"
-                    htmlFor="connector-jit-cooldown"
-                  >
-                    JIT Cooldown (seconds)
-                  </label>
-                  <input
-                    id="connector-jit-cooldown"
-                    type="number"
-                    min={0}
-                    className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
-                    value={draft.jitCooldownSeconds}
-                    onChange={(e) => setDraftField('jitCooldownSeconds', e.target.value)}
-                    placeholder="600"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium mb-1" htmlFor="connector-sidecar-name">
-                  Container Sidecar Name
-                </label>
-                <input
-                  id="connector-sidecar-name"
-                  className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
-                  value={draft.containerSidecarName}
-                  onChange={(e) => setDraftField('containerSidecarName', e.target.value)}
-                  placeholder="markitdown"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label
-                    className="block text-xs font-medium mb-1"
-                    htmlFor="connector-healthcheck-url"
-                  >
-                    Healthcheck URL
-                  </label>
-                  <input
-                    id="connector-healthcheck-url"
-                    className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
-                    value={draft.healthcheckUrl}
-                    onChange={(e) => setDraftField('healthcheckUrl', e.target.value)}
-                    placeholder="http://127.0.0.1:20011/health"
-                  />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Example endpoint only. Manager uses this URL to probe the connector sidecar you
-                    configure.
-                  </p>
-                </div>
-                <div>
-                  <label
-                    className="block text-xs font-medium mb-1"
-                    htmlFor="connector-healthcheck-interval"
-                  >
-                    Healthcheck Interval (ms)
-                  </label>
-                  <input
-                    id="connector-healthcheck-interval"
-                    type="number"
-                    min={100}
-                    step={100}
-                    className="w-full rounded border border-border bg-background px-3 py-1.5 text-sm"
-                    value={draft.healthcheckIntervalMilliseconds}
-                    onChange={(e) =>
-                      setDraftField('healthcheckIntervalMilliseconds', e.target.value)
-                    }
-                    placeholder="2000"
-                  />
-                </div>
-              </div>
+              </details>
             </>
           ) : (
             <>
+              <div className="border-t border-border pt-4">
+                <h3 className="text-sm font-semibold">Command setup</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Enter the command and its arguments.
+                </p>
+              </div>
               <div>
                 <label className="block text-xs font-medium mb-1" htmlFor="connector-local-command">
                   Local Command
@@ -585,8 +610,8 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
             <div className="rounded-lg border border-border bg-muted/20 p-3">
               <div className="mb-2 text-xs font-medium">Credentials</div>
               <p className="mb-3 text-xs text-muted-foreground">
-                Saved as system credentials and used at runtime. Also passed to Validate when
-                testing.
+                Saved as system credentials and used at runtime. Also used when testing the
+                connection.
               </p>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {declaredEnvKeys
@@ -657,7 +682,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         )}
 
         {/* footer */}
-        <div className="flex items-center justify-between border-t border-border px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3">
           <Button
             type="button"
             variant="outline"
@@ -670,7 +695,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
             ) : (
               <FlaskConical className="h-3.5 w-3.5" />
             )}
-            {testing ? 'Validating…' : 'Validate'}
+            {testing ? 'Testing…' : 'Test connection'}
           </Button>
           <div className="flex gap-2">
             <Button type="button" variant="outline" size="sm" onClick={onClose}>

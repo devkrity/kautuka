@@ -87,6 +87,11 @@ for (const viewport of [
     const key = page.getByLabel('API key (required)', { exact: true });
     await key.fill('synthetic-browser-only-key');
     await expect(key).toHaveAttribute('type', 'password');
+    await page.mouse.click(5, 5);
+    await expect(key).toHaveValue('synthetic-browser-only-key');
+    await expect(page.getByLabel('Server URL', { exact: true })).toHaveValue(
+      'https://search.example/mcp'
+    );
     await page.getByRole('button', { name: 'Test connection', exact: true }).click();
     await expect(page.getByRole('status').filter({ hasText: 'Connected.' })).toBeVisible();
     await expect(page.getByRole('dialog')).toBeVisible();
