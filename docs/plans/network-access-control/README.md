@@ -82,3 +82,17 @@ The fixture now admits basic TCP and UDP over both IPv4 and IPv6. It retains fou
 The updated published-AOT run passes twelve live checks with no cleanup errors. Forty focused C# tests pass on Windows and Linux; four unprivileged Python harness tests pass. SQLite startup now checks a dedicated application marker and schema version before changing journal mode or creating tables. A real second-connection writer lock denies admission with zero kernel publication/allow verdicts. Unmarked early prototype ledgers and unrelated databases are refused rather than silently adopted; this does not affect any application store.
 
 The only gateway OUTPUT exception added is IPv6 neighbor solicitation/advertisement on the two fixture interfaces with hop limit 255. General OUTPUT admission remains unimplemented. IPv6 extension-header/fragment admission and PMTU/control-plane coverage remain unsupported/unvalidated; a decoder check on new admission is not a claim that every established-flow packet is decoded again. Conntrack retirement, accounting, overload/performance, topology supervision, runtime owners/helpers, controlled DNS, signed acquisition and the native Linux matrix remain outstanding. Gate 1 remains **in progress**.
+
+### Runtime-owner feasibility checkpoint (6 November 2026)
+
+`scripts/network-gateway/probe-runtime-owners.py` provisions two disposable accounts in a dedicated test environment, disjoint subordinate allocations, private homes/runtime/storage, and network namespaces containing only loopback. It runs Podman metadata/unshare operations as systemd-managed `User=` units with namespace attachment and delegation. It verifies effective UID/GID maps, outer namespace/cgroup, isolated graph roots, and denial of access to the other owner's private home. It does not acquire images or test external networking.
+
+Run as Linux root with an explicit `--cgroup-manager systemd` or `--cgroup-manager cgroupfs` and a new `--report` file. Do not run alongside unrelated account provisioning: the root-owned fixture lock serializes this fixture only. Cleanup stops only the recorded units, checks for owner/subordinate-UID survivors, removes only recorded accounts/mappings/namespaces, and deletes only its validated temporary root. Incomplete cleanup preserves the resource manifest and reports failure.
+
+Observed in the Fedora/WSL test environment:
+
+- Requested **systemd** was rejected because Podman reported **cgroupfs**. The probe did not silently accept the fallback; cleanup completed without errors.
+- A separate, explicitly requested **cgroupfs** experiment passed both owners' identity/mapping/namespace/storage/directory-access checks. Podman's warning about the unavailable user-session bus for pause-process sandboxing is retained in the report.
+- Eight unprivileged Python tests pass on Linux. On Windows, four pass and the four Linux allocation/mapping tests are explicitly skipped.
+
+The architect approved this limited feasibility checkpoint. **No production cgroup-manager choice has been made.** Before selecting cgroupfs, actual containers must prove memory, process-count and CPU limits from kernel cgroup state and exercised workloads, with bounded parent-unit ceilings. The real pasta/slirp/pull-helper paths, alternate-route denial, startup/restart supervision and signed acquisition remain unproved. Gate 1 is still **in progress**.
