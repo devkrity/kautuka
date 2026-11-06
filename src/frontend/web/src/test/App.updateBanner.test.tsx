@@ -398,9 +398,7 @@ describe('App update banner', () => {
 
     renderApp();
 
-    await waitFor(() => {
-      expect(fetchUpdateStatusMock).toHaveBeenCalled();
-    });
+    await screen.findByText('Waiting for newer stable release');
 
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
 
