@@ -84,7 +84,7 @@ for (const viewport of [
     await page
       .getByRole('combobox', { name: 'Authentication', exact: true })
       .selectOption('bearer');
-    const key = page.getByLabel('API key (required)', { exact: true });
+    const key = page.getByLabel('Bearer token (required)', { exact: true });
     await key.fill('synthetic-browser-only-key');
     await expect(key).toHaveAttribute('type', 'password');
     await page.mouse.click(5, 5);

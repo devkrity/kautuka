@@ -100,6 +100,12 @@ export function RemoteMcpEditor({
       ? 'bearer'
       : 'api-key'
     : 'none';
+  const credentialLabel = (credential: (typeof credentials)[number]) =>
+    credential.key === authentication?.credentialKey
+      ? authKind === 'bearer'
+        ? 'Bearer token'
+        : 'API key'
+      : credential.label;
   const update = (next: Partial<ConnectorDraft>) => {
     if ('httpUrl' in next) setSharedUrlChangeAcknowledged(false);
     if ('credentials' in next || 'httpHeaders' in next) setLegacyAuthAcknowledged(false);
@@ -296,8 +302,8 @@ export function RemoteMcpEditor({
                 }}
               />
               <span>
-                I reviewed the new authentication choice. If I choose no key or an optional key,
-                this connector may connect without one.
+                I reviewed the new authentication choice. If I choose no credential or an optional
+                credential, this connector may connect without one.
               </span>
             </label>
           )}
@@ -331,7 +337,7 @@ export function RemoteMcpEditor({
             return (
               <div key={credential.key} className="space-y-2 rounded border border-border p-3">
                 <label className="block text-sm">
-                  {credential.label}
+                  {credentialLabel(credential)}
                   {credential.required ? ' (required)' : ' (optional)'}
                   <input
                     className={inputClass}
@@ -382,8 +388,8 @@ export function RemoteMcpEditor({
                     onClick={() => changeCredential({ key: credential.key, action: 'remove' })}
                   >
                     {personalDestinationChanged
-                      ? `Omit ${credential.label} at new URL`
-                      : `Remove ${credential.label}`}
+                      ? `Omit ${credentialLabel(credential)} at new URL`
+                      : `Remove ${credentialLabel(credential)}`}
                   </Button>
                 )}
               </div>
@@ -515,28 +521,20 @@ export function RemoteMcpEditor({
                   />
                 </label>
               )}
-              {!connector && (
+              <div>
                 <label className="block text-sm">
-                  Connector ID
-                  <input
+                  Description (optional)
+                  <textarea
                     className={inputClass}
                     disabled={!canManage || !!busy}
-                    value={draft.id}
-                    onChange={(event) =>
-                      update({ id: event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })
-                    }
+                    value={draft.description}
+                    onChange={(event) => update({ description: event.target.value })}
                   />
                 </label>
-              )}
-              <label className="block text-sm">
-                Description
-                <textarea
-                  className={inputClass}
-                  disabled={!canManage || !!busy}
-                  value={draft.description}
-                  onChange={(event) => update({ description: event.target.value })}
-                />
-              </label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Add a short note about this connector if you like.
+                </p>
+              </div>
               <label className="block text-sm">
                 Icon URL
                 <input
@@ -572,7 +570,7 @@ export function RemoteMcpEditor({
                       })
                     }
                   />
-                  Require {credential.label} before connecting
+                  Require {credentialLabel(credential)} before connecting
                 </label>
               ))}
               <details>

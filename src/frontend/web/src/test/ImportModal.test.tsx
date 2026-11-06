@@ -98,7 +98,7 @@ describe('ImportModal JSON preview', () => {
       },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Import 1 connector' }));
-    expect(await screen.findByLabelText('Authorization (required)')).toHaveValue(
+    expect(await screen.findByLabelText('Bearer token (required)')).toHaveValue(
       'synthetic-import-key'
     );
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));

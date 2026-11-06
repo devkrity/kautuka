@@ -30,7 +30,7 @@ function enter() {
     target: { value: 'https://mcp.example.com/mcp' },
   });
   fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'bearer' } });
-  fireEvent.change(screen.getByLabelText('API key (required)'), {
+  fireEvent.change(screen.getByLabelText('Bearer token (required)'), {
     target: { value: 'synthetic-owner-key' },
   });
 }
@@ -94,7 +94,7 @@ describe('RemoteMcpConnectionDialog credential custody', () => {
     enter();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await screen.findByRole('alert');
-    expect(screen.getByLabelText('API key (required)')).toHaveValue('synthetic-owner-key');
+    expect(screen.getByLabelText('Bearer token (required)')).toHaveValue('synthetic-owner-key');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(saveRemoteMcpDraft).toHaveBeenCalledTimes(2));
     expect(vi.mocked(saveRemoteMcpDraft).mock.calls).toEqual([['draft-1'], ['draft-1']]);
@@ -122,7 +122,7 @@ describe('RemoteMcpConnectionDialog credential custody', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(cancelRemoteMcpDraft).not.toHaveBeenCalled();
     expect(screen.getByLabelText('Server URL')).toHaveValue('https://mcp.example.com/mcp');
-    expect(screen.getByLabelText('API key (required)')).toHaveValue('synthetic-owner-key');
+    expect(screen.getByLabelText('Bearer token (required)')).toHaveValue('synthetic-owner-key');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(cancelRemoteMcpDraft).toHaveBeenCalledExactlyOnceWith('draft-1');
     expect(onClose).toHaveBeenCalledOnce();

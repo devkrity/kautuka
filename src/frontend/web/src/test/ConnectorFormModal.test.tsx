@@ -47,6 +47,119 @@ describe('ConnectorFormModal container validation credentials', () => {
     mutateSpy.mockReset();
   });
 
+  it('adds, renames and removes masked credential rows without moving entered values', () => {
+    const onSave = vi.fn();
+    render(
+      <ConnectorFormModal
+        draft={createDraft()}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.getByLabelText('Value for CONNECTOR_TOKEN')).toHaveAttribute('type', 'password');
+    fireEvent.change(screen.getByLabelText('Value for CONNECTOR_TOKEN'), {
+      target: { value: 'synthetic-old' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add key' }));
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'CONNECTOR_TOKEN' },
+    });
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'OTHER_KEY' },
+    });
+    expect(screen.getByLabelText('Value for CONNECTOR_TOKEN')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Value for OTHER_KEY'), {
+      target: { value: 'synthetic-new' },
+    });
+    fireEvent.change(screen.getByLabelText('Environment key 2'), {
+      target: { value: 'RENAMED_KEY' },
+    });
+    expect(screen.getByLabelText('Value for RENAMED_KEY')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Value for RENAMED_KEY'), {
+      target: { value: 'synthetic-final' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(mutateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        envKeys: ['CONNECTOR_TOKEN', 'RENAMED_KEY'],
+        testEnv: { RENAMED_KEY: 'synthetic-final' },
+      }),
+      expect.any(Object)
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove environment key 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ envKeys: 'CONNECTOR_TOKEN' }),
+      {}
+    );
+  });
+
+  it('keeps the managed mailbox credential declaration hidden and unchanged', () => {
+    const draft = {
+      ...createDraft(),
+      id: 'kautuka-m365-mail',
+      envKeys: 'KAUTUKA_M365_REFRESH_TOKEN\nOTHER_KEY',
+    };
+    const onSave = vi.fn();
+    render(
+      <ConnectorFormModal
+        draft={draft}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.queryByDisplayValue('KAUTUKA_M365_REFRESH_TOKEN')).not.toBeInTheDocument();
+    expect(screen.getByText(/Mailbox sign-in is on the connector card/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ envKeys: draft.envKeys }), {});
+  });
+
+  it('preserves saved custom commands and applies runner defaults only on selection', () => {
+    const onSave = vi.fn();
+    const draft = {
+      ...createDraft(),
+      transport: 'local',
+      localCommand: 'my-runner',
+      localArgs: '--existing\nvalue',
+    };
+    render(
+      <ConnectorFormModal
+        draft={draft}
+        isNew={false}
+        onSave={onSave}
+        onClose={vi.fn()}
+        saving={false}
+      />
+    );
+    expect(screen.getByLabelText('Runner')).toHaveValue('custom');
+    expect(screen.getByLabelText('Command')).toHaveValue('my-runner');
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue(
+      '--existing\nvalue'
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ localCommand: 'my-runner', localArgs: '--existing\nvalue' }),
+      {}
+    );
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'npx' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('-y');
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'uvx' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Runner'), { target: { value: 'python' } });
+    expect(screen.getByLabelText('Local Arguments (one per line)')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(mutateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ localCommand: 'python', localArgs: [] }),
+      expect.any(Object)
+    );
+  });
+
   it('keeps discovered tools visible and in the save payload after parent rerenders', () => {
     mutateSpy.mockImplementation((_payload, options?: { onSuccess?: (value: unknown) => void }) => {
       options?.onSuccess?.({
@@ -128,7 +241,7 @@ describe('ConnectorFormModal container validation credentials', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('CONNECTOR_TOKEN'), {
+    fireEvent.change(screen.getByLabelText('Value for CONNECTOR_TOKEN'), {
       target: { value: credentialValue },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
