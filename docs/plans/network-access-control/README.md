@@ -127,3 +127,20 @@ Both owners pass the corrected Fedora/WSL candidate:
 - Cleanup reports no errors. Nine unprivileged Python tests pass on Linux; four pass and five skip on Windows. The bounded C workload compiles with warnings treated as errors.
 
 The architect reviewed the failures, candidate changes and corrected evidence. This remains **WSL feasibility**, not a production runtime selection. The Fedora PAM stack includes SELinux session context, login UID, keyring, namespace, umask and system-auth hooks; a non-login production design must explicitly account for required security/session settings and validate native Linux with SELinux enabled. Actual pasta/slirp networking, signed registry acquisition, alternate-route denial and supervision still require proof. Gate 1 remains **in progress**.
+
+
+### Rootless pasta admitted-traffic checkpoint (6 November 2026)
+
+`scripts/network-gateway/probe-runtime-network.py --report <new-file> --admission-binary <published-AOT-path> --workload-source <path>/resource-workload.c` exercises real rootless pasta sockets against the isolated simulated uplink. It uses the two disposable runtime owners and the managed non-login systemd candidate above. Each owner's outer namespace is attached sequentially to a fresh gateway/sink topology; there is no real host-uplink interface or route. Containers use the locally built/imported fixture image ID, `--pull=never`, explicit pasta networking, nonroot execution and the resource limits. No proxy variables or TLS interception are involved.
+
+The borrowed source namespace is validated against a retained descriptor and must contain only loopback with no main-table routes. Source operations and interface cleanup use that descriptor. The network fixture owns only its new veth/gateway/sink resources; the runtime-owner fixture retains ownership of its source namespace/account/storage. A failure-injection test verifies that failed link setup does not claim or delete the borrowed namespace. Topology names are retained in the resource manifest for cleanup recovery.
+
+Observed on Fedora/WSL:
+
+- Both core and work owners pass TCP/UDP IPv4/IPv6 container traffic: eight successful nonce exchanges total.
+- The simulated uplink checks the durable admission using the translated source tuple it receives, before echoing the payload. The runner also requires the exact nonce sequence and records the admission rows. Attribution here is to the isolated runtime-owner boundary; it does not prove per-connector attribution.
+- Root-side held-workload snapshots contain a real pasta executable, the user manager, bus, pause process and container monitor in the registered outer namespace, with the exact workload PID in its registered inner namespace. The first run rejected the distro's `pasta.avx2` command name; the check now accepts the explicit pasta/pasta.avx2/pasta.avx512 variants. That diagnostic rejection is retained separately.
+- Ten unprivileged Python tests pass on Linux; five pass and five Linux-only checks skip on Windows. The C workload compiles with warnings treated as errors.
+- All twelve existing published-AOT kernel checks pass again after the topology refactor. Both live fixtures report no cleanup errors.
+
+The architect reviewed the code and evidence. These are **positive admitted-traffic checks**. The pasta-specific consumer-loss/new-tuple tests, actual alternate-uplink/retained-descriptor escape attempts, short-lived pull-helper coverage, signed acquisition, controlled DNS and native Linux PAM/SELinux validation remain outstanding. Namespace snapshots alone cannot prove where every socket or retained namespace descriptor is used. Gate 1 remains **in progress**, and application enforcement is not enabled.

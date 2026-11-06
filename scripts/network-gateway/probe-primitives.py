@@ -129,9 +129,14 @@ class Topology:
         self.retained_source_fd = None
         self.clients = []
         self.steps = []
+        self.borrowed_source = False
+        self.borrowed_source_fd = None
+        self.borrowed_source_link = False
 
     def run(self, args, *, role=None, data=None, timeout=10):
-        if role == "src" and self.retained_source_fd is not None:
+        if role == "src" and self.borrowed_source_fd is not None:
+            prefix = ["nsenter", f"--net=/proc/{os.getpid()}/fd/{self.borrowed_source_fd}", "--"]
+        elif role == "src" and self.retained_source_fd is not None:
             prefix = ["nsenter", f"--net=/proc/{os.getpid()}/fd/{self.retained_source_fd}", "--"]
         else:
             prefix = ["ip", "netns", "exec", self.names[role]] if role else []
@@ -146,8 +151,23 @@ class Topology:
         action()
         self.steps.append({"check": name, "passed": True, "seconds": round(time.monotonic() - started, 3)})
 
-    def create(self):
+    def create(self, *, borrowed_source=None):
+        if borrowed_source is not None:
+            name, descriptor = borrowed_source
+            if os.fstat(descriptor).st_ino != os.stat("/run/netns/" + name).st_ino:
+                raise ProbeFailure("Borrowed source namespace identity changed")
+            self.names["src"] = name
+            self.borrowed_source_fd = descriptor
+            interfaces = json.loads(self.run(["ip", "-j", "link", "show"], role="src"))
+            if [interface["ifname"] for interface in interfaces] != ["lo"]:
+                raise ProbeFailure("Borrowed fixture source is not empty")
+            for family in ("-4", "-6"):
+                if json.loads(self.run(["ip", family, "-j", "route", "show", "table", "main"], role="src")):
+                    raise ProbeFailure("Borrowed fixture source has existing routes")
+            self.borrowed_source = True
         for name in self.names.values():
+            if self.borrowed_source and name == self.names["src"]:
+                continue
             self.run(["ip", "netns", "add", name])
             # Record only after successful creation: never delete a pre-existing name.
             self.created.append(name)
@@ -155,6 +175,8 @@ class Topology:
             self.run(["ip", "link", "set", "lo", "up"], role=role)
         for role, local, peer, subnet in (("src", "s0", "g0", "10.231.251"), ("sink", "u0", "g1", "10.231.252")):
             self.run(["ip", "link", "add", local, "type", "veth", "peer", "name", peer], role=role)
+            if role == "src" and self.borrowed_source:
+                self.borrowed_source_link = True
             self.run(["ip", "link", "set", peer, "netns", self.names["gw"]], role=role)
             self.run(["ip", "address", "add", subnet + ".2/30", "dev", local], role=role)
             self.run(["ip", "address", "add", subnet + ".1/30", "dev", peer], role="gw")
@@ -439,6 +461,11 @@ print(json.dumps({'outcome':outcome,'port':s.getsockname()[1]}))
                 os.close(self.retained_source_fd)
             except OSError as error:
                 failures.append(f"source namespace fd cleanup: {error}")
+        if self.borrowed_source_link:
+            try:
+                self.run(["ip", "link", "delete", "s0"], role="src")
+            except (OSError, subprocess.SubprocessError, ProbeFailure) as error:
+                failures.append(f"borrowed source interface cleanup: {error}")
         for name in reversed(self.created):
             try:
                 result = subprocess.run(["ip", "netns", "delete", name], text=True, capture_output=True, timeout=5)

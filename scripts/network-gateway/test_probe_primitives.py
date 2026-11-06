@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 
@@ -45,6 +46,19 @@ class ProbeCleanupTests(unittest.TestCase):
             topology.cleanup()
         run.assert_called_once()
         self.assertEqual(["ip", "netns", "delete", topology.names["src"]], run.call_args.args[0])
+
+    def test_borrowed_namespace_is_not_claimed_when_interface_setup_fails(self):
+        topology = probe.Topology()
+        topology.run = Mock(side_effect=['[{"ifname":"lo"}]', '[]', '[]', '', '', '', '', '', '', probe.ProbeFailure("move failed")])
+        with patch.object(probe.os, "fstat", return_value=SimpleNamespace(st_ino=9)), patch.object(probe.os, "stat", return_value=SimpleNamespace(st_ino=9)):
+            with self.assertRaises(probe.ProbeFailure):
+                topology.create(borrowed_source=("borrowed", 99))
+        self.assertNotIn("borrowed", topology.created)
+        topology.run = Mock(return_value="")
+        with patch.object(probe.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            self.assertEqual([], topology.cleanup())
+        topology.run.assert_called_once_with(["ip", "link", "delete", "s0"], role="src")
+        self.assertTrue(all(call.args[0][-1] != "borrowed" for call in run.call_args_list))
 
     def test_echo_cleanup_error_does_not_skip_namespace_cleanup(self):
         topology = probe.Topology()

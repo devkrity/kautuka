@@ -1,6 +1,9 @@
 /* Offline, bounded container workload for Gate 1 cgroup feasibility tests only. */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +52,37 @@ static int expected(const char *path, const char *wanted)
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strncmp(argv[1], "echo-", 5) == 0) {
+        int ipv6 = strstr(argv[1], "6") != NULL;
+        int tcp = strstr(argv[1], "tcp") != NULL;
+        int descriptor = socket(ipv6 ? AF_INET6 : AF_INET, tcp ? SOCK_STREAM : SOCK_DGRAM, 0);
+        if (descriptor < 0) return 2;
+        struct timeval timeout = { .tv_sec = 2 };
+        if (setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0
+            || setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) return 2;
+        struct sockaddr_in v4 = { .sin_family = AF_INET, .sin_port = htons(20199) };
+        struct sockaddr_in6 v6 = { .sin6_family = AF_INET6, .sin6_port = htons(20199) };
+        if (inet_pton(AF_INET, "10.231.252.2", &v4.sin_addr) != 1
+            || inet_pton(AF_INET6, "fd7a:6b74:252::2", &v6.sin6_addr) != 1) return 2;
+        if (connect(descriptor, ipv6 ? (struct sockaddr *)&v6 : (struct sockaddr *)&v4,
+                    ipv6 ? sizeof(v6) : sizeof(v4)) != 0) { close(descriptor); return 3; }
+        char request[128], response[128] = {0};
+        int length = snprintf(request, sizeof(request), "%s%s", argv[2], tcp ? "\n" : "");
+        if (length <= 0 || (size_t)length >= sizeof(request)) return 2;
+        if (send(descriptor, request, (size_t)length, MSG_NOSIGNAL) != length) { close(descriptor); return 3; }
+        size_t received = 0;
+        while (received < (size_t)length) {
+            ssize_t count = recv(descriptor, response + received, sizeof(response) - received, 0);
+            if (count <= 0) break;
+            received += (size_t)count;
+            if (!tcp) break;
+        }
+        int success = received == (size_t)length && memcmp(request, response, received) == 0;
+        printf("{\"echoed\":%s}\n", success ? "true" : "false");
+        if (success) { fflush(stdout); sleep(4); }
+        close(descriptor);
+        return success ? 0 : 3;
+    }
     if (argc != 2) return 2;
     if (strcmp(argv[1], "hold") == 0) { sleep(10); return 0; }
     if (strcmp(argv[1], "limits") == 0) {

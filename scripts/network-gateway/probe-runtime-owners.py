@@ -27,7 +27,7 @@ import tarfile
 import uuid
 
 
-INSPECT = r"""import json,os,subprocess,sys,time
+IDENTITY_INSPECT = r"""import json,os,subprocess,sys,time
 def identity():
     return {'euid':os.geteuid(),'netns':os.readlink('/proc/self/ns/net'),'uid_map':open('/proc/self/uid_map').read().strip(),'gid_map':open('/proc/self/gid_map').read().strip(),'cgroup':open('/proc/self/cgroup').read().strip()}
 peer_home,archive,prefix=sys.argv[1:4]
@@ -46,7 +46,10 @@ inner=subprocess.run(podman+['unshare',sys.executable,'-c',inner_code],capture_o
 if inner.returncode:
     raise RuntimeError('Podman unshare failed: '+inner.stderr)
 result={'outer':outer,'podman':json.loads(info.stdout),'inner':json.loads(inner.stdout),'warnings':info.stderr}
-if archive != '-':
+"""
+
+
+INSPECT = IDENTITY_INSPECT + r"""if archive != '-':
     def command(args):
         return subprocess.run(podman+args,capture_output=True,text=True,timeout=20)
     imported=command(['import','--quiet',archive])
@@ -151,12 +154,13 @@ def fixture_lock():
 
 
 class RuntimeOwners:
-    def __init__(self, cgroup_manager, managed_user_session=False):
+    def __init__(self, cgroup_manager, managed_user_session=False, inspect_program=None):
         self.prefix = "ktng-" + uuid.uuid4().hex[:8]
         self.root = Path(tempfile.mkdtemp(prefix="ktng-owners-", dir="/var/tmp")).resolve()
         self.root.chmod(0o711)
         self.cgroup_manager = cgroup_manager
         self.managed_user_session = managed_user_session
+        self.inspect_program = inspect_program or INSPECT
         self.owners = []
 
     def build_workload(self, source):
@@ -279,7 +283,7 @@ class RuntimeOwners:
                 "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF",
                 "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + str(home / "runtime"),
                 "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
-                sys.executable, "-c", INSPECT, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
+                sys.executable, "-c", self.inspect_program, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
         if self.managed_user_session:
             self.start_user_manager(owner)
             runtime = "/run/user/" + str(owner["uid"])
@@ -291,7 +295,7 @@ class RuntimeOwners:
                             "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + runtime,
                             "--setenv", "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus",
                             "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
-                            sys.executable, "-c", INSPECT, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
+                            sys.executable, "-c", self.inspect_program, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
             unit = ["nsenter", "--net=/run/netns/" + owner["name"], "setpriv", "--reuid=" + str(owner["uid"]), "--regid=" + str(owner["uid"]),
                     "--init-groups", "env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"] + environment + user_command
         process = subprocess.Popen(unit, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -386,7 +390,7 @@ class RuntimeOwners:
                 raise RuntimeError("Session bus broker namespace was not observed")
         if "resources" in result:
             validate_resources(result["resources"])
-        return {"resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
+        return {"network": result.get("network"), "resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
                 "subid_start": owner["subid_start"], "requested_cgroup_manager": self.cgroup_manager,
                 "effective_cgroup_manager": effective, "outer": result["outer"], "inner": result["inner"],
                 "podman_version": result["podman"]["version"]["Version"], "warnings": result["warnings"]}
