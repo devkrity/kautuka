@@ -251,14 +251,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        string[] desiredConnectorNames = [.. connectorExecutionService
-            .DesiredIsolatedContainerNames(snapshot.DesiredContainerConnectors)
-            .Concat(connectorExecutionService.TrackedContainerNames)
-            .Distinct(StringComparer.OrdinalIgnoreCase)];
-        ManagedContainerReconcileResult connectorOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
-            "connector",
-            desiredConnectorNames,
-            cancellationToken).ConfigureAwait(false);
+        ManagedContainerReconcileResult connectorOrphanResult = await connectorExecutionService
+            .RemoveOrphanedConnectorContainersAsync(cancellationToken).ConfigureAwait(false);
         if (!connectorOrphanResult.Succeeded)
         {
             MarkFailed(snapshot, connectorOrphanResult.FailureClass ?? "connector_orphan_reconcile_failed");
@@ -325,7 +319,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         // Reconcile containerized MCP connectors (Phase 2c: JIT startup with cooldown)
         await ReconcileContainerConnectorsAsync(snapshot.DesiredContainerConnectors, cancellationToken).ConfigureAwait(false);
         IReadOnlyList<string> connectorNotes = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
-            snapshot.DesiredContainerConnectors,
             cancellationToken).ConfigureAwait(false);
         desiredStateStore.ReplaceDriftActions([
             .. sidecarSupervisor.TakeDriftNotes(),

@@ -1525,6 +1525,10 @@ public sealed class WorkspaceDesiredStatePublicationTests
 
         Assert.Equal("user-ash-agent-alpha", context.ScopeId);
         Assert.EndsWith(Path.Combine("agents", "user-ash-agent-alpha"), context.HostWorkspacePath, StringComparison.Ordinal);
+        Assert.Equal("user-ash", context.UserId);
+        Assert.Equal(context.HostWorkspacePath, resolver.ResolveAgentWorkspace("agent-alpha", "user-ash").HostWorkspacePath);
+        Assert.Throws<InvalidOperationException>(() => resolver.ResolveAgentWorkspace("agent-alpha", "another-user"));
+        Assert.Equal("user-ash", Assert.Single(resolver.ResolveDesiredState().Workspaces, workspace => workspace.ScopeId == context.ScopeId).UserId);
     }
 
     [Fact]

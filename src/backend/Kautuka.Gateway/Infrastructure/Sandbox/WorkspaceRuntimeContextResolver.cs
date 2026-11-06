@@ -382,6 +382,16 @@ internal sealed class WorkspaceRuntimeContextResolver(
         string root = ResolveBaseRoot(configuration.Kautuka.Workspace);
         AgentDefinition? agent = configuration.Agents.FirstOrDefault(candidate =>
             string.Equals(candidate.Id, agentId, StringComparison.Ordinal));
+        if (!IsSharedSystemAgent(configuration, agentId) && !string.IsNullOrWhiteSpace(agent?.OwnerUserId))
+        {
+            if (!string.IsNullOrWhiteSpace(userId) && !string.Equals(userId, agent.OwnerUserId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Agent workspace caller does not match its owner.");
+            }
+
+            userId = agent.OwnerUserId;
+        }
+
         string scopeName = agent is not null ? StableScopeId(agent) : DistinctSegment(agentId);
         string hostWorkspace = Path.Combine(root, "agents", scopeName);
         if (IsSharedSystemAgent(configuration, agentId))

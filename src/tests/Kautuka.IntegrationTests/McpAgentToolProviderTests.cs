@@ -329,8 +329,10 @@ public sealed class McpAgentToolProviderTests
         Assert.Equal("system::kautuka-web-tools", grpcService.LastListToolsRequest?.ConnectorId);
     }
 
-    [Fact]
-    public async Task BuildToolsAsyncUsesIsolatedWithAgentFilesExecutionContextForBinding()
+    [Theory]
+    [InlineData("OwnContextWithAgentFiles", WorkspaceMcpExecutionContext.IsolatedWithAgentFiles)]
+    [InlineData("OwnContext", WorkspaceMcpExecutionContext.Isolated)]
+    public async Task BuildToolsAsyncCarriesAgentIdentityIndependentlyOfFileAccess(string bindingContext, WorkspaceMcpExecutionContext mode)
     {
         var grpcService = new CapturingWorkspaceGrpcService();
         var provider = new McpAgentToolProvider(
@@ -366,7 +368,7 @@ public sealed class McpAgentToolProviderTests
                     new AgentMcpBindingDefinition
                     {
                         ConnectorId = "bundle-mcp",
-                        Context = "OwnContextWithAgentFiles",
+                        Context = bindingContext,
                     },
                 ],
             },
@@ -378,8 +380,9 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> tools = [.. await provider.BuildToolsAsync(context, CancellationToken.None)];
 
         Assert.Empty(tools);
-        Assert.Equal(WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, grpcService.LastListToolsRequest?.ExecutionContext);
+        Assert.Equal(mode, grpcService.LastListToolsRequest?.ExecutionContext);
         Assert.Equal("/workspace", grpcService.LastListToolsRequest?.WorkspaceContext?.ContainerWorkspacePath);
+        Assert.Equal("user-1", grpcService.LastListToolsRequest?.WorkspaceContext?.UserId);
     }
 
     [Fact]

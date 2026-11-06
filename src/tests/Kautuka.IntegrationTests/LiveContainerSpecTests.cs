@@ -212,7 +212,7 @@ public sealed class LiveContainerSpecTests
             ["run_shell"],
             new Dictionary<string, string>(StringComparer.Ordinal) { ["TOKEN"] = "secret" });
 
-    private static string Inspect(
+    internal static string Inspect(
         string imageId = "sha256:current",
         string? network = "kautuka-sandbox",
         string mount = "/tmp/kautuka/alpha:/workspace",

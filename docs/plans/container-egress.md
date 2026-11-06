@@ -238,3 +238,32 @@ The architect reviewed the proof and the explicit limits. This is WSL static
 topology evidence, not a completed product, recursive DNS proof, file-xDS update
 proof, host-process containment test or native Linux/Mac validation. Continue
 with Manager integration rather than creating additional research subsystems.
+
+## Agent connector identity integration
+
+Agent-initiated `Isolated` calls now carry workspace identity without receiving
+workspace files or environment. Owned agent contexts publish their canonical
+owner; a foreign caller is rejected. Existing runtime keys distinguish agents,
+while non-agent setup/system operations keep explicit management instances.
+
+Manager reconciles actual existing connector containers against current accepted
+connector/workspace identities. It does not eagerly start their Cartesian product.
+Recovery and persistent creation use the same container-name lease, including
+idle-timer registration. Orphan cleanup rechecks current desired state after
+inventory and retires the exact observed container ID, not a replacement using
+its name. Gateway remains the binding authority; unbinding can leave an idle
+cached instance until normal cleanup. No new binding protocol is introduced.
+
+This checkpoint changes identity and reconciliation, not network enforcement:
+the application still uses its existing network until the Manager egress mode
+and package endpoint are integrated. Scoped network creation, service
+containerisation, container update/recovery and UI remain outstanding.
+
+Validation for this identity checkpoint: 122 focused integration tests pass,
+including owner publication/rejection, separate agent names, no isolated file or
+environment access, existing-instance recovery, current-state orphan decisions,
+cooldown/active-use ordering and immutable-ID retirement of a replaced one-shot.
+The actual filtered full-ID/name Podman inventory command also passes in Fedora
+44 WSL as part of the existing topology proof; the local report is
+`artifacts/container-egress/product-inventory-12f668db.json`, with empty cleanup
+errors. The architect reviewed and approved the final identity changes.

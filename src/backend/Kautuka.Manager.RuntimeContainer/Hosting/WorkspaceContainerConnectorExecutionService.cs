@@ -39,29 +39,129 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         => [.. trackedConnectorContainers.Values.Distinct(StringComparer.OrdinalIgnoreCase)];
 
     public IReadOnlyCollection<string> DesiredIsolatedContainerNames(
-        IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors)
+        IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors,
+        IReadOnlyList<ContainerContext>? workspaces = null)
     {
         ArgumentNullException.ThrowIfNull(connectors);
-        return [.. connectors
-            .Where(static connector => connector.Enabled)
-            .Select(static connector => BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null))
+        return [.. DesiredInstances(connectors, workspaces ?? desiredStateStore.Snapshot.DesiredWorkspaces)
+            .Select(static instance => instance.Name)
             .Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 
-    public async Task<IReadOnlyList<string>> ReconcileDesiredConnectorsAsync(
+    private static IEnumerable<ConnectorInstance> DesiredInstances(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors,
-        CancellationToken cancellationToken)
+        IReadOnlyList<ContainerContext> workspaces)
     {
-        ArgumentNullException.ThrowIfNull(connectors);
-        var notes = new List<string>();
         foreach (WorkspaceMcpContainerConnectorDefinition connector in connectors.Where(static item => item.Enabled))
         {
-            string containerName = BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
-            string runtimeKey = BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
+            // Non-agent validation/setup retains its explicit user/system instance.
+            yield return new(connector, WorkspaceMcpExecutionContext.Isolated, null);
+            int separator = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
+            string owner = separator > 0 ? connector.ConnectorId[..separator] : "system";
+            foreach (ContainerContext workspace in workspaces.Where(workspace =>
+                string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(workspace.UserId ?? "system", owner, StringComparison.Ordinal)))
+            {
+                yield return new(connector, WorkspaceMcpExecutionContext.Isolated, workspace);
+                yield return new(connector, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, workspace);
+            }
+        }
+    }
+
+    private sealed record ConnectorInstance(
+        WorkspaceMcpContainerConnectorDefinition Connector,
+        WorkspaceMcpExecutionContext Mode,
+        ContainerContext? Workspace)
+    {
+        public string Name => BuildContainerName(Connector.ConnectorId, Mode, Workspace);
+        public string RuntimeKey => BuildRuntimeKey(Connector.ConnectorId, Mode, Workspace);
+    }
+
+    private ConnectorInstance? CurrentInstance(string name)
+    {
+        WorkspaceDesiredStateSnapshot current = desiredStateStore.Snapshot;
+        return DesiredInstances(current.DesiredContainerConnectors, current.DesiredWorkspaces)
+            .FirstOrDefault(instance => string.Equals(instance.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private sealed record ContainerReference(string Id, string Name);
+
+    private async Task<ContainerReference[]> ExistingConnectorNamesAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult listed = await podmanCommandRunner.RunAsync(
+            ["ps", "--all", "--filter", "label=kautuka.managed=manager", "--filter", "label=kautuka.role=connector", "--no-trunc", "--format", "{{.ID}}|{{.Names}}"],
+            10, cancellationToken).ConfigureAwait(false);
+        if (listed.ExitCode != 0)
+        {
+            throw new ContainerInspectionUnavailableException("Connector inventory is unavailable. Reconciliation is deferred.");
+        }
+
+        return [.. listed.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static line =>
+            {
+                string[] fields = line.Split('|');
+                if (fields.Length != 2 || fields[0].Length != 64 || !fields[0].All(char.IsAsciiHexDigit)
+                    || string.IsNullOrWhiteSpace(fields[1]) || fields[1].Any(char.IsWhiteSpace))
+                {
+                    throw new ContainerInspectionUnavailableException("Connector inventory is malformed. Reconciliation is deferred.");
+                }
+                return new ContainerReference(fields[0], fields[1]);
+            })
+            .DistinctBy(static item => item.Id, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    public async Task<ManagedContainerReconcileResult> RemoveOrphanedConnectorContainersAsync(CancellationToken cancellationToken)
+    {
+        int removed = 0;
+        foreach (ContainerReference observedContainer in await ExistingConnectorNamesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string name = observedContainer.Name;
+            await using var lease = (await connectorLocks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+            // Revalidate after inventory and under the same lease used by creation.
+            if (CurrentInstance(name) is not null)
+            {
+                continue;
+            }
+
+            // A one-shot stdio launch may reuse the name without taking this lease.
+            // Retire only the immutable object observed by inventory, never its replacement.
+            _ = await podmanCommandRunner.RunAsync(["rm", "-f", observedContainer.Id], 15, cancellationToken).ConfigureAwait(false);
+            PodmanCommandResult exists = await podmanCommandRunner.RunAsync(["container", "exists", observedContainer.Id], 10, cancellationToken).ConfigureAwait(false);
+            if (exists.ExitCode != 1 || exists.TerminationReason != ProcessTerminationReason.NonZeroExit)
+            {
+                return new(false, removed, "orphan_container_remove_unconfirmed");
+            }
+
+            foreach ((string key, string trackedName) in trackedConnectorContainers.Where(pair => string.Equals(pair.Value, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                await CancelConnectorCooldownAsync(key).ConfigureAwait(false);
+                trackedConnectorContainers.TryRemove(key, out _);
+            }
+            removed++;
+        }
+        return new(true, removed, null);
+    }
+
+    public async Task<IReadOnlyList<string>> ReconcileDesiredConnectorsAsync(CancellationToken cancellationToken)
+    {
+        var notes = new List<string>();
+        foreach (ContainerReference observedContainer in await ExistingConnectorNamesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            string name = observedContainer.Name;
+            await using var lease = (await connectorLocks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+            ConnectorInstance? instance = CurrentInstance(name);
+            if (instance is null)
+            {
+                continue;
+            }
+            WorkspaceMcpContainerConnectorDefinition connector = instance.Connector;
+            string containerName = instance.Name;
+            string runtimeKey = instance.RuntimeKey;
+            ContainerContext? mountedWorkspace = ResolveMountedWorkspace(instance.Mode, instance.Workspace);
             ConnectorContainerInspection inspection;
             try
             {
-                inspection = await InspectContainerStateAsync(containerName, connector, null, cancellationToken).ConfigureAwait(false);
+                inspection = await InspectContainerStateAsync(containerName, connector, mountedWorkspace, cancellationToken).ConfigureAwait(false);
             }
             catch (ContainerInspectionUnavailableException ex)
             {
@@ -71,7 +171,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
             if (inspection.Exists && inspection.IsRunning && inspection.Matches(connector))
             {
-                trackedConnectorContainers[runtimeKey] = containerName;
+                if (trackedConnectorContainers.TryAdd(runtimeKey, containerName))
+                {
+                    await ResetConnectorCooldownAsync(connector, runtimeKey, containerName).ConfigureAwait(false);
+                }
                 continue;
             }
 
@@ -86,12 +189,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 : "it was not running after Manager started";
             try
             {
-                await EnsureConnectorContainerRunningAsync(
+                await EnsureConnectorContainerRunningCoreAsync(
                     connector,
                     runtimeKey,
                     containerName,
-                    WorkspaceMcpExecutionContext.Isolated,
-                    workspaceContext: null,
+                    instance.Mode,
+                    mountedWorkspace,
                     cancellationToken).ConfigureAwait(false);
                 await ResetConnectorCooldownAsync(connector, runtimeKey, containerName).ConfigureAwait(false);
                 notes.Add("Connector " + connector.ConnectorId + " was replaced because " + reason + ".");
@@ -854,8 +957,20 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         CancellationToken cancellationToken)
     {
         await using var connectorLease = (await connectorLocks
-            .AcquireAsync(runtimeKey, cancellationToken)
+            .AcquireAsync(containerName, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
+        await EnsureConnectorContainerRunningCoreAsync(connector, runtimeKey, containerName, executionContext, workspaceContext, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Caller holds the container-name lease, including during recovery.
+    private async Task EnsureConnectorContainerRunningCoreAsync(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string runtimeKey,
+        string containerName,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        CancellationToken cancellationToken)
+    {
         ConnectorContainerInspection inspection = await InspectContainerStateAsync(containerName, connector, workspaceContext, cancellationToken).ConfigureAwait(false);
         await CancelConnectorCooldownAsync(runtimeKey).ConfigureAwait(false);
         if (inspection.IsRunning && inspection.Matches(connector))
@@ -922,7 +1037,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private async Task StopConnectorContainerAsync(string runtimeKey, string connectorId, string containerName, string eventName, CancellationToken cancellationToken = default)
     {
         await using var connectorLease = (await connectorLocks
-            .AcquireAsync(runtimeKey, cancellationToken)
+            .AcquireAsync(containerName, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         ConnectorContainerInspection inspection = await InspectContainerStateAsync(containerName, null, null, cancellationToken).ConfigureAwait(false);

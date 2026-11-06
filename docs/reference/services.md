@@ -18,6 +18,19 @@ Manager persists accepted desired state in `manager-desired-state.json`, reloads
 
 Host status keeps three signals separate. A successful status RPC proves Manager is reachable; a last-known Podman sample reports container-runtime availability; and accepted/reconciled cursors plus the execution gate report agent-workspace readiness. A Manager background loop runs the bounded live `podman info` check (5s when healthy, 2s after unavailable) and keeps that sample warm. Status, execution-readiness (chat and the UI banner), and reconcile read the snapshot instead of inducing `podman info`. Concurrent first callers share one in-flight check; a concrete process/connection failure is reported immediately, while a command timeout is confirmed once. Gateway evaluates the Podman failure before the Manager-ready response and publishes it as the `container_runtime` dependency.
 
+Agent-initiated connector instances include the user, agent workspace and execution
+mode in their runtime identity, including `Isolated` execution. Workspace identity
+does not grant file access: only `IsolatedWithAgentFiles` receives the read-only
+workspace mount. Private agents publish their canonical owner and reject another
+caller; shared system agents retain per-user workspaces. Non-agent setup retains
+an explicit user/system instance. Connector reconciliation discovers existing
+instances without starting every possible agent/connector pair. Creation,
+recovery and retirement share a container-name lease; orphan removal targets the
+inventoried immutable ID so a one-shot replacement cannot be deleted by name.
+Gateway remains the connector-binding authority. An unbound cached instance may
+remain until idle cleanup while its connector and workspace remain accepted; its
+presence does not authorize calls.
+
 ## CredentialsHost
 
 **Entry point:** `src/backend/Kautuka.CredentialsHost/Program.cs`

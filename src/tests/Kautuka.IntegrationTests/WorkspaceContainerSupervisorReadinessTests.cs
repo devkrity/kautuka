@@ -131,9 +131,12 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
             new PodmanCommandRunner(),
             startup,
             NullLogger<WorkspaceSidecarSupervisor>.Instance);
+        var connectorRunner = new PodmanCommandRunner((args, _) => args[0] == "ps"
+            ? Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed))
+            : throw new InvalidOperationException("Unexpected connector command during readiness test."));
         var connectorExecution = new WorkspaceContainerConnectorExecutionService(
             store,
-            new PodmanCommandRunner(),
+            connectorRunner,
             new McpbImageMaterializer(new PodmanCommandRunner(), NullLogger<McpbImageMaterializer>.Instance),
             new UnusedContainerTool(),
             NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
