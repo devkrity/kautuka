@@ -25,6 +25,7 @@ def module(name, filename):
 owners = module("runtime_owners", "probe-runtime-owners.py")
 primitives = module("primitives", "probe-primitives.py")
 registry = module("registry", "registry-fixture.py")
+pull_proof = module("pull_proof", "pull-socket-proof.py")
 
 ACQUIRE = owners.IDENTITY_INSPECT + r"""
 def command(args):
@@ -148,11 +149,12 @@ def prepare(fixture, binary):
     return image_directory, plan
 
 
-def start_registry(topology, directory, binary):
+def start_registry(topology, directory, binary, observe_home=None):
     topology.echo.terminate()
     topology.echo.communicate(timeout=3)
+    observer = ["--observe-home", observe_home] if observe_home else []
     topology.echo = subprocess.Popen(["ip", "netns", "exec", topology.names["sink"], sys.executable,
-        str(Path(__file__).with_name("registry-fixture.py")), "--directory", str(directory), "--ledger", topology.ledger],
+        str(Path(__file__).with_name("registry-fixture.py")), "--directory", str(directory), "--ledger", topology.ledger] + observer,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if topology.read_line(topology.echo.stdout) != "KTNG_REGISTRY_READY":
         raise RuntimeError("TLS registry did not become ready")
@@ -177,6 +179,7 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--admission-binary", type=Path, required=True)
     parser.add_argument("--failure-check", action="store_true", help="Cold stores reject corrupt content and consumer-absent acquisition")
+    parser.add_argument("--observe-pull", action="store_true", help="Hold first TLS handshake for root-side live socket/process correlation")
     options = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("requires Linux root; no resources created")
@@ -193,6 +196,7 @@ def main():
                       "No corrupted-content/cold-pull consumer-loss, DNS, real registry interoperability, anti-rollback or updater transaction proof.",
                       "WSL managed non-login candidate; native Linux PAM/SELinux parity and short-lived helper coverage unvalidated."]}
         result["failureCheck"] = options.failure_check
+        result["observePull"] = options.observe_pull
         if options.failure_check:
             result["limitations"][1] = "Consumer-absence tests use fixture-only conntrack reset and reduced source SYN retries. No restart, DNS, real registry interoperability, anti-rollback or updater transaction proof."
         try:
@@ -210,15 +214,22 @@ def main():
                         owner["network_topology"] = {**topology.names, "src": owner["name"]}
                         try:
                             topology.create(borrowed_source=(owner["name"], descriptor))
-                            start_registry(topology, directory, options.admission_binary)
+                            start_registry(topology, directory, options.admission_binary, owner["home"] if options.observe_pull else None)
                             def counters():
                                 values = json.loads(topology.run(["nft", "-j", "list", "counter", "inet", "ktng_admission", "queued_tcp4"], role="gw"))
                                 return next(entry["counter"]["packets"] for entry in values["nftables"] if "counter" in entry)
 
                             def control(event):
-                                if event == {"phase": "corrupt-content"}:
+                                if options.observe_pull and set(event) == {"phase", "peer"} and event["phase"] == "observe-pull":
+                                    peer = event["peer"]
+                                    if not isinstance(peer, list) or len(peer) != 2 or peer[0] != "10.231.251.2" or type(peer[1]) is not int or not 0 < peer[1] <= 65535:
+                                        raise RuntimeError("Unexpected pull peer tuple")
+                                    namespace = "net:[" + str(os.fstat(descriptor).st_ino) + "]"
+                                    table = topology.run(["cat", "/proc/net/tcp"], role="src")
+                                    owner["active_pull"] = pull_proof.observe(owner, namespace, peer, table)
+                                elif options.failure_check and event == {"phase": "corrupt-content"}:
                                     (directory / "corrupt").write_text("trusted fixture fault")
-                                elif event == {"phase": "consumer-stop"}:
+                                elif options.failure_check and event == {"phase": "consumer-stop"}:
                                     (directory / "corrupt").unlink()
                                     topology.consumer.kill()
                                     topology.consumer.communicate(timeout=3)
@@ -235,8 +246,10 @@ def main():
 
                             if options.failure_check:
                                 topology.run(["sysctl", "-qw", "net.ipv4.tcp_syn_retries=1"], role="src")
-                            observation = fixture.inspect(owner, peer, on_event=control if options.failure_check else None)
+                            observation = fixture.inspect(owner, peer, on_event=control if options.failure_check or options.observe_pull else None)
                             result["owners"].append(observation)
+                            if options.observe_pull and "active_pull" not in owner:
+                                raise RuntimeError("Active pull socket observation missing")
                             errors = capture_registry(topology, owner)
                             events = owner["registry_events"]
                             if options.failure_check:

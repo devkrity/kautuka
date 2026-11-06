@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import ssl
 import threading
+import time
 
 
 def digest(content):
@@ -41,7 +42,7 @@ def build_image(directory, layer):
     return metadata
 
 
-def serve(directory, ledger):
+def serve(directory, ledger, observe_home=None):
     events_path = directory / "events.jsonl"
     events_path.write_bytes(b"")
     log_lock = threading.Lock()
@@ -102,6 +103,7 @@ def serve(directory, ledger):
 
     class Registry(ThreadingHTTPServer):
         daemon_threads = True
+        observed = False
 
         def get_request(self):
             connection, peer = self.socket.accept()
@@ -114,6 +116,20 @@ def serve(directory, ledger):
                     record({"event": "AUDIT_MISSING", "peer": list(peer)})
                     raise OSError("No durable admission before registry handshake")
                 record({"event": "admitted_connection", "peer": list(peer), "admission": row[0]})
+                if observe_home is not None and not self.observed:
+                    self.observed = True
+                    control = observe_home / "control.json"
+                    ack = observe_home / "control-ack"
+                    control.write_bytes(encode({"phase": "observe-pull", "peer": list(peer)}))
+                    deadline = time.monotonic() + 5
+                    while not ack.exists():
+                        if time.monotonic() > deadline:
+                            raise OSError("Root pull observer did not acknowledge")
+                        time.sleep(0.02)
+                    if ack.read_text() != "observe-pull":
+                        raise OSError("Unexpected root pull observation acknowledgement")
+                    control.unlink()
+                    ack.unlink()
                 return context.wrap_socket(connection, server_side=True), peer
             except (OSError, sqlite3.Error):
                 connection.close()
@@ -128,5 +144,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--observe-home", type=Path, help="Trusted fixture observer handshake directory")
     args = parser.parse_args()
-    serve(args.directory, args.ledger)
+    serve(args.directory, args.ledger, args.observe_home)
