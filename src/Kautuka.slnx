@@ -10,6 +10,7 @@
     <Project Path="backend/connectors/google-mail/kautuka-google-mail.csproj" />
     <Project Path="backend/Kautuka.ChannelHost/Kautuka.ChannelHost.csproj" />
     <Project Path="backend/Kautuka.Manager/Kautuka.Manager.csproj" />
+    <Project Path="backend/Kautuka.NetworkGateway/Kautuka.NetworkGateway.csproj" />
     <Project Path="backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj" />
     <Project Path="backend/Kautuka.Manager.RuntimeContainer/Kautuka.Manager.RuntimeContainer.csproj" />
     <Project Path="backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj" />
@@ -28,6 +29,7 @@
     <Project Path="shared/Kautuka.CredentialsHost.Protos/Kautuka.CredentialsHost.Protos.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Kautuka.NetworkGateway.Tests/Kautuka.NetworkGateway.Tests.csproj" />
     <Project Path="tests/Kautuka.ApiFlowTests/Kautuka.ApiFlowTests.csproj" />
     <Project Path="tests/Kautuka.ContractTests/Kautuka.ContractTests.csproj" />
     <Project Path="tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj" />

@@ -10,7 +10,7 @@ Implement the [revision 4.1 proposal](spec-rev4-1.txt) and Part A of the [packag
 
 All Kautuka-initiated external traffic must cross one mandatory network gateway for policy and durable admission. Preserve rootless Podman, separate core/workload owners, container-first application services, local independent network infrastructure, and offline recovery. Connector enforcement is required; additional per-call attribution is supplementary. No unrestricted fallback or implicit switch to rootful Podman is permitted.
 
-The original input files are preserved byte-for-byte as text snapshots. Their references to older proposal revisions and external review files are historical context, not additional implementation dependencies.
+The original input content is preserved as text snapshots, subject to Git's line-ending normalization. Their references to older proposal revisions and external review files are historical context, not additional implementation dependencies.
 
 ## Governing amendments
 
@@ -57,3 +57,20 @@ Local Fedora/WSL result: six primitive checks passed: namespace/veth routing, al
 The first probe invocation exposed a diagnostic-format assumption (`queue num` versus nft's normalized output); the probe now checks structured nft JSON. The architect requested retained-namespace coverage, sink-side denial evidence, and cleanup failure isolation; all were addressed before this checkpoint.
 
 This is **not a Gate 1 pass**. A real admission consumer, durable audit, conntrack/handle/revocation proof, IPv6, both runtime owners, rootless-helper containment, signed acquisition, published AOT execution, and native Linux coverage remain outstanding.
+
+### Admission checkpoint (6 November 2026)
+
+`src/backend/Kautuka.NetworkGateway` now contains the isolated admission prototype: immutable exact-endpoint policy with ingress-interface binding, SQLite WAL/FULL admissions and persistent revocations, bounded lease coordination, conservative IP parsing, raw NFQUEUE UAPI encoding/decoding, and source-generated Linux native interop. A terminal coordinator/transport failure closes the consumer instead of continuing under uncertain state.
+
+The `probe-admission` command is intentionally fixture-only: it verifies an explicitly named `ktng-*` namespace before applying its rules, has one fixed UDP endpoint, and is not installed, enabled, or used by Manager. It clears incoming packet marks, queues new flows, validates the returned permission in a later hook, and copies it to conntrack state for the kernel fast path. Both hooks enforce fixture ingress/address/direction guards before trusting a conntrack permission. The OUTPUT path currently denies all traffic.
+
+Local evidence:
+
+- 38 focused C# tests pass on Windows (.NET SDK 10.0.403) and the Fedora/WSL test distro (self-contained .NET 10.0.14).
+- The Linux Native AOT binary publishes and executes on Fedora/WSL using SDK 10.0.113 with `-r linux-x64 -p:RuntimeFrameworkVersion=10.0.14`. The older compiler/runtime package selected by that distro SDK was rejected by NuGet's security audit; the patched runtime selection passes without suppressing the audit.
+- Nine live fixture checks pass when the primitive probe receives `--admission-binary <published-path>/Kautuka.NetworkGateway`. They include a durable admission observed by the simulated uplink at first receipt, consumer death blocking new flows, and replay of an admitted tuple from the wrong interface being dropped by the explicit boundary guard. Cleanup reported no errors.
+- The three Python cleanup/ownership fault tests pass. The complete Windows solution builds with zero warnings/errors.
+- The complete backend pre-push test selection passes: 2,437 succeeded, 4 skipped, 0 failed (API-flow tests excluded by the repository's filter). The integration suite completed in approximately ten minutes. The skips cover Linux-only filesystem/socket behaviour and unavailable local broker/sandbox fixtures; they are not evidence for those paths.
+- The architect identified post-publication lease expiry, persistent revocation/startup state, callback-failure handling, and fast-path ingress binding; these were addressed with tests before checkpoint review.
+
+Still **not a Gate 1 pass**: no real-uplink route is installed and no application behaviour changes. Required work remains: TCP/IPv6, permitted OUTPUT admission, conntrack retirement/accounting/reconciliation, real kernel revocation and pending races, throughput/overload, topology supervision, both runtime owners/helper coverage, controlled DNS, signed registry acquisition, and the native Linux support matrix. The retained fixture namespace descriptor is not a production namespace supervisor.

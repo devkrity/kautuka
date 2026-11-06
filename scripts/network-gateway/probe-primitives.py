@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -28,6 +29,10 @@ class Topology:
         self.names = {role: self.prefix + "-" + role for role in ("src", "gw", "sink")}
         self.created = []
         self.echo = None
+        self.consumer = None
+        self.state = tempfile.TemporaryDirectory(prefix="ktng-admission-")
+        self.ledger = str(Path(self.state.name) / "admissions.sqlite")
+        self.last_admitted_port = None
         self.retained_source_fd = None
         self.steps = []
 
@@ -64,17 +69,23 @@ class Topology:
             self.run(["ip", "route", "add", "default", "via", subnet + ".1"], role=role)
         self.run(["sysctl", "-qw", "net.ipv4.ip_forward=1"], role="gw")
         self.rules("ct state established,related accept\niifname g0 accept")
-        code = """import socket
+        code = """import os,socket,sqlite3,sys
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 s.bind(('10.231.252.2',20199))
 print('ready',flush=True)
 while True:
     data,peer=s.recvfrom(1024)
-    print(data.decode(),flush=True)
+    received=data.decode()
+    if os.path.exists(sys.argv[1]):
+        with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:
+            present=db.execute('SELECT EXISTS(SELECT 1 FROM gateway_admissions WHERE source_address=? AND source_port=? AND destination_port=20199)',peer).fetchone()[0]
+        if not present:
+            received='AUDIT_MISSING:'+received
+    print(received,flush=True)
     s.sendto(data,peer)
 """
         self.echo = subprocess.Popen(
-            ["ip", "netns", "exec", self.names["sink"], sys.executable, "-u", "-c", code],
+            ["ip", "netns", "exec", self.names["sink"], sys.executable, "-u", "-c", code, self.ledger],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         # A bounded readiness wait; do not block forever on a child that failed to bind.
@@ -96,20 +107,24 @@ table inet ktng_probe {{
 }}
 """)
 
-    def echo_check(self, *, role="src", allowed):
+    def echo_check(self, *, role="src", allowed, source_port=None):
         payload = uuid.uuid4().hex
-        code = """import socket,sys
+        code = """import json,socket,sys
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 s.settimeout(0.5)
+if sys.argv[2] != 'none':
+    s.bind(('10.231.251.2',int(sys.argv[2])))
 payload=sys.argv[1].encode()
 s.sendto(payload,('10.231.252.2',20199))
 try:
     data,_=s.recvfrom(1024)
-    print('delivered' if data == payload else 'corrupt')
+    outcome='delivered' if data == payload else 'corrupt'
 except TimeoutError:
-    print('blocked')
+    outcome='blocked'
+print(json.dumps({'outcome':outcome,'port':s.getsockname()[1]}))
 """
-        actual = self.run([sys.executable, "-c", code, payload], role=role)
+        response = json.loads(self.run([sys.executable, "-c", code, payload, str(source_port) if source_port is not None else "none"], role=role))
+        actual = response["outcome"]
         expected = "delivered" if allowed else "blocked"
         import selectors
         with selectors.DefaultSelector() as selector:
@@ -122,6 +137,8 @@ except TimeoutError:
             raise ProbeFailure(f"sink received denied {role} payload: {received}")
         if actual != expected:
             raise ProbeFailure(f"{role} packet expected {expected}, observed {actual}")
+        if allowed and self.consumer is not None:
+            self.last_admitted_port = response["port"]
 
     def queue_absence(self):
         self.rules("ct state established,related accept\niifname g0 queue num 23199")
@@ -145,6 +162,56 @@ except TimeoutError:
         self.rules("")
         self.echo_check(allowed=False)
 
+    def start_admission(self, binary):
+        self.consumer = subprocess.Popen(
+            ["ip", "netns", "exec", self.names["gw"], str(binary), "probe-admission", self.names["gw"], self.ledger, "23199"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        import selectors
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.consumer.stdout, selectors.EVENT_READ)
+            ready = selector.select(timeout=10)
+            marker = self.consumer.stdout.readline().strip() if ready else None
+        if marker != "KTNG_PROBE_READY":
+            detail = self.consumer.stderr.read() if self.consumer.poll() is not None else "readiness timed out"
+            raise ProbeFailure("admission consumer failed readiness: " + detail)
+        # Remove the primitive fixture only after the consumer has installed its own
+        # default-drop two-hook contract. No external host/uplink exists in this fixture.
+        self.run(["nft", "delete", "table", "inet", "ktng_probe"], role="gw")
+        self.echo_check(allowed=True)
+        import sqlite3
+        with sqlite3.connect(self.ledger) as db:
+            if db.execute("SELECT COUNT(*) FROM gateway_admissions").fetchone()[0] != 1:
+                raise ProbeFailure("expected one durable admission for first flow")
+
+    def consumer_crash(self):
+        self.consumer.kill()
+        self.consumer.communicate(timeout=3)
+        self.echo_check(allowed=False)
+
+    def wrong_ingress(self):
+        # Reuse the admitted five-tuple from a new interface. Conntrack itself does
+        # not key by ingress, so a valid-mark-only fast path would otherwise leak it.
+        if self.last_admitted_port is None:
+            raise ProbeFailure("wrong-ingress test requires the previously admitted source port")
+        self.names["spoof"] = self.prefix + "-spoof"
+        self.run(["ip", "netns", "add", self.names["spoof"]])
+        self.created.append(self.names["spoof"])
+        self.run(["ip", "link", "set", "lo", "up"], role="spoof")
+        self.run(["ip", "link", "add", "a0", "type", "veth", "peer", "name", "g2"], role="spoof")
+        self.run(["ip", "link", "set", "g2", "netns", self.names["gw"]], role="spoof")
+        self.run(["ip", "address", "add", "10.231.253.2/30", "dev", "a0"], role="spoof")
+        self.run(["ip", "address", "add", "10.231.251.2/32", "dev", "a0"], role="spoof")
+        self.run(["ip", "address", "add", "10.231.253.1/30", "dev", "g2"], role="gw")
+        self.run(["ip", "link", "set", "a0", "up"], role="spoof")
+        self.run(["ip", "link", "set", "g2", "up"], role="gw")
+        self.run(["ip", "route", "add", "default", "via", "10.231.253.1"], role="spoof")
+        self.run(["sysctl", "-qw", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.g2.rp_filter=0"], role="gw")
+        self.echo_check(role="spoof", allowed=False, source_port=self.last_admitted_port)
+        counters = json.loads(self.run(["nft", "--json", "list", "counter", "inet", "ktng_admission", "boundary_denials"], role="gw"))
+        if not any(entry.get("counter", {}).get("packets", 0) > 0 for entry in counters["nftables"]):
+            raise ProbeFailure("wrong-ingress test did not reach the explicit source-boundary guard")
+
     def namespace_retirement(self):
         # Drop the old interface first. A surviving process/netns reference is not a bypass.
         self.rules("")
@@ -158,6 +225,18 @@ except TimeoutError:
 
     def cleanup(self):
         failures = []
+        if self.consumer is not None and self.consumer.poll() is None:
+            try:
+                self.consumer.terminate()
+                self.consumer.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    self.consumer.kill()
+                    self.consumer.communicate(timeout=3)
+                except (OSError, subprocess.SubprocessError) as error:
+                    failures.append(f"consumer cleanup: {error}")
+            except (OSError, subprocess.SubprocessError) as error:
+                failures.append(f"consumer cleanup: {error}")
         if self.echo is not None:
             try:
                 self.echo.terminate()
@@ -182,12 +261,17 @@ except TimeoutError:
                     failures.append(f"cleanup {name}: {result.stderr.strip()}")
             except (OSError, subprocess.SubprocessError) as error:
                 failures.append(f"cleanup {name}: {error}")
+        try:
+            self.state.cleanup()
+        except OSError as error:
+            failures.append(f"probe state cleanup: {error}")
         return failures
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True, help="New JSON evidence file (never overwritten).")
+    parser.add_argument("--admission-binary", type=Path, help="Optional published Linux admission probe executable.")
     options = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("requires Linux root; no resources created")
@@ -202,7 +286,7 @@ def main():
             "primitivesPassed": False,
             "kernel": os.uname().release, "namespaces": topology.names, "checks": topology.steps,
             "limitations": [
-                "No durable policy admission, NFQUEUE consumer, conntrack revocation, or IPv6 proof yet.",
+                "Optional admission check covers one UDP flow and consumer death, not full conntrack/revocation or IPv6 proof.",
                 "No rootless helper, signed pull, native Linux support matrix, or full WSL proof yet.",
                 "A successful primitive probe does not pass Gate 1 or enable enforcement.",
             ],
@@ -214,6 +298,10 @@ def main():
             topology.record("queue-no-consumer-output-drop", topology.output_queue_absence)
             topology.record("forward-default-drop", topology.default_drop)
             topology.record("namespace-retirement", topology.namespace_retirement)
+            if options.admission_binary is not None:
+                topology.record("durable-nfqueue-admission", lambda: topology.start_admission(options.admission_binary))
+                topology.record("consumer-crash-new-flow-drop", topology.consumer_crash)
+                topology.record("admitted-tuple-wrong-ingress-drop", topology.wrong_ingress)
             result["primitivesPassed"] = True
         except (ProbeFailure, OSError, subprocess.SubprocessError) as error:
             result["primitivesPassed"] = False
