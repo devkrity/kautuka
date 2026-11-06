@@ -2,7 +2,8 @@
 """Isolated Gate 1 rootless execution probe, not an installer or containment claim.
 
 Creates two disposable accounts, disjoint subordinate mappings, private storage and
-network namespaces. Runs only Podman info/unshare under systemd-managed units.
+network namespaces. Runs Podman info/unshare under systemd-managed units; an optional
+offline workload tests actual container resource limits.
 No image acquisition, real-uplink route, existing account, or existing store is used.
 """
 
@@ -10,6 +11,7 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import grp
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,14 +22,15 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tarfile
 import uuid
 
 
 INSPECT = r"""import json,os,subprocess,sys
 def identity():
     return {'euid':os.geteuid(),'netns':os.readlink('/proc/self/ns/net'),'uid_map':open('/proc/self/uid_map').read().strip(),'gid_map':open('/proc/self/gid_map').read().strip(),'cgroup':open('/proc/self/cgroup').read().strip()}
-peer_home=sys.argv[1]
-podman=sys.argv[2:]
+peer_home,archive,prefix=sys.argv[1:4]
+podman=sys.argv[4:]
 outer=identity()
 try:
     os.listdir(peer_home)
@@ -41,7 +44,38 @@ inner_code="import json,os; print(json.dumps({'euid':os.geteuid(),'netns':os.rea
 inner=subprocess.run(podman+['unshare',sys.executable,'-c',inner_code],capture_output=True,text=True,timeout=20)
 if inner.returncode:
     raise RuntimeError('Podman unshare failed: '+inner.stderr)
-print(json.dumps({'outer':outer,'podman':json.loads(info.stdout),'inner':json.loads(inner.stdout),'warnings':info.stderr}),flush=True)
+result={'outer':outer,'podman':json.loads(info.stdout),'inner':json.loads(inner.stdout),'warnings':info.stderr}
+if archive != '-':
+    def command(args):
+        return subprocess.run(podman+args,capture_output=True,text=True,timeout=20)
+    imported=command(['import','--quiet',archive])
+    if imported.returncode: raise RuntimeError('Offline import failed: '+imported.stderr)
+    image=imported.stdout.strip()
+    if len(image.removeprefix('sha256:')) != 64: raise RuntimeError('Unexpected imported image ID')
+    results={'image_id':image}
+    result['resources']=results
+    for mode in ('limits','pids','cpu','memory'):
+        name=prefix+'-'+mode
+        args=['run','--name',name,'--pull=never','--network=none','--user=65532:65532',
+              '--cap-drop=ALL','--security-opt=no-new-privileges','--read-only','--cgroupns=private',
+              '--memory=32m','--memory-swap=32m','--pids-limit=16','--cpu-period=100000','--cpu-quota=25000',
+              image,'/probe',mode]
+        results[mode]={'exit_code':-1}
+        try:
+            observed=command(args)
+            results[mode]={'exit_code':observed.returncode,'stdout':observed.stdout,'stderr':observed.stderr}
+            if mode == 'memory':
+                state=command(['inspect','--format=json',name])
+                if state.returncode == 0: results[mode]['state']=json.loads(state.stdout)[0]['State']
+        except subprocess.TimeoutExpired as error:
+            results[mode]['error']=str(error)
+        finally:
+            try:
+                removed=command(['rm','--force',name])
+                if removed.returncode: results[mode]['cleanup_error']=removed.stderr
+            except subprocess.TimeoutExpired as error:
+                results[mode]['cleanup_error']=str(error)
+print(json.dumps(result),flush=True)
 """
 
 
@@ -107,6 +141,31 @@ class RuntimeOwners:
         self.cgroup_manager = cgroup_manager
         self.owners = []
 
+    def build_workload(self, source):
+        binary = self.root / "probe"
+        run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)])
+        dependencies = run(["ldd", str(binary)])
+        libraries = set()
+        for line in dependencies.splitlines():
+            for token in line.split():
+                if token.startswith("/"):
+                    library = Path(token)
+                    if not library.is_file():
+                        raise RuntimeError("Unexpected dynamic library dependency")
+                    libraries.add(library)
+        if not libraries:
+            raise RuntimeError("No dynamic runtime dependencies found")
+        archive = self.root / "workload.tar"
+        with tarfile.open(archive, "w", dereference=True) as output:
+            output.add(binary, arcname="probe")
+            for library in sorted(libraries):
+                output.add(library, arcname=str(library).lstrip("/"))
+        archive.chmod(0o644)
+        self.archive = archive
+        return {"source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                "libraries": [str(library) for library in sorted(libraries)]}
+
     def create(self, role):
         name = self.prefix + "-" + role
         try:
@@ -166,16 +225,20 @@ class RuntimeOwners:
                 "--network-config-dir", str(home / "networks")]
         unit = ["systemd-run", "--quiet", "--wait", "--pipe", "--collect", "--unit", owner["unit"],
                 "--property", "User=" + owner["name"], "--property", "Group=" + owner["name"],
-                "--property", "Delegate=yes", "--property", "NetworkNamespacePath=/run/netns/" + owner["name"],
+                "--property", "Delegate=yes",
+                "--property", "MemoryMax=256M", "--property", "MemorySwapMax=0",
+                "--property", "TasksMax=128", "--property", "CPUQuota=100%",
+                "--property", "RuntimeMaxSec=75", "--property", "NetworkNamespacePath=/run/netns/" + owner["name"],
                 "--property", "WorkingDirectory=" + owner["home"],
                 "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF",
                 "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + str(home / "runtime"),
                 "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
-                sys.executable, "-c", INSPECT, peer["home"]] + base
-        result = json.loads(run(unit, timeout=50))
+                sys.executable, "-c", INSPECT, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
+        result = json.loads(run(unit, timeout=85))
         owner["observation"] = {"outer": result["outer"], "inner": result["inner"],
                                 "rootless": result["podman"]["host"]["security"]["rootless"],
-                                "cgroup_manager": result["podman"]["host"]["cgroupManager"]}
+                                "cgroup_manager": result["podman"]["host"]["cgroupManager"],
+                                "resources": result.get("resources")}
         expected = os.stat("/run/netns/" + owner["name"]).st_ino
         if result["outer"]["euid"] != owner["uid"] or result["outer"]["netns"] != f"net:[{expected}]":
             raise RuntimeError("Managed unit did not use its registered UID and namespace")
@@ -192,7 +255,9 @@ class RuntimeOwners:
         effective = result["podman"]["host"]["cgroupManager"]
         if effective != self.cgroup_manager:
             raise RuntimeError(f"Requested {self.cgroup_manager} but observed {effective}; no silent fallback")
-        return {"role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
+        if "resources" in result:
+            validate_resources(result["resources"])
+        return {"resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
                 "subid_start": owner["subid_start"], "requested_cgroup_manager": self.cgroup_manager,
                 "effective_cgroup_manager": effective, "outer": result["outer"], "inner": result["inner"],
                 "podman_version": result["podman"]["version"]["Version"], "warnings": result["warnings"]}
@@ -247,26 +312,43 @@ class RuntimeOwners:
         return failures
 
 
+def validate_resources(resources):
+    for mode in ("limits", "pids", "cpu"):
+        if resources[mode]["exit_code"] != 0 or "cleanup_error" in resources[mode]:
+            raise RuntimeError(f"Container {mode} enforcement probe failed: {resources[mode]}")
+    limits = json.loads(resources["limits"]["stdout"])
+    if limits != {"uid": 65532, "memory_max": "33554432", "pids_max": "16", "cpu_max": "25000 100000"}:
+        raise RuntimeError(f"Unexpected kernel resource limits: {limits}")
+    memory = resources["memory"]
+    if memory["exit_code"] != 137 or memory.get("state", {}).get("OOMKilled") is not True or "cleanup_error" in memory:
+        raise RuntimeError(f"Container memory limit did not produce a confirmed OOM kill: {memory}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--cgroup-manager", choices=("systemd", "cgroupfs"), required=True)
+    parser.add_argument("--workload-source", type=Path, help="Optional offline C workload; requires gcc and ldd")
     options = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("requires Linux root; no resources created")
     required = ("podman", "ip", "systemd-run", "systemctl", "useradd", "userdel", "groupadd", "groupdel", "usermod")
     if any(shutil.which(command) is None for command in required):
         parser.error("missing required runtime/account tools; no resources created")
+    if options.workload_source and (not options.workload_source.is_file() or any(shutil.which(tool) is None for tool in ("gcc", "ldd"))):
+        parser.error("workload source, gcc and ldd required; no resources created")
     with options.report.open("x", encoding="utf-8") as report:
-        result = {"schemaVersion": 1, "scope": "managed-rootless-identity-feasibility-only",
+        result = {"schemaVersion": 1, "scope": "managed-rootless-resource-feasibility" if options.workload_source else "managed-rootless-identity-feasibility-only",
                   "gate1Passed": False, "feasibilityPassed": False, "owners": [], "cleanupErrors": [],
-                  "limitations": ["No networking helper placement, image pull, container cgroup/resource-limit, or external traffic containment proof."]}
+                  "limitations": ["No networking helper placement, signed image acquisition, or external traffic containment proof. Resource-limit evidence requires the optional workload to pass."]}
         try:
             with fixture_lock():
                 fixture = RuntimeOwners(options.cgroup_manager)
                 result["createdResources"] = fixture.owners
                 result["fixtureRoot"] = str(fixture.root)
                 try:
+                    if options.workload_source:
+                        result["workload"] = fixture.build_workload(options.workload_source)
                     core, work = [fixture.create(role) for role in ("core", "work")]
                     result["owners"].append(fixture.inspect(core, work))
                     result["owners"].append(fixture.inspect(work, core))
