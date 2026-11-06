@@ -52,6 +52,7 @@ static int expected(const char *path, const char *wanted)
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "artifact") == 0) { puts(argv[2]); return 0; }
     if (argc == 3 && strncmp(argv[1], "echo-", 5) == 0) {
         int ipv6 = strstr(argv[1], "6") != NULL;
         int tcp = strstr(argv[1], "tcp") != NULL;

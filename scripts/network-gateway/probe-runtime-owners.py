@@ -280,7 +280,7 @@ class RuntimeOwners:
                 "--property", "TasksMax=128", "--property", "CPUQuota=100%",
                 "--property", "RuntimeMaxSec=75", "--property", "NetworkNamespacePath=/run/netns/" + owner["name"],
                 "--property", "WorkingDirectory=" + owner["home"],
-                "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF",
+                "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST DBUS_SESSION_BUS_ADDRESS REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy",
                 "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + str(home / "runtime"),
                 "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
                 sys.executable, "-c", self.inspect_program, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
@@ -291,7 +291,7 @@ class RuntimeOwners:
                            "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus"]
             user_command = ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", owner["unit"],
                             "--property", "Delegate=yes", "--property", "WorkingDirectory=" + owner["home"],
-                            "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF",
+                            "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy",
                             "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + runtime,
                             "--setenv", "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus",
                             "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
@@ -403,7 +403,7 @@ class RuntimeOwners:
                 raise RuntimeError("Session bus broker namespace was not observed")
         if "resources" in result:
             validate_resources(result["resources"])
-        return {"network": result.get("network"), "resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
+        return {"acquisition": result.get("acquisition"), "network": result.get("network"), "resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
                 "subid_start": owner["subid_start"], "requested_cgroup_manager": self.cgroup_manager,
                 "effective_cgroup_manager": effective, "outer": result["outer"], "inner": result["inner"],
                 "podman_version": result["podman"]["version"]["Version"], "warnings": result["warnings"]}
