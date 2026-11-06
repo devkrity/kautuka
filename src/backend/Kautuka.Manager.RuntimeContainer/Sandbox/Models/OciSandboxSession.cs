@@ -8,5 +8,6 @@ public sealed record OciSandboxSession(
     bool Running,
     string ScopeType,
     string ScopeId,
-    string? UserId);
+    string? UserId,
+    string? ContainerId = null);
 

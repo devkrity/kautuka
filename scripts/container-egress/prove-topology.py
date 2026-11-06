@@ -37,7 +37,7 @@ parser.add_argument('--report', required=True, type=pathlib.Path, help='New outp
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
     parser.error('requires Linux root in a disposable test distro')
-for role in ('envoy','dns'):
+for role in (('envoy','dns','pkgs','sandbox') if options.manager_smoke is not None else ('envoy','dns')):
     if not (options.image_cache/(role+'.oci')).is_file():
         parser.error('missing offline '+role+'.oci image archive')
 if options.manager_smoke is not None and not options.manager_smoke.is_file():
@@ -151,7 +151,7 @@ try:
     def logs(name):
         p = subprocess.run(base+['podman','logs',name],capture_output=True,text=True,cwd='/var/tmp',timeout=10)
         return p.stdout+p.stderr
-    for role in ('envoy','dns'):
+    for role in (('envoy','dns','pkgs','sandbox') if options.manager_smoke is not None else ('envoy','dns')):
         with open(options.image_cache/(role+'.oci'),'rb') as stream:
             report[role+'ArchiveSha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
             stream.seek(0)
@@ -163,6 +163,17 @@ try:
     dns_image = 'docker.io/coredns/coredns:1.14.6'
     report['resolvedEnvoy'] = json.loads(podman('image','inspect',envoy_image))[0]['Id']
     report['resolvedDns'] = json.loads(podman('image','inspect',dns_image))[0]['Id']
+    managed_images={}
+    if options.manager_smoke is not None:
+        for role in ('pkgs','sandbox'):
+            with tarfile.open(options.image_cache/(role+'.oci')) as cached_archive:
+                index=json.load(cached_archive.extractfile('index.json'))
+                manifest=json.load(cached_archive.extractfile('blobs/sha256/'+index['manifests'][0]['digest'].split(':')[1]))
+                config=manifest['config']['digest']
+            image='localhost/kautuka-'+role+'-fixture:'+prefix
+            podman('tag',config,image)
+            managed_images[role]=image
+            report['resolved'+role.title()]=json.loads(podman('image','inspect',image))[0]['Id']
     fixture = root/'home'/'fixture'
     fixture.mkdir(mode=0o755)
     command(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes',
@@ -367,10 +378,16 @@ table ip6 kautuka_no_ipv6 {
            '--sysctl','net.ipv6.conf.all.disable_ipv6=1','--user','65532:65532','--cap-drop=ALL','--security-opt=no-new-privileges','--volume',str(fixture)+':/fixture:ro',tools,'/usr/bin/openssl','s_server','-accept','18080','-cert','/fixture/cert.pem','-key','/fixture/key.pem','-www')
     containers.append(second)
     podman('run','--rm','--network','container:'+second,'--cap-drop=ALL','--cap-add=NET_ADMIN',tools,'/usr/sbin/ip','route','replace','default','via','10.247.92.2')
+    resolvers=[line.split()[1] for line in pathlib.Path('/etc/resolv.conf').read_text().splitlines() if line.startswith('nameserver ') and ':' not in line]
+    if not resolvers: raise RuntimeError('fixture needs an IPv4 recursive DNS upstream')
+    dns_hosts=fixture/'dns-hosts'
+    dns_hosts.write_text('10.247.90.10 allowed.kautuka.test denied.kautuka.test\n')
+    os.chown(dns_hosts,user.pw_uid,user.pw_gid)
+    (fixture/'ExternalCorefile').write_text('.:53 {\n hosts /fixture/dns-hosts {\n reload 1s\n fallthrough\n }\n forward . '+resolvers[0]+'\n log\n errors\n}\n')
     external_dns = prefix+'-external-dns'
     podman('run','-d','--name',external_dns,'--network',names['outside']+':ip=10.247.90.20',
            '--cap-drop=ALL','--cap-add=NET_BIND_SERVICE','--security-opt=no-new-privileges','--user','65532:65532',
-           '--volume',str(fixture/'Corefile')+':/Corefile:ro',dns_image,'-conf','/Corefile')
+           '--volume',str(fixture)+':/fixture:ro',dns_image,'-conf','/fixture/ExternalCorefile')
     containers.append(external_dns)
     time.sleep(0.2)
     network_command(external_dns,['nft','-f','-'],"table ip fixture_count {\n chain observe {\n type filter hook input priority filter; policy accept;\n udp dport 53 counter\n }\n}\n")
@@ -506,9 +523,10 @@ while True:
         native_input=root/'home'/'manager-input.json'
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
-            'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0]}))
+            'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts)}))
         native_input.chmod(0o644)
-        p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=180)
+        p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=320)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
         # Account/store are disposable; capture immutable IDs even after a failed preparation.
         # Capture non-infra containers; pods own their infra container lifecycle.
@@ -523,6 +541,9 @@ while True:
         if observed.exists(): report['managerUnconfirmedDump']=json.loads(observed.read_text())
         if p.returncode: raise RuntimeError('Native Manager lifecycle failed: '+p.stdout[-3000:]+' '+p.stderr[-8000:])
         report['managerRuntime']=json.loads(p.stdout.strip().splitlines()[-1])
+        workspace_file=root/'home'/'managed'/'alpha'/'native-fixture.txt'
+        if not workspace_file.is_file() or workspace_file.stat().st_uid!=user.pw_uid: raise RuntimeError('sandbox file is not owned by the runtime host account')
+        report['sandboxFileOwnedByRuntime']=True
         report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
         report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']

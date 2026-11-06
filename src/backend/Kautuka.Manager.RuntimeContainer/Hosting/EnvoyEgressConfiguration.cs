@@ -9,6 +9,8 @@ using System.Text.Json.Nodes;
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal sealed record EgressTcpRule(string SourceAddress, string Destination, int Port);
+internal sealed record EgressPackageRoute(string SourceAddress, string ProxyAddress, string BackendAddress, string ProxySourceAddress);
+
 
 /// <summary>Stock Envoy file resources and observations of their accepted active configuration.</summary>
 internal sealed record EnvoyEgressConfiguration(
@@ -17,21 +19,30 @@ internal sealed record EnvoyEgressConfiguration(
     internal const string ListenerName = "transparent";
     private const string metadataNamespace = "kautuka.egress";
 
-    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules)
+    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
             .OrderBy(static rule => rule.Destination, StringComparer.Ordinal).ThenBy(static rule => rule.Port)
             .ThenBy(static rule => rule.SourceAddress, StringComparer.Ordinal)];
+        if (externalSourceAddress is not null) externalSourceAddress = NormalizeAddress(externalSourceAddress);
+        EgressPackageRoute[] packages = [.. (packageRoutes ?? []).Select(static route => new EgressPackageRoute(
+            NormalizeAddress(route.SourceAddress), NormalizeAddress(route.ProxyAddress), NormalizeAddress(route.BackendAddress), NormalizeAddress(route.ProxySourceAddress)))
+            .Distinct().OrderBy(static route => route.SourceAddress, StringComparer.Ordinal).ThenBy(static route => route.ProxyAddress, StringComparer.Ordinal)];
+        if (packages.Length > 0 && (externalSourceAddress is null || packages.Any(route => route.ProxySourceAddress == externalSourceAddress)
+            || packages.GroupBy(static route => (route.SourceAddress, route.ProxyAddress)).Any(static group => group.Count() != 1)))
+            throw new ArgumentException("Package routes need unambiguous topology and separate outside/core source addresses.", nameof(packageRoutes));
         var clusters = new JsonArray();
         var chains = new JsonArray();
         var clusterNames = new List<string>();
-        foreach (var group in normalized.GroupBy(static rule => (rule.Destination, rule.Port)))
+        var targets = normalized.Select(rule => (Destination: rule.Destination, Port: rule.Port, Name: "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture)), Bind: externalSourceAddress))
+            .Distinct().Concat(packages.Select(route => (Destination: route.BackendAddress, Port: 20101, Name: PackageClusterName(route), Bind: (string?)route.ProxySourceAddress)).Distinct());
+        foreach (var target in targets)
         {
-            string destination = group.Key.Destination;
-            int port = group.Key.Port;
+            string destination = target.Destination;
+            int port = target.Port;
             bool literal = IPAddress.TryParse(destination, out _);
-            string name = "upstream-" + Hash(destination + ":" + port.ToString(CultureInfo.InvariantCulture));
+            string name = target.Name;
             clusterNames.Add(name);
             var cluster = new JsonObject
             {
@@ -58,6 +69,10 @@ internal sealed record EnvoyEgressConfiguration(
                 },
             };
             if (!literal) cluster["dns_lookup_family"] = "V4_ONLY";
+            if (target.Bind is not null) cluster["upstream_bind_config"] = new JsonObject
+            {
+                ["source_address"] = new JsonObject { ["address"] = target.Bind, ["port_value"] = 0 },
+            };
             SetMarker(cluster, name);
             clusters.Add((JsonNode)cluster);
 
@@ -99,7 +114,7 @@ internal sealed record EnvoyEgressConfiguration(
         deny["name"] = "deny";
         chains.Add((JsonNode)deny);
         listener["filter_chains"] = chains;
-        listener["filter_chain_matcher"] = SourceMatcher(normalized);
+        listener["filter_chain_matcher"] = SourceMatcher(normalized, packages);
         listener["access_log"] = new JsonArray(AccessLog("listener"));
         string version = Hash(clusters.ToJsonString() + "\n" + listener.ToJsonString());
         SetMarker(listener, version);
@@ -147,17 +162,27 @@ internal sealed record EnvoyEgressConfiguration(
         return false;
     }
 
-    private static JsonObject SourceMatcher(EgressTcpRule[] rules)
+    private static string PackageClusterName(EgressPackageRoute route) => "package-" + Hash(route.BackendAddress + ":20101@" + route.ProxySourceAddress);
+
+    private static string NormalizeAddress(string value)
+    {
+        if (!IPAddress.TryParse(value, out IPAddress? address) || !IsUnicastV4(address) || IPAddress.IsLoopback(address))
+            throw new ArgumentException("Topology addresses must be assigned unicast IPv4 addresses.", nameof(value));
+        return address.ToString();
+    }
+
+    private static JsonObject SourceMatcher(EgressTcpRule[] rules, EgressPackageRoute[] packages)
     {
         var sources = new JsonObject();
-        foreach (var source in rules.GroupBy(static rule => rule.SourceAddress))
+        foreach (string source in rules.Select(static rule => rule.SourceAddress).Concat(packages.Select(static route => route.SourceAddress)).Distinct().Order(StringComparer.Ordinal))
         {
             var ports = new JsonObject();
-            foreach (var port in source.GroupBy(static rule => rule.Port))
+            foreach (int port in rules.Where(rule => rule.SourceAddress == source).Select(static rule => rule.Port)
+                .Concat(packages.Any(route => route.SourceAddress == source) ? [20101] : Array.Empty<int>()).Distinct().Order())
             {
                 var names = new JsonObject();
                 var addresses = new JsonObject();
-                foreach (EgressTcpRule rule in port)
+                foreach (EgressTcpRule rule in rules.Where(rule => rule.SourceAddress == source && rule.Port == port))
                 {
                     string chain = "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture));
                     (IPAddress.TryParse(rule.Destination, out _) ? addresses : names)[rule.Destination] = ChainAction(chain);
@@ -165,11 +190,19 @@ internal sealed record EnvoyEgressConfiguration(
 
                 JsonObject fallback = addresses.Count == 0 ? ChainAction("deny")
                     : new JsonObject { ["matcher"] = ExactMatcher("destination_ip", "DestinationIPInput", addresses, ChainAction("deny")) };
-                ports[port.Key.ToString(CultureInfo.InvariantCulture)] = names.Count == 0 ? fallback
+                JsonObject ordinary = names.Count == 0 ? fallback
                     : new JsonObject { ["matcher"] = ExactMatcher("server_name", "ServerNameInput", names, fallback) };
+                EgressPackageRoute[] routes = port == 20101 ? [.. packages.Where(route => route.SourceAddress == source)] : [];
+                if (routes.Length > 0)
+                {
+                    var endpoints = new JsonObject();
+                    foreach (EgressPackageRoute route in routes) endpoints[route.ProxyAddress] = ChainAction(PackageClusterName(route));
+                    ordinary = new JsonObject { ["matcher"] = ExactMatcher("destination_ip", "DestinationIPInput", endpoints, ordinary) };
+                }
+                ports[port.ToString(CultureInfo.InvariantCulture)] = ordinary;
             }
 
-            sources[source.Key] = new JsonObject { ["matcher"] = ExactMatcher("destination_port", "DestinationPortInput", ports, ChainAction("deny")) };
+            sources[source] = new JsonObject { ["matcher"] = ExactMatcher("destination_port", "DestinationPortInput", ports, ChainAction("deny")) };
         }
 
         return sources.Count == 0 ? new JsonObject { ["on_no_match"] = ChainAction("deny") }

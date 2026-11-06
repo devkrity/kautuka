@@ -23,7 +23,9 @@ public sealed class ContainerEgressGrant
 
     public string AgentId { get; set; } = "management";
 
-    public string ConnectorId { get; set; } = string.Empty;
+    public string Role { get; set; } = "connector";
+
+    public string ComponentId { get; set; } = string.Empty;
 
     public string Destination { get; set; } = string.Empty;
 

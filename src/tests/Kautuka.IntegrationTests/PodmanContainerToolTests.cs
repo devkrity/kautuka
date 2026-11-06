@@ -180,13 +180,29 @@ public sealed class PodmanContainerToolTests
         }
     }
 
+    [Fact]
+    public void PreparedSandboxUsesTheShippedNonRootIdentityAndClientOnlyRouteConfiguration()
+    {
+        var context = new ContainerContext("agent", "alpha", "owner", "/tmp/workspace", "/workspace", "localhost/kautuka-base:fixture", 1, "512m", 20, [], new Dictionary<string, string>());
+        MethodInfo method = typeof(PodmanContainerTool).GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var args = Assert.IsType<List<string>>(method.Invoke(null, [context, "fixture", "scope-network", "10.89.1.2"]));
+        Assert.Equal("create", args[0]);
+        Assert.Contains("--pull=never", args);
+        Assert.Contains("--restart=no", args);
+        Assert.Contains("--userns=keep-id:uid=1000,gid=1000", args);
+        Assert.Contains("--user=1000:1000", args);
+        Assert.Equal("scope-network", args[args.IndexOf("--network") + 1]);
+        Assert.Equal("10.89.1.2", args[args.IndexOf("--dns") + 1]);
+        Assert.DoesNotContain("kautuka-sandbox", args);
+    }
+
     private static List<string> InvokeBuildRunArguments(ContainerContext context, string containerName)
     {
         MethodInfo method = typeof(PodmanContainerTool)
             .GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("BuildRunArguments method was not found.");
 
-        object? result = method.Invoke(null, [context, containerName]);
+        object? result = method.Invoke(null, [context, containerName, null, null]);
         return Assert.IsType<List<string>>(result);
     }
 

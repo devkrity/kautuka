@@ -54,3 +54,26 @@ Runtime platform configuration is stored in SQLite normalized tables. Host boots
 ## Schema policy
 
 Fresh empty stores receive the current embedded baseline. Non-empty stores must match the current schema exactly and fail otherwise. Removed fields/tables are not maintained for backward compatibility unless an explicit future decision says otherwise.
+
+
+### Opt-in revision 6 integration
+
+The `enhancement/network-access-control-v6` implementation has an opt-in
+`ContainerEgress:Enabled` path described in [the deployment plan](../plans/container-egress.md).
+The default runtime above remains in place while service deployment and updates
+are being migrated. Do not treat the flag as an installation-wide completed
+rollout.
+
+The enabled path uses private core and user-agent networks, native client routes,
+and one Envoy/CoreDNS egress pod. Preloaded connector images and sandbox shell
+execution use prepared same-ID startup. The existing package service runs on
+core, reached through its designated Envoy mapping and existing package URLs.
+Sandbox workspace ownership uses native Podman keep-id for the shipped UID 1000.
+Direct core routes are denied; containers on the same network can communicate
+directly. Only outbound traffic is controlled.
+
+Bundle/language materialization and MCP installation inside an AgentSandbox
+remain blocked until their install containers use the same path. Service
+containerisation, verified container updates and the audit/approval UI are still
+required work on this branch. There is no fallback to the legacy network when
+enabled execution cannot be prepared.

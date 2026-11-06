@@ -20,6 +20,7 @@ public sealed class ContainerEgressRuntime(
     private const string outsideName = "kautuka-outside";
     private const string coreName = "kautuka-core";
     private const string ownerLabel = "kautuka.egress";
+    private static readonly string[] packageUpstreams = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly Dictionary<string, ScopeNetwork> networks = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Source> sources = new(StringComparer.Ordinal);
@@ -31,6 +32,7 @@ public sealed class ContainerEgressRuntime(
     private string? infraId;
     private string? podId;
     private string? outsideDefaultGateway;
+    private string? outsideSourceAddress;
     private bool recoveryRequiresProxyStop;
     private bool ready;
 
@@ -44,12 +46,20 @@ public sealed class ContainerEgressRuntime(
 
     internal sealed record Scope(string UserId, string AgentId, string Kind = "agent")
     {
-        internal string Key => Hash(UserId + "\0" + Kind + "\0" + AgentId);
-        internal string NetworkName => "kautuka-" + Key[..32];
+        internal string Key => Kind == "core" ? "core" : Hash(UserId + "\0" + Kind + "\0" + AgentId);
+        internal string NetworkName => Kind == "core" ? coreName : "kautuka-" + Key[..32];
     }
 
     private sealed record ScopeNetwork(string Name, string Subnet, string Gateway, string? NativeGateway, bool Prepared = false);
-    private sealed record Source(PreparedPodmanContainer Container, string Name, Scope Scope, string ConnectorId, bool Authorized);
+    internal sealed record SourceIdentity(Scope Scope, string Role, string ComponentId, bool PackageEligible = false);
+    private sealed record Source(PreparedPodmanContainer Container, string Name, SourceIdentity Identity, bool Authorized);
+
+    internal static Scope SandboxScope(ContainerContext workspace)
+    {
+        if (workspace.ScopeType != "agent" || string.IsNullOrWhiteSpace(workspace.UserId))
+            throw new InvalidOperationException("A sandbox requires its accepted canonical user-agent identity.");
+        return new Scope(workspace.UserId, workspace.ScopeId);
+    }
 
     internal static Scope ConnectorScope(string connectorId, ContainerContext? workspace)
     {
@@ -72,11 +82,18 @@ public sealed class ContainerEgressRuntime(
         finally { gate.Release(); }
     }
 
-    internal async Task<PreparedPodmanContainer> PrepareAndAuthorizeAsync(
+    internal Task<PreparedPodmanContainer> PrepareAndAuthorizeAsync(
         WorkspaceMcpContainerConnectorDefinition connector, string containerName, Scope scope,
         Func<string, string, List<string>> buildCreate, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null)
+        => PrepareAndAuthorizeAsync(new SourceIdentity(scope, "connector", connector.ConnectorId), containerName, buildCreate, cancellationToken, environment);
+
+    internal async Task<PreparedPodmanContainer> PrepareAndAuthorizeAsync(
+        SourceIdentity identity, string containerName, Func<string, string, List<string>> buildCreate, CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
+        Scope scope = identity.Scope;
+        if (identity.Role is not ("connector" or "agent" or "package")) throw new ArgumentException("Unsupported source role.", nameof(identity));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -85,7 +102,10 @@ public sealed class ContainerEgressRuntime(
             List<string> create = buildCreate(network.Name, network.Gateway);
             create.InsertRange(1, ["--label", ownerLabel + "=true", "--label", "kautuka.egress.user=" + scope.UserId,
                 "--label", "kautuka.egress.agent=" + scope.AgentId, "--label", "kautuka.egress.scope-kind=" + scope.Kind,
-                "--label", "kautuka.egress.connector=" + connector.ConnectorId]);
+                "--label", "kautuka.egress.source=true", "--label", "kautuka.egress.source-role=" + identity.Role,
+                "--label", "kautuka.egress.component=" + identity.ComponentId, "--label", "kautuka.egress.packages=" + (identity.PackageEligible ? "true" : "false")]);
+            if (identity.Role == "connector") create.InsertRange(1, ["--label", "kautuka.egress.connector=" + identity.ComponentId]);
+            if (identity.PackageEligible) create.InsertRange(1, ["--add-host", "kautuka-pkgs-proxy:" + network.Gateway]);
             PreparedPodmanContainer prepared;
             try
             {
@@ -98,11 +118,17 @@ public sealed class ContainerEgressRuntime(
                 throw;
             }
             // Native stop/exit may release an IP. Only the newly observed allocation may own its grants.
+            bool packageBoundaryChanged = identity.Role == "package";
             foreach (string stale in sources.Where(pair => pair.Value.Container.NetworkName == prepared.NetworkName
-                && pair.Value.Container.Address == prepared.Address).Select(static pair => pair.Key).ToArray()) sources.Remove(stale);
-            sources.Add(prepared.Id, new Source(prepared, containerName, scope, connector.ConnectorId, Authorized: true));
+                && pair.Value.Container.Address == prepared.Address).Select(static pair => pair.Key).ToArray())
+            {
+                packageBoundaryChanged |= sources[stale].Identity.Role == "package";
+                sources.Remove(stale);
+            }
+            sources.Add(prepared.Id, new Source(prepared, containerName, identity, Authorized: true));
             try
             {
+                if (packageBoundaryChanged) await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
                 await PublishAsync(CompileCurrent(), cancellationToken).ConfigureAwait(false);
                 return prepared;
             }
@@ -123,6 +149,31 @@ public sealed class ContainerEgressRuntime(
         {
             await EnsureReadyCoreAsync(cancellationToken).ConfigureAwait(false);
             await RetireCoreAsync(id, cancellationToken).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task<ManagedContainerReconcileResult> RetireOrphansAsync(string role, Func<IReadOnlyCollection<string>> desiredNames, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(desiredNames);
+        if (role is not ("sidecar" or "agent")) throw new ArgumentException("Unsupported orphan owner.", nameof(role));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await EnsureReadyCoreAsync(cancellationToken).ConfigureAwait(false);
+            PodmanCommandResult listed = await RunAsync(["ps", "--all", "--filter", "label=kautuka.managed=manager", "--filter", "label=kautuka.role=" + role,
+                "--no-trunc", "--format", "{{.ID}}"], cancellationToken).ConfigureAwait(false);
+            int removed = 0;
+            foreach (string id in listed.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (!IsId(id)) throw new InvalidOperationException("Invalid managed orphan identity.");
+                using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", id], cancellationToken).ConfigureAwait(false)).StdOut);
+                string name = inspected.RootElement[0].GetProperty("Name").GetString()!.TrimStart('/');
+                if (desiredNames().Contains(name, StringComparer.Ordinal)) continue;
+                await RetireCoreAsync(id, cancellationToken).ConfigureAwait(false);
+                removed++;
+            }
+            return new ManagedContainerReconcileResult(true, removed, null);
         }
         finally { gate.Release(); }
     }
@@ -168,7 +219,11 @@ public sealed class ContainerEgressRuntime(
         if (sources.TryGetValue(id, out Source? source))
         {
             sources[id] = source with { Authorized = false };
-            try { await PublishAsync(CompileCurrent(), cancellationToken).ConfigureAwait(false); }
+            try
+            {
+                await PublishAsync(CompileCurrent(), cancellationToken).ConfigureAwait(false);
+                if (source.Identity.Role == "package") await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
+            }
             catch
             {
                 // Ordinary stop may release the IP. First blackhole egress and invalidate readiness.
@@ -195,7 +250,17 @@ public sealed class ContainerEgressRuntime(
 
     private async Task EnsureReadyCoreAsync(CancellationToken cancellationToken)
     {
-        if (ready) return;
+        if (ready)
+        {
+            PodmanCommandResult inspected = await runner.RunAsync(["inspect", "--format", "{{.State.Running}}", "kautuka-egress-envoy", "kautuka-egress-dns"], 10, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            string[] states = inspected.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (inspected.ExitCode == 0 && states.Length == 2 && states.All(static state => state == "true")) return;
+            ready = false;
+            recoveryRequiresProxyStop = true;
+            if (inspected.TerminationReason is ProcessTerminationReason.TimedOut or ProcessTerminationReason.CallerCancelled)
+                throw new ContainerInspectionUnavailableException("Cannot confirm the egress services' running state; cached readiness is invalid.");
+        }
         if (recoveryRequiresProxyStop) await StopProxyAsync(cancellationToken).ConfigureAwait(false);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Container egress requires the Linux appliance.");
         if (options.MaxPrivateNetworks < 2) throw new InvalidOperationException("Egress needs capacity for core and a workload scope.");
@@ -244,6 +309,7 @@ public sealed class ContainerEgressRuntime(
         await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
         _ = await EnsureScopeCoreAsync(coreName, "core", cancellationToken).ConfigureAwait(false);
         List<string> inactive = await RestoreSourcesAsync(cancellationToken).ConfigureAwait(false);
+        await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
         EnvoyEgressConfiguration initial = CompileCurrent();
         bool proxyRunning = false;
         if (await ExistsAsync(["container", "exists", "kautuka-egress-envoy"], cancellationToken).ConfigureAwait(false))
@@ -467,6 +533,9 @@ public sealed class ContainerEgressRuntime(
               meta skuid 65533 ip daddr 127.0.0.1 tcp dport 9901 accept
               ip daddr 127.0.0.0/8 counter reject
             """);
+        Source? package = sources.Values.SingleOrDefault(static source => source.Authorized && source.Identity.Role == "package");
+        if (package is not null)
+            text.Append(CultureInfo.InvariantCulture, $" meta skuid 65532 ip saddr {networks[coreName].Gateway} ip daddr {package.Container.Address} tcp dport 20101 counter accept\n");
         if (networks.Count > 0) text.Append(CultureInfo.InvariantCulture, $" ip daddr {{ {subnets} }} counter reject\n");
         text.AppendLine("""
              }
@@ -486,7 +555,10 @@ public sealed class ContainerEgressRuntime(
         using (JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", infraId!], cancellationToken).ConfigureAwait(false)).StdOut))
         {
             JsonElement attachments = inspected.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
-            if (!attachments.TryGetProperty(outsideName, out _)) throw new InvalidOperationException("The egress pod lost its outside attachment.");
+            if (!attachments.TryGetProperty(outsideName, out JsonElement outside)) throw new InvalidOperationException("The egress pod lost its outside attachment.");
+            outsideSourceAddress = outside.GetProperty("IPAddress").GetString();
+            if (!IPAddress.TryParse(outsideSourceAddress, out IPAddress? outsideAddress) || outsideAddress.AddressFamily != AddressFamily.InterNetwork)
+                throw new InvalidOperationException("The outside attachment has no assigned IPv4 source address.");
             foreach (JsonProperty attachment in attachments.EnumerateObject())
             {
                 if (attachment.Name == outsideName) continue;
@@ -503,7 +575,7 @@ public sealed class ContainerEgressRuntime(
     {
         sources.Clear();
         var inactive = new List<string>();
-        PodmanCommandResult listed = await RunAsync(["ps", "--all", "--filter", "label=" + ownerLabel + "=true", "--filter", "label=kautuka.role=connector", "--no-trunc", "--format", "{{.ID}}"], cancellationToken).ConfigureAwait(false);
+        PodmanCommandResult listed = await RunAsync(["ps", "--all", "--filter", "label=" + ownerLabel + "=true", "--filter", "label=kautuka.egress.source=true", "--no-trunc", "--format", "{{.ID}}"], cancellationToken).ConfigureAwait(false);
         foreach (string id in listed.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (!IsId(id)) throw new InvalidOperationException("Invalid managed source inventory ID.");
@@ -513,7 +585,7 @@ public sealed class ContainerEgressRuntime(
             string? state = container.GetProperty("State").GetProperty("Status").GetString();
             if (state is not ("running" or "initialized" or "paused")) { inactive.Add(id); continue; }
             string? kind = labels.GetProperty("kautuka.egress.scope-kind").GetString();
-            if (kind is not ("agent" or "management")) throw new InvalidOperationException("Unknown managed connector scope kind.");
+            if (kind is not ("agent" or "management" or "core")) throw new InvalidOperationException("Unknown managed connector scope kind.");
             var scope = new Scope(labels.GetProperty("kautuka.egress.user").GetString()!, labels.GetProperty("kautuka.egress.agent").GetString()!, kind);
             ScopeNetwork network = await EnsureScopeCoreAsync(scope.NetworkName, scope.Key, cancellationToken).ConfigureAwait(false);
             JsonElement attachments = container.GetProperty("NetworkSettings").GetProperty("Networks");
@@ -526,8 +598,11 @@ public sealed class ContainerEgressRuntime(
             if (sources.Values.Any(source => source.Container.NetworkName == network.Name && source.Container.Address == address))
                 throw new InvalidOperationException("Native source ownership is ambiguous; egress recovery is deferred.");
             var prepared = new PreparedPodmanContainer(id, network.Name, address!, sandbox);
-            sources[id] = new Source(prepared, container.GetProperty("Name").GetString()!.TrimStart('/'), scope,
-                labels.GetProperty("kautuka.egress.connector").GetString()!, Authorized: !retiring.Contains(id));
+            string? role = labels.GetProperty("kautuka.egress.source-role").GetString();
+            if (role is not ("connector" or "agent" or "package")) throw new InvalidOperationException("Unknown managed source role.");
+            var identity = new SourceIdentity(scope, role, labels.GetProperty("kautuka.egress.component").GetString()!,
+                labels.GetProperty("kautuka.egress.packages").GetString() == "true");
+            sources[id] = new Source(prepared, container.GetProperty("Name").GetString()!.TrimStart('/'), identity, Authorized: !retiring.Contains(id));
         }
         return inactive;
     }
@@ -577,9 +652,20 @@ public sealed class ContainerEgressRuntime(
     }
 
     private EnvoyEgressConfiguration CompileCurrent()
-        => EnvoyEgressConfiguration.Compile(sources.Values.Where(static source => source.Authorized).SelectMany(source => options.Grants
-            .Where(grant => grant.ScopeType == source.Scope.Kind && grant.UserId == source.Scope.UserId && grant.AgentId == source.Scope.AgentId && grant.ConnectorId == source.ConnectorId)
-            .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port))));
+    {
+        Source[] authorized = [.. sources.Values.Where(static source => source.Authorized)];
+        Source? package = authorized.SingleOrDefault(static source => source.Identity.Role == "package");
+        IEnumerable<EgressTcpRule> rules = authorized.SelectMany(source => options.Grants
+            .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
+                && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
+            .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port)));
+        if (package is not null)
+            rules = rules.Concat(packageUpstreams
+                .Select(host => new EgressTcpRule(package.Container.Address, host, 443)));
+        EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
+            .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes);
+    }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)
     {

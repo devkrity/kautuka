@@ -58,12 +58,25 @@ public sealed class ContainerEgressIntegrationTests
     }
 
     [Fact]
-    public async Task AgentShellCannotReuseAnExistingLegacyNetworkInEgressMode()
+    public async Task SupervisorProvisioningCannotStartLegacyMcpArtifactInstallContainers()
+    {
+        var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No legacy build/run may occur."));
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        await using var service = new WorkspaceContainerConnectorExecutionService(new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance), new PodmanContainerTool(runner, runtime),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, runtime);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => service.EnsureAgentSandboxProvisionedAsync(
+            Workspace("alpha", "owner"), ["owner::mail"], TestContext.Current.CancellationToken));
+        Assert.Contains("legacy install containers are disabled", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AgentShellRequiresCanonicalAgentScopeBeforeAnyPodmanOperation()
     {
         var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command is allowed."));
         using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
         var tool = new PodmanContainerTool(runner, runtime);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => tool.RunShellAsync(Workspace("alpha", "owner"), "true", cancellationToken: TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => tool.RunShellAsync(Workspace("alpha", "owner") with { ScopeType = "user" }, "true", cancellationToken: TestContext.Current.CancellationToken));
     }
 
     [Fact]

@@ -99,7 +99,7 @@ public sealed class PodmanContainerTool(
         ArgumentNullException.ThrowIfNull(command);
 
         OciSandboxSession session = await EnsureContainerRunningAsync(context, cancellationToken).ConfigureAwait(false);
-        return await ExecuteInContainerAsync(context, session.ContainerName, command, timeoutSeconds, environment, cancellationToken).ConfigureAwait(false);
+        return await ExecuteInContainerAsync(context, session.ContainerId ?? session.ContainerName, command, timeoutSeconds, environment, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<OciSandboxSession> InspectSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
@@ -180,8 +180,7 @@ public sealed class PodmanContainerTool(
 
     private async Task<OciSandboxSession> EnsureContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
-        if (egressRuntime?.Enabled == true)
-            throw new InvalidOperationException("AgentSandbox egress integration is not ready; execution on the legacy network is disabled in this mode.");
+        if (egressRuntime?.Enabled == true) return await EnsureEgressContainerRunningAsync(context, cancellationToken).ConfigureAwait(false);
         string containerName = BuildContainerName(context);
         await using var containerLease = (await containerLocks
             .AcquireAsync(containerName, cancellationToken)
@@ -237,6 +236,37 @@ public sealed class PodmanContainerTool(
         }
 
         return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);
+    }
+
+    private async Task<OciSandboxSession> EnsureEgressContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
+    {
+        ContainerEgressRuntime runtime = egressRuntime!;
+        ContainerEgressRuntime.Scope scope = ContainerEgressRuntime.SandboxScope(context);
+        string name = BuildContainerName(context);
+        await using var lease = (await containerLocks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+        await PrimeDirectoriesAsync(context).ConfigureAwait(false);
+        await runtime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        ContainerInspection inspection = await InspectContainerStateAsync(context, cancellationToken).ConfigureAwait(false);
+        PreparedPodmanContainer? admitted = inspection.Session.Running && inspection.Matches(context)
+            ? await runtime.FindSourceAsync(name, cancellationToken).ConfigureAwait(false) : null;
+        if (admitted is null)
+        {
+            if (inspection.Exists) await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
+            admitted = await runtime.PrepareAndAuthorizeAsync(new ContainerEgressRuntime.SourceIdentity(scope, "agent", context.ScopeId, PackageEligible: true), name,
+                (network, dns) => BuildRunArguments(context, name, network, dns), cancellationToken, context.ContainerEnvironment).ConfigureAwait(false);
+            try
+            {
+                PodmanCommandResult started = await runtime.StartWithAdmissionAsync(admitted,
+                    token => podmanCommandRunner.RunAsync(admitted.StartArguments(attach: false), 15, token), cancellationToken).ConfigureAwait(false);
+                if (started.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Start admitted sandbox", started));
+            }
+            catch
+            {
+                await runtime.RetireAsync(admitted.Id, CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+        }
+        return new OciSandboxSession(name, true, context.ScopeType, context.ScopeId, context.UserId, admitted.Id);
     }
 
     private async Task<ContainerExecutionResult> ExecuteInContainerAsync(
@@ -421,7 +451,18 @@ public sealed class PodmanContainerTool(
         {
             if (LiveContainerSpec.TryReadLabels(inspectJson, out state, out desiredVersion, out fingerprint))
             {
-                drift = LiveContainerSpec.DescribeDrift(inspectJson, LiveContainerSpec.ForSandbox(context, imageId));
+                drift = LiveContainerSpec.DescribeDrift(inspectJson, LiveContainerSpec.ForSandbox(context, imageId) with
+                { NetworkName = egressRuntime?.Enabled == true ? ContainerEgressRuntime.SandboxScope(context).NetworkName : "kautuka-sandbox" });
+                if (egressRuntime?.Enabled == true && drift is null)
+                {
+                    using JsonDocument actual = JsonDocument.Parse(inspectJson);
+                    JsonElement container = actual.RootElement[0];
+                    JsonElement config = container.GetProperty("Config");
+                    if (config.GetProperty("User").GetString() != "1000:1000"
+                        || !config.GetProperty("CreateCommand").EnumerateArray().Any(static value => value.GetString() == "--userns=keep-id:uid=1000,gid=1000")
+                        || container.GetProperty("HostConfig").GetProperty("RestartPolicy").GetProperty("Name").GetString() is not ("no" or ""))
+                        drift = "its sandbox identity mapping or restart policy differs from the protected specification";
+                }
             }
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
@@ -466,6 +507,13 @@ public sealed class PodmanContainerTool(
         ContainerInspection inspection = await InspectContainerStateAsync(context, cancellationToken).ConfigureAwait(false);
         if (!inspection.Exists)
         {
+            return;
+        }
+
+        if (egressRuntime?.Enabled == true)
+        {
+            using JsonDocument current = JsonDocument.Parse((await podmanCommandRunner.RunAsync(["inspect", inspection.Session.ContainerName], 15, cancellationToken).ConfigureAwait(false)).StdOut);
+            await egressRuntime.RetireAsync(current.RootElement[0].GetProperty("Id").GetString()!, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -538,7 +586,7 @@ public sealed class PodmanContainerTool(
 
     private static List<string> BuildRunArguments(
         ContainerContext context,
-        string containerName)
+        string containerName, string? networkName = null, string? dns = null)
     {
         List<string> args =
         [
@@ -564,8 +612,13 @@ public sealed class PodmanContainerTool(
             // for virtual environments and connector launch artifacts. Sticky mode prevents
             // cross-user deletion if a future sandbox introduces additional identities.
             "--tmpfs", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777",
-            "--network", "kautuka-sandbox"
+            "--network", networkName ?? "kautuka-sandbox"
         ];
+        if (networkName is not null)
+        {
+            args[0] = "create"; args.Remove("-d");
+            args.InsertRange(1, ["--pull=never", "--restart=no", "--userns=keep-id:uid=1000,gid=1000", "--user=1000:1000", "--dns", dns!, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1", "--entrypoint", "sh"]);
+        }
 
         if (context.DefaultCpuLimit > 0)
         {
@@ -591,7 +644,7 @@ public sealed class PodmanContainerTool(
         // Qualify short-name images with 'localhost/' so Podman resolves them from local
         // storage without requiring unqualified-search-registries in registries.conf.
         args.Add(QualifyLocalImage(context.Image));
-        args.Add("sh");
+        if (networkName is null) args.Add("sh");
         args.Add("-lc");
         args.Add("tail -f /dev/null");
 

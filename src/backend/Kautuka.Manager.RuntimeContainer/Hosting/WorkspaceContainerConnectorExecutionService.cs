@@ -264,6 +264,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(workspaceContext);
         ArgumentNullException.ThrowIfNull(desiredConnectorIds);
+        if (egressRuntime?.Enabled == true && desiredConnectorIds.Count != 0)
+            throw new InvalidOperationException("AgentSandbox MCP artifact materialization is not integrated with egress; legacy install containers are disabled.");
 
         string sandboxProvisionKey = BuildSandboxProvisionKey(workspaceContext);
         await using var sandboxProvisionLease = (await sandboxProvisionLocks
@@ -287,7 +289,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             foreach (AgentSandboxInstalledContract contract in desiredManifest.Contracts)
             {
-                await InstallAgentSandboxConnectorAsync(workspaceContext, session.ContainerName, contract, cancellationToken).ConfigureAwait(false);
+                await InstallAgentSandboxConnectorAsync(workspaceContext, session.ContainerId ?? session.ContainerName, contract, cancellationToken).ConfigureAwait(false);
             }
 
             await WriteAgentSandboxManifestAsync(workspaceContext, desiredManifest, cancellationToken).ConfigureAwait(false);
@@ -696,7 +698,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             WorkspaceMcpContainerConnectorDefinition sandboxConnector = ApplyInstalledAgentSandboxContract(connector, installedContract);
             List<string> sandboxArguments = ConnectorContainerSpecBuilder.BuildExec(
                 sandboxConnector,
-                sandboxSession.ContainerName,
+                sandboxSession.ContainerId ?? sandboxSession.ContainerName,
                 installedContract.WorkingDirectory ?? installedContract.InstallRoot);
 
             return new StdioClientTransport(new StdioClientTransportOptions

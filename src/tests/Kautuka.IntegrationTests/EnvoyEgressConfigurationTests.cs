@@ -86,6 +86,30 @@ public sealed class EnvoyEgressConfigurationTests
         Assert.Empty(denied.ClusterNames);
     }
 
+    [Fact]
+    public void PackageEndpointPrecedesOrdinaryNamesAndUsesItsOwnBoundBackend()
+    {
+        EgressTcpRule[] grants = [new("10.89.1.1", "rebind.example", 20101)];
+        EgressPackageRoute[] packages = [new("10.89.1.1", "10.89.1.2", "10.89.0.1", "10.89.0.2")];
+        EnvoyEgressConfiguration config = EnvoyEgressConfiguration.Compile(grants, "10.90.0.2", packages);
+        JsonNode listener = JsonNode.Parse(config.ListenerDocument)!["resources"]![0]!;
+        JsonNode source = listener["filter_chain_matcher"]!["matcher_tree"]!["exact_match_map"]!["map"]!["10.89.1.1"]!;
+        JsonNode port = source["matcher"]!["matcher_tree"]!["exact_match_map"]!["map"]!["20101"]!["matcher"]!;
+        Assert.Equal("envoy.matching.inputs.destination_ip", port["matcher_tree"]!["input"]!["name"]!.GetValue<string>());
+        string packageChain = port["matcher_tree"]!["exact_match_map"]!["map"]!["10.89.1.2"]!["action"]!["name"]!.GetValue<string>();
+        Assert.StartsWith("package-", packageChain, StringComparison.Ordinal);
+        Assert.Equal("envoy.matching.inputs.server_name", port["on_no_match"]!["matcher"]!["matcher_tree"]!["input"]!["name"]!.GetValue<string>());
+        JsonArray clusters = JsonNode.Parse(config.ClusterDocument)!["resources"]!.AsArray();
+        JsonNode backend = clusters.Single(cluster => cluster!["name"]!.GetValue<string>() == packageChain)!;
+        JsonNode external = clusters.Single(cluster => cluster!["name"]!.GetValue<string>() != packageChain)!;
+        Assert.Equal("10.89.0.2", backend["upstream_bind_config"]!["source_address"]!["address"]!.GetValue<string>());
+        Assert.Equal("10.90.0.2", external["upstream_bind_config"]!["source_address"]!["address"]!.GetValue<string>());
+        Assert.Equal("10.89.0.1", backend["load_assignment"]!["endpoints"]![0]!["lb_endpoints"]![0]!["endpoint"]!["address"]!["socket_address"]!["address"]!.GetValue<string>());
+        Assert.NotEqual(config.Version, EnvoyEgressConfiguration.Compile(grants, "10.90.0.3", packages).Version);
+        Assert.Throws<ArgumentException>(() => EnvoyEgressConfiguration.Compile(grants, null, packages));
+        Assert.Throws<ArgumentException>(() => EnvoyEgressConfiguration.Compile(grants, "10.89.0.2", packages));
+    }
+
     [Theory]
     [InlineData("0.0.0.0", "example.com", 443)]
     [InlineData("127.0.0.1", "example.com", 443)]

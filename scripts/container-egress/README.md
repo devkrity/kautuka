@@ -139,8 +139,21 @@ run. It discovers partially-created Manager resources during cleanup, removes
 application containers before their pods and networks, and retains the account
 and directory when cleanup reports an error. Core dumps are disabled.
 
-The current enabled Manager path accepts preloaded self-contained connector
-images. Bundle/language materialization and AgentSandbox execution reject rather
-than using legacy networking while those integrations are unfinished. This is
+The enabled path accepts preloaded self-contained connector and sandbox images.
+It runs the actual pinned package service on core and checks a real npm metadata
+fetch through the sandbox package URL, direct-core denial, and denial of an
+external granted hostname resolving to that same private backend. The sandbox
+creates a workspace file under its shipped non-root identity; the runner checks
+that the runtime host account owns it.
+
+Provide `pkgs.oci` and `sandbox.oci` in the fixture cache for this stage, from the
+pinned references in `src/images/kautuka-pkgs-proxy/release.json` and
+`src/images/kautuka-base/release.json`. These are offline fixture inputs, not
+application-managed acquisition. The external fixture resolver forwards public
+registry lookups to the disposable distro's IPv4 resolver.
+
+Bundle/language materialization and AgentSandbox MCP connector installation
+reject while those install-container paths are unfinished; direct sandbox shell
+execution uses the protected route. This is
 not yet the installed all-service deployment or its image-acquisition/update
 path. Never treat this offline fixture as evidence for production registry pulls.

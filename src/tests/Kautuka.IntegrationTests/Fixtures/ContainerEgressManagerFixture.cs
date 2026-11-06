@@ -8,6 +8,7 @@ using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 using SandboxRuntimeDefinition = Kautuka.Manager.RuntimeContainer.Configuration.SandboxRuntimeDefinition;
 using WorkspaceDefinition = Kautuka.Manager.RuntimeContainer.Configuration.WorkspaceDefinition;
@@ -45,14 +46,16 @@ internal static class ContainerEgressManagerFixture
         var allowlist = new RuntimeImageAllowlist(1, [
          new("egress-setup",data.GetProperty("helper").GetString()!,null),
          new("egress-envoy",data.GetProperty("envoy").GetString()!,null),
-         new("egress-dns",data.GetProperty("dns").GetString()!,null)]);
+         new("egress-dns",data.GetProperty("dns").GetString()!,null),
+         new("git-pkgs-proxy",data.GetProperty("pkgs").GetString()!,null)]);
         var options = new ContainerEgressOptions
         {
             Enabled = true,
             DnsUpstreams = ["10.247.90.20"],
             Grants = [
-         new(){UserId="owner",AgentId="alpha",ConnectorId="owner::a",Destination="allowed.kautuka.test",Port=8443},
-         new(){UserId="owner",AgentId="beta",ConnectorId="owner::c",Destination="allowed.kautuka.test",Port=8443}]
+         new(){Role="agent",UserId="owner",AgentId="alpha",ComponentId="alpha",Destination="rebind.kautuka.test",Port=20101},
+         new(){UserId="owner",AgentId="alpha",ComponentId="owner::a",Destination="allowed.kautuka.test",Port=8443},
+         new(){UserId="owner",AgentId="beta",ComponentId="owner::c",Destination="allowed.kautuka.test",Port=8443}]
         };
         using var runtime = new ContainerEgressRuntime(runner, options, allowlist, stateRoot);
         var store = new WorkspaceDesiredStateStore();
@@ -81,6 +84,45 @@ internal static class ContainerEgressManagerFixture
             if (privateDenied.ExitCode != 7) throw new InvalidOperationException("The proxy identity can initiate a private-network connection: " + privateDenied.ExitCode);
         }
         report["proxyIdentityCannotInitiatePrivateConnection"] = true;
+        var packageDefinition = new WorkspaceSidecarDefinition("kautuka-pkgs-proxy", data.GetProperty("pkgs").GetString()!, [],
+            [new WorkspaceSidecarVolumeBinding(Path.Combine(stateRoot, "pkg-cache"), "/data", false)],
+            new Dictionary<string, string> { ["PROXY_LISTEN"] = ":20101", ["PROXY_BASE_URL"] = "http://kautuka-pkgs-proxy:20101", ["PROXY_CACHE_METADATA"] = "true" }, [], null, null, null);
+        var packageSupervisor = new WorkspaceSidecarSupervisor(new WorkspaceSidecarCatalog([packageDefinition]), new UnusedHttpClientFactory(), runner,
+            Options.Create(new ManagerContainerStartupOptions()), NullLogger<WorkspaceSidecarSupervisor>.Instance, allowlist, null, runtime);
+        var settings = new ManagerRuntimeSettings(new WorkspaceDefinition { BaseRoot = stateRoot }, new SandboxRuntimeDefinition(), new WorkspaceTelemetryDefinition());
+        if (!await packageSupervisor.EnsureReadyAsync(settings, ct)) throw new InvalidOperationException("Actual package service did not become healthy");
+        var firstPackage = await runtime.FindSourceAsync("kautuka-pkgs-proxy", ct) ?? throw new InvalidOperationException("Package source missing after startup");
+        if (!await packageSupervisor.EnsureReadyAsync(settings, ct)) throw new InvalidOperationException("Actual package service could not be adopted");
+        var package = await runtime.FindSourceAsync("kautuka-pkgs-proxy", ct) ?? throw new InvalidOperationException("Package source not registered");
+        if (package.Id != firstPackage.Id) throw new InvalidOperationException("Unchanged package service was replaced during adoption");
+        await File.AppendAllTextAsync(data.GetProperty("dnsHosts").GetString()!, package.Address + " rebind.kautuka.test\n", ct);
+        await Task.Delay(1200, ct);
+        var sandbox = new PodmanContainerTool(runner, runtime);
+        ContainerContext packageWorkspace = alpha with { Image = data.GetProperty("sandbox").GetString()! };
+        var workspaceWrite = await sandbox.RunShellAsync(packageWorkspace, "printf fixture-write > /workspace/native-fixture.txt && cat /workspace/native-fixture.txt", cancellationToken: ct);
+        if (workspaceWrite.ExitCode != 0 || workspaceWrite.StdOut != "fixture-write") throw new InvalidOperationException("Shipped sandbox workspace write failed: " + workspaceWrite.StdErr);
+        var pkgHealth = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --fail --show-error --max-time 8 http://kautuka-pkgs-proxy:20101/health", cancellationToken: ct);
+        if (pkgHealth.ExitCode != 0) throw new InvalidOperationException("Sandbox package route failed: " + pkgHealth.StdErr);
+        var metadata = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --fail --show-error --max-time 12 --output /tmp/npm-metadata.json --write-out '%{http_code}' http://kautuka-pkgs-proxy:20101/npm/is-number", cancellationToken: ct);
+        if (metadata.ExitCode != 0 || metadata.StdOut != "200") throw new InvalidOperationException("Real package metadata fetch failed: " + metadata.StdOut + " " + metadata.StdErr);
+        var coreDenied = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --fail --max-time 3 http://" + package.Address + ":20101/health", cancellationToken: ct);
+        if (coreDenied.ExitCode == 0) throw new InvalidOperationException("Sandbox could bypass the designated package endpoint");
+        async Task<long> RejectedPackets()
+        {
+            var result = await native.RunAsync(["run", "--rm", "--pull=never", "--pod", "kautuka-egress", "--cap-drop=ALL", "--cap-add=NET_ADMIN", "--security-opt=no-new-privileges",
+                "--entrypoint", "/usr/sbin/nft", data.GetProperty("helper").GetString()!, "-j", "list", "chain", "ip", "kautuka_egress", "output"], 15, ct);
+            using JsonDocument counters = JsonDocument.Parse(result.StdOut);
+            return counters.RootElement.GetProperty("nftables").EnumerateArray().Where(item => item.TryGetProperty("rule", out _))
+                .Select(item => item.GetProperty("rule").GetProperty("expr")).Where(expr => expr.EnumerateArray().Any(item => item.TryGetProperty("reject", out _)))
+                .Sum(expr => expr.EnumerateArray().Where(item => item.TryGetProperty("counter", out _)).Sum(item => item.GetProperty("counter").GetProperty("packets").GetInt64()));
+        }
+        long beforeRebind = await RejectedPackets();
+        var rebind = await sandbox.RunShellAsync(packageWorkspace, "curl --silent --insecure --fail --max-time 4 https://rebind.kautuka.test:20101/", cancellationToken: ct);
+        if (rebind.ExitCode == 0 || await RejectedPackets() <= beforeRebind) throw new InvalidOperationException("Ordinary external grant bypassed the package boundary through DNS rebinding");
+        await sandbox.CloseSandboxAsync(packageWorkspace, ct);
+        report["actualPackageServiceHealthyAndAdopted"] = true; report["sandboxPackageMetadataFetched"] = true;
+        report["directCorePackageDenied"] = true; report["externalGrantRebindingDenied"] = true;
+        await Console.Error.WriteLineAsync("fixture: actual package path and sandbox passed");
         var service = new WorkspaceContainerConnectorExecutionService(store, runner, new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
          new PodmanContainerTool(runner, runtime), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, runtime);
         try
@@ -124,6 +166,10 @@ internal static class ContainerEgressManagerFixture
                 throw new InvalidOperationException("Healthy Manager adoption restarted the live proxy");
             await Check("a", alpha, "exit:0");
             report["healthyRestartAdoptedLiveProxy"] = true;
+            var stoppedProxy = await native.RunAsync(["stop", "--time", "1", "kautuka-egress-envoy"], 15, ct);
+            if (stoppedProxy.ExitCode != 0) throw new InvalidOperationException("Fixture could not simulate an unexpected proxy exit");
+            await Check("a", alpha, "exit:0");
+            report["stoppedProxyRecoveredThroughReadiness"] = true;
             await Console.Error.WriteLineAsync("fixture: live adoption passed");
             // Force native address reuse after an unexpected allocation loss, leaving the old cached permission present.
             var removed = await native.RunAsync(["rm", "--force", first.Id], 15, ct);
@@ -165,4 +211,9 @@ internal static class ContainerEgressManagerFixture
         report["emptyScopesRetired"] = true; report["passed"] = true;
         return report;
     }
+    private sealed class UnusedHttpClientFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => throw new InvalidOperationException("The package service must use its native health check.");
+    }
+
 }

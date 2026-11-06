@@ -193,9 +193,9 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         else
             await runtimeAdapter.EnsureNetworkAsync("kautuka-sandbox", cancellationToken).ConfigureAwait(false);
 
-        if (egressRuntime?.Enabled != true && !await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, cancellationToken).ConfigureAwait(false))
+        if (!await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, cancellationToken).ConfigureAwait(false))
         {
-            if (runtimePaths.RequireSidecars)
+            if (egressRuntime?.Enabled == true || runtimePaths.RequireSidecars)
             {
                 logger.LogWarning("Workspace sidecars are not ready and strict sidecar mode is enabled.");
                 readinessGate.Reset();
@@ -206,10 +206,9 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             logger.LogWarning("Workspace sidecars are not ready; continuing because strict sidecar mode is disabled.");
         }
 
-        ManagedContainerReconcileResult sidecarOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
-            "sidecar",
-            egressRuntime?.Enabled == true ? [] : sidecarSupervisor.ManagedContainerNames,
-            cancellationToken).ConfigureAwait(false);
+        ManagedContainerReconcileResult sidecarOrphanResult = egressRuntime?.Enabled == true
+            ? await egressRuntime.RetireOrphansAsync("sidecar", () => sidecarSupervisor.ManagedContainerNames, cancellationToken).ConfigureAwait(false)
+            : await runtimeAdapter.RemoveOrphanedManagedContainersAsync("sidecar", sidecarSupervisor.ManagedContainerNames, cancellationToken).ConfigureAwait(false);
         if (!sidecarOrphanResult.Succeeded)
         {
             MarkFailed(snapshot, sidecarOrphanResult.FailureClass ?? "sidecar_orphan_reconcile_failed");
@@ -241,19 +240,16 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         // first-run image preparation is still downloading or building containers.
         SignalRuntimeReady();
 
-        // Until their protected lifecycle is integrated, do not create legacy agent/sidecar containers.
-        // Accepted workspace identities remain in the store for isolated connector scoping and file access.
-        ContainerContext[] desiredWorkspaces = egressRuntime?.Enabled == true ? [] : [.. snapshot.DesiredWorkspaces
+        ContainerContext[] desiredWorkspaces = [.. snapshot.DesiredWorkspaces
             .GroupBy(
                 static workspace => workspace.ScopeId + "\n" + (workspace.UserId ?? string.Empty),
                 StringComparer.OrdinalIgnoreCase)
             .Select(static group => group.First())];
 
         string[] desiredContainerNames = [.. desiredWorkspaces.Select(PodmanContainerTool.BuildContainerName)];
-        ManagedContainerReconcileResult orphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
-            "agent",
-            desiredContainerNames,
-            cancellationToken).ConfigureAwait(false);
+        ManagedContainerReconcileResult orphanResult = egressRuntime?.Enabled == true
+            ? await egressRuntime.RetireOrphansAsync("agent", () => desiredStateStore.Snapshot.DesiredWorkspaces.Select(PodmanContainerTool.BuildContainerName).ToArray(), cancellationToken).ConfigureAwait(false)
+            : await runtimeAdapter.RemoveOrphanedManagedContainersAsync("agent", desiredContainerNames, cancellationToken).ConfigureAwait(false);
         if (!orphanResult.Succeeded)
         {
             MarkFailed(snapshot, orphanResult.FailureClass ?? "orphan_container_reconcile_failed");
@@ -367,6 +363,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         }
         catch (Exception ex)
         {
+            if (egressRuntime?.Enabled == true) readinessGate.Reset();
             WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
             MarkFailed(snapshot, ClassifyFailure(ex));
             LogReconcileLoopFailed(logger, ex);

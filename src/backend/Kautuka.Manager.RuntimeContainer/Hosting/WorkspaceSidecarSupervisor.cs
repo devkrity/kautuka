@@ -20,9 +20,11 @@ public sealed class WorkspaceSidecarSupervisor(
     IOptions<ManagerContainerStartupOptions> startupOptions,
     ILogger<WorkspaceSidecarSupervisor> logger,
     RuntimeImageAllowlist? allowlist = null,
-    PodmanImageArchiveStore? imageArchives = null)
+    PodmanImageArchiveStore? imageArchives = null,
+    ContainerEgressRuntime? egressRuntime = null)
 {
     private const string alwaysPolicyName = "ALWAYS";
+    private const string packageHealthCommand = "wget -q -O /dev/null http://127.0.0.1:20101/health";
     private readonly WorkspaceSidecarCatalog catalog = catalog;
     private readonly IHttpClientFactory httpClientFactory = httpClientFactory;
     private readonly PodmanCommandRunner podmanCommandRunner = podmanCommandRunner;
@@ -40,7 +42,8 @@ public sealed class WorkspaceSidecarSupervisor(
     private const int defaultRunningProbeTimeoutSeconds = 45;
     private const int defaultRunningProbeIntervalMilliseconds = 1000;
 
-    public IReadOnlyList<string> ManagedContainerNames => catalog.Sidecars.Select(static sidecar => sidecar.Name).ToArray();
+    public IReadOnlyList<string> ManagedContainerNames => catalog.Sidecars
+        .Where(sidecar => egressRuntime?.Enabled != true || sidecar.Name == "kautuka-pkgs-proxy").Select(static sidecar => sidecar.Name).ToArray();
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -60,6 +63,13 @@ public sealed class WorkspaceSidecarSupervisor(
         if (this.imageArchives is not null)
         {
             await this.imageArchives.EnsureArchivedImagesLoadedAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (egressRuntime?.Enabled == true)
+        {
+            WorkspaceSidecarDefinition package = catalog.Sidecars.SingleOrDefault(static sidecar => sidecar.Name == "kautuka-pkgs-proxy")
+                ?? throw new InvalidOperationException("The required package service is missing from the verified catalog.");
+            return await EnsurePackageEgressAsync(package, cancellationToken).ConfigureAwait(false);
         }
 
         int maxParallelism = startupOptions.GetEffectiveSidecarMaxConcurrency();
@@ -284,6 +294,85 @@ public sealed class WorkspaceSidecarSupervisor(
             logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
         }
         return ready;
+    }
+
+    private async Task<bool> EnsurePackageEgressAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
+    {
+        ContainerEgressRuntime runtime = egressRuntime!;
+        if (sidecar.Ports.Count != 0 || sidecar.Command.Count != 0 || sidecar.HealthCheck is not null
+            || !sidecar.Environment.TryGetValue("PROXY_LISTEN", out string? listen) || listen != ":20101"
+            || !sidecar.Environment.TryGetValue("PROXY_BASE_URL", out string? baseUrl) || baseUrl != "http://kautuka-pkgs-proxy:20101")
+            throw new InvalidOperationException("The package service must use its unpublished fixed endpoint and released command.");
+        string image = allowlist.Images.SingleOrDefault(static entry => entry.Id == "git-pkgs-proxy")?.Image
+            ?? throw new InvalidOperationException("The verified package image is missing from the release inventory.");
+        ContainerImageProvenancePolicy.EnsureTrusted(image, "package service");
+        if (!await ImageExistsAsync(image, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("The verified package image is not cached; implicit pulls/builds are disabled.");
+        sidecar = sidecar with { Image = image, BuildContext = null, Dockerfile = null };
+        await runtime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
+        PreparedPodmanContainer? existing = state.IsRunning ? await runtime.FindSourceAsync(sidecar.Name, cancellationToken).ConfigureAwait(false) : null;
+        if (existing is not null)
+        {
+            string imageId = (await podmanCommandRunner.RunAsync(["image", "inspect", "--format", "{{.Id}}", image], 10, cancellationToken).ConfigureAwait(false)).StdOut.Trim();
+            if (await PackageSecurityMatchesAsync(state.InspectJson!, image, cancellationToken).ConfigureAwait(false)
+                && LiveContainerSpec.DescribeSidecarDrift(state.InspectJson!, image, [], imageId, sidecar.Volumes, sidecar.Environment, "kautuka-core") is null)
+                return await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false);
+        }
+        if (state.Exists)
+        {
+            using JsonDocument inspected = JsonDocument.Parse(state.InspectJson!);
+            await runtime.RetireAsync(inspected.RootElement[0].GetProperty("Id").GetString()!, cancellationToken).ConfigureAwait(false);
+        }
+        if (!EnsureVolumeHostPaths(sidecar)) return false;
+        var identity = new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("system", "core", "core"), "package", sidecar.Name);
+        PreparedPodmanContainer prepared = await runtime.PrepareAndAuthorizeAsync(identity, sidecar.Name, (network, dns) =>
+        {
+            List<string> args = BuildRunArguments(sidecar);
+            args[0] = "create"; args.Remove("-d");
+            args[args.IndexOf("--network") + 1] = network;
+            int alias = args.IndexOf("--network-alias"); args.RemoveRange(alias, 2);
+            args.InsertRange(1, ["--pull=never", "--restart=no", "--dns", dns, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+                "--user", "65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid",
+                "--health-cmd", packageHealthCommand, "--health-interval", "5s", "--health-timeout", "3s", "--health-retries", "3"]);
+            return args;
+        }, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            PodmanCommandResult started = await runtime.StartWithAdmissionAsync(prepared,
+                token => podmanCommandRunner.RunAsync(prepared.StartArguments(attach: false), 15, token), cancellationToken).ConfigureAwait(false);
+            if (started.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Start package service", started));
+            return await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await runtime.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static bool NoCapabilities(JsonElement capabilities)
+        => capabilities.ValueKind == JsonValueKind.Null || capabilities.ValueKind == JsonValueKind.Array && capabilities.GetArrayLength() == 0;
+
+    private async Task<bool> PackageSecurityMatchesAsync(string inspected, string image, CancellationToken cancellationToken)
+    {
+        using JsonDocument actual = JsonDocument.Parse(inspected);
+        using JsonDocument expected = JsonDocument.Parse((await podmanCommandRunner.RunAsync(["image", "inspect", image], 10, cancellationToken).ConfigureAwait(false)).StdOut);
+        JsonElement container = actual.RootElement[0];
+        JsonElement config = container.GetProperty("Config");
+        JsonElement host = container.GetProperty("HostConfig");
+        JsonElement expectedConfig = expected.RootElement[0].GetProperty("Config");
+        return config.GetProperty("User").GetString() == "65532:65532"
+            && host.GetProperty("ReadonlyRootfs").GetBoolean()
+            && host.GetProperty("RestartPolicy").GetProperty("Name").GetString() is "no" or ""
+            && host.GetProperty("SecurityOpt").EnumerateArray().Any(static value => value.GetString() == "no-new-privileges")
+            && NoCapabilities(container.GetProperty("BoundingCaps")) && NoCapabilities(container.GetProperty("EffectiveCaps"))
+            && JsonElement.DeepEquals(config.GetProperty("Entrypoint"), expectedConfig.GetProperty("Entrypoint"))
+            && JsonElement.DeepEquals(config.GetProperty("Cmd"), expectedConfig.GetProperty("Cmd"))
+            && config.TryGetProperty("Healthcheck", out JsonElement health)
+            && health.GetProperty("Test").EnumerateArray().Select(static value => value.GetString()).SequenceEqual(new[] { "CMD-SHELL", packageHealthCommand })
+            && health.GetProperty("Interval").GetInt64() == 5_000_000_000 && health.GetProperty("Timeout").GetInt64() == 3_000_000_000
+            && health.GetProperty("Retries").GetInt32() == 3;
     }
 
     private async Task<string?> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)

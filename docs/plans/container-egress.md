@@ -405,3 +405,64 @@ egress topology survives for adoption. The host dependency graph constructs the
 runtime before its dependent connector service, so normal reverse-order disposal
 keeps the runtime available through connector cleanup. Both enabled preservation
 and unchanged legacy shutdown are covered by focused tests.
+
+
+## Package service and sandbox shell integration
+
+The existing sidecar owner starts the released package-service image on core,
+using its verified local inventory entry (`git-pkgs-proxy`). It retains the cache
+mount and CLI diagnostics, publishes no host ports, and applies the existing
+`/health` probe as an explicit Podman health check. No wrapper image build or
+implicit pull is needed for this path. Adoption checks image, mounts, environment,
+numeric user, readonly root, capabilities, NNP, command, restart policy and the
+installed health-check configuration.
+
+A topology-owned package mapping reuses the transparent listener: an eligible
+source connecting to its scope's egress address at port 20101 selects the fixed
+core backend. This branch precedes ordinary SNI/literal rules. Manager supplies a
+hosts entry for `kautuka-pkgs-proxy`; the existing package URLs remain unchanged.
+The mapping is not a user destination grant and never connects back to itself.
+
+The package cluster binds upstream connections to the core egress address.
+Ordinary external clusters bind to the inspected outside address. The native
+private OUTPUT exception requires the Envoy UID, core source address and exact
+package-backend address/port. An external hostname resolving to that backend
+therefore cannot reuse the exception. These use [stock Envoy per-cluster source bindings](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/cluster/v3/cluster.proto.html)
+and native nftables matches, with no additional listener or forwarding service. The package service's initial separate upstream list is exact HTTPS
+access to `registry.npmjs.org`, `pypi.org` and `files.pythonhosted.org`.
+
+Agent shell startup now uses prepared containers on the accepted user-agent
+network, with exact-ID exec and policy-aware retirement. The shipped sandbox
+runs as UID/GID 1000 with Podman's `keep-id` mapping to the runtime host owner.
+This preserves workspace permissions and ownership without recursive chown or
+world-write permissions. Adoption rejects the prior user/mapping/restart setup.
+Agent and sidecar orphan cleanup uses the runtime's policy ordering and reads
+current desired names before retiring each immutable ID.
+
+The existing readiness path detects absent/stopped Envoy or DNS containers,
+invalidates cached readiness, confirms the proxy stopped, then reconstructs and
+recovers the native state. This is a running-state check, not a health proof for
+a running but unresponsive service. Source restoration reapplies the complete
+boundary after inventory loading, independently of source order. Ordinary source
+grants change Envoy configuration; nftables is rewritten for topology or package
+backend changes only.
+
+The native report `artifacts/container-egress/runtime-proof-c15f5c3e.json` passed
+with the actual pinned package and sandbox images and no cleanup errors. It
+records a real npm metadata fetch from a sandbox, direct-core denial, an ordinary
+external grant's DNS-rebinding denial with an observed kernel reject counter,
+unchanged package/proxy adoption, stopped-proxy recovery and the earlier connector
+lifecycle checks. The host observed the workspace file owned by the runtime
+account. Images were cached separately for the disposable test; this remains no
+proof of application-managed image acquisition. The final run covers the boundary-update optimization. All changed runtime
+sources and the shared fixture match the Linux AOT snapshot by normalized-text
+SHA-256. Two focused regression groups pass: 34 passed/one Linux-only skip, and
+58 passed.
+
+Bundle/language image materialization and MCP connector installation inside an
+AgentSandbox remain explicitly blocked in enabled mode while their install
+containers are migrated. Direct sandbox shell execution and the package route
+are implemented; this does not claim every sandbox provisioning path is finished.
+Core application containers, host artifact transport, update transactions,
+policy persistence, logs/approval UI and broader platform evidence remain in the
+overall goal.
