@@ -24,8 +24,17 @@ try
 {
     var kernel = new ProbeKernel(args[1], queueNumber);
     uint ingress = uint.Parse(File.ReadAllText("/sys/class/net/g0/ifindex").Trim(), CultureInfo.InvariantCulture);
-    var source = new SourceRegistration(IPAddress.Parse("10.231.251.2"), "probe-source", 1, ingress);
-    var policy = new EndpointPolicy(1, [source], [new EndpointRule(source.Subject, IPAddress.Parse("10.231.252.2"), 20199, 17)]);
+    SourceRegistration[] sources = [
+        new(IPAddress.Parse("10.231.251.2"), "probe-source", 1, ingress),
+        new(IPAddress.Parse("fd7a:6b74:251::2"), "probe-source", 1, ingress),
+    ];
+    EndpointRule[] rules = [
+        new("probe-source", IPAddress.Parse("10.231.252.2"), 20199, 17),
+        new("probe-source", IPAddress.Parse("10.231.252.2"), 20199, 6),
+        new("probe-source", IPAddress.Parse("fd7a:6b74:252::2"), 20199, 17),
+        new("probe-source", IPAddress.Parse("fd7a:6b74:252::2"), 20199, 6),
+    ];
+    var policy = new EndpointPolicy(1, sources, rules);
     using var ledger = new SqliteAdmissionLedger(args[2]);
     var coordinator = new AdmissionCoordinator(policy, ledger, kernel, TimeProvider.System);
     using var consumer = new LinuxNfQueue(queueNumber);

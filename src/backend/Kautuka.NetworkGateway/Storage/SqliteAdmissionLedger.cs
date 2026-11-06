@@ -7,23 +7,54 @@ namespace Kautuka.NetworkGateway.Storage;
 /// <summary>Prototype-owned ledger; never opens an application database.</summary>
 internal sealed class SqliteAdmissionLedger : IAdmissionLedger, IDisposable
 {
+    private const long applicationId = 0x4B4E4731; // KNG1; never mutate an unrelated SQLite store.
     private readonly SqliteConnection connection;
 
     public SqliteAdmissionLedger(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        string fullPath = Path.GetFullPath(path);
+        bool existed = File.Exists(fullPath);
         connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = Path.GetFullPath(path),
+            DataSource = fullPath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Pooling = false,
             DefaultTimeout = 1,
         }.ToString());
-        connection.Open();
+        try
+        {
+            connection.Open();
+            Initialize(existed);
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    private void Initialize(bool existed)
+    {
         using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA application_id;";
+        long marker = (long)command.ExecuteScalar()!;
+        command.CommandText = "PRAGMA user_version;";
+        long version = (long)command.ExecuteScalar()!;
+        if ((existed && (marker != applicationId || version != 1)) || (!existed && (marker != 0 || version != 0)))
+        {
+            throw new InvalidDataException("Refusing an unrelated or unsupported admission ledger.");
+        }
+
+        command.CommandText = "PRAGMA journal_mode=WAL;";
+        if (!string.Equals((string?)command.ExecuteScalar(), "wal", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new IOException("The admission ledger requires WAL support.");
+        }
         command.CommandText = """
-            PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
+            PRAGMA application_id=0x4B4E4731;
+            PRAGMA user_version=1;
             CREATE TABLE IF NOT EXISTS gateway_admissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ct_id INTEGER NOT NULL, ct_zone INTEGER NOT NULL,

@@ -1,5 +1,6 @@
 """Unprivileged failure-injection tests for the isolated probe's resource ownership."""
 
+import ast
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -13,6 +14,14 @@ spec.loader.exec_module(probe)
 
 
 class ProbeCleanupTests(unittest.TestCase):
+    def test_embedded_peer_programs_compile(self):
+        tree = ast.parse(Path(probe.__file__).read_text(encoding="utf-8"))
+        programs = [node.value for node in ast.walk(tree)
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("import ")]
+        self.assertGreaterEqual(len(programs), 3)
+        for program in programs:
+            compile(program, "embedded-fixture-peer", "exec")
+
     def test_cleanup_continues_after_timeout_and_records_failure(self):
         topology = probe.Topology()
         topology.created = ["owned-first", "owned-second", "owned-third"]

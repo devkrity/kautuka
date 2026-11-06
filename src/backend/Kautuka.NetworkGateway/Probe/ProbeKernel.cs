@@ -28,7 +28,7 @@ internal sealed class ProbeKernel : IAdmissionKernel
               set valid { type mark; flags timeout; }
               counter boundary_denials { }
               chain boundary {
-                meta nfproto != ipv4 counter name boundary_denials drop
+                meta nfproto != { ipv4, ipv6 } counter name boundary_denials drop
                 iifname != { "g0", "g1" } counter name boundary_denials drop
                 ct direction original iifname != "g0" counter name boundary_denials drop
                 ct direction reply iifname != "g1" counter name boundary_denials drop
@@ -36,6 +36,10 @@ internal sealed class ProbeKernel : IAdmissionKernel
                 iifname "g0" ip daddr != 10.231.252.2 counter name boundary_denials drop
                 iifname "g1" ip saddr != 10.231.252.2 counter name boundary_denials drop
                 iifname "g1" ip daddr != 10.231.251.2 counter name boundary_denials drop
+                iifname "g0" ip6 saddr != fd7a:6b74:251::2 counter name boundary_denials drop
+                iifname "g0" ip6 daddr != fd7a:6b74:252::2 counter name boundary_denials drop
+                iifname "g1" ip6 saddr != fd7a:6b74:252::2 counter name boundary_denials drop
+                iifname "g1" ip6 daddr != fd7a:6b74:251::2 counter name boundary_denials drop
               }
               chain admit {
                 type filter hook forward priority 0; policy drop;
@@ -54,6 +58,7 @@ internal sealed class ProbeKernel : IAdmissionKernel
               }
               chain output {
                 type filter hook output priority 0; policy drop;
+                oifname { "g0", "g1" } ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
               }
             }
             """);

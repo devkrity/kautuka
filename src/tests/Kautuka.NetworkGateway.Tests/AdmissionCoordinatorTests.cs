@@ -53,6 +53,46 @@ public sealed class AdmissionCoordinatorTests
     }
 
     [Fact]
+    public void UnrelatedDatabaseIsRefusedBeforeSchemaOrJournalChanges()
+    {
+        using var directory = new TestDirectory();
+        using (var application = new SqliteConnection($"Data Source={directory.DatabasePath};Pooling=False"))
+        {
+            application.Open();
+            using SqliteCommand command = application.CreateCommand();
+            command.CommandText = "CREATE TABLE user_data (value TEXT); INSERT INTO user_data VALUES ('preserve');";
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Throws<InvalidDataException>(() => new SqliteAdmissionLedger(directory.DatabasePath));
+        using var observer = new SqliteConnection($"Data Source={directory.DatabasePath};Pooling=False");
+        observer.Open();
+        using SqliteCommand check = observer.CreateCommand();
+        check.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'gateway_%';";
+        Assert.Equal(0L, check.ExecuteScalar());
+        check.CommandText = "PRAGMA journal_mode;";
+        Assert.Equal("delete", check.ExecuteScalar());
+        check.CommandText = "SELECT value FROM user_data;";
+        Assert.Equal("preserve", check.ExecuteScalar());
+    }
+
+    [Fact]
+    public void RealSqliteWriterContentionDeniesInsteadOfAllowingWithoutRecord()
+    {
+        using var directory = new TestDirectory();
+        using var ledger = new SqliteAdmissionLedger(directory.DatabasePath);
+        using var blocker = new SqliteConnection($"Data Source={directory.DatabasePath};Pooling=False");
+        blocker.Open();
+        using SqliteTransaction transaction = blocker.BeginTransaction();
+        var kernel = new TestKernel();
+        var verdicts = new TestVerdicts();
+        Assert.Equal("audit_unavailable", Create(ledger, kernel).Process(1, allowedFlow, verdicts).Reason);
+        Assert.Empty(kernel.Published);
+        Assert.Empty(verdicts.Allowed);
+        Assert.Equal(1, verdicts.Drops);
+    }
+
+    [Fact]
     public void UnavailableAuditNeverPublishesOrReleasesPermission()
     {
         var ledger = new TestLedger { OnAppend = () => throw new IOException("injected disk failure") };
