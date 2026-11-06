@@ -144,3 +144,16 @@ Observed on Fedora/WSL:
 - All twelve existing published-AOT kernel checks pass again after the topology refactor. Both live fixtures report no cleanup errors.
 
 The architect reviewed the code and evidence. These are **positive admitted-traffic checks**. The pasta-specific consumer-loss/new-tuple tests, actual alternate-uplink/retained-descriptor escape attempts, short-lived pull-helper coverage, signed acquisition, controlled DNS and native Linux PAM/SELinux validation remain outstanding. Namespace snapshots alone cannot prove where every socket or retained namespace descriptor is used. Gate 1 remains **in progress**, and application enforcement is not enabled.
+
+
+### Pasta consumer-absence checkpoint (6 November 2026)
+
+The runtime-network probe adds optional `--failure-check`. After each owner's four positive protocol checks, a trusted fixture-only control handshake stops and reaps the admission consumer. Root clears only the newly created gateway namespace's IPv4/IPv6 conntrack tables and verifies they are empty before acknowledging. This setup prevents a reused pasta source tuple from inheriting an earlier established-flow permission. It is not a production revocation/restart procedure, and the root callback is not an interface for untrusted workload instructions.
+
+The published-AOT fixture now exposes four observational counters immediately before the mandatory new-flow queue path. Each denied attempt must exit through the workload's connection-failure result, produce no sink nonce, leave the durable admission count unchanged from the separately checked baseline, and increase its protocol/family queue counter. The counters do not add an acceptance path.
+
+Both owners pass all four new-flow denial checks after consumer loss: eight denied pasta-mediated attempts total, no extra durable admissions, positive-only nonce sequences at the sink, and increases in all four queue counters. Boundary-denial counters remain zero, so the attempts reached the intended new-flow path. Both owners' positive baselines also pass, and cleanup reports no errors.
+
+A first rerun exposed CRLF line endings in a Windows-edited C# raw rule string. `nft` rejected those rules and the consumer stopped closed. The nft input adapter now normalizes line endings to LF; the republished Native AOT binary passes the experiment. Forty focused Windows C# tests pass, and ten Python tests pass on Linux (five pass/five Linux-only skips on Windows). Formatting, documentation validation and commit hooks pass.
+
+This establishes **new-flow denial with the consumer absent after a fixture-only conntrack reset** in the tested WSL configuration. It does not establish production conntrack reconciliation, restart recovery, or existing-flow revocation behind pasta. Controlled DNS, signed acquisition, alternate-uplink escape attempts and native Linux support remain outstanding. Gate 1 is still **in progress**.

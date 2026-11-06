@@ -27,6 +27,10 @@ internal sealed class ProbeKernel : IAdmissionKernel
             table inet ktng_admission {
               set valid { type mark; flags timeout; }
               counter boundary_denials { }
+              counter queued_tcp4 { }
+              counter queued_udp4 { }
+              counter queued_tcp6 { }
+              counter queued_udp6 { }
               chain boundary {
                 meta nfproto != { ipv4, ipv6 } counter name boundary_denials drop
                 iifname != { "g0", "g1" } counter name boundary_denials drop
@@ -48,6 +52,10 @@ internal sealed class ProbeKernel : IAdmissionKernel
                 ct mark @valid accept
                 ct mark != 0 drop
                 meta mark set 0
+                ct state new meta nfproto ipv4 meta l4proto tcp counter name queued_tcp4
+                ct state new meta nfproto ipv4 meta l4proto udp counter name queued_udp4
+                ct state new meta nfproto ipv6 meta l4proto tcp counter name queued_tcp6
+                ct state new meta nfproto ipv6 meta l4proto udp counter name queued_udp6
                 ct state new queue num {{queueNumber}}
               }
               chain verify {
@@ -77,7 +85,7 @@ internal sealed class ProbeKernel : IAdmissionKernel
     public void Revoke(uint handle)
         => Apply(FormattableString.Invariant($"destroy element inet ktng_admission valid {{ {handle} }}"));
 
-    private static void Apply(string rules) => Command("nft", ["-f", "-"], rules);
+    private static void Apply(string rules) => Command("nft", ["-f", "-"], rules.ReplaceLineEndings("\n"));
 
     internal static string Command(string program, string[] arguments, string? input = null)
     {

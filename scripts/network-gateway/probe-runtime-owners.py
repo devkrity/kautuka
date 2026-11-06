@@ -268,7 +268,7 @@ class RuntimeOwners:
         if owner["manager_observation"]["netns"] != f"net:[{os.stat('/run/netns/' + owner['name']).st_ino}]":
             raise RuntimeError("User manager outside controlled network namespace")
 
-    def inspect(self, owner, peer):
+    def inspect(self, owner, peer, *, on_event=None):
         home = Path(owner["home"])
         base = ["podman", "--cgroup-manager", self.cgroup_manager, "--root", str(home / "graph"),
                 "--runroot", str(home / "runroot"), "--tmpdir", str(home / "tmp"),
@@ -300,8 +300,21 @@ class RuntimeOwners:
                     "--init-groups", "env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"] + environment + user_command
         process = subprocess.Popen(unit, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         deadline = time.monotonic() + 85
+        handled_events = set()
         try:
             while True:
+                control = home / "control.json"
+                if control.exists():
+                    try:
+                        event = json.loads(control.read_text())
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        event = None
+                    if event and event.get("phase") not in handled_events:
+                        if on_event is None:
+                            raise RuntimeError("Unexpected fixture control event")
+                        on_event(event)
+                        handled_events.add(event["phase"])
+                        (home / "control-ack").write_text(event["phase"])
                 marker = home / "held.json"
                 if marker.exists() and "held_processes" not in owner:
                     try:
