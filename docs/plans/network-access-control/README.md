@@ -1,0 +1,59 @@
+# Network access control implementation
+
+**Status:** Active
+**Owner:** Kautuka maintainers
+**Activation condition:** Work on `enhancement/network-access-control`, based on `main` at `5ca94f0`. Commits are authorised; merging is not.
+
+## Goal and authority
+
+Implement the [revision 4.1 proposal](spec-rev4-1.txt) and Part A of the [package-service addendum](package-service-addendum.txt), with the amendments below. The imported documents are design inputs, not evidence that the feature exists. This page resolves contradictions in those snapshots. Part B (package-name/version policy) is deferred.
+
+All Kautuka-initiated external traffic must cross one mandatory network gateway for policy and durable admission. Preserve rootless Podman, separate core/workload owners, container-first application services, local independent network infrastructure, and offline recovery. Connector enforcement is required; additional per-call attribution is supplementary. No unrestricted fallback or implicit switch to rootful Podman is permitted.
+
+The original input files are preserved byte-for-byte as text snapshots. Their references to older proposal revisions and external review files are historical context, not additional implementation dependencies.
+
+## Governing amendments
+
+1. **Revocation acknowledgement.** A revocation is acknowledged as enforced only after kernel permission removal. Operational revocations stop forwarding within two seconds of activation. When the policy service cannot enforce a request, the request remains pending and is not reported as successful. Already admitted flows expire within the surviving kernel lease (at most 120 seconds); new admissions fail closed. A two-second outage-time revocation guarantee requires an independently tested enforcement path and is not currently claimed.
+2. **Namespace validation.** Validate process roles, service/cgroup membership, mapped identities and the registered namespace/interface generation graph. Do not require every process of an owner UID to inhabit one namespace. Legitimate rootless inner namespaces are allowed only as registered topology. Quarantine retired outer paths before cleanup. Host-namespace UID rules are only a backstop for host-originated sockets, not rules governing every stale namespace.
+3. **Candidate A DNS.** Gate 2 must prove authenticated per-pod DNS identity, query policy, bindings and approval ownership. Coarse runtime identity is not a fallback for connector DNS. Candidate B must prove DNS source preservation as well as TCP/UDP identity.
+4. **Admission handles.** Socket/packet marks are bounded internal handles, bound to the complete flow, trusted creator, runtime identity and generation. They are not unchecked database IDs. Define packet-to-conntrack mark propagation, source-port reservation before transmission, synchronization with revocation, and safe handle reuse. Persist admission before releasing the first external packet.
+5. **Denials and trust.** Denials use `NF_DROP`; a packet already dropped cannot subsequently reach a reject chain. Prompt reset is optional and separately tested. Cached/imported image activation is checked by Manager against recorded verified image identity, not by an assumed Podman run-time signature check. Silent network drop does not promise immediate client failure.
+6. **Package interface.** Enforce a workload-facing route/method allowlist for the minimum supported npm/PyPI protocol, including artifact paths; deny every other ecosystem, generic route, management API, UI, metrics and cache-listing surface before handler/cache access. The backend is unreachable directly. Gateway host rules alone do not enforce the HTTP interface.
+7. **Package permission.** Package-service access is an explicit capability for approved materialisation or package-enabled workload contexts. Ordinary mail execution receives no standing package access. No direct registry access is granted to workloads. Package rules cannot be bypassed through a shared service.
+8. **Package evidence.** The pinned upstream source has many ecosystem routes, but generic routes require named configured upstreams and no Git handler was found in v0.8.1. Verify the shipped image digest against its source before claiming provenance. Record durable admissions per external flow, not per HTTP fetch; request logs and cache hits are separate. Preserve the `dns_bound` numeric-address limitation. Observed CDN IPs do not authorise hostname wildcards.
+9. **Package tests.** Exercise cold and warm client/proxy caches, unauthorized callers, backend bypass, route/method rejection, redirects, direct registry attempts, and revoked local service access. Observe HTTPS redirects at the proxy or a controlled upstream, not by assuming packet capture exposes encrypted headers.
+10. **Deferred package policy.** Part B requires authenticated caller identity at the package-service endpoint; it is not inherited automatically from either gateway identity candidate. URL bearer tokens cannot independently choose broader package policy. Describe artifacts as served, not confirmed installed. Do not add Part B to the stop gates.
+
+## Sequential stop gates
+
+| Gate | Required proof | Current state |
+|---|---|---|
+| 1 | Both runtime owners; gated signed acquisition; helper/implicit-pull/DNS/stale-path denial; durable first-packet admission and failure/restart tests; published AOT binaries; WSL primitive smoke check | In progress; no enforcement claim |
+| 2 | Distinct connector and DNS policy identities; lateral isolation; constrained package interface and explicit package permission | Not started |
+| 3 | Minimal core-service socket/health chain; staged signed release transaction; offline recovery; schema and write-fence safety | Not started |
+| 4 | Full shipped WSL NAT integration; desktop and phone WebHost ingress | Not started |
+
+Stop at a failed gate and report the evidence. Do not proceed by silently weakening the invariant. Record Linux and WSL evidence separately. Windows unit tests alone do not establish Linux kernel behaviour; a WSL smoke check does not establish the full Linux and WSL support matrix.
+
+## Review and commits
+
+Use the requested GPT-6 Astra architect at medium reasoning effort for code reviews at meaningful checkpoints. Resolve security findings before committing the affected implementation. Run applicable local checks with repository hooks enabled and DCO sign-off. Keep checkpoints focused, leave the working tree reviewable, and do not merge or publish a release.
+
+## Evidence and limitations
+
+- Baseline inspected: clean local `main` at `5ca94f0`.
+- Local .NET SDK: 10.0.403.
+- Available smoke environment: `KautukaTestFedora44`, Podman 5.8.9, WSL kernel 6.18.58.1. This is a local test distro, not proof of the final shipped configuration.
+- Kernel configuration exposes network namespaces/veth and modular NFQUEUE/conntrack features; runtime probes remain required.
+- No existing installation, Podman storage, or application data may be reset merely to run the prototype. Temporary test topology must have unique names and clean up only resources it created.
+
+### Primitive checkpoint (6 November 2026)
+
+`scripts/network-gateway/probe-primitives.py` creates isolated source, gateway and simulated-uplink namespaces. It never attaches them to the real uplink. Run on Linux as root with `python3 scripts/network-gateway/probe-primitives.py --report /tmp/<new-evidence-name>.json`. The report must be a new file; existing evidence is never overwritten. Unprivileged cleanup fault tests run with `python -m unittest discover -s scripts/network-gateway -p 'test_*.py'`.
+
+Local Fedora/WSL result: six primitive checks passed: namespace/veth routing, allowed UDP, no-consumer NFQUEUE drop in FORWARD and OUTPUT, default-drop forwarding, and cutoff from a namespace retained by an open descriptor after its name was removed. Denial checks observe the sink's receipt log, not only client timeouts. All created namespaces and the echo child were cleaned up.
+
+The first probe invocation exposed a diagnostic-format assumption (`queue num` versus nft's normalized output); the probe now checks structured nft JSON. The architect requested retained-namespace coverage, sink-side denial evidence, and cleanup failure isolation; all were addressed before this checkpoint.
+
+This is **not a Gate 1 pass**. A real admission consumer, durable audit, conntrack/handle/revocation proof, IPv6, both runtime owners, rootless-helper containment, signed acquisition, published AOT execution, and native Linux coverage remain outstanding.

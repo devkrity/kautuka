@@ -34,6 +34,8 @@ Read these in order:
 
 ## Authority map
 
+The active [network access control implementation plan](plans/network-access-control/README.md) records the proposed container-first topology, mandatory egress stop gates, and prototype evidence. It does not describe shipped enforcement.
+
 Each concern has one canonical explanation. Other pages link to it rather than restating it.
 
 | Concern | Canonical document | Primary code anchors |

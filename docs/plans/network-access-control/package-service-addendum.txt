@@ -1,0 +1,70 @@
+Addendum: package service egress and package-level policy
+Applies to: network-access-control.md revision 4.1. That document is not changed by this addendum. Baseline: 5ca94f0. Source references are repo-relative and pinned with @5ca94f0. Status: draft, 6 Nov 2026 (AEST). Part A is proposed for the spec as a Gate 2 item. Part B is a separate idea, outside this spec.
+
+Part A: package service egress (for the spec, Gate 2)
+A.1 What exists at 5ca94f0
+The package service is the kautuka-pkgs-proxy sidecar. It is a local health-check wrapper (src/images/kautuka-pkgs-proxy/Dockerfile:4 @5ca94f0) over a Devkrity mirror of git-pkgs/proxy 0.8.1 (src/images/kautuka-pkgs-proxy/upstream.json @5ca94f0, docs/operations/runtime-image-mirrors.md:8 @5ca94f0). It listens on :20101 (src/backend/Kautuka.Manager/sidecars.json:46-52 @5ca94f0). The sidecar sets no upstream settings, so the proxy's built-in defaults apply.
+Registries Kautuka uses today: npm and PyPI only. Clients are pointed at /npm/ and /pypi/simple/ (src/backend/Kautuka.Gateway/Infrastructure/Sandbox/WorkspaceRuntimeContextResolver.cs:21-22 @5ca94f0). Nothing in the repo points a client at any other proxy route.
+The upstream proxy serves far more than that. git-pkgs/proxy has handlers for Cargo, RubyGems, Go, Maven, NuGet, container images, Homebrew (via ghcr.io), Debian/RPM/Alpine, generic HTTP downloads and read-only Git (upstream README "Supported Registries"; main branch, still to check against 0.8.1). Nothing at 5ca94f0 turns those handlers off. So today the sidecar can be used as a relay to many hosts beyond npm and PyPI, and only the network can hold it to the two registries Kautuka uses. This is the "overly capable package proxy" case in rev 4.1 §5.7.7.
+Upstream defaults (git-pkgs/proxy docs/configuration.md, main branch; confirm against 0.8.1):
+Registry	Proxy setting (default)	Hosts the proxy contacts
+npm metadata and tarballs	upstream.npm = https://registry.npmjs.org	registry.npmjs.org. Tarball URLs and attestations (/-/npm/v1/attestations/...) use the same host.
+npm change feed	off by default; Kautuka does not set it	replicate.npmjs.com, only if enabled. Must stay off.
+PyPI index	upstream.pypi = https://pypi.org	pypi.org
+PyPI files	upstream.pypi_download = https://files.pythonhosted.org	files.pythonhosted.org
+Redirects and CDN hosts. Both registries sit behind Fastly. The table lists the names the proxy asks for, but Gate 2 must record which names and redirects actually show up on the shipped proxy version (capture DNS queries and Location headers during a full install of the test set in A.4). A redirect to any host outside the list is denied by the gateway, not followed through a broader rule.
+npm Git dependencies (github: specifiers, git+https) are fetched as GitHub tarballs or through the proxy's Git handler. These are not in the allow list. Under this addendum such installs fail closed; adding GitHub would be a separate, explicit decision (Q-A3).
+Not package-service traffic (covered by other identities in rev 4.1 §8.5 and §5.1, not by this addendum): the nodejs.org tarball used in MCPB image builds (src/backend/Kautuka.Manager.RuntimeContainer/Hosting/McpbImageMaterializer.cs:23-24 @5ca94f0), uv's managed CPython download from GitHub (docs/reference/runtime.md:20 @5ca94f0), RPM/microdnf, and OCI pulls.
+A.2 Package-index environment variables today (convenience only)
+Variable	Set or enforced where
+NPM_CONFIG_REGISTRY, UV_INDEX_URL, UV_DEFAULT_INDEX, PIP_INDEX_URL, PIP_TRUSTED_HOST (only for http index URLs)	Gateway builds them from ManagerProxy:* settings or the defaults above, refuses ManagerProxy:Mode=upstream, and refuses public hosts (registry.npmjs.org, registry.npmjs.com, pypi.org, www.pypi.org, pypi.python.org, files.pythonhosted.org) (src/backend/Kautuka.Gateway/Infrastructure/Sandbox/WorkspaceRuntimeContextResolver.cs:17-35 @5ca94f0, :216-245 @5ca94f0). Connectors are forwarded these keys plus HTTP(S)_PROXY/NO_PROXY if present (:23-27 @5ca94f0, :198-211 @5ca94f0).
+Same five keys	MCPB language-package installs require them and pin --registry / --index-url on the command line (src/backend/Kautuka.Manager.RuntimeContainer/Hosting/McpbImageMaterializer.cs:25-31 @5ca94f0, :432-455 @5ca94f0).
+PIP_INDEX_URL, PIP_TRUSTED_HOST	Sandbox image uv==0.11.19 install (src/backend/Kautuka.Manager.RuntimeContainer/Hosting/WorkspaceHostRuntimeAdapter.cs:23-25 @5ca94f0, :303-315 @5ca94f0).
+Bypass spellings dropped: npm_config_registry, npm_config_userconfig, npm_config_globalconfig, UV_EXTRA_INDEX_URL, UV_INDEX, UV_CONFIG_FILE, PIP_EXTRA_INDEX_URL, PIP_CONFIG_FILE	Connector container spec (src/backend/Kautuka.Manager.RuntimeContainer/Hosting/ConnectorContainerSpecBuilder.cs:150-165 @5ca94f0). npx/npm/uv/uvx arguments are re-pinned (:223-262 @5ca94f0).
+Skills cannot override NPM_CONFIG_REGISTRY, PIP_*INDEX*, PIP_TRUSTED_HOST, UV_*INDEX*, UV_INDEX	src/backend/Kautuka.Gateway/Infrastructure/Agents/SkillAgentToolProvider.cs:19-28 @5ca94f0, :593 @5ca94f0.
+Today these variables are the only thing steering clients to the proxy. The kautuka-sandbox network is not internal, so a client that ignores them reaches the public registry directly. Under this addendum they stay as convenience only, and the network enforces the route.
+
+A.3 Requirements (Gate 2)
+Own policy identity. The package service has its own policy subject at the central gateway (component pkgs-proxy, rev 4.1 §5.1 table). It shares no identity with the core Gateway service, connectors or sandboxes.
+Fixed, tested upstream allow list. Its destinations are exactly registry.npmjs.org:443, pypi.org:443 and files.pythonhosted.org:443, plus any CDN or redirect names Gate 2 records and the architect accepts. Each is a dns_bound domain rule (rev 4.1 §5.4.2). The list ships in the signed release policy and is not user-editable. Plain HTTP, other ports, QUIC, IP literals and private addresses are denied.
+No general egress. No ask mode and no approvals for this subject: anything outside the list is denied and counted. The proxy's other handlers (generic, Git, container, other ecosystems) therefore fail at the gateway even if they cannot be turned off in the proxy. Where the proxy version allows it, they are also turned off in its configuration, as a second layer.
+Every upstream fetch has an admission record (rev 4.1 §5.6.2), written before the first packet. Bytes are counted on that flow. The record names the package service as the source. Who asked for it is a Part B question, not a gateway claim.
+Connectors, skills and sandboxes get no direct registry access. Their policies never include the registry hosts. A client that ignores the variables, or uses a spelling not stripped above, is denied at the gateway (fails closed) and recorded as a denial for that connector or sandbox.
+Lateral path to the service. It is reached only on the enumerated interface (:20101, npm and PyPI paths) from rev 4.1 §5.7.7. How a workload namespace reaches a core-owned sidecar (one exposed port, or a separate workload-owned instance) is decided in Gate 2 under Q10.
+Proxy hardening that keeps it from relaying: no HTTP(S)_PROXY in its environment (the proxy honours them); allow_private_hosts empty and allow_loopback off (the defaults); no upstream credentials configured; npm change feed off.
+A.4 Acceptance tests (Gate 2)
+npm install of a pinned test package, and pip install plus uv pip install of a pinned test package with a wheel, succeed from a connector pod and from an agent sandbox through the proxy. Each upstream fetch has an admission record under pkgs-proxy. Record the observed hostnames and redirects and compare them with the allow list.
+Same installs with the variables unset or ignored (npm --registry https://registry.npmjs.org, pip --index-url https://pypi.org/simple, a direct curl to files.pythonhosted.org): denied at the gateway, recorded as denials for the connector or sandbox, and nothing reaches the uplink.
+Relay attempts through the proxy: /generic/..., /git/..., container and other-ecosystem routes, CONNECT, absolute-URI requests, a test upstream that redirects to example.net. Each fails, and the gateway shows a denied pkgs-proxy attempt or no upstream attempt at all.
+A rebinding or private answer for an allowed name is dropped (rev 4.1 §5.5), and the proxy cannot reach 169.254.169.254, the host, or LAN addresses.
+MCPB materialisation of a Node and a Python bundle still works. An npm Git dependency fails closed with a clear error.
+Policy-service restart, store full, and revocation behave as in rev 4.1 §20.2 and §20.6 for the pkgs-proxy subject.
+A.5 Open questions (Part A)
+Q-A1 Can git-pkgs/proxy 0.8.1 disable unused ecosystem handlers? If not, do we accept relying on the gateway allow list alone, or wrap the proxy with a small path filter?
+Q-A2 Which Fastly or redirect hostnames do npm and PyPI actually use from the shipped proxy, and are they stable enough for a fixed list?
+Q-A3 Do any built-in or supported connectors need npm Git dependencies (GitHub)? If so, is that a separate subject or a separate decision?
+Q-A4 Should the upstream list be per install (enterprise mirrors such as Artifactory) through a signed admin setting, or fixed per release only?
+Part B: package-level policy in the package service (separate idea, not in this spec)
+Idea. Use the proxy, which already sees package names and versions, to apply policy above the network layer:
+
+per connector or skill: which registries (npm, PyPI) it may use;
+allow and block lists by package name (git-pkgs/proxy already has a version denylist and a publish-age cooldown, upstream README "Version Cooldown");
+version pinning or ranges per package;
+install audit records such as "Microsoft mail connector installed nodemailer@6.9.x", stored with the network-activity retention and shown in the connector's activity view.
+Caller identity. The proxy needs to know which connector or skill is asking. Two options:
+
+Reuse the per-connector mechanism (rev 4.1 §5.7.2). With candidate B the proxy sees a distinct source address per pod, and the network service publishes address → identity to it read-only. With candidate A it sees the authenticated identity. This is the strong option, because the caller cannot choose it.
+A Manager-set per-connector token in the proxy URL (for example http://kautuka-pkgs-proxy:20101/t/<token>/npm/). It is simple and works with any client, but:
+URLs end up in logs, lockfiles, npm debug output, error messages, crash reports and the proxy's own access log, so the token leaks;
+the connector process can read its own environment and hand the URL to another process or connector, so the token is a bearer credential;
+it must never grant network permissions: it selects package policy only, and the proxy's egress stays the fixed list in Part A. A stolen token reveals or borrows only package-policy choices;
+it needs rotation per pod and must be stripped before anything is persisted.
+Limits. Package policy controls what gets installed through the proxy, not what installed code does. Code from an allowed package runs with the connector's own network policy. Install records reflect what the proxy served (cache hits included), not what the client finally kept.
+
+Open questions (Part B)
+
+Q-B1 Does package policy belong in git-pkgs/proxy (GPL-3.0-or-later, configured, not modified) or in a small Kautuka front end in front of it?
+Q-B2 Are install records audit (same retention and visibility rules as network activity) or diagnostics?
+Q-B3 Who sets package rules for system vs personal connectors (same ownership rules as network rules)?
+Q-B4 Should a token option exist at all, given the leak risks, or only the identity-mechanism option?
+Q-B5 Should cache hits shared across connectors be visible to each one (they reveal what other connectors installed)?
