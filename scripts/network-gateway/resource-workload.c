@@ -50,6 +50,7 @@ static int expected(const char *path, const char *wanted)
 int main(int argc, char **argv)
 {
     if (argc != 2) return 2;
+    if (strcmp(argv[1], "hold") == 0) { sleep(10); return 0; }
     if (strcmp(argv[1], "limits") == 0) {
         char memory[128], pids[128], cpu[128];
         if (field("/sys/fs/cgroup/memory.max", memory, sizeof(memory)) != 0

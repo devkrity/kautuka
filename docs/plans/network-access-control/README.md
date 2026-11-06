@@ -107,3 +107,23 @@ Requested container limits are 32 MiB memory with no swap, 16 processes and 25% 
 **The explicit cgroupfs candidate failed.** In the Fedora/WSL experiment, the first owner's actual container observed the parent limits (`memory.max=268435456`, `pids.max=128`, `cpu.max=100000 100000`) rather than its requested limits. This rejects the candidate's resource-enforcement proof; it does not yet distinguish missing child limits from an incorrect cgroup mount/view. Resolving that distinction requires the running workload's host PID/cgroup path and descendant kernel files. The exercised workloads therefore refused to report success. The second owner was not exercised after this rejection. All recorded resources were cleaned up without errors. Nine unprivileged Python tests pass on Linux; on Windows four pass and five Linux-only checks skip. The C fixture compiles with `-O2 -Wall -Wextra -Werror`.
 
 Do not select this cgroupfs layout for production or drop container resource limits. The next candidate is a managed systemd user manager/session bus with the entire user-manager tree attached to the controlled outer network namespace. Namespace attachment and resource enforcement must both be measured again; a user manager that spawns helpers or scopes outside containment is unacceptable. Gate 1 remains **in progress**.
+
+
+### Managed non-login user-manager checkpoint (6 November 2026)
+
+A held container resolved the preceding cgroupfs ambiguity: its host PID was directly in the parent fixture service cgroup, with the parent limits and no separate limited child. That is a rejection of this tested layout, not a statement about all possible Podman/cgroupfs configurations.
+
+The next explicit candidate, `--cgroup-manager systemd --managed-user-session --workload-source <path>/resource-workload.c`, provisions an instance-specific runtime drop-in for each disposable `user@UID.service`, before starting it. The entire user manager is attached to its controlled network namespace with bounded ancestor resources. Its private `/run/user/UID` ownership/mode and runtime-directory dependencies are verified. The launching client enters that namespace before dropping privileges, uses a clean environment and explicit bus, and starts the probe through the user manager. Cleanup stops the owned user manager and runtime-directory service before deleting only its instance drop-in and reloading systemd; no global user-manager template or lingering setting is changed.
+
+The first managed-user candidate exposed `(sd-pam)` outside the controlled namespace and was rejected. The explicit non-login candidate clears `PAMName=` and supplies HOME/runtime/bus settings. A second process snapshot caught the fixture's own user-bus client outside the namespace; the client now enters the namespace before dropping its UID. Neither process was exempted from the acceptance check.
+
+Both owners pass the corrected Fedora/WSL candidate:
+
+- Host PID/cgroup correlation and container-visible kernel files show separate child limits of 32 MiB, 16 tasks and `cpu.max=25000 100000`.
+- Each process workload creates fifteen children, then receives the expected failure with a local `pids.events` limit hit.
+- CPU workloads use approximately 0.51/0.52 CPU seconds over two wall-clock seconds, with twenty local throttling periods each.
+- Both memory workloads exit 137 with the container's OOM-killed flag confirmed.
+- Root-side snapshots while each held workload exists place the user manager, D-Bus broker, user-bus client, pause process and container monitor in the registered outer namespace. Only the exact `--network=none` workload PID may occupy its registered inner namespace. Snapshots do not establish coverage of short-lived networking/pull helpers.
+- Cleanup reports no errors. Nine unprivileged Python tests pass on Linux; four pass and five skip on Windows. The bounded C workload compiles with warnings treated as errors.
+
+The architect reviewed the failures, candidate changes and corrected evidence. This remains **WSL feasibility**, not a production runtime selection. The Fedora PAM stack includes SELinux session context, login UID, keyring, namespace, umask and system-auth hooks; a non-login production design must explicitly account for required security/session settings and validate native Linux with SELinux enabled. Actual pasta/slirp networking, signed registry acquisition, alternate-route denial and supervision still require proof. Gate 1 remains **in progress**.

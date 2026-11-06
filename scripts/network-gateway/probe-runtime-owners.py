@@ -22,11 +22,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tarfile
 import uuid
 
 
-INSPECT = r"""import json,os,subprocess,sys
+INSPECT = r"""import json,os,subprocess,sys,time
 def identity():
     return {'euid':os.geteuid(),'netns':os.readlink('/proc/self/ns/net'),'uid_map':open('/proc/self/uid_map').read().strip(),'gid_map':open('/proc/self/gid_map').read().strip(),'cgroup':open('/proc/self/cgroup').read().strip()}
 peer_home,archive,prefix=sys.argv[1:4]
@@ -54,16 +55,32 @@ if archive != '-':
     if len(image.removeprefix('sha256:')) != 64: raise RuntimeError('Unexpected imported image ID')
     results={'image_id':image}
     result['resources']=results
-    for mode in ('limits','pids','cpu','memory'):
+    for mode in ('hold','limits','pids','cpu','memory'):
         name=prefix+'-'+mode
         args=['run','--name',name,'--pull=never','--network=none','--user=65532:65532',
               '--cap-drop=ALL','--security-opt=no-new-privileges','--read-only','--cgroupns=private',
               '--memory=32m','--memory-swap=32m','--pids-limit=16','--cpu-period=100000','--cpu-quota=25000',
               image,'/probe',mode]
+        if mode == 'hold': args.insert(1,'--detach')
         results[mode]={'exit_code':-1}
         try:
             observed=command(args)
             results[mode]={'exit_code':observed.returncode,'stdout':observed.stdout,'stderr':observed.stderr}
+            if mode == 'hold' and observed.returncode == 0:
+                state=command(['inspect','--format=json',name])
+                if state.returncode == 0:
+                    pid=json.loads(state.stdout)[0]['State']['Pid']
+                    proc='/proc/'+str(pid)
+                    cgroup=open(proc+'/cgroup').read().strip()
+                    path=cgroup.removeprefix('0::')
+                    if not path.startswith('/') or '..' in path.split('/'): raise RuntimeError('Unexpected cgroup path')
+                    root='/sys/fs/cgroup'+path
+                    results[mode]['host']={'pid':pid,'cgroup':cgroup,'netns':os.readlink(proc+'/ns/net'),
+                        'limits':{field:open(root+'/'+field).read().strip() for field in ('memory.max','pids.max','cpu.max')}}
+                    marker=os.path.join(os.environ['HOME'],'held.json')
+                    with open(marker,'w') as stream: json.dump(results[mode]['host'],stream)
+                    time.sleep(2)
+                    os.unlink(marker)
             if mode == 'memory':
                 state=command(['inspect','--format=json',name])
                 if state.returncode == 0: results[mode]['state']=json.loads(state.stdout)[0]['State']
@@ -134,11 +151,12 @@ def fixture_lock():
 
 
 class RuntimeOwners:
-    def __init__(self, cgroup_manager):
+    def __init__(self, cgroup_manager, managed_user_session=False):
         self.prefix = "ktng-" + uuid.uuid4().hex[:8]
         self.root = Path(tempfile.mkdtemp(prefix="ktng-owners-", dir="/var/tmp")).resolve()
         self.root.chmod(0o711)
         self.cgroup_manager = cgroup_manager
+        self.managed_user_session = managed_user_session
         self.owners = []
 
     def build_workload(self, source):
@@ -218,6 +236,34 @@ class RuntimeOwners:
         run(["ip", "-n", name, "link", "set", "lo", "up"])
         return owner
 
+    def start_user_manager(self, owner):
+        uid = str(owner["uid"])
+        unit = "user@" + uid + ".service"
+        directory = Path("/run/systemd/system") / (unit + ".d")
+        if directory.exists() or subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
+            raise RuntimeError("Refusing existing user-manager configuration or running instance")
+        directory.mkdir(mode=0o755)
+        owner["manager_dropin"] = str(directory)
+        (directory / "90-ktng-fixture.conf").write_text(
+            "[Service]\nPAMName=\nEnvironment=HOME=" + owner["home"] + "\nEnvironment=XDG_RUNTIME_DIR=/run/user/" + uid +
+            "\nEnvironment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/" + uid + "/bus\nNetworkNamespacePath=/run/netns/" + owner["name"] +
+            "\nMemoryMax=256M\nMemorySwapMax=0\nTasksMax=128\nCPUQuota=100%\nRuntimeMaxSec=120\n")
+        run(["systemctl", "daemon-reload"])
+        owner["manager_started"] = True
+        run(["systemctl", "start", unit])
+        runtime = Path("/run/user") / uid
+        status = runtime.stat()
+        if status.st_uid != owner["uid"] or status.st_mode & 0o777 != 0o700:
+            raise RuntimeError("User runtime directory ownership/mode incorrect")
+        dependencies = run(["systemctl", "show", "--property=BindsTo", "--property=After", unit])
+        if dependencies.count("user-runtime-dir@" + uid + ".service") < 2:
+            raise RuntimeError("User manager lacks expected runtime directory dependencies")
+        owner["manager_dependencies"] = dependencies
+        pid = int(run(["systemctl", "show", "--property=MainPID", "--value", unit]))
+        owner["manager_observation"] = {"pid": pid, "netns": os.readlink(f"/proc/{pid}/ns/net")}
+        if owner["manager_observation"]["netns"] != f"net:[{os.stat('/run/netns/' + owner['name']).st_ino}]":
+            raise RuntimeError("User manager outside controlled network namespace")
+
     def inspect(self, owner, peer):
         home = Path(owner["home"])
         base = ["podman", "--cgroup-manager", self.cgroup_manager, "--root", str(home / "graph"),
@@ -234,7 +280,72 @@ class RuntimeOwners:
                 "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + str(home / "runtime"),
                 "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
                 sys.executable, "-c", INSPECT, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
-        result = json.loads(run(unit, timeout=85))
+        if self.managed_user_session:
+            self.start_user_manager(owner)
+            runtime = "/run/user/" + str(owner["uid"])
+            environment = ["HOME=" + owner["home"], "XDG_RUNTIME_DIR=" + runtime,
+                           "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus"]
+            user_command = ["systemd-run", "--user", "--quiet", "--wait", "--pipe", "--collect", "--unit", owner["unit"],
+                            "--property", "Delegate=yes", "--property", "WorkingDirectory=" + owner["home"],
+                            "--property", "UnsetEnvironment=CONTAINER_HOST CONTAINER_CONNECTION DOCKER_HOST REGISTRY_AUTH_FILE CONTAINERS_STORAGE_CONF",
+                            "--setenv", "HOME=" + owner["home"], "--setenv", "XDG_RUNTIME_DIR=" + runtime,
+                            "--setenv", "DBUS_SESSION_BUS_ADDRESS=unix:path=" + runtime + "/bus",
+                            "--setenv", "XDG_CONFIG_HOME=" + str(home / ".config"),
+                            sys.executable, "-c", INSPECT, peer["home"], str(getattr(self, "archive", "-")), owner["name"]] + base
+            unit = ["nsenter", "--net=/run/netns/" + owner["name"], "setpriv", "--reuid=" + str(owner["uid"]), "--regid=" + str(owner["uid"]),
+                    "--init-groups", "env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin"] + environment + user_command
+        process = subprocess.Popen(unit, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 85
+        try:
+            while True:
+                marker = home / "held.json"
+                if marker.exists() and "held_processes" not in owner:
+                    try:
+                        held = json.loads(marker.read_text())
+                        inventory = []
+                        for proc in Path("/proc").glob("[0-9]*"):
+                            try:
+                                uid_line = next(line for line in (proc / "status").read_text().splitlines() if line.startswith("Uid:"))
+                                uid = int(uid_line.split()[1])
+                                if uid != owner["uid"] and not owner["subid_start"] <= uid < owner["subid_start"] + 65536:
+                                    continue
+                                inventory.append({"pid": int(proc.name), "uid": uid,
+                                    "comm": (proc / "comm").read_text().strip(), "cgroup": (proc / "cgroup").read_text().strip(),
+                                    "netns": os.readlink(proc / "ns/net")})
+                            except (FileNotFoundError, ProcessLookupError):
+                                continue
+                        owner["held_processes"] = inventory
+                        owner["held_workload"] = held
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass
+                try:
+                    stdout, stderr = process.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("Managed runtime inspection timed out")
+            if process.returncode:
+                raise RuntimeError(f"Managed runtime inspection failed ({process.returncode}): {stderr}")
+            result = json.loads(stdout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.stdout.close()
+                    process.stderr.close()
+                    process.wait(timeout=2)
+        if hasattr(self, "archive"):
+            held = owner.get("held_workload")
+            inventory = owner.get("held_processes", [])
+            if not held or not any(item["pid"] == held["pid"] for item in inventory):
+                raise RuntimeError("Held workload process inventory missing")
+            outer_namespace = f"net:[{os.stat('/run/netns/' + owner['name']).st_ino}]"
+            for item in inventory:
+                expected_namespace = held["netns"] if item["pid"] == held["pid"] else outer_namespace
+                if item["netns"] != expected_namespace:
+                    raise RuntimeError("Held runtime support process outside registered namespace: " + item["comm"])
         owner["observation"] = {"outer": result["outer"], "inner": result["inner"],
                                 "rootless": result["podman"]["host"]["security"]["rootless"],
                                 "cgroup_manager": result["podman"]["host"]["cgroupManager"],
@@ -255,6 +366,24 @@ class RuntimeOwners:
         effective = result["podman"]["host"]["cgroupManager"]
         if effective != self.cgroup_manager:
             raise RuntimeError(f"Requested {self.cgroup_manager} but observed {effective}; no silent fallback")
+        if self.managed_user_session:
+            observed = []
+            for proc in Path("/proc").glob("[0-9]*"):
+                try:
+                    status = (proc / "status").read_text()
+                    uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+                    if int(uid_line.split()[1]) != owner["uid"]:
+                        continue
+                    comm = (proc / "comm").read_text().strip()
+                    ns = os.readlink(proc / "ns/net")
+                    observed.append({"pid": int(proc.name), "comm": comm, "netns": ns})
+                    if ns != result["outer"]["netns"]:
+                        raise RuntimeError("Runtime-owner process outside registered outer namespace: " + comm)
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+            owner["session_processes"] = observed
+            if not any(process["comm"].startswith("dbus-broker") for process in observed):
+                raise RuntimeError("Session bus broker namespace was not observed")
         if "resources" in result:
             validate_resources(result["resources"])
         return {"resources": result.get("resources"), "role": owner["name"].rsplit("-", 1)[1], "uid": owner["uid"],
@@ -268,6 +397,15 @@ class RuntimeOwners:
             try:
                 # Units are fixture-named; never stop an existing application unit.
                 subprocess.run(["systemctl", "stop", owner["unit"]], capture_output=True, timeout=10)
+                if owner.get("manager_started"):
+                    run(["systemctl", "stop", "user@" + str(owner["uid"]) + ".service", "user-runtime-dir@" + str(owner["uid"]) + ".service"])
+                if owner.get("manager_dropin"):
+                    directory = Path(owner["manager_dropin"])
+                    if directory != Path("/run/systemd/system") / ("user@" + str(owner["uid"]) + ".service.d"):
+                        raise RuntimeError("Unexpected user-manager drop-in cleanup path")
+                    (directory / "90-ktng-fixture.conf").unlink()
+                    directory.rmdir()
+                    run(["systemctl", "daemon-reload"])
                 if owner["user_created"]:
                     identity = pwd.getpwnam(owner["name"])
                     if identity.pw_uid != owner["uid"] or identity.pw_dir != owner["home"]:
@@ -329,10 +467,15 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--cgroup-manager", choices=("systemd", "cgroupfs"), required=True)
     parser.add_argument("--workload-source", type=Path, help="Optional offline C workload; requires gcc and ldd")
+    parser.add_argument("--managed-user-session", action="store_true", help="Test entire managed user@ instance inside its namespace; systemd cgroups only")
     options = parser.parse_args()
+    if options.managed_user_session and options.cgroup_manager != "systemd":
+        parser.error("managed user session requires explicit systemd cgroup manager")
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("requires Linux root; no resources created")
     required = ("podman", "ip", "systemd-run", "systemctl", "useradd", "userdel", "groupadd", "groupdel", "usermod")
+    if options.managed_user_session:
+        required += ("setpriv", "env", "nsenter")
     if any(shutil.which(command) is None for command in required):
         parser.error("missing required runtime/account tools; no resources created")
     if options.workload_source and (not options.workload_source.is_file() or any(shutil.which(tool) is None for tool in ("gcc", "ldd"))):
@@ -341,9 +484,11 @@ def main():
         result = {"schemaVersion": 1, "scope": "managed-rootless-resource-feasibility" if options.workload_source else "managed-rootless-identity-feasibility-only",
                   "gate1Passed": False, "feasibilityPassed": False, "owners": [], "cleanupErrors": [],
                   "limitations": ["No networking helper placement, signed image acquisition, or external traffic containment proof. Resource-limit evidence requires the optional workload to pass."]}
+        if options.managed_user_session:
+            result["limitations"].append("Managed non-login user-manager candidate: PAM security/session parity on native Linux remains unvalidated. Process snapshots do not prove placement of every short-lived helper.")
         try:
             with fixture_lock():
-                fixture = RuntimeOwners(options.cgroup_manager)
+                fixture = RuntimeOwners(options.cgroup_manager, options.managed_user_session)
                 result["createdResources"] = fixture.owners
                 result["fixtureRoot"] = str(fixture.root)
                 try:
