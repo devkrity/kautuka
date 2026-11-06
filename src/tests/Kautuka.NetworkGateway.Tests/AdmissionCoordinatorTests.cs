@@ -52,15 +52,18 @@ public sealed class AdmissionCoordinatorTests
         Assert.True(next > first);
     }
 
-    [Fact]
-    public void UnrelatedDatabaseIsRefusedBeforeSchemaOrJournalChanges()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnrelatedOrOldPrototypeDatabaseIsRefusedBeforeSchemaOrJournalChanges(bool oldPrototype)
     {
         using var directory = new TestDirectory();
         using (var application = new SqliteConnection($"Data Source={directory.DatabasePath};Pooling=False"))
         {
             application.Open();
             using SqliteCommand command = application.CreateCommand();
-            command.CommandText = "CREATE TABLE user_data (value TEXT); INSERT INTO user_data VALUES ('preserve');";
+            command.CommandText = (oldPrototype ? "PRAGMA application_id=0x4B4E4731; PRAGMA user_version=1;" : "")
+                + "CREATE TABLE user_data (value TEXT); INSERT INTO user_data VALUES ('preserve');";
             command.ExecuteNonQuery();
         }
 
@@ -303,7 +306,7 @@ public sealed class AdmissionCoordinatorTests
         public int Appended { get; private set; }
         public Action? OnAppend { get; init; }
         public Action? OnReleaseFailure { get; init; }
-        public long Append(FlowKey flow, SourceRegistration source, long policyGeneration, DateTimeOffset expiresAt)
+        public long Append(FlowKey flow, ActorRegistration source, long policyGeneration, DateTimeOffset expiresAt)
         {
             OnAppend?.Invoke();
             Appended++;

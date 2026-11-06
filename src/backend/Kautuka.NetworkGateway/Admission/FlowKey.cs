@@ -11,9 +11,22 @@ internal sealed record FlowKey(
     IPAddress Destination,
     ushort DestinationPort,
     byte Protocol,
-    uint IngressInterfaceIndex = 0);
+    uint IngressInterfaceIndex = 0,
+    AdmissionPath Path = AdmissionPath.Forwarded,
+    uint EgressInterfaceIndex = 0,
+    uint? SocketUid = null,
+    long NamespaceGeneration = 1);
 
-internal sealed record SourceRegistration(IPAddress Address, string Subject, long Generation, uint IngressInterfaceIndex);
+// Values match the supported Linux NF_INET hooks; no other hooks admit traffic.
+internal enum AdmissionPath { Forwarded = 2, LocalOutput = 3 }
+
+internal abstract record ActorRegistration(string Subject, long Generation, long NamespaceGeneration);
+
+internal sealed record SourceRegistration(IPAddress Address, string Subject, long Generation, uint IngressInterfaceIndex, long NamespaceGeneration = 1)
+    : ActorRegistration(Subject, Generation, NamespaceGeneration);
+
+internal sealed record LocalOutputRegistration(IPAddress Address, string Subject, long Generation, uint SocketUid, uint EgressInterfaceIndex, long NamespaceGeneration = 1)
+    : ActorRegistration(Subject, Generation, NamespaceGeneration);
 
 internal sealed record EndpointRule(string Subject, IPAddress Destination, ushort Port, byte Protocol);
 

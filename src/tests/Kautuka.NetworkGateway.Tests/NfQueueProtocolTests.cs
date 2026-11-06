@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 
 using Kautuka.NetworkGateway.Packets;
+using Kautuka.NetworkGateway.Admission;
 
 namespace Kautuka.NetworkGateway.Tests;
 
@@ -74,11 +75,34 @@ public sealed class NfQueueProtocolTests
     {
         byte[] config = NfQueueProtocol.Configure(23199, 2, bind: false);
         // UAPI: packed copy params attr is 12 bytes aligned; maxlen, mask and flags follow.
-        Assert.Equal(3u, BinaryPrimitives.ReadUInt32BigEndian(config.AsSpan(44)));
-        Assert.Equal(2u, BinaryPrimitives.ReadUInt32BigEndian(config.AsSpan(52)));
+        Assert.Equal(11u, BinaryPrimitives.ReadUInt32BigEndian(config.AsSpan(44)));
+        Assert.Equal(10u, BinaryPrimitives.ReadUInt32BigEndian(config.AsSpan(52)));
     }
 
-    private static byte[] Packet(bool includeConntrack = true, bool duplicateInput = false)
+    [Fact]
+    public void LocalOutputUsesKernelHookSocketCredentialsAndEgressIdentity()
+    {
+        QueuedPacket packet = NfQueueProtocol.Decode(Packet(hook: 3, uid: 215, egress: 12), 23199, namespaceGeneration: 9);
+        Assert.NotNull(packet.Flow);
+        Assert.Equal(AdmissionPath.LocalOutput, packet.Flow.Path);
+        Assert.Equal(215u, packet.Flow.SocketUid);
+        Assert.Equal(12u, packet.Flow.EgressInterfaceIndex);
+        Assert.Equal(0u, packet.Flow.IngressInterfaceIndex);
+        Assert.Equal(9, packet.Flow.NamespaceGeneration);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(4)]
+    public void UnsupportedHooksCannotEnterAdmission(byte hook)
+        => Assert.Null(NfQueueProtocol.Decode(Packet(hook: hook, uid: 215), 23199).Flow);
+
+    [Fact]
+    public void MissingOutputSocketUidIsDeniedRatherThanBecomingUidZero()
+        => Assert.Null(NfQueueProtocol.Decode(Packet(hook: 3, egress: 12), 23199).Flow);
+
+    private static byte[] Packet(bool includeConntrack = true, bool duplicateInput = false, byte hook = 2, uint? uid = null, uint egress = 0)
     {
         byte[] udp = new byte[28];
         udp[0] = 0x45;
@@ -92,7 +116,20 @@ public sealed class NfQueueProtocolTests
         byte[] header = new byte[7];
         BinaryPrimitives.WriteUInt32BigEndian(header, 17);
         header[4] = 8;
-        var attributes = new List<byte[]> { Attribute(1, header), Attribute(5, NetworkInt(11)), Attribute(10, udp) };
+        header[6] = hook;
+        var attributes = new List<byte[]> { Attribute(1, header), Attribute(10, udp) };
+        if (hook == 2)
+        {
+            attributes.Add(Attribute(5, NetworkInt(11)));
+        }
+        if (uid.HasValue)
+        {
+            attributes.Add(Attribute(16, NetworkInt(uid.Value)));
+        }
+        if (egress != 0)
+        {
+            attributes.Add(Attribute(6, NetworkInt(egress)));
+        }
         if (includeConntrack)
         {
             attributes.Add(Attribute(0x800B, Attribute(12, NetworkInt(42))));

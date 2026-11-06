@@ -41,7 +41,7 @@ internal sealed class SqliteAdmissionLedger : IAdmissionLedger, IDisposable
         long marker = (long)command.ExecuteScalar()!;
         command.CommandText = "PRAGMA user_version;";
         long version = (long)command.ExecuteScalar()!;
-        if ((existed && (marker != applicationId || version != 1)) || (!existed && (marker != 0 || version != 0)))
+        if ((existed && (marker != applicationId || version != 2)) || (!existed && (marker != 0 || version != 0)))
         {
             throw new InvalidDataException("Refusing an unrelated or unsupported admission ledger.");
         }
@@ -54,11 +54,12 @@ internal sealed class SqliteAdmissionLedger : IAdmissionLedger, IDisposable
         command.CommandText = """
             PRAGMA synchronous=FULL;
             PRAGMA application_id=0x4B4E4731;
-            PRAGMA user_version=1;
+            PRAGMA user_version=2;
             CREATE TABLE IF NOT EXISTS gateway_admissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ct_id INTEGER NOT NULL, ct_zone INTEGER NOT NULL,
-                ingress_interface INTEGER NOT NULL,
+                ingress_interface INTEGER NOT NULL, egress_interface INTEGER NOT NULL,
+                hook INTEGER NOT NULL, socket_uid INTEGER, namespace_generation INTEGER NOT NULL,
                 source_address TEXT NOT NULL, source_port INTEGER NOT NULL,
                 destination_address TEXT NOT NULL, destination_port INTEGER NOT NULL, protocol INTEGER NOT NULL,
                 subject TEXT NOT NULL, identity_generation INTEGER NOT NULL, policy_generation INTEGER NOT NULL,
@@ -72,21 +73,25 @@ internal sealed class SqliteAdmissionLedger : IAdmissionLedger, IDisposable
         command.ExecuteNonQuery();
     }
 
-    public long Append(FlowKey flow, SourceRegistration source, long policyGeneration, DateTimeOffset expiresAt)
+    public long Append(FlowKey flow, ActorRegistration source, long policyGeneration, DateTimeOffset expiresAt)
     {
         using SqliteTransaction transaction = connection.BeginTransaction();
         using SqliteCommand command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO gateway_admissions
-                (ct_id, ct_zone, ingress_interface, source_address, source_port, destination_address, destination_port,
+                (ct_id, ct_zone, ingress_interface, egress_interface, hook, socket_uid, namespace_generation, source_address, source_port, destination_address, destination_port,
                  protocol, subject, identity_generation, policy_generation, expires_at)
-            VALUES ($ct, $zone, $iface, $src, $sport, $dst, $dport, $proto, $subject, $identity, $policy, $expires);
+            VALUES ($ct, $zone, $iface, $egress, $hook, $uid, $namespace, $src, $sport, $dst, $dport, $proto, $subject, $identity, $policy, $expires);
             SELECT last_insert_rowid();
             """;
         command.Parameters.AddWithValue("$ct", flow.ConntrackId);
         command.Parameters.AddWithValue("$zone", flow.Zone);
         command.Parameters.AddWithValue("$iface", flow.IngressInterfaceIndex);
+        command.Parameters.AddWithValue("$egress", flow.EgressInterfaceIndex);
+        command.Parameters.AddWithValue("$hook", (int)flow.Path);
+        command.Parameters.AddWithValue("$uid", flow.SocketUid is uint uid ? (object)uid : DBNull.Value);
+        command.Parameters.AddWithValue("$namespace", flow.NamespaceGeneration);
         command.Parameters.AddWithValue("$src", flow.Source.ToString());
         command.Parameters.AddWithValue("$sport", flow.SourcePort);
         command.Parameters.AddWithValue("$dst", flow.Destination.ToString());

@@ -19,8 +19,8 @@ internal static class NfQueueProtocol
         BinaryPrimitives.WriteUInt32BigEndian(copy, 65535);
         copy[4] = 2; // NFQNL_COPY_PACKET
         return Message(0x302, queue, sequence, 5,
-            [(2, copy), (3, NetworkUInt32(4096)), (4, NetworkUInt32(3)), (5, NetworkUInt32(2))]);
-        // Mask FAIL_OPEN|CONNTRACK; enable CONNTRACK only, explicitly disable FAIL_OPEN.
+            [(2, copy), (3, NetworkUInt32(4096)), (4, NetworkUInt32(11)), (5, NetworkUInt32(10))]);
+        // Mask FAIL_OPEN|CONNTRACK|UID_GID; enable CONNTRACK and socket credentials, disable FAIL_OPEN.
     }
 
     public static byte[] Verdict(ushort queue, uint packetId, uint handle)
@@ -31,7 +31,7 @@ internal static class NfQueueProtocol
         return Message(0x301, queue, 0, 1, [(2, verdict), (3, NetworkUInt32(handle))]);
     }
 
-    public static QueuedPacket Decode(ReadOnlySpan<byte> message, ushort queue)
+    public static QueuedPacket Decode(ReadOnlySpan<byte> message, ushort queue, long namespaceGeneration = 1)
     {
         RequireLittleEndian();
         if (message.Length < 20 || BinaryPrimitives.ReadUInt32LittleEndian(message) != message.Length
@@ -48,7 +48,11 @@ internal static class NfQueueProtocol
         }
 
         uint packetId = BinaryPrimitives.ReadUInt32BigEndian(header);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(namespaceGeneration);
         uint ingress = attributes.TryGetValue(5, out byte[]? input) ? ReadUInt32(input) : 0;
+        uint egress = attributes.TryGetValue(6, out byte[]? output) ? ReadUInt32(output) : 0;
+        uint? socketUid = attributes.TryGetValue(16, out byte[]? uid) ? ReadUInt32(uid) : null;
+        byte hook = header[6];
         uint originalMark = attributes.TryGetValue(3, out byte[]? mark) ? ReadUInt32(mark) : 0;
         uint ctId = 0;
         ushort zone = 0;
@@ -71,9 +75,18 @@ internal static class NfQueueProtocol
 
         FlowKey? flow = null;
         if (attributes.TryGetValue(10, out byte[]? payload)
+            && hook is (byte)AdmissionPath.Forwarded or (byte)AdmissionPath.LocalOutput
+            && (hook != (byte)AdmissionPath.LocalOutput || socketUid.HasValue)
             && IpPacketDecoder.TryDecode(payload, ctId, zone, out FlowKey? decoded))
         {
-            flow = decoded! with { IngressInterfaceIndex = ingress };
+            flow = decoded! with
+            {
+                IngressInterfaceIndex = ingress,
+                EgressInterfaceIndex = egress,
+                Path = (AdmissionPath)hook,
+                SocketUid = hook == (byte)AdmissionPath.LocalOutput ? socketUid : null,
+                NamespaceGeneration = namespaceGeneration,
+            };
         }
 
         return new QueuedPacket(packetId, originalMark, flow);

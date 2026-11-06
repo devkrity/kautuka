@@ -58,7 +58,7 @@ internal sealed class AdmissionCoordinator
 
     private AdmissionResult ProcessLocked(uint packetId, FlowKey flow, IQueueVerdicts verdicts)
     {
-        SourceRegistration? source = policy.Resolve(flow);
+        ActorRegistration? source = policy.Resolve(flow);
         if (source is null || revokedSubjects.Contains(source.Subject) || !policy.Allows(source, flow))
         {
             return Deny("policy_denied");

@@ -74,6 +74,10 @@ internal sealed class ProbeKernel : IAdmissionKernel
 
     public void Publish(AdmissionLease lease)
     {
+        if (lease.Flow.Path != AdmissionPath.Forwarded)
+        {
+            throw new InvalidOperationException("This kernel fixture has no enabled local-output admission path.");
+        }
         long milliseconds = Math.Min(120000, (long)(lease.ExpiresAt - DateTimeOffset.UtcNow).TotalMilliseconds);
         if (milliseconds <= 0)
         {

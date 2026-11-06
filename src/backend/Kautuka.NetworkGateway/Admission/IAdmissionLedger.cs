@@ -3,7 +3,7 @@ namespace Kautuka.NetworkGateway.Admission;
 internal interface IAdmissionLedger
 {
     /// <summary>Returns a never-reused durable sequence after synchronous commit.</summary>
-    long Append(FlowKey flow, SourceRegistration source, long policyGeneration, DateTimeOffset expiresAt);
+    long Append(FlowKey flow, ActorRegistration source, long policyGeneration, DateTimeOffset expiresAt);
 
     void RecordReleaseFailure(long admissionId);
 
