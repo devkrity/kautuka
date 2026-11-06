@@ -34,22 +34,29 @@ internal static partial class DnsProbeCommand
             }
             ProbeKernel.VerifyNamespace(expectedNamespace);
             uint ingress = uint.Parse((await File.ReadAllTextAsync("/sys/class/net/g0/ifindex", cancellation.Token).ConfigureAwait(false)).Trim(), CultureInfo.InvariantCulture);
-            IPAddress source = IPAddress.Parse("10.231.251.2");
             IPAddress answer4 = IPAddress.Parse("10.231.252.2");
             IPAddress answer6 = IPAddress.Parse("fd7a:6b74:252::2");
-            var policy = new DnsQueryPolicy(1, [new SourceRegistration(source, subject, 1, ingress)], [
+            var policy = new DnsQueryPolicy(1, [
+                new SourceRegistration(IPAddress.Parse("10.231.251.2"), subject, 1, ingress),
+                new SourceRegistration(IPAddress.Parse("fd7a:6b74:251::2"), subject, 1, ingress),
+            ], [
                 new DnsNameRule(subject, $"allowed.{subject}.ktng.test", answer4, answer6),
                 new DnsNameRule(subject, $"forged.{subject}.ktng.test", answer4, answer6),
             ]);
             using var ledger = new SqliteDnsDecisionLedger(ledgerPath);
-            var upstream = new SocketDnsUpstream(new IPEndPoint(answer4, 2053));
-            using var coordinator = new DnsQueryCoordinator(policy, ledger, upstream, TimeProvider.System, TimeSpan.FromSeconds(1));
-            using var listener = new DnsResolverListener(new IPEndPoint(IPAddress.Parse("10.231.251.1"), 2053),
-                ingress, 1, coordinator, TimeSpan.FromSeconds(2));
+            var upstream4 = new SocketDnsUpstream(new IPEndPoint(answer4, 2053));
+            var upstream6 = new SocketDnsUpstream(new IPEndPoint(answer6, 2053));
+            // Eight per family, sixteen total; the ledger remains shared and serialized.
+            using var coordinator4 = new DnsQueryCoordinator(policy, ledger, upstream4, TimeProvider.System, TimeSpan.FromSeconds(1), concurrency: 8);
+            using var coordinator6 = new DnsQueryCoordinator(policy, ledger, upstream6, TimeProvider.System, TimeSpan.FromSeconds(1), concurrency: 8);
+            using var listener4 = new DnsResolverListener(new IPEndPoint(IPAddress.Parse("10.231.251.1"), 2053),
+                ingress, 1, coordinator4, TimeSpan.FromSeconds(2), concurrency: 8);
+            using var listener6 = new DnsResolverListener(new IPEndPoint(IPAddress.Parse("fd7a:6b74:251::1"), 2053),
+                ingress, 1, coordinator6, TimeSpan.FromSeconds(2), concurrency: 8);
 #pragma warning disable CA1303
             await Console.Out.WriteLineAsync("KTNG_DNS_READY").ConfigureAwait(false);
 #pragma warning restore CA1303
-            await listener.RunAsync(cancellation.Token).ConfigureAwait(false);
+            await DnsListenerGroup.RunAsync(cancellation.Token, listener4.RunAsync, listener6.RunAsync).ConfigureAwait(false);
             return 0;
         }
         catch (Exception error) when (error is IOException or InvalidDataException or SocketException

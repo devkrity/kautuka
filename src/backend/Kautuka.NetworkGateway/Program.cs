@@ -46,7 +46,10 @@ try
         new(IPAddress.Parse("fd7a:6b74:251::2"), subject, 1, ingress),
     ];
     EndpointRule[] rules = dnsMode
-        ? [new(subject, IPAddress.Parse("10.231.252.2"), 2053, 6), new(subject, IPAddress.Parse("10.231.252.2"), 2053, 17)]
+        ? [
+            new(subject, IPAddress.Parse("10.231.252.2"), 2053, 6), new(subject, IPAddress.Parse("10.231.252.2"), 2053, 17),
+            new(subject, IPAddress.Parse("fd7a:6b74:252::2"), 2053, 6), new(subject, IPAddress.Parse("fd7a:6b74:252::2"), 2053, 17),
+        ]
         : args[0] == "probe-registry"
         ? [new(subject, IPAddress.Parse("10.231.252.2"), 20443, 6)]
         : [

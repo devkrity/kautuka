@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated IPv4 DNS transport, coarse-owner policy and audited upstream fixture."""
+"""Isolated dual-stack DNS transport, coarse-owner policy and audited upstream fixture."""
 
 import argparse
 import importlib.util
@@ -57,13 +57,13 @@ UPSTREAM = WIRE + r"""
 import selectors,sqlite3
 flowdb,querydb,log,uid=sys.argv[1:5]
 seen=set()
-def received(data,peer,protocol,port):
+def received(data,peer,protocol,port,address):
     identifier,name,kind=question(data)
-    event={'port':port,'peer':list(peer),'protocol':protocol,'id':identifier,'name':name,'type':kind}
+    event={'family':6 if ':' in address else 4,'server':address,'port':port,'peer':list(peer),'protocol':protocol,'id':identifier,'name':name,'type':kind}
     if port==2053:
         with sqlite3.connect('file:'+flowdb+'?mode=ro',uri=True) as db:
-            flow=db.execute('SELECT id FROM gateway_admissions WHERE source_address=? AND source_port=? AND destination_port=2053 AND protocol=? AND socket_uid=? AND hook=3 AND subject=?',
-                (peer[0],peer[1],protocol,int(uid),'probe-resolver')).fetchall()
+            flow=db.execute('SELECT id FROM gateway_admissions WHERE source_address=? AND source_port=? AND destination_port=2053 AND destination_address=? AND protocol=? AND socket_uid=? AND hook=3 AND subject=?',
+                (peer[0],peer[1],address,protocol,int(uid),'probe-resolver')).fetchall()
         with sqlite3.connect('file:'+querydb+'?mode=ro',uri=True) as db:
             attempts=db.execute("SELECT operation FROM dns_decisions WHERE upstream_id=? AND name=? AND qtype=? AND kind='AuthorizedAttempt'",(identifier,name,kind)).fetchall()
         fresh=[row[0] for row in attempts if row[0] not in seen]
@@ -72,31 +72,33 @@ def received(data,peer,protocol,port):
     with open(log,'a') as output: output.write(json.dumps(event)+'\n'); output.flush()
     return response(data,name.startswith('forged.'))
 selector=selectors.DefaultSelector()
-for port in (53,2053):
-    for protocol in (6,17):
-        s=socket.socket(socket.AF_INET,socket.SOCK_STREAM if protocol==6 else socket.SOCK_DGRAM)
-        s.bind(('10.231.252.2',port))
-        if protocol==6: s.listen(8)
-        selector.register(s,selectors.EVENT_READ,(protocol,port))
+for family,address in ((socket.AF_INET,'10.231.252.2'),(socket.AF_INET6,'fd7a:6b74:252::2')):
+    for port in (53,2053):
+        for protocol in (6,17):
+            s=socket.socket(family,socket.SOCK_STREAM if protocol==6 else socket.SOCK_DGRAM)
+            if family==socket.AF_INET6: s.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
+            s.bind((address,port))
+            if protocol==6: s.listen(8)
+            selector.register(s,selectors.EVENT_READ,(protocol,port,address))
 print('ready',flush=True)
 while True:
     for event,_ in selector.select():
-        protocol,port=event.data; s=event.fileobj
+        protocol,port,address=event.data; s=event.fileobj
         if protocol==17:
-            data,peer=s.recvfrom(1233); s.sendto(received(data,peer,protocol,port),peer)
+            data,peer=s.recvfrom(1233); s.sendto(received(data,peer,protocol,port,address),peer)
         else:
             connection,peer=s.accept()
             with connection:
                 connection.settimeout(3)
                 data=exact(connection,struct.unpack('!H',exact(connection,2))[0])
-                reply=received(data,peer,protocol,port)
+                reply=received(data,peer,protocol,port,address)
                 connection.sendall(struct.pack('!H',len(reply))+reply)
 """
 
 CLIENT = WIRE + r"""
 address,port,protocol,name,kind,identifier,bindaddress,bindport=sys.argv[1:9]
 port,protocol,kind,identifier,bindport=map(int,(port,protocol,kind,identifier,bindport))
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM if protocol==6 else socket.SOCK_DGRAM)
+s=socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET,socket.SOCK_STREAM if protocol==6 else socket.SOCK_DGRAM)
 s.settimeout(2.5)
 s.bind((bindaddress,bindport))
 request=query(identifier,name,kind)
@@ -132,6 +134,8 @@ class DnsProbe:
         self.upstream_process = None
         self.process_diagnostics = []
         self.packet_observation = None
+        self.packet_observations = []
+        self.resolver_stopped = []
         self.capture_process = None
         self.denials = []
         self.consumer_loss = []
@@ -149,7 +153,8 @@ class DnsProbe:
         return next(entry["counter"]["packets"] for entry in data["nftables"] if "counter" in entry)
 
     def client(self, *, protocol=17, name=None, kind=1, address="10.231.251.1", port=53,
-               role="src", source="0.0.0.0", source_port=0, uid=None):
+               role="src", source=None, source_port=0, uid=None):
+        source = source or ("::" if ":" in address else "0.0.0.0")
         self.identifier += 1
         uid = self.owner["uid"] if uid is None else uid
         command = ["setpriv", "--reuid=" + str(uid), "--regid=" + str(uid), "--init-groups",
@@ -180,8 +185,9 @@ class DnsProbe:
         if topology.read_line(self.upstream_process.stdout) != "ready":
             raise RuntimeError("DNS upstream not ready")
         # A reachable alternate DNS endpoint must work before the boundary is installed.
-        for protocol in (6, 17):
-            self.require(self.client(protocol=protocol, address="10.231.252.2"))
+        for address in ("10.231.252.2", "fd7a:6b74:252::2"):
+            for protocol in (6, 17):
+                self.require(self.client(protocol=protocol, address=address))
         self.checks.append("alternate-resolver-reachable-before-enforcement")
         topology.consumer = subprocess.Popen(["ip", "netns", "exec", topology.names["gw"], str(binary),
             "probe-dns-admission", topology.names["gw"], topology.ledger, "23199", str(self.resolver["uid"])],
@@ -210,52 +216,69 @@ class DnsProbe:
 
     def execute(self, binary):
         self.start(binary)
-        for protocol in (6, 17):
-            for kind in (1, 28):
-                result = self.client(protocol=protocol, kind=kind)
-                self.require(result)
-                if result["answer"] != ("10.231.252.2" if kind == 1 else "fd7a:6b74:252::2"):
-                    raise RuntimeError("DNS answer mismatch")
+        families = [(4, "10.231.251.1", "10.231.252.2", "10.231.251.2", "10.231.251.9"),
+                    (6, "fd7a:6b74:251::1", "fd7a:6b74:252::2", "fd7a:6b74:251::2", "fd7a:6b74:251::9")]
+        for family, gateway, _, _, _ in families:
+            for protocol in (6, 17):
+                for kind in (1, 28):
+                    result = self.client(protocol=protocol, kind=kind, address=gateway)
+                    self.require(result)
+                    if result["answer"] != ("10.231.252.2" if kind == 1 else "fd7a:6b74:252::2"):
+                        raise RuntimeError("DNS answer mismatch")
+                    if self.events()[-1]["family"] != family:
+                        raise RuntimeError("DNS upstream did not use the client transport family")
         events = [event for event in self.events() if event["port"] == 2053]
-        if len(events) != 4 or any(not event.get("operation") or not event.get("admissionId") for event in events):
-            raise RuntimeError("Missing pre-payload network/query audit evidence")
-        self.checks.append("tcp-udp-A-AAAA-two-durable-admissions-before-upstream")
-        for protocol in (6, 17):
-            for name in ("blocked." + self.subject + ".ktng.test", "allowed." + ("work" if self.subject == "core" else "core") + ".ktng.test"):
+        expected = {(family, protocol, kind) for family in (4, 6) for protocol in (6, 17) for kind in (1, 28)}
+        if len(events) != 8 or {(event["family"], event["protocol"], event["type"]) for event in events} != expected or any(not event.get("operation") or not event.get("admissionId") for event in events):
+            raise RuntimeError("Missing dual-stack pre-payload network/query audit evidence")
+        self.checks.append("tcp-udp-A-AAAA-ipv4-ipv6-client-and-upstream-admission")
+        for _, gateway, _, _, _ in families:
+            for protocol in (6, 17):
+                for name in ("blocked." + self.subject + ".ktng.test", "allowed." + ("work" if self.subject == "core" else "core") + ".ktng.test"):
+                    before = len(self.events())
+                    self.require(self.client(protocol=protocol, name=name, address=gateway), 5)
+                    if len(self.events()) != before:
+                        raise RuntimeError("Denied name reached upstream")
                 before = len(self.events())
-                self.require(self.client(protocol=protocol, name=name), 5)
-                if len(self.events()) != before:
-                    raise RuntimeError("Denied name reached upstream")
-            before = len(self.events())
-            self.require(self.client(protocol=protocol, name="forged." + self.subject + ".ktng.test"), 2)
-            if len(self.events()) != before + 1 or self.rows(self.querydb, "dns_decisions")[-1]["kind"] != "ResponseRejected":
-                raise RuntimeError("Forged response was not observed and rejected by response validation")
-        self.checks.append("denied-names-no-upstream-and-forged-response-rejected")
-        for protocol in (6, 17):
-            self.blocked("query_denials", protocol=protocol, port=2053)
-            self.blocked("forward_denials", protocol=protocol, address="10.231.252.2")
-            self.blocked("actor_denials", protocol=protocol, role="gw", uid=0)
-            self.blocked("actor_denials", protocol=protocol, role="gw", uid=self.owner["uid"])
-            self.blocked("local_query_denials", protocol=protocol, role="gw", uid=self.resolver["uid"])
-        self.checks.append("direct-listener-alternate-resolver-and-local-query-denied")
-        # Replay an already labelled UDP tuple through the other interface.
-        self.require(self.client(source_port=55053))
+                self.require(self.client(protocol=protocol, name="forged." + self.subject + ".ktng.test", address=gateway), 2)
+                if len(self.events()) != before + 1 or self.rows(self.querydb, "dns_decisions")[-1]["kind"] != "ResponseRejected":
+                    raise RuntimeError("Forged response was not observed and rejected by response validation")
+        self.checks.append("dual-stack-denied-names-no-upstream-and-forged-response-rejected")
+        for _, gateway, upstream, _, _ in families:
+            for protocol in (6, 17):
+                self.blocked("query_denials", protocol=protocol, address=gateway, port=2053)
+                self.blocked("forward_denials", protocol=protocol, address=upstream)
+                self.blocked("actor_denials", protocol=protocol, role="gw", uid=0, address=gateway)
+                self.blocked("actor_denials", protocol=protocol, role="gw", uid=self.owner["uid"], address=gateway)
+                self.blocked("local_query_denials", protocol=protocol, role="gw", uid=self.resolver["uid"], address=gateway)
+        self.checks.append("dual-stack-direct-listener-alternate-resolver-and-local-query-denied")
         self.topology.run(["sysctl", "-qw", "net.ipv4.conf.all.rp_filter=0", "net.ipv4.conf.g0.rp_filter=0", "net.ipv4.conf.g1.rp_filter=0"], role="gw")
-        self.topology.run(["ip", "address", "add", "10.231.251.2/32", "dev", "lo"], role="sink")
-        self.blocked("query_denials", role="sink", source="10.231.251.2", source_port=55053)
-        self.topology.run(["ip", "address", "add", "10.231.251.9/32", "dev", "lo"], role="src")
-        self.capture_process = subprocess.Popen(["ip", "netns", "exec", self.topology.names["gw"],
-            "tcpdump", "-Z", "root", "-nn", "-v", "-l", "-i", "g0", "-c", "1", "udp and dst port 53"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if "listening on" not in self.topology.read_line(self.capture_process.stderr):
-            raise RuntimeError("DNS source observer not ready")
-        try:
-            self.blocked("query_denials", source="10.231.251.9")
-        finally:
-            self.packet_observation, _ = self.capture_process.communicate(timeout=3)
-        if "10.231.251.9." not in self.packet_observation:
-            raise RuntimeError("Spoofed source did not appear on the observed ingress")
-        self.checks.append("labelled-tuple-wrong-interface-and-spoofed-source-denied")
+        # Fixed neighbors make adversarial IPv6 packets reach nftables independently
+        # of whether a spoofed source can complete neighbor discovery. Fixture only.
+        for role, interface, gateway, gateway_interface in (("src", "s0", "fd7a:6b74:251::1", "g0"), ("sink", "u0", "fd7a:6b74:252::1", "g1")):
+            mac = json.loads(self.topology.run(["ip", "-j", "link", "show", gateway_interface], role="gw"))[0]["address"]
+            self.topology.run(["ip", "-6", "neigh", "replace", gateway, "lladdr", mac, "nud", "permanent", "dev", interface], role=role)
+        for family, gateway, _, source, spoof in families:
+            self.require(self.client(source_port=55053, address=gateway))
+            command = ["ip"] + (["-6"] if family == 6 else [])
+            prefix = "/128" if family == 6 else "/32"
+            suffix = ["nodad"] if family == 6 else []
+            self.topology.run(command + ["address", "add", source + prefix, "dev", "lo"] + suffix, role="sink")
+            self.blocked("query_denials", role="sink", source=source, source_port=55053, address=gateway)
+            self.topology.run(command + ["address", "add", spoof + prefix, "dev", "lo"] + suffix, role="src")
+            self.capture_process = subprocess.Popen(["ip", "netns", "exec", self.topology.names["gw"],
+                "tcpdump", "-Z", "root", "-nn", "-v", "-l", "-i", "g0", "-c", "1", ("ip6" if family == 6 else "ip") + " and udp and dst port 53"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if "listening on" not in self.topology.read_line(self.capture_process.stderr):
+                raise RuntimeError("DNS source observer not ready")
+            try:
+                self.blocked("query_denials", source=spoof, address=gateway)
+            finally:
+                self.packet_observation, _ = self.capture_process.communicate(timeout=3)
+            if spoof + "." not in self.packet_observation:
+                raise RuntimeError("Spoofed source did not appear on the observed ingress")
+            self.packet_observations.append({"family": family, "packet": self.packet_observation})
+        self.checks.append("dual-stack-labelled-tuple-wrong-interface-and-spoofed-source-denied")
         if self.topology.consumer.poll() is not None:
             raise RuntimeError("Admission consumer exited before the intentional failure injection")
         self.topology.consumer.kill()
@@ -266,31 +289,36 @@ class DnsProbe:
                 raise RuntimeError("Fixture conntrack reset did not empty table")
         baseline = len(self.events())
         admissions = len(self.rows(self.topology.ledger, "gateway_admissions"))
-        for protocol in (6, 17):
-            before = self.counter("queued_output")
-            self.require(self.client(protocol=protocol), 2)
-            if self.counter("queued_output") <= before or len(self.events()) != baseline or len(self.rows(self.topology.ledger, "gateway_admissions")) != admissions:
-                raise RuntimeError("Consumer-absence DNS did not fail closed for protocol " + str(protocol))
-            self.consumer_loss.append({"protocol": protocol, "queueBefore": before, "queueAfter": self.counter("queued_output"), "admissions": admissions, "events": baseline})
-        self.checks.append("consumer-absent-new-upstream-denied")
+        for family, gateway, _, _, _ in families:
+            for protocol in (6, 17):
+                before = self.counter("queued_output")
+                query_count = len(self.rows(self.querydb, "dns_decisions"))
+                self.require(self.client(protocol=protocol, address=gateway), 2)
+                fresh = self.rows(self.querydb, "dns_decisions")[query_count:]
+                if self.counter("queued_output") <= before or len(self.events()) != baseline or len(self.rows(self.topology.ledger, "gateway_admissions")) != admissions or [row["kind"] for row in fresh] != ["AuthorizedAttempt", "UpstreamFailed"]:
+                    raise RuntimeError("Consumer-absence DNS did not fail closed: " + str((family, protocol)))
+                self.consumer_loss.append({"family": family, "protocol": protocol, "queueBefore": before, "queueAfter": self.counter("queued_output"), "admissions": admissions, "events": baseline})
+        self.checks.append("consumer-absent-each-protocol-family-upstream-denied")
         if self.resolver_process.poll() is not None:
             raise RuntimeError("Resolver exited before intentional shutdown")
         self.resolver_process.terminate()
         _, errors = self.resolver_process.communicate(timeout=5)
         if self.resolver_process.returncode != 0:
             raise RuntimeError("Resolver graceful shutdown failed: " + errors)
-        for protocol in (6, 17):
-            if self.client(protocol=protocol)["response"]:
-                raise RuntimeError("Stopped resolver answered")
-        if len(self.events()) != baseline:
-            raise RuntimeError("Stopped resolver emitted upstream traffic")
-        self.checks.append("resolver-stopped-no-response-or-upstream")
+        query_count = len(self.rows(self.querydb, "dns_decisions"))
+        for family, gateway, _, _, _ in families:
+            for protocol in (6, 17):
+                before = self.counter("client_queries")
+                if self.client(protocol=protocol, address=gateway)["response"] or self.counter("client_queries") <= before or len(self.events()) != baseline or len(self.rows(self.querydb, "dns_decisions")) != query_count:
+                    raise RuntimeError("Stopped resolver did not deny the observed query: " + str((family, protocol)))
+                self.resolver_stopped.append({"family": family, "protocol": protocol, "inputBefore": before, "inputAfter": self.counter("client_queries")})
+        self.checks.append("resolver-stopped-each-protocol-family-no-response-or-upstream")
         rows = self.rows(self.querydb, "dns_decisions")
         if any(row["subject"] != self.subject or row["namespace_generation"] != 1 for row in rows):
             raise RuntimeError("Coarse owner identity missing from DNS audit")
         return {"subject": self.subject, "owner": self.owner["name"], "sourceNamespace": self.topology.names["src"],
                 "checks": self.checks, "queryDecisions": rows, "denials": self.denials,
-                "spoofIngressPacket": self.packet_observation, "consumerLoss": self.consumer_loss,
+                "spoofIngressPackets": self.packet_observations, "consumerLoss": self.consumer_loss, "resolverStopped": self.resolver_stopped,
                 "upstreamEvents": self.events(), "networkAdmissions": self.rows(self.topology.ledger, "gateway_admissions")}
 
     def stop(self):
@@ -327,9 +355,9 @@ def main():
     if any(shutil.which(tool) is None for tool in ("ip", "nft", "setpriv", "conntrack", "systemctl", "tcpdump")) or not options.admission_binary.is_file():
         parser.error("missing tools or AOT binary; no resources created")
     with options.report.open("x", encoding="utf-8") as report:
-        result = {"schemaVersion": 1, "scope": "isolated-coarse-owner-IPv4-DNS", "dnsPassed": False,
+        result = {"schemaVersion": 1, "scope": "isolated-coarse-owner-dual-stack-DNS", "dnsPassed": False,
                   "gate1Passed": False, "cleanupErrors": [], "owners": [], "limitations": [
-                      "IPv4 DNS transport with A/AAAA answers; not IPv6 transport or general DNS interoperability.",
+                      "IPv4/IPv6 DNS transport with A/AAAA answers; not general DNS, PMTU, extension-header or fragment interoperability.",
                       "Trusted root fixture selects owner/namespace; no helper resolver-config or per-connector identity proof.",
                       "Client conntrack label is query transport classification, not a revocable name or connection grant."]}
         try:
