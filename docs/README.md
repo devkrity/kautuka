@@ -69,6 +69,7 @@ Each concern has one canonical explanation. Other pages link to it rather than r
 
 ## Decisions and active plans
 
+- [Container deployment and outbound access control](plans/container-egress.md) — revision 6: native Podman/Linux egress, user–agent networks, service containers and UpdateService integration.
 - [Single-instance channel concurrency plan](plans/single-instance-channel-concurrency.md) — polling isolation and durable delivery stages.
 - [ADR 0001: Podman runtime](adr/0001-podman-runtime.md)
 - [ADR 0002: Canonical runtime events](adr/0002-canonical-runtime-events.md)
