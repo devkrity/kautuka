@@ -108,3 +108,39 @@ To check the C# admission observer against the actual report, rerun the fixture
 export test above with `KAUTUKA_TEST_EGRESS_REPORT` set to the report's path. It
 checks accepted CDS/LDS, the preserved listener after rejection and the mixed
 policy's active resources.
+
+## Actual Manager lifecycle fixture
+
+Publish the small Native AOT host in Linux, then pass it to the same disposable
+runner. It references the actual RuntimeContainer project and shares the Linux
+integration-test fixture; it does not substitute a launcher or network model.
+
+```sh
+dotnet publish scripts/container-egress/manager-smoke.csproj -c Release -r linux-x64 \
+  -o "$PWD/artifacts/container-egress/manager-smoke"
+sudo python3 scripts/container-egress/prove-topology.py \
+  --image-cache "$HOME/kautuka-egress-fixture-images" \
+  --policy-fixture "$PWD/artifacts/container-egress/compiled-policy" \
+  --manager-smoke "$PWD/artifacts/container-egress/manager-smoke/Kautuka.IntegrationTests" \
+  --report /var/tmp/kautuka-manager-egress-proof.json
+```
+
+This optional stage uses offline fixture images and the public Manager connector
+execution service for real stdio discovery and invocation. Its assertions cover
+source-specific grants, overlapping one-shot operations, Manager adoption of a
+live proxy, unexpected address reuse, uncertain-policy retirement and recovery,
+agent-scope retirement, and recovery of empty-network capacity. The fixture also
+checks that the proxy UID cannot initiate a connection to its loopback admin
+listener or the managed private-network resolver address. Control helpers use a
+different numeric UID for the narrowly allowed admin endpoint.
+
+The runner creates a fresh rootless account and subordinate mappings for each
+run. It discovers partially-created Manager resources during cleanup, removes
+application containers before their pods and networks, and retains the account
+and directory when cleanup reports an error. Core dumps are disabled.
+
+The current enabled Manager path accepts preloaded self-contained connector
+images. Bundle/language materialization and AgentSandbox execution reject rather
+than using legacy networking while those integrations are unfinished. This is
+not yet the installed all-service deployment or its image-acquisition/update
+path. Never treat this offline fixture as evidence for production registry pulls.

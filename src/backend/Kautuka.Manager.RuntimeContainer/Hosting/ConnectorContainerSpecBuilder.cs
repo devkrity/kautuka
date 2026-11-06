@@ -51,6 +51,7 @@ internal static class ConnectorContainerSpecBuilder
         if (create)
         {
             arguments.Add("--pull=never");
+            arguments.Add("--restart=no");
             if (!persistent)
             {
                 arguments.Add("--interactive");
@@ -103,10 +104,13 @@ internal static class ConnectorContainerSpecBuilder
             arguments.Add($"{workspaceContext.HostWorkspacePath}:{workspaceContext.ContainerWorkspacePath}:ro");
         }
 
+        // The persistent exec host must not accidentally invoke the image's application ENTRYPOINT.
+        if (create && persistent) arguments.AddRange(["--entrypoint", "sh"]);
+
         arguments.Add(connector.Image);
         if (persistent)
         {
-            arguments.AddRange(["sh", "-lc", "tail -f /dev/null"]);
+            arguments.AddRange(create ? ["-lc", "tail -f /dev/null"] : ["sh", "-lc", "tail -f /dev/null"]);
         }
         else
         {

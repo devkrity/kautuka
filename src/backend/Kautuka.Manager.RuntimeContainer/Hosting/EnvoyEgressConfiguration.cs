@@ -110,7 +110,9 @@ internal sealed record EnvoyEgressConfiguration(
     {
         foreach (JsonElement config in Configurations(dump, "ClustersConfigDump"))
         {
-            if (Text(config, "version_info") != Version) continue;
+            // Envoy omits the enclosing version when no dynamic clusters exist.
+            // Exact absence is the observable condition for an empty required set.
+            if (ClusterNames.Count != 0 && Text(config, "version_info") != Version) continue;
             JsonElement[] active = Items(config, "dynamic_active_clusters");
             if (active.Length != ClusterNames.Count) return false;
             foreach (string name in ClusterNames)
@@ -218,7 +220,7 @@ internal sealed record EnvoyEgressConfiguration(
         string destination;
         if (IPAddress.TryParse(rule.Destination, out IPAddress? address))
         {
-            if (!IsUnicastV4(address)) throw new ArgumentException("Egress literal destination must be unicast IPv4.", nameof(rule));
+            if (!IsUnicastV4(address) || IPAddress.IsLoopback(address)) throw new ArgumentException("Egress literal destination must be unicast IPv4.", nameof(rule));
             destination = address.ToString();
         }
         else

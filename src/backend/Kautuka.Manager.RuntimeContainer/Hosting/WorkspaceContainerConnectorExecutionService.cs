@@ -23,7 +23,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     PodmanCommandRunner podmanCommandRunner,
     McpbImageMaterializer mcpbImageMaterializer,
     IContainerTool containerTool,
-    ILogger<WorkspaceContainerConnectorExecutionService> logger) : IAsyncDisposable
+    ILogger<WorkspaceContainerConnectorExecutionService> logger,
+    ContainerEgressRuntime? egressRuntime = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -32,6 +33,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private readonly ConcurrentDictionary<string, string> trackedConnectorContainers = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConnectorCooldownScheduler connectorCooldowns = new();
     private readonly AsyncKeyedLockPool connectorLocks = new();
+    private readonly AsyncKeyedLockPool oneShotOperations = new();
     private readonly AsyncKeyedLockPool sandboxProvisionLocks = new();
     private readonly IContainerTool containerTool = containerTool;
 
@@ -125,7 +127,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             // A one-shot stdio launch may reuse the name without taking this lease.
             // Retire only the immutable object observed by inventory, never its replacement.
-            _ = await podmanCommandRunner.RunAsync(["rm", "-f", observedContainer.Id], 15, cancellationToken).ConfigureAwait(false);
+            if (egressRuntime?.Enabled == true)
+                await egressRuntime.RetireAsync(observedContainer.Id, cancellationToken).ConfigureAwait(false);
+            else
+                _ = await podmanCommandRunner.RunAsync(["rm", "-f", observedContainer.Id], 15, cancellationToken).ConfigureAwait(false);
             PodmanCommandResult exists = await podmanCommandRunner.RunAsync(["container", "exists", observedContainer.Id], 10, cancellationToken).ConfigureAwait(false);
             if (exists.ExitCode != 1 || exists.TerminationReason != ProcessTerminationReason.NonZeroExit)
             {
@@ -161,7 +166,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             ConnectorContainerInspection inspection;
             try
             {
-                inspection = await InspectContainerStateAsync(containerName, connector, mountedWorkspace, cancellationToken).ConfigureAwait(false);
+                inspection = await InspectContainerStateAsync(containerName, connector, mountedWorkspace, cancellationToken,
+                    egressRuntime?.Enabled == true ? ContainerEgressRuntime.ConnectorScope(connector.ConnectorId, instance.Workspace).NetworkName : null).ConfigureAwait(false);
             }
             catch (ContainerInspectionUnavailableException ex)
             {
@@ -189,6 +195,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 : "it was not running after Manager started";
             try
             {
+                if (egressRuntime?.Enabled == true)
+                {
+                    _ = await RemoveConnectorContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
+                    trackedConnectorContainers.TryRemove(runtimeKey, out _);
+                    notes.Add(connector.ConnectorId + " was retired after drift and starts on its next tool call.");
+                    continue;
+                }
                 await EnsureConnectorContainerRunningCoreAsync(
                     connector,
                     runtimeKey,
@@ -318,6 +331,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         string connectorId = connector.ConnectorId;
         bool containerPrepared = false;
+        IAsyncDisposable? operationLease = null;
 
         try
         {
@@ -337,6 +351,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "probe-start");
 
+            operationLease = await AcquireOneShotOperationAsync(effectiveConnector, null, WorkspaceMcpExecutionContext.Isolated, cancellationToken).ConfigureAwait(false);
             var transport = await CreateTransportAsync(effectiveConnector, requireEnabled: false, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = true;
             var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(effectiveConnector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
@@ -367,13 +382,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
         finally
         {
-            if (containerPrepared)
-            {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null),
-                    BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null)).ConfigureAwait(false);
-            }
+            await CompleteInvocationAsync(connector, null, WorkspaceMcpExecutionContext.Isolated, containerPrepared, operationLease).ConfigureAwait(false);
         }
     }
 
@@ -393,6 +402,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         WorkspaceMcpContainerConnectorDefinition? connector = null;
         bool containerPrepared = false;
+        IAsyncDisposable? operationLease = null;
 
         try
         {
@@ -412,6 +422,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "list-start");
 
+            operationLease = await AcquireOneShotOperationAsync(connector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
             var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
@@ -439,13 +450,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
         finally
         {
-            if (containerPrepared && connector is not null)
-            {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
-                    BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
-            }
+            await CompleteInvocationAsync(connector, workspaceContext, executionContext, containerPrepared, operationLease).ConfigureAwait(false);
         }
     }
 
@@ -469,6 +474,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         WorkspaceMcpContainerConnectorDefinition? connector = null;
         bool containerPrepared = false;
+        IAsyncDisposable? operationLease = null;
 
         try
         {
@@ -488,6 +494,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "call-start");
 
+            operationLease = await AcquireOneShotOperationAsync(connector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
             var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             McpClient client = await McpClient.CreateAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -523,13 +530,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
         finally
         {
-            if (containerPrepared && connector is not null)
-            {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
-                    BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
-            }
+            await CompleteInvocationAsync(connector, workspaceContext, executionContext, containerPrepared, operationLease).ConfigureAwait(false);
         }
     }
 
@@ -606,6 +607,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         int timeoutSeconds,
         CancellationToken cancellationToken)
     {
+        // A diagnostic retry must not launch another application outside the admitted lifecycle.
+        if (egressRuntime?.Enabled == true) return null;
         connector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
 
         List<string> arguments = ConnectorContainerSpecBuilder.BuildRun(
@@ -644,7 +647,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         return false;
     }
 
-    private async Task<StdioClientTransport> CreateTransportAsync(
+    private async Task<IClientTransport> CreateTransportAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         bool requireEnabled,
         bool allowInternalSystemConnector = false,
@@ -670,6 +673,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         WorkspaceMcpExecutionContext effectiveExecutionContext = NormalizeExecutionContext(executionContext);
+
+        if (egressRuntime?.Enabled == true)
+        {
+            if (effectiveExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox)
+                throw new InvalidOperationException("AgentSandbox egress is not integrated; the legacy network cannot be used.");
+            if (!string.IsNullOrWhiteSpace(connector.BundlePath) || !string.IsNullOrWhiteSpace(connector.ServerType))
+                throw new InvalidOperationException("Connector image acquisition/build and package endpoint integration are not ready in egress mode. Use a verified preloaded self-contained image.");
+            return await CreateEgressTransportAsync(connector, workspaceContext, effectiveExecutionContext, cancellationToken).ConfigureAwait(false);
+        }
 
         if (effectiveExecutionContext == WorkspaceMcpExecutionContext.AgentSandbox)
         {
@@ -730,6 +742,74 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             EnvironmentVariables = ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector),
             Name = $"container-connector-{connector.ConnectorId}"
         });
+    }
+
+    private async Task<IClientTransport> CreateEgressTransportAsync(
+        WorkspaceMcpContainerConnectorDefinition connector, ContainerContext? identity,
+        WorkspaceMcpExecutionContext mode, CancellationToken cancellationToken)
+    {
+        ContainerEgressRuntime runtime = egressRuntime!;
+        string name = BuildContainerName(connector.ConnectorId, mode, identity);
+        string key = BuildRuntimeKey(connector.ConnectorId, mode, identity);
+        ContainerEgressRuntime.Scope scope = ContainerEgressRuntime.ConnectorScope(connector.ConnectorId, identity);
+        ContainerContext? mounted = ResolveMountedWorkspace(mode, identity);
+        if (mounted is not null) await containerTool.PrimeWorkspaceAsync(mounted, cancellationToken).ConfigureAwait(false);
+        bool persistent = !UsesImageDefaultCommand(connector);
+        PreparedPodmanContainer? prepared;
+        await using (var lease = (await connectorLocks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false))
+        {
+            await runtime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+            await CancelConnectorCooldownAsync(key).ConfigureAwait(false);
+            ConnectorContainerInspection inspection = await InspectContainerStateAsync(name, connector, mounted, cancellationToken, scope.NetworkName).ConfigureAwait(false);
+            prepared = persistent && inspection.IsRunning && inspection.Matches(connector)
+                ? await runtime.FindSourceAsync(name, cancellationToken).ConfigureAwait(false) : null;
+            if (prepared is null)
+            {
+                if (inspection.Exists) _ = await RemoveConnectorContainerAsync(name, cancellationToken).ConfigureAwait(false);
+                prepared = await runtime.PrepareAndAuthorizeAsync(connector, name, scope,
+                    (network, dns) => ConnectorContainerSpecBuilder.BuildCreate(connector, name, mode, mounted, persistent, network, dns),
+                    cancellationToken, BuildPodmanEnvironment(connector)).ConfigureAwait(false);
+                if (persistent)
+                {
+                    try
+                    {
+                        PodmanCommandResult started = await runtime.StartWithAdmissionAsync(prepared,
+                            token => podmanCommandRunner.RunAsync(prepared.StartArguments(attach: false), 15, token), cancellationToken).ConfigureAwait(false);
+                        if (started.ExitCode != 0)
+                            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Start admitted connector", started));
+                    }
+                    catch
+                    {
+                        await runtime.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false);
+                        throw;
+                    }
+                }
+            }
+            trackedConnectorContainers[key] = name;
+        }
+
+        string[] arguments = persistent ? [.. ConnectorContainerSpecBuilder.BuildExec(connector, prepared.Id, ResolveExecWorkingDirectory(connector))]
+            : prepared.StartArguments(attach: true);
+        var transport = new StdioClientTransport(new StdioClientTransportOptions
+        {
+            Command = PodmanCommandRunner.BinaryName,
+            Arguments = arguments,
+            EnvironmentVariables = ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector),
+            Name = "container-connector-" + connector.ConnectorId,
+        });
+        return new AdmittedConnectorTransport(transport, runtime, prepared, connectorLocks, name);
+    }
+
+    private sealed class AdmittedConnectorTransport(IClientTransport transport, ContainerEgressRuntime runtime,
+        PreparedPodmanContainer container, AsyncKeyedLockPool locks, string name) : IClientTransport
+    {
+        public string Name => transport.Name;
+
+        public async Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default)
+        {
+            await using var lease = (await locks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+            return await runtime.StartWithAdmissionAsync(container, transport.ConnectAsync, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task<AgentSandboxInstalledManifest> BuildDesiredAgentSandboxManifestAsync(
@@ -1005,6 +1085,39 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         trackedConnectorContainers[runtimeKey] = containerName;
     }
 
+    private async ValueTask<IAsyncDisposable?> AcquireOneShotOperationAsync(WorkspaceMcpContainerConnectorDefinition connector,
+        ContainerContext? workspace, WorkspaceMcpExecutionContext mode, CancellationToken cancellationToken)
+    {
+        if (egressRuntime?.Enabled != true || !UsesImageDefaultCommand(connector)
+            || NormalizeExecutionContext(mode) == WorkspaceMcpExecutionContext.AgentSandbox) return null;
+        return await oneShotOperations.AcquireAsync(BuildContainerName(connector.ConnectorId, mode, workspace), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CompleteInvocationAsync(WorkspaceMcpContainerConnectorDefinition? connector, ContainerContext? workspace,
+        WorkspaceMcpExecutionContext mode, bool prepared, IAsyncDisposable? operationLease)
+    {
+        try
+        {
+            if (!prepared || connector is null) return;
+            string key = BuildRuntimeKey(connector.ConnectorId, mode, workspace);
+            string name = BuildContainerName(connector.ConnectorId, mode, workspace);
+            if (egressRuntime?.Enabled == true && UsesImageDefaultCommand(connector))
+            {
+                try { await StopConnectorContainerAsync(key, connector.ConnectorId, name, "connector-call-complete", CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception error)
+                {
+                    // Keep the already-produced tool result; uncertain retirement has invalidated egress readiness.
+                    logger.LogWarning(error, "[ContainerConnector] One-shot cleanup needs recovery for '{ConnectorId}'", connector.ConnectorId);
+                }
+            }
+            else await ResetConnectorCooldownAsync(connector, key, name).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (operationLease is not null) await operationLease.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
     private async Task ResetConnectorCooldownAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string runtimeKey,
@@ -1063,7 +1176,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string containerName,
         WorkspaceMcpContainerConnectorDefinition? connector,
         ContainerContext? workspaceContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? networkName = null)
     {
         string? inspectJson = await PodmanContainerInspector.ReadAsync(podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false);
         if (inspectJson is null)
@@ -1081,7 +1195,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             string? drift = LiveContainerSpec.DescribeDrift(
                 inspectJson,
-                LiveContainerSpec.ForConnector(workspaceContext, ConnectorEnvAssignments(connector), imageId));
+                LiveContainerSpec.ForConnector(workspaceContext, ConnectorEnvAssignments(connector), imageId) with
+                { NetworkName = networkName ?? ConnectorContainerSpecBuilder.SandboxNetworkName });
             return new ConnectorContainerInspection(true, state, desiredVersion, fingerprint, drift);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
@@ -1136,6 +1251,18 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task<bool> RemoveConnectorContainerAsync(string containerName, CancellationToken cancellationToken)
     {
+        if (egressRuntime?.Enabled == true)
+        {
+            string? inspect = await PodmanContainerInspector.ReadAsync(podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false);
+            if (inspect is null) return true;
+            using JsonDocument document = JsonDocument.Parse(inspect);
+            JsonElement container = document.RootElement[0];
+            JsonElement labels = container.GetProperty("Config").GetProperty("Labels");
+            if (labels.GetProperty("kautuka.managed").GetString() != "manager" || labels.GetProperty("kautuka.role").GetString() != "connector")
+                throw new InvalidOperationException("Unmanaged container cannot be retired as a connector.");
+            await egressRuntime.RetireAsync(container.GetProperty("Id").GetString()!, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
         PodmanCommandResult result = await podmanCommandRunner
             .RunAsync(["rm", "-f", containerName], 15, cancellationToken)
             .ConfigureAwait(false);
@@ -1471,6 +1598,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         connectorLocks.Dispose();
+        oneShotOperations.Dispose();
         sandboxProvisionLocks.Dispose();
 
     }
@@ -1505,7 +1633,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             : new McpClientOptions { ProtocolVersion = protocolVersion.Trim() };
 
     private static async Task<IReadOnlyList<McpClientTool>> ListMcpToolsAsync(
-        StdioClientTransport transport,
+        IClientTransport transport,
         McpClientOptions? clientOptions,
         CancellationToken cancellationToken)
     {

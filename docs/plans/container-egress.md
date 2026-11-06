@@ -338,3 +338,70 @@ All 59 focused tests pass; the Astra architect reviewed this bounded checkpoint.
 The compiler and observer are not yet wired to application launch or approval
 publication. Manager topology lifecycle, package endpoint integration, service
 containerisation, container release/update recovery and UI remain required work.
+
+
+## Manager connector integration checkpoint
+
+`ContainerEgressRuntime` now owns native topology and serialized policy publication
+inside Manager's existing lifecycle. It prepares the egress pod from verified,
+locally cached inventory entries, keeps its sole outside default route, installs
+native drop/redirection rules before private attachment, and disables ordinary
+IPv4 forwarding. No application receives an outside network or runtime socket.
+Private network names are deterministic hashes of user, scope kind and agent;
+management probes have a distinct scope kind.
+
+The connector service uses create/init, verifies the assigned native tuple,
+confirms the complete Envoy policy, then starts that immutable container ID.
+A newly observed address allocation replaces its previous owner before startup.
+Automatic restart is disabled. One-shot calls hold the existing keyed operation
+lease through invocation and cleanup; persistent calls use exec against the
+admitted ID. Isolated identity does not imply a workspace mount.
+
+Retirement removes source permission before allocation release. If policy
+confirmation fails, Manager invalidates readiness and confirms Envoy stopped
+before stopping the source. Recovery reconstructs native ownership, prepares
+policy files before reviving a stopped proxy, and never starts the whole pod
+with stale files. Healthy adoption checks image, pod, command, capabilities,
+readonly configuration mount and disabled restart. DNS configuration drift
+rejects explicitly until controlled DNS replacement is integrated.
+
+The proxy cannot initiate connections to managed private CIDRs or its own
+loopback services. Reply-direction traffic remains possible. Loopback DNS is
+allowed at port 53; only a separate numeric setup-helper identity can reach the
+loopback admin port. This protects against approved names resolving to internal
+addresses. The future designated package endpoint requires an explicit narrow
+exception and forwarder, not an ordinary external rule.
+
+Native Envoy observations require two publication details. An empty cluster set
+has no response version in the admin dump, so its confirmation requires an actual
+cluster dump with zero active and warming clusters, alongside the independently
+confirmed listener. Nonempty sets retain the exact version checks. Envoy also
+ignores resource-identical version-only CDS updates; staging/final publication
+therefore gives actual cluster resources a separate publication metadata marker.
+The stable destination marker and authorization configuration are preserved.
+
+This remains an opt-in integration checkpoint. It accepts preloaded,
+self-contained connector images. Bundle/language materialization, AgentSandbox,
+package/telemetry endpoints, host artifact acquisition, full service deployment,
+container update recovery, policy persistence and audit/approval UI still need
+integration. Unsupported execution paths reject explicitly; there is no legacy
+network fallback. The measured private-network cap is currently core plus one
+active scope, with empty scopes retired to recover capacity.
+
+
+The tracked Fedora WSL run with the actual Linux Native AOT host passed in
+`artifacts/container-egress/runtime-proof-715a031e.json`, with no cleanup errors.
+It completed real tool discovery and invocation, overlapping one-shot calls,
+healthy adoption without an Envoy PID change, forced same-address replacement
+without permission inheritance, proxy-stop-before-source-stop recovery, different
+agent grants and empty-scope retirement. The proxy-UID loopback/admin and private
+resolver probes were denied. Runtime, execution-service and shared-fixture source
+hashes match the Linux AOT snapshot. This uses fixture DNS and offline images;
+it does not demonstrate registry acquisition or an installed application.
+
+Enabled supervisor shutdown skips the legacy global parallel managed-container
+removal. The connector service remains responsible for policy-aware retirement;
+egress topology survives for adoption. The host dependency graph constructs the
+runtime before its dependent connector service, so normal reverse-order disposal
+keeps the runtime available through connector cleanup. Both enabled preservation
+and unchanged legacy shutdown are covered by focused tests.

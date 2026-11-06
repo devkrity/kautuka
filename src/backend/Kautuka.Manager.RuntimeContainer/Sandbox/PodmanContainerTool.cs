@@ -14,7 +14,8 @@ namespace Kautuka.Manager.RuntimeContainer.Sandbox;
 /// Podman-backed sandbox tool for Linux appliance agent workspaces.
 /// </summary>
 public sealed class PodmanContainerTool(
-    PodmanCommandRunner podmanCommandRunner) : IContainerTool
+    PodmanCommandRunner podmanCommandRunner,
+    ContainerEgressRuntime? egressRuntime = null) : IContainerTool
 {
     private readonly ConcurrentDictionary<string, byte> primedWorkspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> driftNotes = new();
@@ -179,6 +180,8 @@ public sealed class PodmanContainerTool(
 
     private async Task<OciSandboxSession> EnsureContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
+        if (egressRuntime?.Enabled == true)
+            throw new InvalidOperationException("AgentSandbox egress integration is not ready; execution on the legacy network is disabled in this mode.");
         string containerName = BuildContainerName(context);
         await using var containerLease = (await containerLocks
             .AcquireAsync(containerName, cancellationToken)

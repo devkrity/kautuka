@@ -7,6 +7,7 @@ The outside TLS/DNS containers simulate remote endpoints; they are test fixtures
 This is not installed application enforcement or a production container launcher.
 """
 import argparse
+import resource
 import fcntl
 import grp
 import hashlib
@@ -31,6 +32,7 @@ def command(args, timeout=60):
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image-cache', required=True, type=pathlib.Path, help='Directory containing envoy.oci and dns.oci')
 parser.add_argument('--policy-fixture', required=True, type=pathlib.Path, help='C# test-exported cds/lds and mixed-cds/mixed-lds JSON files')
+parser.add_argument('--manager-smoke', type=pathlib.Path, help='Optional linux-x64 Native AOT Manager fixture executable')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -38,6 +40,9 @@ if sys.platform != 'linux' or os.geteuid() != 0:
 for role in ('envoy','dns'):
     if not (options.image_cache/(role+'.oci')).is_file():
         parser.error('missing offline '+role+'.oci image archive')
+if options.manager_smoke is not None and not options.manager_smoke.is_file():
+    parser.error('missing Native AOT Manager fixture executable')
+resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
 lock = os.open('/run/lock/kautuka-egress-proof.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
 lock_status = os.fstat(lock)
@@ -96,13 +101,25 @@ try:
                          'networkBackend':info['host']['networkBackend']}
     if not report['runtime']['rootless']: raise RuntimeError('not rootless')
     names = {role:prefix+'-'+role for role in ('outside','a','b')}
+    names['outside']='kautuka-outside'
     for index,role in enumerate(('outside','a','b')):
         args = ['network','create','--subnet',f'10.247.{90+index}.0/24','--disable-dns']
         if role != 'outside': args += ['--internal']
+        else: args += ['--label','kautuka.egress=true','--label','kautuka.egress.scope=outside']
         podman(*args,names[role])
         network_names.append(names[role])
+    archive = root/'home'/'tools.tar'
+    files = set()
+    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl','/usr/bin/bash','/usr/bin/sh','/usr/bin/tail','/usr/bin/cat'):
+        files.add(binary)
+        for line in command(['ldd',binary]).splitlines():
+            files.update(token for token in line.split() if token.startswith('/'))
+    with tarfile.open(archive,'w',dereference=True) as tar:
+        for file in sorted(files): tar.add(file,arcname=file.lstrip('/'),recursive=False)
+    archive.chmod(0o644)
+    tools = podman('import','--quiet',str(archive))
     pod = prefix+'-egress'
-    podman('pod','create','--sysctl','net.ipv4.ip_unprivileged_port_start=0','--name',pod,'--dns','127.0.0.1','--network',names['outside']+':ip=10.247.90.2',
+    podman('pod','create','--infra-image',tools,'--infra-command','/usr/bin/sleep infinity','--security-opt','no-new-privileges','--sysctl','net.ipv4.ip_unprivileged_port_start=0','--name',pod,'--dns','127.0.0.1','--network',names['outside']+':ip=10.247.90.2',
            '--network',names['a']+':ip=10.247.91.2')
     pod_created = True
     podman('pod','start',pod)
@@ -114,16 +131,6 @@ try:
         return {'pid':pid,'networks':state['NetworkSettings']['Networks'],
                 'routes':command(['nsenter','--net=/proc/'+str(pid)+'/ns/net','ip','-j','route']),
                 'addresses':command(['nsenter','--net=/proc/'+str(pid)+'/ns/net','ip','-j','address'])}
-    archive = root/'home'/'tools.tar'
-    files = set()
-    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl','/usr/bin/bash'):
-        files.add(binary)
-        for line in command(['ldd',binary]).splitlines():
-            files.update(token for token in line.split() if token.startswith('/'))
-    with tarfile.open(archive,'w',dereference=True) as tar:
-        for file in sorted(files): tar.add(file,arcname=file.lstrip('/'),recursive=False)
-    archive.chmod(0o644)
-    tools = podman('import','--quiet',str(archive))
     client = prefix+'-client'
     podman('run','--detach','--name',client,'--network',names['a']+':ip=10.247.91.10',
            '--dns','10.247.91.2','--sysctl','net.ipv6.conf.all.disable_ipv6=1','--user','65532:65532','--cap-drop=ALL','--security-opt=no-new-privileges',tools,'/usr/bin/sleep','120')
@@ -465,6 +472,59 @@ while True:
     for key in ('beforeAttach','afterAttach','afterDetach'):
         defaults = [r for r in json.loads(report[key]['routes']) if r['dst']=='default']
         if len(defaults)!=1 or defaults[0].get('gateway')!='10.247.90.1': raise RuntimeError('egress default changed')
+    if options.manager_smoke is not None:
+        import io
+        mcp_script=r"""#!/usr/bin/bash
+    while IFS= read -r line; do
+     if [[ ! $line =~ \"id\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[0-9]+) ]]; then continue; fi
+     request_id=${BASH_REMATCH[1]}
+     if [[ $line == *'"initialize"'* ]]; then
+      [[ $line =~ \"protocolVersion\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; version=${BASH_REMATCH[1]}
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"%s","capabilities":{"tools":{}},"serverInfo":{"name":"native-egress-fixture","version":"1"}}}\n' "$request_id" "$version"
+     elif [[ $line == *'"tools/list"'* ]]; then
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"allowed","inputSchema":{"type":"object"}},{"name":"denied","inputSchema":{"type":"object"}},{"name":"hold","inputSchema":{"type":"object"}}]}}\n' "$request_id"
+     elif [[ $line == *'"tools/call"'* ]]; then
+      if [[ $line == *'"hold"'* ]]; then /usr/bin/sleep 2; value=held
+      else
+       host=allowed.kautuka.test; [[ $line == *'"denied"'* ]] && host=denied.kautuka.test
+       /usr/bin/curl --silent --show-error --output /dev/null --max-time 4 --insecure "https://$host:8443/"
+       value=exit:$?
+      fi
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"%s"}]}}\n' "$request_id" "$value"
+     else printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"Method not found"}}\n' "$request_id"
+     fi
+     done
+    """
+        with tarfile.open(archive,'a') as tar:
+            raw=mcp_script.encode();item=tarfile.TarInfo('mcp-fixture.sh');item.size=len(raw);item.mode=0o644;tar.addfile(item,io.BytesIO(raw))
+        mcp_image='localhost/kautuka-mcp-fixture:'+prefix
+        podman('import','--change','ENTRYPOINT ["/usr/bin/bash","/mcp-fixture.sh"]',str(archive),mcp_image)
+        helper_image='localhost/kautuka-egress-fixture:'+prefix
+        podman('tag',tools,helper_image)
+        binary=root/'home'/'manager-smoke'
+        shutil.copyfile(options.manager_smoke,binary);binary.chmod(0o755)
+        native_input=root/'home'/'manager-input.json'
+        native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
+            'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
+            'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0]}))
+        native_input.chmod(0o644)
+        p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=180)
+        report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
+        # Account/store are disposable; capture immutable IDs even after a failed preparation.
+        # Capture non-infra containers; pods own their infra container lifecycle.
+        for item in json.loads(podman('ps','--all','--format=json')):
+            labels=item.get('Labels') or {}
+            if not item.get('IsInfra') and (labels.get('kautuka.managed')=='manager' or labels.get('kautuka.preparation-helper')=='true'):
+                id=item.get('Id') or item.get('ID') or item.get('id')
+                if id and id not in containers: containers.append(id)
+        for name in podman('network','ls','--filter','label=kautuka.egress=true','--format','{{.Name}}').splitlines():
+            if name and name not in network_names: network_names.append(name)
+        observed=root/'home'/'managed'/'egress'/'config'/'unconfirmed-admin-dump.json'
+        if observed.exists(): report['managerUnconfirmedDump']=json.loads(observed.read_text())
+        if p.returncode: raise RuntimeError('Native Manager lifecycle failed: '+p.stdout[-3000:]+' '+p.stderr[-8000:])
+        report['managerRuntime']=json.loads(p.stdout.strip().splitlines()[-1])
+        report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
+        report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
     report['scope'] = 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
@@ -480,8 +540,28 @@ finally:
     if created:
         cleanup_commands = []
         if started:
+            # Discover partial Manager resources even when its executable timed out.
+            try:
+                for item in json.loads(podman('ps','--all','--format=json')):
+                    labels=item.get('Labels') or {}
+                    if not item.get('IsInfra') and (labels.get('kautuka.managed')=='manager' or labels.get('kautuka.preparation-helper')=='true'):
+                        id=item.get('Id') or item.get('ID') or item.get('id')
+                        if id and id not in containers: containers.append(id)
+                for name in podman('network','ls','--filter','label=kautuka.egress=true','--format','{{.Name}}').splitlines():
+                    if name and name not in network_names: network_names.append(name)
+            except Exception as error: report['cleanupErrors'].append(str(error))
+            # Use the disposable store's actual pod IDs, including partially-created Manager pods.
+            pod_ids=[]
+            try:
+                for item in json.loads(podman('pod','ls','--no-trunc','--format=json')):
+                    labels=item.get('Labels') or {}
+                    if item.get('Name')==prefix+'-egress' or labels.get('kautuka.egress')=='true':
+                        id=item.get('Id') or item.get('ID') or item.get('id')
+                        if not id or len(id)!=64: raise RuntimeError('invalid disposable pod identity')
+                        pod_ids.append(id)
+            except Exception as error:report['cleanupErrors'].append(str(error))
             cleanup_commands += [base+['podman','rm','--force',name] for name in reversed(containers)]
-            if pod_created: cleanup_commands.append(base+['podman','pod','rm','--force',prefix+'-egress'])
+            cleanup_commands += [base+['podman','pod','rm','--force',id] for id in pod_ids]
             cleanup_commands += [base+['podman','network','rm',name] for name in reversed(network_names)]
         for args in cleanup_commands:
             try: command(args)
@@ -490,7 +570,7 @@ finally:
         except Exception as error: report['cleanupErrors'].append(str(error))
         try:
             if pwd.getpwnam(prefix).pw_dir != str(root/'home'): raise RuntimeError('account home changed')
-            command(['userdel',prefix])
+            if not report['cleanupErrors']: command(['userdel',prefix])
         except Exception as error: report['cleanupErrors'].append(str(error))
     try:
         if root.parent != pathlib.Path('/var/tmp') or not root.name.startswith('kautuka-egress-v6-'): raise RuntimeError('unsafe cleanup path')

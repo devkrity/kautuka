@@ -107,7 +107,7 @@ internal sealed class PodmanContainerPreparation(PodmanCommandRunner runner)
         }
     }
 
-    private async Task RetireOperationAsync(string operation)
+    internal async Task RetireOperationAsync(string operation)
     {
         string[] inventory = ["ps", "--all", "--filter", "label=" + operationLabel + "=" + operation, "--no-trunc", "--format", "{{.ID}}"];
         PodmanCommandResult listed = await RunAsync(inventory, CancellationToken.None).ConfigureAwait(false);

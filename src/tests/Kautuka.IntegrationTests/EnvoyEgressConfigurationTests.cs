@@ -96,6 +96,7 @@ public sealed class EnvoyEgressConfigurationTests
     [InlineData("10.0.0.1", "example.com/path", 443)]
     [InlineData("10.0.0.1", "example.com\nother", 443)]
     [InlineData("10.0.0.1", "::1", 443)]
+    [InlineData("10.0.0.1", "127.0.0.1", 9901)]
     [InlineData("10.0.0.1", "255.255.255.255", 443)]
     [InlineData("10.0.0.1", "example.com", 0)]
     [InlineData("10.0.0.1", "example.com", 65536)]
@@ -122,6 +123,22 @@ public sealed class EnvoyEgressConfigurationTests
         Assert.False(ListenerActive(config, dump));
         listenerDump["dynamic_listeners"]![0]!.AsObject().Remove("active_state");
         Assert.False(ListenerActive(config, dump));
+    }
+
+    [Fact]
+    public void EmptyClusterSetRequiresObservedAbsenceEvenWhenEnvoyOmitsVersion()
+    {
+        EnvoyEgressConfiguration config = EnvoyEgressConfiguration.Compile([]);
+        JsonObject dump = Dump(config);
+        JsonObject clusters = dump["configs"]![0]!.AsObject();
+        clusters.Remove("version_info");
+        clusters.Remove("dynamic_active_clusters");
+        Assert.True(ClustersActive(config, dump));
+        clusters["dynamic_warming_clusters"] = new JsonArray(new JsonObject { ["version_info"] = "other" });
+        Assert.False(ClustersActive(config, dump));
+        clusters.Remove("dynamic_warming_clusters");
+        clusters["dynamic_active_clusters"] = new JsonArray(new JsonObject());
+        Assert.False(ClustersActive(config, dump));
     }
 
     [Fact]

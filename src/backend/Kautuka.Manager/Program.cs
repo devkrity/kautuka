@@ -39,6 +39,14 @@ builder.Services.AddSingleton(static sp =>
         logger);
 });
 builder.Services.AddSingleton<PodmanImageArchiveStore>();
+builder.Services.AddOptions<ContainerEgressOptions>()
+    .Bind(builder.Configuration.GetSection(ContainerEgressOptions.Section));
+builder.Services.AddSingleton(sp => new ContainerEgressRuntime(
+    sp.GetRequiredService<PodmanCommandRunner>(),
+    sp.GetRequiredService<IOptions<ContainerEgressOptions>>().Value,
+    sp.GetRequiredService<RuntimeImageAllowlist>(),
+    sp.GetRequiredService<WorkspaceRuntimePaths>().RuntimeRoot,
+    sp.GetRequiredService<PodmanImageArchiveStore>()));
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();
 builder.Services.AddSingleton<IManagerRuntimeHealthCommand, PodmanManagerRuntimeHealthCommand>();
@@ -65,7 +73,8 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceReadinessGate>(),
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
-    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>()));
+    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>(),
+    sp.GetRequiredService<ContainerEgressRuntime>()));
 builder.Services.AddGrpc(options =>
 {
     options.MaxReceiveMessageSize = GrpcMaxMessageSizeBytes;

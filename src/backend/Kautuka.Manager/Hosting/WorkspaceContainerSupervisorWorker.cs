@@ -26,7 +26,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     WorkspaceReadinessGate readinessGate,
     WorkspaceExecTracker execTracker,
     IOptions<ManagerContainerStartupOptions> startupOptions,
-    ILogger<WorkspaceContainerSupervisorWorker> logger) : BackgroundService
+    ILogger<WorkspaceContainerSupervisorWorker> logger,
+    ContainerEgressRuntime? egressRuntime = null) : BackgroundService
 {
     /// <summary>
     /// Maximum time between drift audits when no exec activity is observed.
@@ -143,6 +144,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        // Connector disposal owns policy-aware retirement. Keep egress topology for adoption.
+        if (egressRuntime?.Enabled == true) return;
         string[] names = await runtimeAdapter.GetManagedContainerNamesAsync(
             [.. trackedContainers.Keys, .. sidecarSupervisor.ManagedContainerNames],
             CancellationToken.None).ConfigureAwait(false);
@@ -184,10 +187,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        // Ensure Podman sandbox network exists before any container operations
-        await runtimeAdapter.EnsureNetworkAsync("kautuka-sandbox", cancellationToken).ConfigureAwait(false);
+        // Egress readiness is mandatory when selected, independently of optional sidecar health.
+        if (egressRuntime?.Enabled == true)
+            await egressRuntime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        else
+            await runtimeAdapter.EnsureNetworkAsync("kautuka-sandbox", cancellationToken).ConfigureAwait(false);
 
-        if (!await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, cancellationToken).ConfigureAwait(false))
+        if (egressRuntime?.Enabled != true && !await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, cancellationToken).ConfigureAwait(false))
         {
             if (runtimePaths.RequireSidecars)
             {
@@ -202,7 +208,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
         ManagedContainerReconcileResult sidecarOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
             "sidecar",
-            sidecarSupervisor.ManagedContainerNames,
+            egressRuntime?.Enabled == true ? [] : sidecarSupervisor.ManagedContainerNames,
             cancellationToken).ConfigureAwait(false);
         if (!sidecarOrphanResult.Succeeded)
         {
@@ -219,7 +225,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         }
 
         Stopwatch sandboxImageStopwatch = Stopwatch.StartNew();
-        string? sandboxImageError = await runtimeAdapter.PrepareSandboxImageAsync(runtimeSettings.Sandbox, cancellationToken).ConfigureAwait(false);
+        string? sandboxImageError = egressRuntime?.Enabled == true ? null
+            : await runtimeAdapter.PrepareSandboxImageAsync(runtimeSettings.Sandbox, cancellationToken).ConfigureAwait(false);
         sandboxImageStopwatch.Stop();
         LogReconcilePhaseCompleted(logger, "sandbox-image", sandboxImageStopwatch.ElapsedMilliseconds, 1, 1);
         if (!string.IsNullOrWhiteSpace(sandboxImageError))
@@ -234,7 +241,9 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         // first-run image preparation is still downloading or building containers.
         SignalRuntimeReady();
 
-        ContainerContext[] desiredWorkspaces = [.. snapshot.DesiredWorkspaces
+        // Until their protected lifecycle is integrated, do not create legacy agent/sidecar containers.
+        // Accepted workspace identities remain in the store for isolated connector scoping and file access.
+        ContainerContext[] desiredWorkspaces = egressRuntime?.Enabled == true ? [] : [.. snapshot.DesiredWorkspaces
             .GroupBy(
                 static workspace => workspace.ScopeId + "\n" + (workspace.UserId ?? string.Empty),
                 StringComparer.OrdinalIgnoreCase)

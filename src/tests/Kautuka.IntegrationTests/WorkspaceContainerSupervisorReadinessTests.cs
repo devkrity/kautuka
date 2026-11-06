@@ -107,11 +107,26 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
         }
     }
 
+    [Theory]
+    [InlineData(true, 0)]
+    [InlineData(false, 1)]
+    public async Task EgressShutdownPreservesTopologyAndAvoidsLegacyGlobalRemoval(bool enabled, int expectedCalls)
+    {
+        var adapter = new UnavailableRuntimeAdapter();
+        var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Shutdown must not bootstrap Podman."));
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = enabled }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        using var worker = CreateWorker(new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), adapter, Path.GetTempPath(), runtime);
+        await worker.StopAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(expectedCalls, adapter.ShutdownInventories);
+        Assert.Equal(expectedCalls, adapter.GlobalStops);
+    }
+
     private static WorkspaceContainerSupervisorWorker CreateWorker(
         WorkspaceDesiredStateStore store,
         WorkspaceReadinessGate gate,
         IManagerRuntimeAdapter adapter,
-        string root)
+        string root,
+        ContainerEgressRuntime? egressRuntime = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -150,7 +165,7 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
             gate,
             new WorkspaceExecTracker(),
             startup,
-            NullLogger<WorkspaceContainerSupervisorWorker>.Instance);
+            NullLogger<WorkspaceContainerSupervisorWorker>.Instance, egressRuntime);
     }
 
     private static ManagerRuntimeSettings CreateRuntimeSettings(string root, int defaultTimeout = 120)
@@ -217,6 +232,8 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
     private sealed class UnavailableRuntimeAdapter : IManagerRuntimeAdapter
     {
         public int ImagePreparations { get; private set; }
+        public int ShutdownInventories { get; private set; }
+        public int GlobalStops { get; private set; }
 
         public void ApplyRuntimeSettings(ManagerRuntimeSettings runtimeSettings)
         {
@@ -234,10 +251,16 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
         public string ResolveSandboxImage(string configuredImage) => configuredImage;
 
         public Task<string[]> GetManagedContainerNamesAsync(IReadOnlyCollection<string> trackedContainers, CancellationToken cancellationToken)
-            => Task.FromResult(Array.Empty<string>());
+        {
+            ShutdownInventories++;
+            return Task.FromResult(Array.Empty<string>());
+        }
 
         public Task StopContainersAsync(IReadOnlyCollection<string> containerNames, CancellationToken cancellationToken)
-            => Task.CompletedTask;
+        {
+            GlobalStops++;
+            return Task.CompletedTask;
+        }
 
         public Task<ManagedContainerReconcileResult> RemoveOrphanedManagedContainersAsync(
             string role,
