@@ -18,7 +18,7 @@ internal static class ArtifactProbeCommand
             Console.WriteLine(JsonSerializer.Serialize(plan, VerifiedArtifactPlanJsonContext.Default.VerifiedArtifactPlan));
             return 0;
         }
-        catch (Exception error) when (error is IOException or ArgumentException or CryptographicException
+        catch (Exception error) when (error is IOException or InvalidDataException or ArgumentException or CryptographicException
             or JsonException or InvalidOperationException or UnauthorizedAccessException)
         {
             Console.Error.WriteLine($"Artifact fixture rejected: {error.Message}");

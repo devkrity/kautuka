@@ -245,3 +245,12 @@ Format references are [RFC 1035](https://www.rfc-editor.org/rfc/rfc1035.html), [
 Eighty-two focused tests pass on Windows and Linux. Coverage includes independent literal wire vectors, compressed/uncompressed answer names, every truncated prefix, mismatched IDs/questions, pointer cycles, header/count expansion, maximum labels/names, unsupported types, framing bounds, and bounded randomized input/response-mutation tests with failing-vector diagnostics. These are not exhaustive fuzzing. The architect reviewed the bounds and scope and approved the checkpoint after the Linux checks.
 
 No DNS listener, query policy, resolver-configuration mount, upstream socket client, DNS-to-connect bindings or production behavior is enabled here. The DNS methods are not yet reached by the published AOT command; whole-prototype AOT publication alone would not establish execution of potentially trimmed methods. The eventual upstream client must bind replies to the expected remote endpoint and randomized outstanding transaction as well as using wire-level matching. Gate 1 remains **in progress**.
+
+
+### Controlled malformed-input rejection correction (6 November 2026)
+
+DNS transport negative tests exposed an exception-taxonomy gap: `InvalidDataException` is not covered by an `IOException` catch. The artifact verifier command and admission command now handle it explicitly, preserving fail-closed behavior through a controlled error result. Earlier artifact negative checks established nonzero exit/no verified plan, but did not distinguish a controlled exit from unhandled termination.
+
+`scripts/network-gateway/probe-artifact-verifier.py --binary <published-AOT-path> --report <new-file>` makes that distinction executable and repeatable. The published Linux Native AOT command returns exactly zero for the valid plan and exactly one with no plan and the expected rejection diagnostic for modified bytes, an untrusted signer, malformed key, validly signed malformed JSON and oversized input. Ephemeral keys remain in a private temporary directory and are removed; the fixture disables its children's core dumps as an additional test-harness precaution.
+
+The architect reviewed the correction and the stronger verification requirement. This changes failure handling, not the authorization policy, trust provisioning, or deployment state. Gate 1 remains **in progress**.

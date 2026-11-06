@@ -71,7 +71,7 @@ try
     }, cancellation.Token);
     return 0;
 }
-catch (Exception error) when (error is IOException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)
+catch (Exception error) when (error is IOException or InvalidDataException or ArgumentException or InvalidOperationException or Microsoft.Data.Sqlite.SqliteException)
 {
     Console.Error.WriteLine($"Admission prototype stopped closed: {error.Message}");
     return 1;
