@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import resource
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -93,4 +94,8 @@ def main():
 
 
 if __name__ == "__main__":
+    def interrupted(signum, frame):
+        raise InterruptedError(f"verifier probe interrupted by signal {signum}")
+
+    signal.signal(signal.SIGTERM, interrupted)
     raise SystemExit(main())

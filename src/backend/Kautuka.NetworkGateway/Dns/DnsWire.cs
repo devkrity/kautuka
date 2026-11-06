@@ -223,7 +223,7 @@ internal static class DnsWire
         return bytes.ToArray();
     }
 
-    private static string CanonicalName(string value)
+    internal static string CanonicalName(string value)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
         if (value.Length > 254)
