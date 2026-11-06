@@ -30,6 +30,7 @@ def command(args, timeout=60):
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image-cache', required=True, type=pathlib.Path, help='Directory containing envoy.oci and dns.oci')
+parser.add_argument('--policy-fixture', required=True, type=pathlib.Path, help='C# test-exported cds/lds and mixed-cds/mixed-lds JSON files')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -169,28 +170,39 @@ try:
     containers.append(sink)
     corefile = '.:53 {\n hosts {\n  10.247.90.10 allowed.kautuka.test denied.kautuka.test\n }\n log\n errors\n}\n'
     (fixture/'Corefile').write_text(corefile)
-    log = {'name':'envoy.access_loggers.stdout','typed_config':{'@type':'type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog',
-           'log_format':{'json_format':{'source':'%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%','destination':'%DOWNSTREAM_LOCAL_ADDRESS%',
-                                       'sni':'%REQUESTED_SERVER_NAME%','details':'%CONNECTION_TERMINATION_DETAILS%'}}}}
-    listener = {'name':'transparent','address':{'socket_address':{'address':'0.0.0.0','port_value':15001}},
-                'use_original_dst':True,'access_log':[log],
-                'listener_filters':[{'name':'envoy.filters.listener.original_dst','typed_config':{'@type':'type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst'}},
-                                    {'name':'envoy.filters.listener.tls_inspector','typed_config':{'@type':'type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector'}}],
-                'filter_chains':[{'filter_chain_match':{'destination_port':8443,'server_names':['allowed.kautuka.test'],'source_prefix_ranges':[{'address_prefix':'10.247.91.10','prefix_len':32},{'address_prefix':'10.247.92.10','prefix_len':32}]},
-                                  'filters':[{'name':'envoy.filters.network.tcp_proxy','typed_config':{'@type':'type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy','stat_prefix':'allowed','cluster':'allowed','access_log':[log]}}]}],
-                'default_filter_chain':{'filters':[{'name':'envoy.filters.network.direct_response','typed_config':{'@type':'type.googleapis.com/envoy.extensions.filters.network.direct_response.v3.Config','response':{'inline_string':''}}}]}}
-    config = {'admin':{'address':{'socket_address':{'address':'127.0.0.1','port_value':9901}}},'static_resources':{'listeners':[listener],
-              'clusters':[{'name':'allowed','type':'STRICT_DNS','connect_timeout':'2s','dns_lookup_family':'V4_ONLY',
-                           'load_assignment':{'cluster_name':'allowed','endpoints':[{'lb_endpoints':[{'endpoint':{'address':{'socket_address':{'address':'allowed.kautuka.test','port_value':8443}}}}]}]}}]}}
-    (fixture/'envoy.json').write_text(json.dumps(config))
-    for file in fixture.iterdir(): file.chmod(0o644)
+    generated_lds=json.loads((options.policy_fixture/'lds.json').read_text())
+    generated_cds=json.loads((options.policy_fixture/'cds.json').read_text())
+    mixed_lds=json.loads((options.policy_fixture/'mixed-lds.json').read_text())
+    mixed_cds=json.loads((options.policy_fixture/'mixed-cds.json').read_text())
+    listener=generated_lds['resources'][0]
+    policy_version=generated_lds['version_info']
+    envoy_dir = fixture/'envoy-config'
+    envoy_dir.mkdir(mode=0o755)
+    clusters=generated_cds['resources']
+    def publish(kind, version, resources):
+        target=envoy_dir/(kind+'.json')
+        temporary=envoy_dir/(kind+'.next')
+        temporary.write_text(json.dumps({'version_info':version,'resources':resources}))
+        temporary.chmod(0o644)
+        os.replace(temporary,target)
+    def listener_resource(value, version): return {'@type':'type.googleapis.com/envoy.config.listener.v3.Listener',**value,'metadata':{'filter_metadata':{'kautuka.egress':{'policy_version':version}}}}
+    publish('cds',policy_version,clusters)
+    initial=json.loads(json.dumps(listener));initial['filter_chains']=[chain for chain in initial['filter_chains'] if chain['name']=='deny'];initial['filter_chain_matcher']={'on_no_match':{'action':{'name':'deny','typed_config':{'@type':'type.googleapis.com/google.protobuf.StringValue','value':'deny'}}}}
+    publish('lds','deny-1',[listener_resource(initial,'deny-1')])
+    config={'node':{'id':'kautuka-proof','cluster':'proof'},'admin':{'address':{'socket_address':{'address':'127.0.0.1','port_value':9901}}},
+            'dynamic_resources':{'cds_config':{'resource_api_version':'V3','path_config_source':{'path':'/envoy/cds.json'}},
+                                 'lds_config':{'resource_api_version':'V3','path_config_source':{'path':'/envoy/lds.json'}}}}
+    (envoy_dir/'bootstrap.json').write_text(json.dumps(config))
+    for file in fixture.iterdir():
+        if file.is_file(): file.chmod(0o644)
+    (envoy_dir/'bootstrap.json').chmod(0o644)
     dns = prefix+'-dns'
     podman('run','-d','--name',dns,'--pod',pod,'--read-only','--cap-add=NET_BIND_SERVICE','--cap-drop=ALL','--security-opt=no-new-privileges','--user','65532:65532','--volume',str(fixture/'Corefile')+':/Corefile:ro',
            dns_image,'-conf','/Corefile')
     containers.append(dns)
     envoy = prefix+'-envoy'
-    podman('run','-d','--name',envoy,'--pod',pod,'--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user','65532:65532','--volume',str(fixture/'envoy.json')+':/envoy.json:ro',
-           envoy_image,'-c','/envoy.json','--concurrency','1')
+    podman('run','-d','--name',envoy,'--pod',pod,'--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user','65532:65532','--volume',str(envoy_dir)+':/envoy:ro',
+           envoy_image,'-c','/envoy/bootstrap.json','--concurrency','1')
     containers.append(envoy)
     # Prove the upstream is actually available before interpreting denied clients.
     def pid(name): return json.loads(podman('inspect',name))[0]['State']['Pid']
@@ -246,6 +258,53 @@ table ip6 kautuka_no_ipv6 {
         expected=0x400 if name==dns else 0
         if int(status['CapBnd'],16)!=expected or status['NoNewPrivs'].strip()!='1' or int(status['CapAmb'],16): raise RuntimeError('unexpected service capability boundary')
         if int(status['CapEff'],16) & ~expected or int(status['CapPrm'],16) & ~expected: raise RuntimeError('unexpected effective capability')
+    def admin(path): return json.loads(network_command(infra,['curl','--silent','--fail','http://127.0.0.1:9901/'+path]))
+    def active_version():
+        for config in admin('config_dump')['configs']:
+            if config.get('@type','').endswith('ListenersConfigDump'):
+                for item in config.get('dynamic_listeners',[]):
+                    if item.get('name')=='transparent' and not item.get('warming_state'):
+                        marker=item.get('active_state',{}).get('listener',{}).get('metadata',{}).get('filter_metadata',{}).get('kautuka.egress',{}).get('policy_version')
+                        if marker==config.get('version_info'): return marker
+    def await_active(version):
+        deadline=time.monotonic()+10
+        while active_version()!=version:
+            if time.monotonic()>deadline:
+                report['acceptanceTimeoutDump']=admin('config_dump');report['acceptanceTimeoutStats']=admin('stats?format=json');raise RuntimeError('listener version not accepted: '+version)
+            time.sleep(0.05)
+    def rejected():
+        return next((item['value'] for item in admin('stats?format=json')['stats'] if item.get('name')=='listener_manager.lds.update_rejected'),0)
+    def await_clusters(version, expected):
+        deadline=time.monotonic()+10
+        while True:
+            configs=[config for config in admin('config_dump')['configs'] if config.get('@type','').endswith('ClustersConfigDump')]
+            if configs:
+                config=configs[0]
+                active=config.get('dynamic_active_clusters',[])
+                markers={item['cluster']['name']:item['cluster'].get('metadata',{}).get('filter_metadata',{}).get('kautuka.egress',{}).get('policy_version') for item in active}
+                if config.get('version_info')==version and not config.get('dynamic_warming_clusters') and markers=={item['name']:item['name'] for item in expected}: return
+            if time.monotonic()>deadline:
+                report['clusterTimeoutDump']=admin('config_dump');raise RuntimeError('cluster version not active: '+version)
+            time.sleep(0.05)
+    await_clusters(policy_version,clusters)
+    await_active('deny-1')
+    report['beforePolicyActive']=request(client,'https://allowed.kautuka.test:8443/')
+    if report['beforePolicyActive']['exit']==0: raise RuntimeError('initial deny policy allowed request')
+    publish('lds',policy_version,[listener_resource(listener,policy_version)])
+    await_active(policy_version)
+    report['acceptedListenerVersion']=active_version()
+    report['dynamicConfigDump']=admin('config_dump')
+    rejected_before=rejected()
+    invalid=json.loads(json.dumps(listener));invalid['address']['socket_address']['port_value']=70000
+    publish('lds','invalid-3',[listener_resource(invalid,'invalid-3')])
+    deadline=time.monotonic()+10
+    while rejected()<=rejected_before:
+        if time.monotonic()>deadline: raise RuntimeError('invalid listener rejection not observed')
+        time.sleep(0.05)
+    report['rejectedListener']={'activeVersion':active_version(),'rejectedCount':rejected()}
+    report['rejectedConfigDump']=admin('config_dump')
+    if active_version()!=policy_version: raise RuntimeError('invalid update replaced last accepted listener')
+    publish('lds',policy_version,[listener_resource(listener,policy_version)])
     before = packets(sink)
     report['allowedA'] = request(client,'https://allowed.kautuka.test:8443/')
     report['allowedFreshSyns'] = packets(sink)-before
@@ -329,6 +388,46 @@ finally:s.close()
     if any(x.get('addr_info') for x in report['clientIpv6Addresses']) or report['clientIpv6Routes']: raise RuntimeError('client IPv6 enabled unexpectedly')
     report['allowedB'] = request(second,'https://allowed.kautuka.test:8443/')
     report['allowedAAfterAttach'] = request(client,'https://allowed.kautuka.test:8443/')
+    mixed_version=mixed_lds['version_info']
+    publish('cds',mixed_version,mixed_cds['resources'])
+    await_clusters(mixed_version,mixed_cds['resources'])
+    publish('lds',mixed_version,mixed_lds['resources'])
+    await_active(mixed_version)
+    report['mixedPolicyDump']=admin('config_dump')
+    report['mixedHostnameB']=request(second,'https://allowed.kautuka.test:8443/')
+    report['mixedLiteralA']=request(client,'https://10.247.90.10:8443/')
+    if report['mixedHostnameB']['exit'] or report['mixedLiteralA']['exit']: raise RuntimeError('overlapping IP/hostname policy broke source-specific admission')
+    # Revoke the extra literal permission before retiring its no-longer-referenced cluster.
+    publish('lds',policy_version,generated_lds['resources'])
+    await_active(policy_version)
+    publish('cds',policy_version,clusters)
+    await_clusters(policy_version,clusters)
+    # A server-first endpoint proves literal TCP does not deadlock waiting for a ClientHello.
+    banner_code = r"""import os,socket,sys
+os.setgroups([]);os.setgid(int(sys.argv[1]));os.setuid(int(sys.argv[2]))
+s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('0.0.0.0',9443));s.listen(4)
+print('ready',flush=True)
+while True:
+ c,_=s.accept();c.sendall(b'fixture-banner\n');c.close()
+"""
+    banner_process=subprocess.Popen(['nsenter','--net=/proc/'+str(pid(sink))+'/ns/net','python3','-c',banner_code,str(user.pw_gid),str(user.pw_uid)],
+                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,cwd='/var/tmp')
+    try:
+        if banner_process.stdout.readline().strip()!='ready': raise RuntimeError('server-first endpoint did not start')
+        network_command(sink,['nft','add','rule','ip','fixture_count','observe','tcp','dport','9443','tcp','flags','&','(syn | ack)','==','syn','counter'])
+        def read_banner(container):
+            script='exec 3<>/dev/tcp/10.247.90.10/9443; IFS= read -r -t 6 line <&3; test "$line" = fixture-banner'
+            p=subprocess.run(base+['podman','exec',container,'/usr/bin/bash','-c',script],capture_output=True,text=True,cwd='/var/tmp',timeout=10)
+            return {'exit':p.returncode,'stderr':p.stderr[-300:]}
+        banner_before=packets(sink)
+        report['serverFirstLiteralA']=read_banner(client)
+        if report['serverFirstLiteralA']['exit'] or packets(sink)<=banner_before: raise RuntimeError('explicit-IP server-first TCP failed')
+        if banner_process.poll() is not None: raise RuntimeError('server-first endpoint exited before denied control')
+        banner_before=packets(sink)
+        report['serverFirstDeniedB']=read_banner(second)
+        if not report['serverFirstDeniedB']['exit'] or packets(sink)!=banner_before: raise RuntimeError('unapproved source reached server-first endpoint')
+    finally:
+        banner_process.terminate();banner_process.communicate(timeout=10)
     unknown = prefix+'-unknown'
     podman('run','-d','--name',unknown,'--network',names['b']+':ip=10.247.92.11','--dns','10.247.92.2',
            '--sysctl','net.ipv6.conf.all.disable_ipv6=1','--user','65532:65532','--cap-drop=ALL','--security-opt=no-new-privileges',tools,'/usr/bin/sleep','120')
@@ -366,8 +465,8 @@ finally:s.close()
     for key in ('beforeAttach','afterAttach','afterDetach'):
         defaults = [r for r in json.loads(report[key]['routes']) if r['dst']=='default']
         if len(defaults)!=1 or defaults[0].get('gateway')!='10.247.90.1': raise RuntimeError('egress default changed')
-    report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Static policy and fixture DNS only; no file-xDS activation, recursive DNS or installed application/update proof.']
-    report['scope'] = 'rootless-transparent-TLS-scope-isolation-external-DNS-denial-and-IPv4-only-client-layout' 
+    report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
+    report['scope'] = 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
 except Exception as error:
     report['error'] = str(error)

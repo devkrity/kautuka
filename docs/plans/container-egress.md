@@ -300,3 +300,41 @@ route stability, cancellation/timeouts during create and both helper operations,
 helper auto-removal races, ambiguous cleanup, and existing connector boundaries.
 The Astra architect approved this checkpoint after reviewing the final cleanup
 changes and the native report. Network enforcement is not enabled by this change.
+
+
+## Stock Envoy configuration checkpoint
+
+The runtime-container layer now compiles exact source-address/TCP rules into
+stock CDS/LDS file resources. A native matcher selects source first, then
+original destination port, visible SNI and a source-specific literal-IP fallback.
+Each path selects a named upstream chain or the named denying chain. A hostname
+rule always uses the configured DNS cluster for that hostname. Legacy
+`FilterChainMatch` pruning is unsuitable for mixed rules: destination-IP matching
+can discard another source's hostname chain before source matching occurs.
+
+Configuration versions are deterministic hashes of the generated configuration.
+Admission observes the accepted CDS/LDS response version, actual active resource
+markers and absence of warming replacements. It does not trust a written file or
+only `active_state.version_info`: that per-listener field remained stale during
+a real Envoy in-place update. Clusters must be active before a referencing
+listener is submitted. Listener/proxy log phases and selected upstream cluster
+are emitted for later collection and classification.
+
+Stock TLS inspection continues after a two-second timeout. Without readable SNI,
+only that source's explicit literal-IP permission can proceed; everything else
+reaches deny. Server-first protocols therefore have an inspection delay, rather
+than immediate forwarding. Hostname rules still require visible SNI.
+
+The existing topology runner consumes the actual C# test-exported files. The
+final local report, `artifacts/container-egress/final-compiled-7586c484.json`,
+passes allowed/denied TLS, overlapping IP/hostname rules from different sources,
+server-first TCP and its denied-source control, unknown-source denial, staged
+startup, attach/detach, cross-scope and DNS isolation, and Envoy-stopped failure.
+It also observes accepted updates, rejected-update preservation and independent
+cluster readiness. Cleanup errors are empty. The C# observer accepts the actual
+accepted and preserved dumps and distinguishes the mixed-policy generation.
+All 59 focused tests pass; the Astra architect reviewed this bounded checkpoint.
+
+The compiler and observer are not yet wired to application launch or approval
+publication. Manager topology lifecycle, package endpoint integration, service
+containerisation, container release/update recovery and UI remain required work.

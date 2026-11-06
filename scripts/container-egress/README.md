@@ -39,16 +39,27 @@ their SHA-256 and loaded image IDs, and starts containers with `--pull=never`.
 Archive conversion can change an image's ID; the test observes the loaded ID.
 This fixture is not the product's signed-release verification mechanism.
 
-Run from the repository in Linux. The report path must not already exist:
+Export the actual C# compiler's fixture documents from the repository. The
+ordinary suite does not write these files unless the environment variable is set:
+
+```sh
+KAUTUKA_TEST_EGRESS_DOCUMENTS="$PWD/artifacts/container-egress/compiled-policy" \
+  dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj \
+  --filter 'FullyQualifiedName~EnvoyEgressConfigurationTests.ExactRulesPreserveSourceBoundariesAndChooseApprovedUpstream'
+```
+
+Run the proof from the repository in Linux with those files available. The report
+path must not already exist:
 
 ```sh
 sudo python3 scripts/container-egress/prove-topology.py \
   --image-cache "$HOME/kautuka-egress-fixture-images" \
+  --policy-fixture "$PWD/artifacts/container-egress/compiled-policy" \
   --report /var/tmp/kautuka-egress-proof.json
 ```
 
 The tooling image is imported offline from the host's `ip`, `nft`, `sleep`, curl
-and OpenSSL executables and their shared libraries. It is test-only. The TLS and
+OpenSSL and Bash executables and their shared libraries. It is test-only. The TLS and
 alternate-DNS containers on the outside bridge simulate remote endpoints; an
 installed deployment gives that bridge only to the egress pod.
 
@@ -58,6 +69,13 @@ installed deployment gives that bridge only to the egress pod.
 - A one-shot helper sets the client's default route; the workload cannot change it.
 - Another helper configures native nftables in the egress pod's actual namespace.
 - Stock Envoy recovers source IP, original destination and visible TLS SNI.
+- The C# generated CDS/LDS files load through stock filesystem xDS. Accepted
+  response versions, active metadata markers and absence of warming replacements
+  establish activation. A rejected update preserves the accepted policy.
+- Source-first native matching keeps one source's literal-IP permission from
+  shadowing another source's hostname rule at the same destination and port.
+- A literal-IP rule also carries server-first TCP after the two-second inspection
+  timeout. Another source without that rule cannot reach the live banner endpoint.
 - Native `create --interactive` and `init` allocate an address and namespace
   while the application's observable startup marker remains absent. A helper
   joins `ns:<SandboxKey>` to prepare the route without starting the application.
@@ -81,7 +99,12 @@ Self-signed fixture TLS uses curl's insecure mode. The proof concerns forwarding
 and policy, not certificate validation. SNI is metadata, not authenticated
 service identity. Disabled IPv6 is not an observed IPv6 firewall-hit test.
 
-Static policy and a stock resolver's fixture zone are used initially. File-xDS
-activation, recursive DNS, the host management proxy, application service
-containers, update recovery, UI and native-Linux/Mac evidence remain separate
-implementation work. This single runner is not a new enforcement service.
+The stock resolver uses a fixture zone. Recursive DNS, the host management proxy,
+application service containers, update recovery, UI and native-Linux/Mac evidence
+remain separate implementation work. This single runner is not a new enforcement
+service.
+
+To check the C# admission observer against the actual report, rerun the fixture
+export test above with `KAUTUKA_TEST_EGRESS_REPORT` set to the report's path. It
+checks accepted CDS/LDS, the preserved listener after rejection and the mixed
+policy's active resources.
