@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import ssl
+import threading
 
 
 def digest(content):
@@ -41,6 +42,16 @@ def build_image(directory, layer):
 
 
 def serve(directory, ledger):
+    events_path = directory / "events.jsonl"
+    events_path.write_bytes(b"")
+    log_lock = threading.Lock()
+
+    def record(event):
+        with log_lock:
+            with events_path.open("ab") as stream:
+                stream.write(encode(event) + b"\n")
+            print(json.dumps(event), flush=True)
+
     metadata = json.loads((directory / "metadata.json").read_bytes())
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -53,8 +64,7 @@ def serve(directory, ledger):
             pass
 
         def respond(self, head):
-            print(json.dumps({"event": "request", "method": self.command, "path": self.path,
-                              "peer": list(self.client_address)}), flush=True)
+            record({"event": "request", "method": self.command, "path": self.path, "peer": list(self.client_address)})
             kind = "application/json"
             identifier = None
             if self.path == "/v2/":
@@ -67,6 +77,11 @@ def serve(directory, ledger):
                 identifier = self.path.rsplit("/", 1)[-1]
                 content, status = (directory / identifier.removeprefix("sha256:")).read_bytes(), 200
                 kind = "application/octet-stream"
+                if identifier == metadata["configurationDigest"] and (directory / "corrupt").exists():
+                    content = content.replace(b'"amd64"', b'"amd65"', 1)
+                    if digest(content) == identifier:
+                        raise RuntimeError("Corrupt fixture did not change bytes")
+                    record({"event": "corrupt_blob", "expected": identifier, "served": digest(content)})
             else:
                 content, status = b'{"errors":[{"code":"NAME_UNKNOWN"}]}', 404
             self.send_response(status)
@@ -96,9 +111,9 @@ def serve(directory, ledger):
                 with sqlite3.connect("file:" + str(ledger) + "?mode=ro", uri=True) as database:
                     row = database.execute("SELECT id FROM gateway_admissions WHERE source_address=? AND source_port=? AND destination_address='10.231.252.2' AND destination_port=20443 AND protocol=6 AND subject='probe-artifacts'", peer).fetchone()
                 if row is None:
-                    print(json.dumps({"event": "AUDIT_MISSING", "peer": list(peer)}), flush=True)
+                    record({"event": "AUDIT_MISSING", "peer": list(peer)})
                     raise OSError("No durable admission before registry handshake")
-                print(json.dumps({"event": "admitted_connection", "peer": list(peer), "admission": row[0]}), flush=True)
+                record({"event": "admitted_connection", "peer": list(peer), "admission": row[0]})
                 return context.wrap_socket(connection, server_side=True), peer
             except (OSError, sqlite3.Error):
                 connection.close()

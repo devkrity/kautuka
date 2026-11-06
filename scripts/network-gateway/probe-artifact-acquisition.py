@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import uuid
@@ -64,6 +65,47 @@ activated=command(['run','--rm']+limits+[identifier,'/probe','artifact',plan['Ac
 if activated.returncode or activated.stdout.strip() != plan['ActivationNonce']:
     raise RuntimeError('Approved artifact activation marker mismatch: '+activated.stderr)
 result['acquisition']['activated_nonce']=activated.stdout.strip()
+if FAILURE_CHECK:
+    def control(phase):
+        path=os.path.join(os.environ['HOME'],'control.json')
+        ack=os.path.join(os.environ['HOME'],'control-ack')
+        with open(path,'w') as stream: json.dump({'phase':phase},stream)
+        deadline=time.monotonic()+10
+        while not os.path.exists(ack):
+            if time.monotonic()>deadline: raise RuntimeError('Acquisition root control timed out')
+            time.sleep(.05)
+        if open(ack).read()!=phase: raise RuntimeError('Wrong acquisition control acknowledgement')
+        os.unlink(path)
+        os.unlink(ack)
+    def cold_pull(label):
+        base=podman.copy()
+        roots={}
+        for flag,suffix in (('--root','graph'),('--runroot','runroot'),('--tmpdir','tmp')):
+            directory=os.path.join(os.environ['HOME'],label+'-'+suffix)
+            os.mkdir(directory,0o700)
+            base[base.index(flag)+1]=directory
+            roots[flag]=directory
+        state=subprocess.run(base+['info','--format=json'],capture_output=True,text=True,timeout=20)
+        if state.returncode or json.loads(state.stdout)['store']['graphRoot'] != roots['--root']:
+            raise RuntimeError('Cold store scope not verified')
+        before=subprocess.run(base+['images','--format=json'],capture_output=True,text=True,timeout=10)
+        if before.returncode or json.loads(before.stdout): raise RuntimeError('Cold store was not empty')
+        attempted=subprocess.run(base+['pull','--retry=0','--tls-verify=true','--cert-dir',plan['CaDirectory'],reference],capture_output=True,text=True,timeout=25)
+        after=subprocess.run(base+['images','--format=json'],capture_output=True,text=True,timeout=10)
+        containers=subprocess.run(base+['ps','--all','--format=json'],capture_output=True,text=True,timeout=10)
+        if attempted.returncode == 0 or after.returncode or containers.returncode or json.loads(after.stdout) or json.loads(containers.stdout):
+            raise RuntimeError('Rejected acquisition installed an image or created a container')
+        return {'exit_code':attempted.returncode,'stderr':attempted.stderr,'empty_images':True,'empty_containers':True,'graph_root':roots['--root']}
+    control('corrupt-content')
+    corrupted=cold_pull('corrupt')
+    import re
+    mismatch=re.search(r'download config\.json digest (sha256:[0-9a-f]{64}) does not match expected (sha256:[0-9a-f]{64})',corrupted['stderr'].lower())
+    if not mismatch or mismatch.group(2)!=plan['ConfigurationDigest'] or mismatch.group(1)==mismatch.group(2):
+        raise RuntimeError('Corrupt pull did not report a recognized digest verification failure: '+corrupted['stderr'])
+    corrupted['reported_calculated_digest']=mismatch.group(1)
+    result['acquisition']['corrupted_content']=corrupted
+    control('consumer-stop')
+    result['acquisition']['consumer_absent']=cold_pull('absent')
 print(json.dumps(result),flush=True)
 """
 
@@ -134,11 +176,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--admission-binary", type=Path, required=True)
+    parser.add_argument("--failure-check", action="store_true", help="Cold stores reject corrupt content and consumer-absent acquisition")
     options = parser.parse_args()
     if sys.platform != "linux" or os.geteuid() != 0:
         parser.error("requires Linux root; no resources created")
     tools = ("podman", "ip", "nft", "nsenter", "setpriv", "env", "systemd-run", "systemctl", "openssl",
              "useradd", "userdel", "groupadd", "groupdel", "usermod", "gcc", "ldd")
+    if options.failure_check:
+        tools += ("conntrack",)
     if any(shutil.which(tool) is None for tool in tools) or not options.admission_binary.is_file():
         parser.error("missing required fixture tools/binary; no resources created")
     with options.report.open("x", encoding="utf-8") as report:
@@ -147,9 +192,12 @@ def main():
                       "Fixture-only root-supplied signing trust, IPv4 TLS registry without authentication, redirects or CDN.",
                       "No corrupted-content/cold-pull consumer-loss, DNS, real registry interoperability, anti-rollback or updater transaction proof.",
                       "WSL managed non-login candidate; native Linux PAM/SELinux parity and short-lived helper coverage unvalidated."]}
+        result["failureCheck"] = options.failure_check
+        if options.failure_check:
+            result["limitations"][1] = "Consumer-absence tests use fixture-only conntrack reset and reduced source SYN retries. No restart, DNS, real registry interoperability, anti-rollback or updater transaction proof."
         try:
             with owners.fixture_lock():
-                fixture = owners.RuntimeOwners("systemd", True, ACQUIRE)
+                fixture = owners.RuntimeOwners("systemd", True, "FAILURE_CHECK=" + repr(options.failure_check) + "\n" + ACQUIRE)
                 result["createdResources"] = fixture.owners
                 result["fixtureRoot"] = str(fixture.root)
                 try:
@@ -163,10 +211,44 @@ def main():
                         try:
                             topology.create(borrowed_source=(owner["name"], descriptor))
                             start_registry(topology, directory, options.admission_binary)
-                            observation = fixture.inspect(owner, peer)
+                            def counters():
+                                values = json.loads(topology.run(["nft", "-j", "list", "counter", "inet", "ktng_admission", "queued_tcp4"], role="gw"))
+                                return next(entry["counter"]["packets"] for entry in values["nftables"] if "counter" in entry)
+
+                            def control(event):
+                                if event == {"phase": "corrupt-content"}:
+                                    (directory / "corrupt").write_text("trusted fixture fault")
+                                elif event == {"phase": "consumer-stop"}:
+                                    (directory / "corrupt").unlink()
+                                    topology.consumer.kill()
+                                    topology.consumer.communicate(timeout=3)
+                                    for family in ("ipv4", "ipv6"):
+                                        topology.run(["conntrack", "-F", "-f", family], role="gw")
+                                        if topology.run(["conntrack", "-L", "-f", family], role="gw"):
+                                            raise RuntimeError("Acquisition fixture conntrack reset failed")
+                                    with sqlite3.connect("file:" + topology.ledger + "?mode=ro", uri=True) as ledger:
+                                        baseline = ledger.execute("SELECT COUNT(*) FROM gateway_admissions").fetchone()[0]
+                                    owner["consumer_loss_setup"] = {"baseline_admissions": baseline, "before_queue": counters(), "conntrack_emptied": True,
+                                        "registry_event_boundary": len((directory / "events.jsonl").read_bytes().splitlines())}
+                                else:
+                                    raise RuntimeError("Unexpected acquisition control event")
+
+                            if options.failure_check:
+                                topology.run(["sysctl", "-qw", "net.ipv4.tcp_syn_retries=1"], role="src")
+                            observation = fixture.inspect(owner, peer, on_event=control if options.failure_check else None)
                             result["owners"].append(observation)
                             errors = capture_registry(topology, owner)
                             events = owner["registry_events"]
+                            if options.failure_check:
+                                if len(events) != owner["consumer_loss_setup"]["registry_event_boundary"]:
+                                    raise RuntimeError("Registry received events after consumer-loss boundary")
+                                if not any(event["event"] == "corrupt_blob" and event["expected"] == plan["ConfigurationDigest"] and event["served"] == observation["acquisition"]["corrupted_content"]["reported_calculated_digest"] for event in events):
+                                    raise RuntimeError("No corrupt bytes were served in the negative test")
+                                with sqlite3.connect("file:" + topology.ledger + "?mode=ro", uri=True) as ledger:
+                                    after = ledger.execute("SELECT COUNT(*) FROM gateway_admissions").fetchone()[0]
+                                owner["consumer_loss_setup"]["after_queue"] = counters()
+                                if after != owner["consumer_loss_setup"]["baseline_admissions"] or counters() <= owner["consumer_loss_setup"]["before_queue"]:
+                                    raise RuntimeError("Cold acquisition did not reach unavailable queue without new admission")
                             if any(event["event"] == "AUDIT_MISSING" for event in events):
                                 raise RuntimeError("Registry bytes preceded durable admission")
                             metadata = json.loads((directory / "metadata.json").read_bytes())

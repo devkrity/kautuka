@@ -38,6 +38,14 @@ class RuntimeOwnerSafetyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             owners.validate_effective_map("0 1800000000 1\n1 196608 65536", self.owner)
 
+    def test_embedded_runtime_programs_compile_without_creating_resources(self):
+        compile(owners.INSPECT, "resource-inspection", "exec")
+        for filename, attribute in (("probe-runtime-network.py", "NETWORK_INSPECT"), ("probe-artifact-acquisition.py", "ACQUIRE")):
+            spec = importlib.util.spec_from_file_location("compile_fixture", Path(__file__).with_name(filename))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            compile(getattr(module, attribute), filename, "exec")
+
     def test_resource_validation_requires_kernel_limits_and_confirmed_oom(self):
         resources = {mode: {"exit_code": 0} for mode in ("limits", "pids", "cpu")}
         resources["limits"]["stdout"] = json.dumps({"uid": 65532, "memory_max": "33554432", "pids_max": "16", "cpu_max": "25000 100000"})
