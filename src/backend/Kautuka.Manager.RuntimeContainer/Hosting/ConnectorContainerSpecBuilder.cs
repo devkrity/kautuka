@@ -18,12 +18,47 @@ internal static class ConnectorContainerSpecBuilder
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
         bool persistent)
+        => Build(connector, containerName, executionContext, workspaceContext, persistent, create: false, SandboxNetworkName, dnsAddress: null);
+
+    internal static List<string> BuildCreate(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string containerName,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        bool persistent,
+        string networkName,
+        string dnsAddress)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(dnsAddress);
+        return Build(connector, containerName, executionContext, workspaceContext, persistent, create: true, networkName, dnsAddress);
+    }
+
+    private static List<string> Build(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string containerName,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        bool persistent,
+        bool create,
+        string networkName,
+        string? dnsAddress)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ContainerImageProvenancePolicy.EnsureTrusted(connector.Image, $"Connector '{connector.ConnectorId}'");
-        var arguments = new List<string> { "run" };
-        if (persistent)
+        var arguments = new List<string> { create ? "create" : "run" };
+        if (create)
+        {
+            arguments.Add("--pull=never");
+            if (!persistent)
+            {
+                arguments.Add("--interactive");
+            }
+
+            arguments.AddRange(["--dns", dnsAddress!, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
+        }
+        else if (persistent)
         {
             arguments.Add("-d");
         }
@@ -49,10 +84,7 @@ internal static class ConnectorContainerSpecBuilder
             "--label", "kautuka.role=connector",
             "--label", $"kautuka.desired-version={connector.DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
             "--label", $"kautuka.spec-fingerprint={connector.SpecFingerprint}",
-            // Isolation is a private container plus optional read-only agent-file
-            // mounts. Every connector still joins kautuka-sandbox so aardvark can
-            // resolve sidecar aliases (kautuka-pkgs-proxy) and public DNS.
-            "--network", SandboxNetworkName,
+            "--network", networkName,
             "--env", "HOME=/tmp",
             "--env", "NPM_CONFIG_CACHE=/tmp/.npm",
             "--env", "PIP_CACHE_DIR=/tmp/.pip",

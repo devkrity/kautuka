@@ -115,7 +115,7 @@ try:
                 'addresses':command(['nsenter','--net=/proc/'+str(pid)+'/ns/net','ip','-j','address'])}
     archive = root/'home'/'tools.tar'
     files = set()
-    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl'):
+    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl','/usr/bin/bash'):
         files.add(binary)
         for line in command(['ldd',binary]).splitlines():
             files.update(token for token in line.split() if token.startswith('/'))
@@ -255,6 +255,44 @@ table ip6 kautuka_no_ipv6 {
     if packets(sink)!=before: raise RuntimeError('denied name reached upstream')
     report['deniedLiteral'] = request(client,'https://10.247.90.10:8443/')
     if packets(sink)!=before: raise RuntimeError('denied literal reached upstream')
+    staged_dir = root/'home'/'staged'
+    staged_dir.mkdir(mode=0o777)
+    staged_dir.chmod(0o777)
+    staged = prefix+'-staged'
+    stage_command = 'printf started > /stage/marker; IFS= read -r line; printf "stdout:%s\\n" "$line"; printf "stderr:%s\\n" "$line" >&2; IFS= read -r finish; exit 7'
+    staged_id = podman('create','--interactive','--pull=never','--sysctl','net.ipv6.conf.all.disable_ipv6=1','--name',staged,'--network',names['a'],'--dns','10.247.91.2',
+                       '--cap-drop=ALL','--security-opt=no-new-privileges','--user','65532:65532',
+                       '--volume',str(staged_dir)+':/stage:rw',tools,'/usr/bin/bash','-c',stage_command)
+    containers.append(staged)
+    podman('init',staged_id)
+    before_stage = json.loads(podman('inspect',staged_id))[0]
+    before_pid = before_stage['State']['Pid']
+    report['nativeStagePrepared'] = {'state':before_stage['State']['Status'],'pid':before_pid,'sandboxKey':before_stage['NetworkSettings'].get('SandboxKey'),'marker':(staged_dir/'marker').exists()}
+    before_ns = os.readlink('/proc/'+str(before_pid)+'/ns/net')
+    before_ip = before_stage['NetworkSettings']['Networks'][names['a']]['IPAddress']
+    if (staged_dir/'marker').exists() or before_stage['State']['Running'] or not before_ip: raise RuntimeError('init ran application or omitted address')
+    podman('run','--rm','--pull=never','--read-only','--security-opt=no-new-privileges','--network','ns:'+before_stage['NetworkSettings']['SandboxKey'],'--cap-drop=ALL','--cap-add=NET_ADMIN',tools,'/usr/sbin/ip','route','replace','default','via','10.247.91.2')
+    report['nativeAfterHelper'] = {'state':json.loads(podman('inspect',staged_id))[0]['State'],'marker':(staged_dir/'marker').exists()}
+    if (staged_dir/'marker').exists(): raise RuntimeError('routing helper started application')
+    attached_process = subprocess.Popen(base+['podman','start','--attach','--interactive',staged_id],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,cwd='/var/tmp')
+    try:
+        deadline = time.monotonic()+10
+        while not (staged_dir/'marker').exists():
+            if attached_process.poll() is not None or time.monotonic()>deadline: raise RuntimeError('staged application did not start')
+            time.sleep(0.02)
+        after_stage=json.loads(podman('inspect',staged_id))[0]
+        after_ns=os.readlink('/proc/'+str(after_stage['State']['Pid'])+'/ns/net')
+        after_ip=after_stage['NetworkSettings']['Networks'][names['a']]['IPAddress']
+        routes=json.loads(podman('exec',staged_id,'/usr/sbin/ip','-j','route'))
+        stage_stdout,stage_stderr=attached_process.communicate('hello\nfinish\n'.replace('\\n','\n'),timeout=15)
+        report['nativeStagedStart']={'beforeState':before_stage['State']['Status'],'beforeRunning':before_stage['State']['Running'],
+                                    'beforeIp':before_ip,'afterIp':after_ip,'namespacePreserved':before_ns==after_ns,
+                                    'routes':routes,'stdout':stage_stdout,'stderr':stage_stderr,'exit':attached_process.returncode}
+        if before_ns!=after_ns or before_ip!=after_ip or not any(r.get('gateway')=='10.247.91.2' and r.get('dst')=='default' for r in routes): raise RuntimeError('start replaced prepared network')
+        if stage_stdout.strip()!='stdout:hello' or 'stderr:hello' not in stage_stderr or attached_process.returncode!=7: raise RuntimeError('staged stdio/exit behavior changed')
+    finally:
+        if attached_process.poll() is None:
+            attached_process.kill();attached_process.communicate(timeout=10)
     report['beforeAttach'] = snapshot()
     podman('network','connect','--ip','10.247.92.2',names['b'],infra)
     report['afterAttach'] = snapshot()

@@ -58,6 +58,11 @@ installed deployment gives that bridge only to the egress pod.
 - A one-shot helper sets the client's default route; the workload cannot change it.
 - Another helper configures native nftables in the egress pod's actual namespace.
 - Stock Envoy recovers source IP, original destination and visible TLS SNI.
+- Native `create --interactive` and `init` allocate an address and namespace
+  while the application's observable startup marker remains absent. A helper
+  joins `ns:<SandboxKey>` to prepare the route without starting the application.
+  Explicit `start --attach --interactive` preserves its address, namespace and
+  route, with working stdin/stdout/stderr and the application's exit status.
 - Approved TLS succeeds through the proxy; a denied name and literal IP fail
   without sending a new SYN to the controlled upstream.
 - Attaching a second scope live preserves the outside default and allows both

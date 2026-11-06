@@ -267,3 +267,36 @@ The actual filtered full-ID/name Podman inventory command also passes in Fedora
 44 WSL as part of the existing topology proof; the local report is
 `artifacts/container-egress/product-inventory-12f668db.json`, with empty cleanup
 errors. The architect reviewed and approved the final identity changes.
+
+
+## Prepared-container lifecycle checkpoint
+
+Manager's runtime-container layer now contains a small preparation primitive:
+create without implicit pulls, initialize, inspect Podman's assigned IPv4
+address and namespace, configure and read back the client default route through
+`ns:<SandboxKey>`, and return the immutable container ID. It does not start the
+application or publish policy. The networking caller must confirm the source's
+Envoy policy is active before starting that ID. The connector create builder
+preserves existing resource, capability and optional read-only file boundaries;
+one-shot stdin is enabled at creation. Existing launch paths remain unchanged
+until the egress lifecycle and package endpoint are integrated.
+
+Each preparation and its transient helpers share a unique native operation
+label. Failed or interrupted preparation recovers exact IDs by label, confirms
+ownership, retires helpers first and checks removal independently of caller
+cancellation. Auto-removal races are treated as success only when exact-ID
+absence is confirmed. Genuine cleanup errors are retained and reported.
+
+The existing Fedora runner now reproduces native staged startup. Its successful
+local report, `artifacts/container-egress/prepared-proof-ff86effd.json`, records
+no application execution before explicit start, native address `.1`, unchanged
+namespace/address/default route, attached stdin/stdout/stderr and exit status 7,
+with empty cleanup errors. Using `container:<ID>` for a helper was rejected:
+Podman starts the initialized target as a dependency. This is platform evidence
+for the sequence, not an installed application or policy-activation test.
+
+Validation: 43 focused integration tests pass, covering preparation and identity,
+route stability, cancellation/timeouts during create and both helper operations,
+helper auto-removal races, ambiguous cleanup, and existing connector boundaries.
+The Astra architect approved this checkpoint after reviewing the final cleanup
+changes and the native report. Network enforcement is not enabled by this change.
