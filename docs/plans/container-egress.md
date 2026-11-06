@@ -76,6 +76,12 @@ designated resolver. A short-lived setup helper may configure each topology
 change; Envoy and DNS retain no `NET_ADMIN`. Workloads have neither `NET_ADMIN`
 nor `NET_RAW`, host networking, arbitrary network attachment or control sockets.
 
+Stock CoreDNS 1.14.6 requires the narrow `NET_BIND_SERVICE` capability in the
+tested runtime because its executable carries that file capability. Permit only
+that capability for DNS, with a non-root user and no-new-privileges; Envoy retains
+no capabilities. Observe actual process capability state in the deployment proof.
+Do not grant DNS the setup helper's network-administration capability.
+
 Use IPv4-only private networking initially and explicitly deny unsupported IPv6
 traffic. The initial demonstration must verify routing and redirection on the
 actual rootless Podman/Netavark/kernel versions, including nftables original
@@ -198,4 +204,37 @@ The GPT-6 Astra medium architect reviewed revision 6 and the supplied feedback.
 Consensus: adopt this bounded design with the explicit ownership, DNS, route,
 IPv4, no-fallback and configuration-activation corrections above. Temporary
 approvals are deferred rather than presenting scheduled expiry as guaranteed.
-Implementation and environment evidence are still outstanding.
+At adoption, implementation and environment evidence were outstanding; the
+foundation evidence below records subsequent progress.
+
+## Fedora 44 WSL foundation evidence
+
+The [single topology proof](../../scripts/container-egress/README.md) now exercises
+the native design with real rootless containers. The initial successful promoted
+run is retained locally as `artifacts/container-egress/promoted-proof-4632c7a4.json`.
+The final runner, including serialized allocation, mapping read-back, explicit
+ambient-capability assertions and restricted configuration mounts, also passes
+as `artifacts/container-egress/final-proof-5f20e6ca.json`.
+Environment: Fedora 44 WSL, Podman 5.8.9, Netavark 1.17.2, aardvark 1.17.1,
+nftables 1.1.6 and WSL kernel 6.18.58.1. Envoy distroless 1.40.2 and CoreDNS
+1.14.6 are supplied as cached OCI archives. No installed application is changed.
+
+Observed results include allowed TLS from both scopes after live attachment;
+unchanged external default routes after attachment/detachment; continued first
+scope traffic after retirement of the second; correctly combined source,
+original-destination and SNI log fields; and no new controlled-upstream SYNs for
+denied name, literal IP, unknown source or an Envoy-stopped request. A reachable
+same-scope target provides the cross-scope denial control. Alternate DNS answers
+from egress but receives no private-network query. Client IPv6 addresses/routes
+are absent rather than assumed filtered. Cleanup errors are empty.
+
+Actual process observations show NNP enabled and no ambient capabilities for both
+stock services: Envoy effective/permitted/bounding capabilities are zero; CoreDNS
+has only `NET_BIND_SERVICE`. Its executable's file capability requires that
+narrow exception on this runtime even with NNP. The fixture's key/certificate
+belong to the simulated TLS endpoints, not to the Envoy configuration.
+
+The architect reviewed the proof and the explicit limits. This is WSL static
+topology evidence, not a completed product, recursive DNS proof, file-xDS update
+proof, host-process containment test or native Linux/Mac validation. Continue
+with Manager integration rather than creating additional research subsystems.
