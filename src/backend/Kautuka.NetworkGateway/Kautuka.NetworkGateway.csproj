@@ -10,6 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <ProjectReference Include="../../shared/Kautuka.Telemetry/Kautuka.Telemetry.csproj" />
     <InternalsVisibleTo Include="Kautuka.NetworkGateway.Tests" />
   </ItemGroup>
 </Project>
