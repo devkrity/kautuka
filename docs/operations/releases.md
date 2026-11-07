@@ -115,7 +115,10 @@ update-maintenance command. On Linux this file overrides release defaults and
 normal environment/argument configuration, and is read once without live reload.
 It is optional for legacy host installations; the installer must publish and
 validate container enablement, DNS and core settings before enabling the
-container service contract. Updates preserve it instead of copying deployment
+container service contract. Both startup paths reject a container contract with
+a missing installed file or absent/disabled core or egress flags; earlier
+configuration providers cannot stand in for those explicit installed settings.
+Updates preserve it instead of copying deployment
 settings into each release. The maintenance command still forces the production
 mode/state root and adds no environment or argument configuration providers.
 

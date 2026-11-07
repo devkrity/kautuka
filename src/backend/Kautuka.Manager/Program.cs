@@ -27,7 +27,7 @@ var builder = WebApplication.CreateSlimBuilder(args);
 // Installed deployment settings survive release changes and are authoritative
 // over release defaults and environment/argument deployment overrides.
 if (OperatingSystem.IsLinux())
-    builder.Configuration.AddJsonFile("/etc/kautuka/manager.json", optional: true, reloadOnChange: false);
+    InstalledManagerConfiguration.Add(builder.Configuration);
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
