@@ -12,6 +12,24 @@ public sealed class VerifiedImageArchiveTests
     private static readonly string source = "ghcr.io/devkrity/archive-fixture@sha256:" + new string('a', 64);
     private static readonly string localId = "sha256:" + new string('b', 64);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InspectOnlyCannotLoadWhenAnImageIsMissingOrDisappears(bool disappears)
+    {
+        using var fixture = new ArchiveFixture();
+        var calls = new List<string[]>();
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add([.. args]);
+            return Task.FromResult(new PodmanCommandResult(disappears && args[1] == "exists" ? 0 : 1, "", ""));
+        });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Store(runner, fixture.Entry)
+            .ResolveCachedAsync(source, TestContext.Current.CancellationToken, allowLoad: false));
+        Assert.DoesNotContain(calls, args => args[0] == "load");
+        Assert.Equal(disappears ? 2 : 1, calls.Count);
+    }
+
     [Fact]
     public async Task ConvertedArchiveResolvesTheSignedConfigWithoutRepositoryMetadata()
     {

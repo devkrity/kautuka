@@ -346,13 +346,17 @@ public sealed class WorkspaceDesiredStateStore
         }
     }
 
-    public bool TryTransitionConnectorState(string connectorId, WorkspaceMcpContainerLifecycleState nextState, string eventName)
+    public bool TryTransitionConnectorState(string connectorId, WorkspaceMcpContainerLifecycleState nextState, string eventName,
+        WorkspaceMcpContainerConnectorDefinition? expectedDefinition = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
         ArgumentException.ThrowIfNullOrWhiteSpace(eventName);
 
         lock (sync)
         {
+            if (expectedDefinition is not null && !desiredContainerConnectors.Any(item => item.Enabled && item.ConnectorId == connectorId
+                && item.Image == expectedDefinition.Image && item.DesiredStateVersion == expectedDefinition.DesiredStateVersion
+                && item.SpecFingerprint == expectedDefinition.SpecFingerprint)) return false;
             if (!connectorStatuses.TryGetValue(connectorId, out WorkspaceMcpContainerRuntimeStatus? currentStatus))
             {
                 return false;
@@ -598,6 +602,8 @@ public sealed record WorkspaceMcpContainerConnectorDefinition(
     int JitCooldownSeconds,
     string? McpProtocolVersion = null)
 {
+    internal ResolvedRuntimeImage? ResolvedImage { get; init; }
+
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;

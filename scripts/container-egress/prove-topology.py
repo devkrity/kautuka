@@ -39,7 +39,10 @@ parser.add_argument('--core-only', action='store_true', help='Run only core-serv
 parser.add_argument('--host-only', action='store_true', help='Run only native host artifact acceptance, omitting core services and workload regressions')
 parser.add_argument('--acquisition-source', help='Optional pinned public registry fixture to acquire through the native private network')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
+parser.add_argument('--work-root', type=pathlib.Path, default=pathlib.Path('/var/tmp'), help='Existing scratch filesystem for the disposable store')
 options = parser.parse_args()
+if not options.work_root.is_absolute() or options.work_root.is_symlink() or options.work_root.resolve() != options.work_root or not options.work_root.is_dir():
+    parser.error('work root must be an existing canonical absolute directory')
 if sys.platform != 'linux' or os.geteuid() != 0:
     parser.error('requires Linux root in a disposable test distro')
 for role in (('envoy','dns','pkgs','sandbox') if options.manager_smoke is not None else ('envoy','dns')):
@@ -58,6 +61,9 @@ if options.core_build_root is not None:
 if options.host_only and (options.manager_smoke is None or options.core_only): parser.error('--host-only needs a Manager fixture and cannot combine with --core-only')
 if options.acquisition_source and (options.manager_smoke is None or not (options.image_cache/'skopeo.oci').is_file()): parser.error('acquisition proof requires Manager fixture and offline skopeo.oci')
 if options.core_only and options.core_build_root is None: parser.error('--core-only requires --core-build-root')
+minimum_scratch = (4 if options.core_build_root is not None and not options.core_only else 2) * 1024**3
+if shutil.disk_usage(options.work_root).free < minimum_scratch:
+    parser.error('insufficient scratch capacity for this proof; choose a larger --work-root before creating disposable resources')
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
 lock = os.open('/run/lock/kautuka-egress-proof.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -73,14 +79,15 @@ signal.signal(signal.SIGTERM, interrupted)
 signal.signal(signal.SIGINT, interrupted)
 
 prefix = 'kev6-' + uuid.uuid4().hex[:8]
-root = pathlib.Path(tempfile.mkdtemp(prefix='kautuka-egress-v6-', dir='/var/tmp'))
+root = pathlib.Path(tempfile.mkdtemp(prefix='kautuka-egress-v6-', dir=options.work_root))
 root.chmod(0o711)
 created = False
 started = False
 pod_created = False
 network_names = []
 containers = []
-report = {'prefix':prefix, 'passed':False, 'cleanupErrors':[]}
+report = {'prefix':prefix, 'passed':False, 'cleanupErrors':[], 'scratchRoot':str(options.work_root),
+          'scratchFilesystem':command(['findmnt','--noheadings','--output','FSTYPE','--target',str(options.work_root)])}
 try:
     allocations = [line.split(':') for file in ('/etc/subuid','/etc/subgid') for line in pathlib.Path(file).read_text().splitlines() if line and not line.startswith('#')]
     if any(len(x)!=3 or int(x[1])<0 or int(x[2])<=0 or int(x[1])+int(x[2])>0xFFFFFFFF for x in allocations): raise RuntimeError('invalid subordinate allocation')
@@ -648,6 +655,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_f
         report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
         report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
+    if report['scratchFilesystem']=='tmpfs': report['limitations'].append('RAM-backed disposable store: no disk throughput, disk-capacity or persistence evidence.')
     report['scope'] = ('rootless-host-artifacts-and-registry-acquisition-only' if options.acquisition_source else 'rootless-host-artifacts-only') if options.host_only else 'rootless-host-and-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
 except Exception as error:
@@ -695,7 +703,7 @@ finally:
             if not report['cleanupErrors']: command(['userdel',prefix])
         except Exception as error: report['cleanupErrors'].append(str(error))
     try:
-        if root.parent != pathlib.Path('/var/tmp') or not root.name.startswith('kautuka-egress-v6-'): raise RuntimeError('unsafe cleanup path')
+        if root.parent != options.work_root or root.resolve() != root or root.is_symlink() or not root.name.startswith('kautuka-egress-v6-'): raise RuntimeError('unsafe cleanup path')
         if not report['cleanupErrors']: shutil.rmtree(root)
     except Exception as error: report['cleanupErrors'].append(str(error))
     if report['cleanupErrors']: report['passed']=False

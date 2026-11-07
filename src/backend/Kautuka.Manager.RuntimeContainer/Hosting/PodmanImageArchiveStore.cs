@@ -30,7 +30,7 @@ public sealed class PodmanImageArchiveStore
         this.logger = logger;
     }
 
-    internal async Task<ResolvedRuntimeImage> ResolveCachedAsync(string sourceReference, CancellationToken ct)
+    internal async Task<ResolvedRuntimeImage> ResolveCachedAsync(string sourceReference, CancellationToken ct, bool allowLoad = true)
     {
         RuntimeImageEntry[] entries = [.. allowlist.Images.Where(item => item.Image == sourceReference)];
         if (entries.Length == 0) throw new InvalidOperationException("The requested bootstrap image is not in the verified release inventory.");
@@ -48,6 +48,7 @@ public sealed class PodmanImageArchiveStore
         string reference = entry.LocalImageId ?? entry.Image;
         if (!await ImageExistsAsync(reference, ct).ConfigureAwait(false))
         {
+            if (!allowLoad) throw new InvalidOperationException("The runtime image is not ready; background preparation must finish before execution.");
             if (!entry.HasArchiveIdentity)
                 throw new InvalidOperationException("A missing bootstrap image requires a signed archive/config identity; network acquisition cannot bootstrap itself.");
             string archive = Path.Combine(ociImagesRoot, entry.Archive!);

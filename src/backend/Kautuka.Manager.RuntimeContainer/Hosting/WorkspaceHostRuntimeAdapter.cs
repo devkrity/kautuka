@@ -16,7 +16,8 @@ public sealed partial class ManagerRuntimeAdapter(
     IManagerRuntimeHealthProbe runtimeHealthProbe,
     ILogger<ManagerRuntimeAdapter> logger,
     RuntimeImageAllowlist? allowlist = null,
-    PodmanImageArchiveStore? imageArchives = null) : IManagerRuntimeAdapter
+    PodmanImageArchiveStore? imageArchives = null,
+    ContainerEgressRuntime? egressRuntime = null) : IManagerRuntimeAdapter
 {
     private const string sandboxSourceHashLabel = "io.kautuka.sandbox.source-hash";
     private const string sandboxUvInstallRecipeVersion = "sandbox-uv-pkgs-proxy-v3";
@@ -77,6 +78,15 @@ public sealed partial class ManagerRuntimeAdapter(
         if (string.IsNullOrWhiteSpace(sandbox.Image))
         {
             return "infra.sandbox.image is not configured in system_settings";
+        }
+
+        if (egressRuntime?.Enabled == true)
+        {
+            string source = ResolveSandboxImage(sandbox.Image);
+            if (!this.allowlist.ImageReferences.Contains(source))
+                return "The managed sandbox base must appear in the verified release inventory.";
+            _ = await egressRuntime.ResolveRuntimeImageAsync(source, cancellationToken).ConfigureAwait(false);
+            return null;
         }
 
         string? releasedImage = TryResolveReleasedSandboxImage(sandbox.Image);

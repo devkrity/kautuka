@@ -1,3 +1,5 @@
+using Kautuka.Manager.RuntimeContainer.Hosting;
+
 namespace Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
 /// <summary>
@@ -16,6 +18,8 @@ public sealed record ContainerContext(
     IReadOnlyList<string> BaseCapabilities,
     IReadOnlyDictionary<string, string> ContainerEnvironment)
 {
+    internal ResolvedRuntimeImage? ResolvedImage { get; init; }
+
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;

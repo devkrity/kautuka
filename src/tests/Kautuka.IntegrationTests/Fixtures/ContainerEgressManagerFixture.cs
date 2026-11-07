@@ -76,6 +76,7 @@ internal static class ContainerEgressManagerFixture
             return result;
         });
         var allowlist = new RuntimeImageAllowlist(1, [
+         new("fixture-connector",image,null),
          new("egress-setup",data.GetProperty("helper").GetString()!,null),
          new("egress-envoy",data.GetProperty("envoy").GetString()!,null),
          new("egress-dns",data.GetProperty("dns").GetString()!,null),
@@ -144,7 +145,19 @@ internal static class ContainerEgressManagerFixture
             ResolvedRuntimeImage cached = await runtime.ResolveRuntimeImageAsync(sourceReference, ct);
             if (cached != acquired || helperCreates != trace.Count(args => args[0] == "create" && args.Contains("kautuka.egress.component=image-acquisition")))
                 throw new InvalidOperationException("Acquired image cache repeated a network operation.");
-            if ((await native.RunAsync(["rmi", acquired.LocalImageId], 30, ct)).ExitCode != 0)
+            using (JsonDocument imageInfo = JsonDocument.Parse((await native.RunAsync(["image", "inspect", acquired.LocalImageId], 15, ct)).StdOut))
+            {
+                // The larger fixture may also be the cached acquisition helper.
+                // Remove only tags resolving to this unused exact image, never force
+                // image removal (which could remove dependent containers).
+                foreach (JsonElement tag in imageInfo.RootElement[0].GetProperty("RepoTags").EnumerateArray())
+                {
+                    PodmanCommandResult removed = await native.RunAsync(["rmi", tag.GetString()!], 30, ct);
+                    if (removed.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Retire acquired test image tag", removed));
+                }
+            }
+            if ((await native.RunAsync(["image", "exists", acquired.LocalImageId], 15, ct)).ExitCode == 0
+                && (await native.RunAsync(["rmi", acquired.LocalImageId], 30, ct)).ExitCode != 0)
                 throw new InvalidOperationException("Acquisition fixture could not remove its exact unused image.");
             if (await runtime.ResolveRuntimeImageAsync(sourceReference, ct) != acquired)
                 throw new InvalidOperationException("Acquired archive could not restore its immutable image.");
@@ -190,6 +203,14 @@ internal static class ContainerEgressManagerFixture
             report["registryConnectedAuditEvents"] = registryEvents;
             report["registryHelperAllocations"] = new JsonArray([.. acquisitionAllocations.Select(pair => (JsonNode)new JsonObject { ["id"] = pair.Key, ["address"] = pair.Value })]);
             report["hostRequestStartAuditObserved"] = true;
+            int publishedDirectories = Directory.GetDirectories(Path.Combine(stateRoot, "egress", "registry-images")).Length;
+            string missingImage = sourceReference[..(sourceReference.LastIndexOf('@') + 1)] + "sha256:" + new string('0', 64);
+            bool missingRejected = false;
+            try { await runtime.ResolveRuntimeImageAsync(missingImage, ct); }
+            catch (InvalidOperationException) { missingRejected = true; }
+            if (!missingRejected || Directory.GetDirectories(Path.Combine(stateRoot, "egress", "registry-images")).Length != publishedDirectories)
+                throw new InvalidOperationException("A failed registry lookup left stale staging despite confirmed helper retirement.");
+            report["failedRegistryLookupRetiredAndStagingRemoved"] = true;
             await Console.Error.WriteLineAsync("fixture: restricted registry image acquisition and cache restoration passed");
         }
         if (data.TryGetProperty("hostOnly", out JsonElement hostOnly) && hostOnly.GetBoolean())

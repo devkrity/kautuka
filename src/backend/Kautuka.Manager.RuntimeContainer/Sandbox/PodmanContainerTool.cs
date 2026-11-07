@@ -241,6 +241,7 @@ public sealed class PodmanContainerTool(
     private async Task<OciSandboxSession> EnsureEgressContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
         ContainerEgressRuntime runtime = egressRuntime!;
+        context = context with { ResolvedImage = await runtime.ResolveCachedRuntimeImageAsync(context.Image, cancellationToken).ConfigureAwait(false) };
         ContainerEgressRuntime.Scope scope = ContainerEgressRuntime.SandboxScope(context);
         string name = BuildContainerName(context);
         await using var lease = (await containerLocks.AcquireAsync(name, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
@@ -447,7 +448,13 @@ public sealed class PodmanContainerTool(
                 null);
         }
 
-        string? imageId = await TryReadImageIdAsync(QualifyLocalImage(context.Image), cancellationToken).ConfigureAwait(false);
+        string imageReference = QualifyLocalImage(context.Image);
+        if (egressRuntime?.Enabled == true)
+        {
+            ResolvedRuntimeImage resolved = context.ResolvedImage ?? await egressRuntime.ResolveCachedRuntimeImageAsync(context.Image, cancellationToken).ConfigureAwait(false);
+            imageReference = resolved.ForSource(context.Image);
+        }
+        string? imageId = await TryReadImageIdAsync(imageReference, cancellationToken).ConfigureAwait(false);
         string? state = null;
         long desiredVersion = 0;
         string fingerprint = string.Empty;
@@ -648,7 +655,8 @@ public sealed class PodmanContainerTool(
 
         // Qualify short-name images with 'localhost/' so Podman resolves them from local
         // storage without requiring unqualified-search-registries in registries.conf.
-        args.Add(QualifyLocalImage(context.Image));
+        args.Add(networkName is null ? QualifyLocalImage(context.Image)
+            : (context.ResolvedImage ?? throw new InvalidOperationException("Controlled sandbox execution requires a resolved image.")).ForSource(context.Image));
         if (networkName is null) args.Add("sh");
         args.Add("-lc");
         args.Add("tail -f /dev/null");

@@ -232,8 +232,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         }
 
         Stopwatch sandboxImageStopwatch = Stopwatch.StartNew();
-        string? sandboxImageError = egressRuntime?.Enabled == true ? null
-            : await runtimeAdapter.PrepareSandboxImageAsync(runtimeSettings.Sandbox, cancellationToken).ConfigureAwait(false);
+        string? sandboxImageError = await runtimeAdapter.PrepareSandboxImageAsync(runtimeSettings.Sandbox, cancellationToken).ConfigureAwait(false);
         sandboxImageStopwatch.Stop();
         LogReconcilePhaseCompleted(logger, "sandbox-image", sandboxImageStopwatch.ElapsedMilliseconds, 1, 1);
         if (!string.IsNullOrWhiteSpace(sandboxImageError))
@@ -395,7 +394,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             new SandboxRuntimeDefinition(),
             new WorkspaceTelemetryDefinition());
 
-    private Task ReconcileContainerConnectorsAsync(
+    private async Task ReconcileContainerConnectorsAsync(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> desiredConnectors,
         CancellationToken cancellationToken)
     {
@@ -425,6 +424,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             if (cancellationToken.IsCancellationRequested) break;
             if (connector.Enabled)
             {
+                if (!await connectorExecutionService.PrepareDesiredConnectorImageAsync(connector.ConnectorId, cancellationToken).ConfigureAwait(false)) continue;
                 mcpContainerConnectors.AddOrUpdate(
                     connector.ConnectorId,
                     (null, DateTime.MinValue),
@@ -436,14 +436,14 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
                     _ = desiredStateStore.TryTransitionConnectorState(
                         connector.ConnectorId,
                         WorkspaceMcpContainerLifecycleState.Materialized,
-                        "connector-materialized");
+                        "connector-materialized",
+                        connector);
                 }
 
                 LogMcpConnectorDesired(logger, connector.ConnectorId, connector.Image, connector.JitCooldownSeconds);
             }
         }
 
-        return Task.CompletedTask;
     }
 
 }

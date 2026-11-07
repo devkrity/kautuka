@@ -154,6 +154,29 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         return new(true, removed, null);
     }
 
+    public async Task<bool> PrepareDesiredConnectorImageAsync(string connectorId, CancellationToken cancellationToken)
+    {
+        if (egressRuntime?.Enabled != true) return true;
+        WorkspaceMcpContainerConnectorDefinition? accepted = desiredStateStore.Snapshot.DesiredContainerConnectors
+            .FirstOrDefault(item => item.ConnectorId == connectorId && item.Enabled);
+        if (accepted is null) return false;
+        if (!string.IsNullOrWhiteSpace(accepted.BundlePath) || !string.IsNullOrWhiteSpace(accepted.ServerType)
+            || McpbImageMaterializer.InferServerType(accepted.Command) is not null) return true;
+        bool IsCurrent() => desiredStateStore.Snapshot.DesiredContainerConnectors.Any(item => item.Enabled && item.ConnectorId == connectorId
+            && item.Image == accepted.Image && item.DesiredStateVersion == accepted.DesiredStateVersion && item.SpecFingerprint == accepted.SpecFingerprint);
+        try
+        {
+            _ = await egressRuntime.ResolveRuntimeImageAsync(accepted.Image, cancellationToken).ConfigureAwait(false);
+            return IsCurrent();
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            _ = desiredStateStore.TryTransitionConnectorState(connectorId, WorkspaceMcpContainerLifecycleState.Failed, "image-preparation-blocked", accepted);
+            logger.LogWarning(error, "Connector {ConnectorId} image preparation is deferred; other ready connectors remain available.", connectorId);
+            return false;
+        }
+    }
+
     public async Task<IReadOnlyList<string>> ReconcileDesiredConnectorsAsync(CancellationToken cancellationToken)
     {
         var notes = new List<string>();
@@ -167,17 +190,18 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 continue;
             }
             WorkspaceMcpContainerConnectorDefinition connector = instance.Connector;
-            if (egressRuntime?.Enabled == true) connector = mcpbImageMaterializer.ResolveControlledRuntimeConnector(connector);
             string containerName = instance.Name;
             string runtimeKey = instance.RuntimeKey;
             ContainerContext? mountedWorkspace = ResolveMountedWorkspace(instance.Mode, instance.Workspace);
             ConnectorContainerInspection inspection;
             try
             {
+                if (egressRuntime?.Enabled == true)
+                    connector = await mcpbImageMaterializer.ResolveControlledExecutionAsync(connector, materialize: false, instance.Workspace, cancellationToken).ConfigureAwait(false);
                 inspection = await InspectContainerStateAsync(containerName, connector, mountedWorkspace, cancellationToken,
                     egressRuntime?.Enabled == true ? ContainerEgressRuntime.ConnectorScope(connector.ConnectorId, instance.Workspace).NetworkName : null).ConfigureAwait(false);
             }
-            catch (ContainerInspectionUnavailableException ex)
+            catch (Exception ex) when (ex is ContainerInspectionUnavailableException or InvalidOperationException)
             {
                 notes.Add("Connector " + connector.ConnectorId + " inspection is unavailable. Reconciliation is deferred.");
                 logger.LogWarning(ex, "[ContainerConnector] Reconcile deferred for connector '{ConnectorId}'.", connector.ConnectorId);
@@ -1012,6 +1036,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         WorkspaceMcpContainerConnectorDefinition connector,
         CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
+        if (egressRuntime?.Enabled == true)
+            return await mcpbImageMaterializer.ResolveControlledExecutionAsync(connector, materialize: true, workspaceContext, cancellationToken).ConfigureAwait(false);
         string? serverType = connector.ServerType;
         if (string.IsNullOrWhiteSpace(serverType))
         {
@@ -1194,7 +1220,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return new ConnectorContainerInspection(false, null, 0, string.Empty, null);
         }
 
-        string? imageId = await TryReadImageIdAsync(connector?.Image, cancellationToken).ConfigureAwait(false);
+        string? imageReference = connector?.ResolvedImage is { } resolved ? resolved.ForSource(connector.Image) : connector?.Image;
+        string? imageId = await TryReadImageIdAsync(imageReference, cancellationToken).ConfigureAwait(false);
         try
         {
             if (!LiveContainerSpec.TryReadLabels(inspectJson, out string? state, out long desiredVersion, out string fingerprint))

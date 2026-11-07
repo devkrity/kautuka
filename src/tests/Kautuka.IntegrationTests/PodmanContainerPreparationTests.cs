@@ -134,7 +134,8 @@ public sealed class PodmanContainerPreparationTests
     public void ConnectorCreatePreservesBoundariesAndCreationTimeStdin()
     {
         var connector = new WorkspaceMcpContainerConnectorDefinition(
-            "owner::connector", "localhost/kautuka-connector:fixture", "", [], true, false, null, null, [], 30, 600);
+            "owner::connector", "localhost/kautuka-connector:fixture", "", [], true, false, null, null, [], 30, 600)
+        { ResolvedImage = new("localhost/kautuka-connector:fixture", "linux/amd64", "sha256:" + new string('a', 64)) };
         List<string> once = ConnectorContainerSpecBuilder.BuildCreate(connector, "fixture", WorkspaceMcpExecutionContext.Isolated,
             null, persistent: false, network, "10.247.91.2");
         List<string> persistent = ConnectorContainerSpecBuilder.BuildCreate(connector, "fixture", WorkspaceMcpExecutionContext.Isolated,

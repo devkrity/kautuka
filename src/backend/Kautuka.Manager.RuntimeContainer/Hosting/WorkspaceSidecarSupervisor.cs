@@ -306,17 +306,17 @@ public sealed class WorkspaceSidecarSupervisor(
         string image = allowlist.Images.SingleOrDefault(static entry => entry.Id == "git-pkgs-proxy")?.Image
             ?? throw new InvalidOperationException("The verified package image is missing from the release inventory.");
         ContainerImageProvenancePolicy.EnsureTrusted(image, "package service");
-        if (!await ImageExistsAsync(image, cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException("The verified package image is not cached; implicit pulls/builds are disabled.");
+        ResolvedRuntimeImage resolved = await runtime.ResolveRuntimeImageAsync(image, cancellationToken).ConfigureAwait(false);
+        string executionImage = resolved.ForSource(image);
         sidecar = sidecar with { Image = image, BuildContext = null, Dockerfile = null };
         await runtime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
         ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
         PreparedPodmanContainer? existing = state.IsRunning ? await runtime.FindSourceAsync(sidecar.Name, cancellationToken).ConfigureAwait(false) : null;
         if (existing is not null)
         {
-            string imageId = (await podmanCommandRunner.RunAsync(["image", "inspect", "--format", "{{.Id}}", image], 10, cancellationToken).ConfigureAwait(false)).StdOut.Trim();
-            if (await PackageSecurityMatchesAsync(state.InspectJson!, image, cancellationToken).ConfigureAwait(false)
-                && LiveContainerSpec.DescribeSidecarDrift(state.InspectJson!, image, [], imageId, sidecar.Volumes, sidecar.Environment, "kautuka-core") is null)
+            string imageId = (await podmanCommandRunner.RunAsync(["image", "inspect", "--format", "{{.Id}}", executionImage], 10, cancellationToken).ConfigureAwait(false)).StdOut.Trim();
+            if (await PackageSecurityMatchesAsync(state.InspectJson!, executionImage, cancellationToken).ConfigureAwait(false)
+                && LiveContainerSpec.DescribeSidecarDrift(state.InspectJson!, executionImage, [], imageId, sidecar.Volumes, sidecar.Environment, "kautuka-core") is null)
                 return await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false);
         }
         if (state.Exists)
@@ -328,7 +328,7 @@ public sealed class WorkspaceSidecarSupervisor(
         var identity = new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("system", "core", "core"), "package", sidecar.Name);
         PreparedPodmanContainer prepared = await runtime.PrepareAndAuthorizeAsync(identity, sidecar.Name, (network, dns) =>
         {
-            List<string> args = BuildRunArguments(sidecar);
+            List<string> args = BuildRunArguments(sidecar, resolved);
             args[0] = "create"; args.Remove("-d");
             args[args.IndexOf("--network") + 1] = network;
             int alias = args.IndexOf("--network-alias"); args.RemoveRange(alias, 2);
@@ -736,7 +736,7 @@ public sealed class WorkspaceSidecarSupervisor(
         return false;
     }
 
-    private static List<string> BuildRunArguments(WorkspaceSidecarDefinition sidecar)
+    private static List<string> BuildRunArguments(WorkspaceSidecarDefinition sidecar, ResolvedRuntimeImage? resolved = null)
     {
         List<string> args =
         [
@@ -774,7 +774,7 @@ public sealed class WorkspaceSidecarSupervisor(
             args.Add($"{kv.Key}={kv.Value}");
         }
 
-        args.Add(sidecar.Image);
+        args.Add(resolved?.ForSource(sidecar.Image) ?? sidecar.Image);
 
         foreach (string commandPart in sidecar.Command)
         {

@@ -792,3 +792,35 @@ stderr pipe; those records appear in `podman logs` and satisfy source attributio
 The missing-stdout root cause is not established. A host request-start record
 means receipt, not admission; actual TLS success and explicit proxy-403 tests
 establish outcomes. Persistent audit delivery/storage and UI are still pending.
+
+
+Runtime image consumers now preserve the authorized source reference while using
+a typed, inspected config ID for native creation and adoption. Background
+reconciliation prepares released sandbox images, accepted raw connector images
+and package services. Foreground execution and inspection are cache-only: they
+never start acquisition or archive loading, and a ready image does not wait
+behind an unrelated registry transfer. Desired-state failure/materialization
+transitions compare the expected definition under the store lock.
+
+Acquisition helpers put Skopeo temporary layers in their private output directory
+and disable implicit image volumes/read-only tmpfs mounts. Normal operation
+failures remove staging only after confirmed helper retirement; uncertain
+retirement preserves potentially mounted output.
+
+Combined Native AOT report artifacts/container-egress/runtime-proof-08c22369.json
+passed with no cleanup errors. All 70 runtime/shared/fixture source inputs match
+the compiled snapshot by normalized-text SHA-256. This run combines all four core
+services, host artifact transport, real pinned registry acquisition, offline cache
+restoration, failed-registry-lookup cleanup, source recovery, package service and
+Node/Python/uv/binary isolated and sandbox execution. The focused Windows group
+passed 106 tests, and the Manager build had zero warnings/errors.
+
+The earlier disk-backed run runtime-proof-125b53b0.json failed on actual disk
+exhaustion; its exact disposable owner/store were subsequently recovered and
+removed. The passing combined run uses a bounded 6 GiB RAM-backed disposable
+store, so it proves neither disk capacity/throughput nor persistence. The first
+RAM-backed run runtime-proof-e55477c1.json exposed a fixture-only non-forced
+image-removal issue when the acquired image was also the cached helper; the
+fixture now removes only inspected tags before testing offline restoration.
+Installed deployment, updater integration, release publication, persistent audit
+and approval UI remain unfinished.

@@ -15,6 +15,20 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceDesiredStateStoreTests
 {
     [Fact]
+    public void AnOldImagePreparationCannotChangeANewerConnectorStatus()
+    {
+        var store = new WorkspaceDesiredStateStore();
+        WorkspaceMcpContainerConnectorDefinition first = CreateConnector("connector-a");
+        store.ApplyDesiredState(1, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Bootstrap, CreateRuntimeSettings(), [], [first], []);
+        WorkspaceMcpContainerConnectorDefinition accepted = Assert.Single(store.Snapshot.DesiredContainerConnectors);
+        store.ApplyDesiredState(2, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change, CreateRuntimeSettings(), [],
+            [first with { Image = "ghcr.io/example/changed@sha256:" + new string('a', 64) }], []);
+        WorkspaceMcpContainerRuntimeStatus? before = store.GetConnectorStatus(first.ConnectorId);
+        Assert.False(store.TryTransitionConnectorState(first.ConnectorId, WorkspaceMcpContainerLifecycleState.Failed, "old-image-failed", accepted));
+        Assert.Equal(before, store.GetConnectorStatus(first.ConnectorId));
+    }
+
+    [Fact]
     public void DesiredStateRejectsDuplicateAgentWorkspaceScopeAcrossCallerIdentities()
     {
         ContainerContext workspace = CreateWorkspace("scope-a");

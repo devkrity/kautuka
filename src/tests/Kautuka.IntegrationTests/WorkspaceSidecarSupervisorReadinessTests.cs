@@ -15,6 +15,21 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceSidecarSupervisorReadinessTests
 {
     [Fact]
+    public void ResolvedPackageExecutionKeepsItsAuthorizedSourceBinding()
+    {
+        string source = "ghcr.io/devkrity/package@sha256:" + new string('a', 64);
+        string config = "sha256:" + new string('b', 64);
+        var sidecar = new WorkspaceSidecarDefinition("kautuka-pkgs-proxy", source, [], new Dictionary<string, string>(), [], null, null, null, false);
+        var resolved = new ResolvedRuntimeImage(source, "linux/amd64", config);
+        List<string> arguments = InvokeBuildRunArguments(sidecar, resolved);
+        Assert.Contains(config, arguments);
+        Assert.DoesNotContain(source, arguments);
+        TargetInvocationException error = Assert.Throws<TargetInvocationException>(() =>
+            InvokeBuildRunArguments(sidecar with { Image = "quay.io/another/image@sha256:" + new string('c', 64) }, resolved));
+        Assert.IsType<InvalidOperationException>(error.InnerException);
+    }
+
+    [Fact]
     public void BuildRunArgumentsUsesSandboxNetworkAliasForServiceDiscovery()
     {
         WorkspaceSidecarDefinition sidecar = new(
@@ -240,13 +255,13 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             },
             new WorkspaceTelemetryDefinition());
 
-    private static List<string> InvokeBuildRunArguments(WorkspaceSidecarDefinition sidecar)
+    private static List<string> InvokeBuildRunArguments(WorkspaceSidecarDefinition sidecar, ResolvedRuntimeImage? resolved = null)
     {
         MethodInfo method = typeof(WorkspaceSidecarSupervisor)
             .GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("BuildRunArguments method was not found.");
 
-        object? result = method.Invoke(null, [sidecar]);
+        object? result = method.Invoke(null, [sidecar, resolved]);
         return Assert.IsType<List<string>>(result);
     }
 }

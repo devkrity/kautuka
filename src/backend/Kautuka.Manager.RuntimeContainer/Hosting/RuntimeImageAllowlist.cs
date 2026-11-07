@@ -120,6 +120,13 @@ public sealed record RuntimeImageEntry(
 
 internal sealed record ResolvedRuntimeImage(string SourceReference, string Platform, string LocalImageId)
 {
+    internal string ForSource(string authorizedSource)
+    {
+        if (SourceReference != authorizedSource || !RuntimeImageEntry.IsLocalId(LocalImageId))
+            throw new InvalidOperationException("The immutable execution image does not match its authorized source.");
+        return LocalImageId;
+    }
+
     internal static ResolvedRuntimeImage FromInspection(string sourceReference, JsonElement image)
     {
         string? id = image.GetProperty("Id").GetString();

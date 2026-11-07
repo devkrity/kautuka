@@ -9,6 +9,29 @@ public sealed partial class McpbImageMaterializer
 {
     private const string egressRecipeVersion = "mcpb-egress-v1";
 
+    internal async Task<WorkspaceMcpContainerConnectorDefinition> ResolveControlledExecutionAsync(
+        WorkspaceMcpContainerConnectorDefinition connector, bool materialize, ContainerContext? workspace, CancellationToken ct)
+    {
+        if (egressRuntime?.Enabled != true) throw new InvalidOperationException("Controlled execution is not configured.");
+        string? serverType = ResolveEgressServerType(connector);
+        if (serverType is null)
+            return connector with { ResolvedImage = await egressRuntime.ResolveCachedRuntimeImageAsync(connector.Image, ct).ConfigureAwait(false) };
+        WorkspaceMcpContainerConnectorDefinition expected = ResolveControlledRuntimeConnector(connector);
+        if (materialize)
+        {
+            string built = await EnsureEgressImageAsync(connector, BundleWorkdir, false, workspace, ct).ConfigureAwait(false);
+            if (built != expected.Image) throw new InvalidOperationException("Materialization returned an image outside its owned cache identity.");
+        }
+        // Only the materializer may bind its own derived local tag. Arbitrary
+        // local images never enter the release/registry resolver through this path.
+        PodmanCommandResult inspected = await podmanCommandRunner.RunAsync(["image", "inspect", expected.Image], 15, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        if (inspected.ExitCode != 0) throw new ContainerInspectionUnavailableException("The materialized connector image is not ready.");
+        using System.Text.Json.JsonDocument image = System.Text.Json.JsonDocument.Parse(inspected.StdOut);
+        if (image.RootElement.GetArrayLength() != 1) throw new InvalidOperationException("Materialized image inspection is ambiguous.");
+        return expected with { ResolvedImage = ResolvedRuntimeImage.FromInspection(expected.Image, image.RootElement[0]) };
+    }
+
     private async Task<string> EnsureEgressImageAsync(WorkspaceMcpContainerConnectorDefinition connector, string installRoot,
         bool artifact, ContainerContext? workspace, CancellationToken cancellationToken)
     {
@@ -23,9 +46,9 @@ public sealed partial class McpbImageMaterializer
         if (artifact && workspace is not null) connector = connector with { Image = workspace.Image };
         ContainerEgressRuntime.Scope scope = ContainerEgressRuntime.ConnectorScope(connector.ConnectorId, workspace);
         await egressRuntime!.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
-        await AdmitInfrastructureBaseAsync(connector, cancellationToken).ConfigureAwait(false);
-        if (!await EgressImageExistsAsync(connector.Image, cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException("The verified sandbox base is not cached; implicit image pulls are disabled.");
+        if (!(allowlist ?? RuntimeImageAllowlist.Empty).ImageReferences.Contains(connector.Image))
+            throw new InvalidOperationException("Controlled materialization requires a sandbox base from the verified release inventory.");
+        ResolvedRuntimeImage baseImage = await egressRuntime.ResolveCachedRuntimeImageAsync(connector.Image, cancellationToken).ConfigureAwait(false);
         IReadOnlyList<KeyValuePair<string, string>> indexes = ResolveEgressIndexEnvironment(connector.Environment, serverType);
         string digest = hasBundle ? ComputeSha256Hex(connector.BundlePath!) : ComputeSha256HexFromString(connector.Image);
         string target = EgressImageReference(serverType, digest, connector.Image, installRoot, artifact, hasBundle);
@@ -42,7 +65,7 @@ public sealed partial class McpbImageMaterializer
             Directory.CreateDirectory(context);
             if (hasBundle) ExtractBundle(connector.BundlePath!, Path.Combine(context, "bundle"));
             await File.WriteAllTextAsync(Path.Combine(context, "contract.json"), "{\"installRoot\":\"" + System.Text.Json.JsonEncodedText.Encode(installRoot) + "\"}", cancellationToken).ConfigureAwait(false);
-            string containerfile = BuildEgressSystemContainerfile(connector.Image, serverType, installRoot, hasBundle);
+            string containerfile = BuildEgressSystemContainerfile(baseImage.ForSource(connector.Image), serverType, installRoot, hasBundle);
             await File.WriteAllTextAsync(Path.Combine(context, "Containerfile"), containerfile, cancellationToken).ConfigureAwait(false);
             await EgressCommandAsync(["build", "--pull=never", "--network=none", "--cap-drop=ALL", "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--security-opt=no-new-privileges",
                 "-t", systemImage, "-f", Path.Combine(context, "Containerfile"), context], 300, cancellationToken).ConfigureAwait(false);

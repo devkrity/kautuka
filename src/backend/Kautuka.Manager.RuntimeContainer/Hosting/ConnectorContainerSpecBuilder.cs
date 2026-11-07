@@ -107,7 +107,9 @@ internal static class ConnectorContainerSpecBuilder
         // The persistent exec host must not accidentally invoke the image's application ENTRYPOINT.
         if (create && persistent) arguments.AddRange(["--entrypoint", "sh"]);
 
-        arguments.Add(connector.Image);
+        arguments.Add(create
+            ? (connector.ResolvedImage ?? throw new InvalidOperationException("Controlled connector execution requires a resolved image.")).ForSource(connector.Image)
+            : connector.Image);
         if (persistent)
         {
             arguments.AddRange(create ? ["-lc", "tail -f /dev/null"] : ["sh", "-lc", "tail -f /dev/null"]);
