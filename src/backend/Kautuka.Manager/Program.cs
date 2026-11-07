@@ -10,6 +10,12 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
+if (args.Any(argument => argument.StartsWith("--update-core-", StringComparison.Ordinal)))
+{
+    Environment.ExitCode = await CoreServiceUpdateCommand.RunAsync(args).ConfigureAwait(false);
+    return;
+}
+
 using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
     Environment.GetEnvironmentVariable("Kautuka__Mode"));
 

@@ -16,6 +16,8 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 public sealed record CoreServicePaths(string StateRoot, string SocketRoot, string WorkspaceRoot,
     string ConfigurationRoot, string WriterLock, string MaintenanceRoot);
 
+public sealed record CoreServiceUpdateIdentity(string Service, string ContainerId, string ImageId);
+
 /// <summary>Fixed application services, reconciled by the existing Manager worker before Gateway's desired state.</summary>
 public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerEgressRuntime egress,
     RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options, PodmanImageArchiveStore? archives = null) : IDisposable
@@ -33,7 +35,10 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
 
     public void Dispose() { gate.Dispose(); GC.SuppressFinalize(this); }
 
-    public async Task<bool> EnsureReadyAsync(CancellationToken cancellationToken)
+    public Task<bool> EnsureReadyAsync(CancellationToken cancellationToken)
+        => EnsureReadyCoreAsync(verification: false, cancellationToken);
+
+    private async Task<bool> EnsureReadyCoreAsync(bool verification, CancellationToken cancellationToken)
     {
         if (!options.Enabled) return true;
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Core service containers require the Linux appliance.");
@@ -42,7 +47,7 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         try
         {
             string maintenance = Path.Combine(paths.MaintenanceRoot, "maintenance.json");
-            if (File.Exists(maintenance) && KautukaMaintenanceMode.ShouldSuppressWorkers(await File.ReadAllTextAsync(maintenance, cancellationToken).ConfigureAwait(false)))
+            if (!verification && File.Exists(maintenance) && KautukaMaintenanceMode.ShouldSuppressWorkers(await File.ReadAllTextAsync(maintenance, cancellationToken).ConfigureAwait(false)))
                 return false;
             if (!File.Exists(paths.WriterLock)) throw new InvalidOperationException("The installer must provision the host database-writer lock before starting services.");
             ValidateWebPublication();
@@ -75,6 +80,41 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             Service web = await BuildServiceAsync("webhost", "Kautuka.WebHost", networkless: false, cancellationToken).ConfigureAwait(false);
             string webId = await EnsureServiceAsync(web, cancellationToken).ConfigureAwait(false);
             return await WaitForWebAsync(webId, cancellationToken).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    /// <summary>Only the fixed update command may start a verification cohort under maintenance.</summary>
+    public async Task<IReadOnlyList<CoreServiceUpdateIdentity>> VerifyForUpdateAsync(CancellationToken cancellationToken)
+    {
+        if (!options.Enabled) throw new InvalidOperationException("Container core services are not enabled for the selected release.");
+        // Always start under the current durable phase. Adopting a container
+        // started before maintenance could leave its external-effect workers
+        // running; clearing maintenance also cannot enable suppressed workers.
+        await StopForUpdateAsync(cancellationToken).ConfigureAwait(false);
+        if (!options.Enabled || !await EnsureReadyCoreAsync(verification: true, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException("The selected release's core verification cohort is not ready.");
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var result = new List<CoreServiceUpdateIdentity>();
+            foreach ((string id, string executable) in new[] { ("credentialshost", "Kautuka.CredentialsHost"), ("channelhost", "Kautuka.ChannelHost"),
+                ("gateway", "Kautuka.Gateway"), ("webhost", "Kautuka.WebHost") })
+            {
+                Service expected = await BuildServiceAsync(id, executable, id == "credentialshost", cancellationToken).ConfigureAwait(false);
+                string json = await PodmanContainerInspector.ReadAsync(runner, expected.Name, cancellationToken).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException("The verification cohort changed before observation.");
+                using JsonDocument inspected = JsonDocument.Parse(json);
+                JsonElement container = PodmanContainerInspector.Container(inspected.RootElement);
+                RequireOwnership(container, id);
+                PreparedPodmanContainer? source = expected.Networkless ? null : await egress.FindSourceAsync(expected.Name, cancellationToken).ConfigureAwait(false);
+                using JsonDocument image = JsonDocument.Parse((await CommandAsync(["image", "inspect", expected.Image], cancellationToken).ConfigureAwait(false)).StdOut);
+                string imageId = image.RootElement[0].GetProperty("Id").GetString()!;
+                if (!Matches(container, expected, imageId, source))
+                    throw new InvalidOperationException("The verification cohort no longer matches the selected release.");
+                result.Add(new CoreServiceUpdateIdentity(id, container.GetProperty("Id").GetString()!, container.GetProperty("Image").GetString()!));
+            }
+            return result;
         }
         finally { gate.Release(); }
     }

@@ -104,6 +104,14 @@ internal static class CoreServiceManagerFixture
             report["coreCredentialsAuthenticatedHealthRpc"] = true;
             report["coreServicesHeldHostWriterLock"] = true;
             report["coreServicesAdoptedSameIds"] = true;
+            string maintenance = Path.Combine(paths.MaintenanceRoot, "maintenance.json");
+            await File.WriteAllTextAsync(maintenance, "{\"phase\":\"verifying\"}", ct);
+            if (await supervisor.EnsureReadyAsync(ct)) throw new InvalidOperationException("Ordinary reconciliation bypassed the maintenance fence");
+            IReadOnlyList<CoreServiceUpdateIdentity> verified = await supervisor.VerifyForUpdateAsync(ct);
+            if (verified.Count != 4 || verified.Any(service => service.ContainerId == tlsIds[service.Service]))
+                throw new InvalidOperationException("Maintenance verification did not replace the normal-worker cohort");
+            report["coreMaintenanceVerificationObservedExactCohort"] = true;
+            File.Delete(maintenance);
         }
         finally { await supervisor.StopForUpdateAsync(CancellationToken.None); }
         if (await ProbeExclusiveWriterLockAsync(writerLock, ct) != 0)

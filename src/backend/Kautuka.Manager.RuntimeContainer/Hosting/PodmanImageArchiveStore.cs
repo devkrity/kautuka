@@ -21,7 +21,7 @@ public sealed class PodmanImageArchiveStore
         RuntimeImageAllowlist allowlist, ILogger<PodmanImageArchiveStore> logger)
         : this(podmanCommandRunner, (runtimePaths ?? throw new ArgumentNullException(nameof(runtimePaths))).OciImagesRoot, allowlist, logger) { }
 
-    internal PodmanImageArchiveStore(PodmanCommandRunner podmanCommandRunner, string ociImagesRoot,
+    public PodmanImageArchiveStore(PodmanCommandRunner podmanCommandRunner, string ociImagesRoot,
         RuntimeImageAllowlist allowlist, ILogger<PodmanImageArchiveStore> logger)
     {
         this.podmanCommandRunner = podmanCommandRunner;

@@ -868,3 +868,32 @@ their host writer lock, then successfully reconstructs egress. Host artifact and
 cold-archive checks also passed. This focused run omits workload regressions and
 uses the bounded RAM-backed store; it does not prove persistence or the installed
 updater CLI/root-helper integration, which remain to be implemented.
+
+Manager now dispatches fixed local maintenance commands before its normal writer
+lease, configuration providers, certificates, hosted workers and web server.
+`--update-core-stop <operationId>` requires matching fixed journal/maintenance
+records and the actual installed source/target executable. Capability discovery
+is `--update-core-capabilities`; no generic commands, image references, mounts or
+caller-selected configuration paths are accepted. The root helper owns record
+ownership/ancestry checks, the clean runtime-owner environment and exclusion of
+the long-lived Manager. The CLI neither writes the journal nor clears admission.
+
+`--update-core-verify <operationId>` selects the source or target release from
+the durable phase. It reads that release's JSON configuration and required image
+inventory without environment/command-line providers, with the production data
+root fixed. Verification first retires the old cohort, then starts fresh services
+under the current marker and reports the four observed immutable container/image
+IDs after full security/admission and health checks. This prevents adoption of
+normal workers during precommit verification; a committed-phase restart launches
+normal workers again. Ordinary reconciliation still refuses precommit startup.
+
+The architect cleared the source review. Focused tests passed 27/27. Actual
+Manager Native AOT publishing succeeded; the native executable returned the
+capability and rejected malformed maintenance arguments before requiring the
+host writer lock. Native report
+`artifacts/container-egress/runtime-proof-82131b76.json` passed with clean teardown
+and 70 matching runtime/shared/fixture input hashes: fresh-cohort maintenance
+verification, ordinary fence refusal, actual core health, closed-proxy shutdown,
+writer-lock release and subsequent egress recovery. This RAM-backed fixture does
+not execute the installed CLI/root-helper transaction. That wiring remains
+unfinished, and container update activation must not be enabled before it exists.
