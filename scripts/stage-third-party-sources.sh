@@ -63,7 +63,7 @@ while IFS=$'\t' read -r id repository commit; do
 done < <(node - "$repo_root/compliance/third-party-components.json" <<'NODE'
 const fs = require('node:fs');
 const catalog = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-for (const id of ['openobserve', 'git-pkgs-proxy', 'elkjs', 'elkjs-mermaid']) {
+for (const id of ['openobserve', 'git-pkgs-proxy', 'elkjs', 'elkjs-mermaid', 'envoy', 'coredns']) {
   const component = catalog.components.find((item) => item.id === id);
   if (!component?.sourceCommit || !component.source) throw new Error(`Missing exact source evidence for ${id}`);
   const url = new URL(component.source);
@@ -142,11 +142,13 @@ const catalog = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const output = process.argv[3];
 const licenseFiles = {
   openobserve: 'LICENSE-openobserve.txt',
+  envoy: 'LICENSE-envoy.txt + NOTICE-envoy.txt',
+  coredns: 'LICENSE-coredns.txt',
   'git-pkgs-proxy': 'LICENSE-proxy.txt',
   elkjs: 'LICENSE-EPL-2.0-elkjs.md',
   'elkjs-mermaid': 'LICENSE-EPL-2.0-elkjs-0.9.3.md',
 };
-const ids = ['openobserve', 'git-pkgs-proxy', 'elkjs', 'elkjs-mermaid'];
+const ids = ['openobserve', 'git-pkgs-proxy', 'elkjs', 'elkjs-mermaid', 'envoy', 'coredns'];
 const components = new Map(catalog.components.map((component) => [component.id, component]));
 const rows = ids.map((id) => {
   const component = components.get(id);
@@ -169,10 +171,12 @@ const text = [
   '',
   'The Fedora archive contains source RPMs for the complete installed package sets in the release WSL rootfs and exact `kautuka-base` image digest. `Fedora-SOURCE-RPMS.txt` names each source RPM and `Fedora-SOURCE-RPMS.sha256` verifies the source RPM files within the archive.',
   '',
+  'Envoy and CoreDNS entries cover only their top-level upstream source. Image base packages and linked/transitive components require separate SBOM/source review; these snapshots do not establish that coverage.',
+  '',
   '`SHA256SUMS` verifies these Git source snapshots, the Fedora source RPM archive, and its source manifest.',
   '',
 ].join('\n');
 fs.writeFileSync(output, text);
 NODE
-(cd "$source_dir" && sha256sum openobserve-*.tar.gz git-pkgs-proxy-*.tar.gz elkjs-*.tar.gz Fedora-SOURCE-RPMS.tar.gz Fedora-SOURCE-RPMS.txt Fedora-SOURCE-RPMS.sha256 SOURCE_ARCHIVES.md > SHA256SUMS)
+(cd "$source_dir" && sha256sum openobserve-*.tar.gz git-pkgs-proxy-*.tar.gz elkjs-*.tar.gz envoy-*.tar.gz coredns-*.tar.gz Fedora-SOURCE-RPMS.tar.gz Fedora-SOURCE-RPMS.txt Fedora-SOURCE-RPMS.sha256 SOURCE_ARCHIVES.md > SHA256SUMS)
 printf 'Staged source archives in %s\n' "$source_dir"

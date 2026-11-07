@@ -77,6 +77,8 @@ exit 1
   const sourceDir = path.join(release, 'sources');
   const archives = await readdir(sourceDir);
   const expected = [
+    ['envoy-b2d89e0ae53916f28770771fbdd49c5c99c5c5a2.tar.gz', 'https://codeload.github.com/envoyproxy/envoy/tar.gz/b2d89e0ae53916f28770771fbdd49c5c99c5c5a2'],
+    ['coredns-424d125775cd70fa90dfc80bf0e52cc9a9aeb574.tar.gz', 'https://codeload.github.com/coredns/coredns/tar.gz/424d125775cd70fa90dfc80bf0e52cc9a9aeb574'],
     ['elkjs-ff5771d7165445c42c408bb8a090c8035272218c.tar.gz', 'https://codeload.github.com/kieler/elkjs/tar.gz/ff5771d7165445c42c408bb8a090c8035272218c'],
     ['elkjs-mermaid-a8304cf79fde75bc2ab1a89d28320f53f8637436.tar.gz', 'https://codeload.github.com/kieler/elkjs/tar.gz/a8304cf79fde75bc2ab1a89d28320f53f8637436'],
   ];
@@ -86,7 +88,15 @@ exit 1
     if (recordedUrl !== expectedUrl) throw new Error(`staging selected the wrong repository or commit for ${filename}: ${JSON.stringify(recordedUrl.slice(0, 180))}`);
   }
   const sums = await readFile(path.join(sourceDir, 'SHA256SUMS'), 'utf8');
-  if (!sums.includes(expected[0][0]) || !sums.includes(expected[1][0])) throw new Error('source checksum manifest omitted an elkjs source snapshot');
+  for (const [filename] of expected) {
+    if (!sums.includes(filename)) throw new Error(`source checksum manifest omitted ${filename}`);
+  }
+  const sourceReadme = await readFile(path.join(sourceDir, 'SOURCE_ARCHIVES.md'), 'utf8');
+  for (const id of ['envoy', 'coredns']) {
+    if (!sourceReadme.includes(`LICENSE-${id}.txt`)) throw new Error(`source index omitted ${id} license mapping`);
+  }
+  if (!sourceReadme.includes('only their top-level upstream source')) throw new Error('source index lost transitive coverage limitation');
+  if (!sourceReadme.includes('NOTICE-envoy.txt')) throw new Error('source index omitted Envoy upstream NOTICE');
   const fedoraSourceUrl = 'https://kojipkgs.fedoraproject.org/packages/fixture/1.0/1/src/fixture-1.0-1.src.rpm';
   const curlUrls = await readFile(path.join(temp, 'curl-urls.txt'), 'utf8');
   if (!curlUrls.includes(fedoraSourceUrl)) throw new Error('staging did not fall back to the exact Fedora Koji source RPM URL');

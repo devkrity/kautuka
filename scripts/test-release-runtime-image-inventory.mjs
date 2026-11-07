@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { validateReleaseRuntimeImages } from './validate-release-runtime-images.mjs';
+import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { validateReleaseRuntimeImages, validateReviewedRuntimeInputs } from './validate-release-runtime-images.mjs';
 
 const digest = 'a'.repeat(64);
 const baseImage = `ghcr.io/devkrity/kautuka-base@sha256:${digest}`;
@@ -41,3 +43,36 @@ assert.throws(
 );
 
 console.log('Release runtime image inventory tests passed: pinned base-image binding, sidecar inventory, and fail-closed mismatch handling.');
+
+const json = async (relative) => JSON.parse(await readFile(new URL(relative, import.meta.url), 'utf8'));
+const inputs = await json('../src/images/runtime-release-inputs.json');
+const catalog = await json('../compliance/third-party-components.json');
+validateReviewedRuntimeInputs(inputs, catalog.components);
+for (const [id, key, version, commit] of [
+  ['envoy', 'envoyImage', '1.40.2', 'b2d89e0ae53916f28770771fbdd49c5c99c5c5a2'],
+  ['coredns', 'dnsImage', '1.14.6', '424d125775cd70fa90dfc80bf0e52cc9a9aeb574'],
+]) {
+  const component = catalog.components.find((item) => item.id === id);
+  assert.equal(component.version, version);
+  assert.equal(component.sourceCommit, commit);
+  const file = `compliance/licenses/LICENSE-${id}.txt`;
+  const bytes = await readFile(new URL(`../${file}`, import.meta.url));
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), component.artifacts[file]);
+  assert.match(bytes.toString('utf8'), /Apache License/u);
+  assert.throws(() => validateReviewedRuntimeInputs({ ...inputs, [key]: `${component.image.slice(0, -64)}${'b'.repeat(64)}` }, catalog.components), /Missing or stale/u);
+  assert.throws(() => validateReviewedRuntimeInputs(inputs, catalog.components.filter((item) => item.id !== id)), /Missing or stale/u);
+  assert.throws(() => validateReviewedRuntimeInputs(inputs, [...catalog.components, component]), /Missing or stale/u);
+  for (const replacement of [{ sourceCommit: '' }, { source: 'https://github.com/unrelated/project' }, { artifacts: {} }]) {
+    assert.throws(() => validateReviewedRuntimeInputs(inputs, catalog.components.map((item) => item.id === id ? { ...item, ...replacement } : item)), /Missing or stale/u);
+  }
+  const generator = await readFile(new URL('./generate-third-party-compliance.mjs', import.meta.url), 'utf8');
+  assert.ok(generator.includes(`'LICENSE-${id}.txt'`), 'release generator must copy the reviewed license');
+  assert.ok(generator.includes('validateReviewedRuntimeInputs(runtimeInputs, catalog.components)'), 'generation must validate current producer pins');
+}
+console.log('Envoy/CoreDNS top-level producer pins, measured source identities, license bytes and drift rejection passed.');
+const envoy = catalog.components.find((item) => item.id === 'envoy');
+const noticeBytes = await readFile(new URL('../compliance/licenses/NOTICE-envoy.txt', import.meta.url));
+assert.equal(createHash('sha256').update(noticeBytes).digest('hex'), envoy.artifacts['compliance/licenses/NOTICE-envoy.txt']);
+assert.equal(envoy.artifacts['compliance/licenses/NOTICE-envoy.txt'], '329d90738f1ee3633da8e7439ea6f9624ec6274a9cbd72437aafa0e8df9de32e');
+assert.throws(() => validateReviewedRuntimeInputs(inputs, catalog.components.map((item) => item.id === 'envoy' ? { ...item, noticeFiles: [] } : item)), /Missing Envoy upstream NOTICE/u);
+assert.ok((await readFile(new URL('./generate-third-party-compliance.mjs', import.meta.url), 'utf8')).includes("'NOTICE-envoy.txt'"));

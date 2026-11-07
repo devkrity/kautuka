@@ -1,5 +1,31 @@
 const baseImagePattern = /^ghcr\.io\/devkrity\/kautuka-base@sha256:[a-f0-9]{64}$/u;
 
+// Deliberately scoped to the two reviewed top-level upstream projects, not
+// approval of other producer inputs or of these images' transitive packages.
+export function validateReviewedRuntimeInputs(inputs, components) {
+  for (const [id, key, repository] of [
+    ['envoy', 'envoyImage', 'envoyproxy/envoy'],
+    ['coredns', 'dnsImage', 'coredns/coredns'],
+  ]) {
+    const matches = components.filter((component) => component.id === id);
+    const component = matches[0];
+    if (matches.length !== 1 || !/@sha256:[a-f0-9]{64}$/u.test(inputs?.[key] ?? '')
+        || component.image !== inputs[key]
+        || !/^[a-f0-9]{40}$/u.test(component.sourceCommit ?? '')
+        || component.source !== `https://github.com/${repository}/tree/${component.sourceCommit}`
+        || !/^\d+\.\d+\.\d+$/u.test(component.version ?? '')
+        || component.licenseExpression !== 'Apache-2.0'
+        || !component.licenseFiles?.includes(`LICENSE-${id}.txt`)
+        || !/^[a-f0-9]{64}$/u.test(component.artifacts?.[`compliance/licenses/LICENSE-${id}.txt`] ?? '')) {
+      throw new Error(`Missing or stale top-level source/license evidence for runtime input ${key}; review the exact pinned ${id} image.`);
+    }
+    if (id === 'envoy' && (!component.noticeFiles?.includes('NOTICE-envoy.txt')
+        || !/^[a-f0-9]{64}$/u.test(component.artifacts?.['compliance/licenses/NOTICE-envoy.txt'] ?? ''))) {
+      throw new Error('Missing Envoy upstream NOTICE evidence.');
+    }
+  }
+}
+
 export function validateReleaseRuntimeImages(runtimeImages, components, selectedBaseImage) {
   if (!Array.isArray(runtimeImages) || !Array.isArray(components)) {
     throw new Error('Runtime images and third-party components must both be arrays.');

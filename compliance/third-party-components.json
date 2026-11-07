@@ -35,6 +35,40 @@
       "licenseFiles": ["LICENSE"]
     },
     {
+      "id": "envoy",
+      "version": "1.40.2",
+      "licenseExpression": "Apache-2.0",
+      "image": "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded",
+      "source": "https://github.com/envoyproxy/envoy/tree/b2d89e0ae53916f28770771fbdd49c5c99c5c5a2",
+      "sourceCommit": "b2d89e0ae53916f28770771fbdd49c5c99c5c5a2",
+      "licenseFiles": [
+        "LICENSE-envoy.txt"
+      ],
+      "artifacts": {
+        "compliance/licenses/LICENSE-envoy.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+        "compliance/licenses/NOTICE-envoy.txt": "329d90738f1ee3633da8e7439ea6f9624ec6274a9cbd72437aafa0e8df9de32e"
+      },
+      "notes": "Top-level upstream project only. Version and commit were measured from the pinned runtime binary. This entry does not establish license/source coverage for image base packages, linked libraries, or other transitive components.",
+      "noticeFiles": [
+        "NOTICE-envoy.txt"
+      ]
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.6",
+      "licenseExpression": "Apache-2.0",
+      "image": "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea",
+      "source": "https://github.com/coredns/coredns/tree/424d125775cd70fa90dfc80bf0e52cc9a9aeb574",
+      "sourceCommit": "424d125775cd70fa90dfc80bf0e52cc9a9aeb574",
+      "licenseFiles": [
+        "LICENSE-coredns.txt"
+      ],
+      "artifacts": {
+        "compliance/licenses/LICENSE-coredns.txt": "f0530760b1e2ffcf23df322db638ee06d06fc07fead0ed3ddd710f2e224698a9"
+      },
+      "notes": "Top-level upstream project only. Version and commit were measured from the pinned runtime binary. This entry does not establish license/source coverage for image base packages, linked libraries, or other transitive components."
+    },
+    {
       "id": "fontsource-ibm-plex-mono",
       "version": "5.3.0",
       "licenseExpression": "OFL-1.1",

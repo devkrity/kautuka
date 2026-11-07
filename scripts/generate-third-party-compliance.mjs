@@ -5,7 +5,7 @@ import { readFile, mkdir, writeFile, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateFrontendLicenseCatalog, validateFrontendSupplementLock } from './validate-frontend-license-catalog.mjs';
-import { validateReleaseRuntimeImages } from './validate-release-runtime-images.mjs';
+import { validateReleaseRuntimeImages, validateReviewedRuntimeInputs } from './validate-release-runtime-images.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = Object.fromEntries(process.argv.slice(2).reduce((all, value, index, values) => {
@@ -21,6 +21,8 @@ const readJson = async (file) => JSON.parse(await readFile(path.join(root, file)
 const catalog = await readJson('compliance/third-party-components.json');
 const runtime = await readJson('src/backend/Kautuka.Manager/runtime-images.json');
 validateReleaseRuntimeImages(runtime.images, catalog.components, args['base-image']);
+const runtimeInputs = await readJson('src/images/runtime-release-inputs.json');
+validateReviewedRuntimeInputs(runtimeInputs, catalog.components);
 
 for (const component of catalog.components) {
   for (const [relative, expected] of Object.entries(component.artifacts ?? {})) {
@@ -52,6 +54,7 @@ const notices = [
     `  Source: ${component.source}`,
     ...(component.sourceCommit ? [`  Source commit: ${component.sourceCommit}`] : []),
     ...(component.image ? [`  Distributed image: ${component.image}`] : []),
+    ...(component.noticeFiles ? [`  Upstream notices: ${component.noticeFiles.map((name) => `licenses/${name}`).join(', ')}`] : []),
     ...(component.artifacts ? [`  Bundled files: ${Object.keys(component.artifacts).join(', ')}`] : []),
     ...(component.embeddedFiles ? [`  Embedded files: ${component.embeddedFiles.join(', ')}`] : []),
     ...(component.notes ? [`  Note: ${component.notes}`] : []),
@@ -72,6 +75,9 @@ for (const name of [
   'LICENSE-APACHE-sqlite-vec.txt',
   'LICENSE-openobserve.txt',
   'LICENSE-proxy.txt',
+  'LICENSE-envoy.txt',
+  'NOTICE-envoy.txt',
+  'LICENSE-coredns.txt',
   'LICENSE-OFL-1.1-IBM-Plex-Mono.txt',
   'LICENSE-OFL-1.1-Source-Sans-3.txt',
   'LICENSE-EPL-2.0-elkjs.md',
