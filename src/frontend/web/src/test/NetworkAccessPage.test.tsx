@@ -1,6 +1,6 @@
 import React from 'react';
 import { render } from '@testing-library/react';
-import { screen, waitFor } from '@testing-library/dom';
+import { screen, waitFor, within } from '@testing-library/dom';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -142,6 +142,46 @@ describe('NetworkAccessPage', () => {
         identity,
         destination: 'api.example.com',
         port: 443,
+        allowed: true,
+        expectedRevision: 7,
+      })
+    );
+  });
+
+  it('distinguishes owners of the same connector when saving rules and approving requests', async () => {
+    const data = fixture();
+    const otherIdentity = { ...identity, userId: 'other-owner' };
+    data.sources.push(otherIdentity);
+    data.requests.push({ ...data.requests[0], id: 'request-2', identity: otherIdentity });
+    mockView(data);
+    put.mockResolvedValue({ data });
+    post.mockResolvedValue({ data });
+    renderPage();
+
+    const component = await screen.findByLabelText('Component');
+    const ownerOption = screen.getByRole('option', { name: /scope agent · user owner ·/ });
+    const otherOption = screen.getByRole('option', { name: /scope agent · user other-owner ·/ });
+    expect(ownerOption.textContent).not.toBe(otherOption.textContent);
+    await userEvent.selectOptions(component, otherOption);
+    await userEvent.type(screen.getByLabelText('Hostname or IPv4 address'), 'api.example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Save rule' }));
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/network-access/rules', {
+        identity: otherIdentity,
+        destination: 'api.example.com',
+        port: 443,
+        allowed: true,
+        expectedRevision: 7,
+      })
+    );
+
+    const request = screen
+      .getAllByRole('article')
+      .find((article) => within(article).queryByText(/scope agent · user other-owner ·/));
+    expect(request).toBeDefined();
+    await userEvent.click(within(request!).getByRole('button', { name: 'Allow' }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/network-access/requests/request-2/decision', {
         allowed: true,
         expectedRevision: 7,
       })

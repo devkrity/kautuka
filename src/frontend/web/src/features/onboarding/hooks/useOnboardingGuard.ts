@@ -28,7 +28,9 @@ export function useOnboardingGuard(authenticated: boolean, isAdmin: boolean) {
 
     const isSystemEmpty = status.providersCount === 0;
     const isSetupCapableRoute =
-      location.pathname === '/onboarding' || location.pathname === '/settings';
+      location.pathname === '/onboarding' ||
+      location.pathname === '/settings' ||
+      location.pathname === '/network-access';
 
     if (isSystemEmpty && !isSetupCapableRoute) {
       navigate('/onboarding', { replace: true });

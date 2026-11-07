@@ -1195,3 +1195,11 @@ generation reads the signed Linux payload archives shared with WSL, and the
 reusable smoke job receives only its two named authentication secrets. Six
 focused smoke/layout regressions and five Windows installer tests pass; these
 checks do not establish a completed cold boot or installed approval flow.
+
+The policy page remains accessible to authenticated administrators before a
+model provider is configured; the onboarding redirect must not prevent network
+setup or approvals. Shared component labels include scope and user as well as
+agent, role and component, so administrators can distinguish the same connector
+used by different owners. Focused browser-component regressions verify the
+zero-provider route and the selected owner's rule and approval request. These
+checks still do not replace the installed desktop/phone acceptance flow.

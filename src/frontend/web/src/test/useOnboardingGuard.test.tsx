@@ -100,6 +100,17 @@ describe('useOnboardingGuard', () => {
     expect(navigateSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps network policies and approvals accessible before a provider is configured', async () => {
+    statusOverride.data = { providersCount: 0, hasProviders: false };
+    statusOverride.isLoading = false;
+    statusOverride.isFetching = false;
+
+    setup('/network-access');
+
+    await act(async () => {});
+    expect(navigateSpy).not.toHaveBeenCalled();
+  });
+
   it('does NOT redirect while the initial fetch is loading (isLoading=true)', async () => {
     statusOverride.data = undefined;
     statusOverride.isLoading = true;

@@ -207,4 +207,4 @@ export const identityKey = (identity: NetworkIdentity): string =>
     identity.componentId,
   ]);
 export const identityLabel = (identity: NetworkIdentity): string =>
-  `${identity.role}: ${identity.componentId}${identity.agentId ? ` · agent ${identity.agentId}` : ''}`;
+  `${identity.role}: ${identity.componentId} · scope ${identity.scopeType}${identity.userId ? ` · user ${identity.userId}` : ''}${identity.agentId ? ` · agent ${identity.agentId}` : ''}`;
