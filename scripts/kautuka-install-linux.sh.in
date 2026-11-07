@@ -1641,7 +1641,9 @@ capture_preserved_uninstall_state() {
         local relative_path="${db_path#${source_root}/}"
         mkdir -p "$destination_root/$source_label/$(dirname "$relative_path")"
         cp -a "$db_path" "$destination_root/$source_label/$relative_path"
-    done < <(find "$source_root" -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) -print0)
+    done < <(find "$source_root" \
+        -path "$source_root/.local/share/containers" -prune -o \
+        -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) -print0)
 }
 
 preserve_uninstall_state() {
@@ -1666,8 +1668,8 @@ preserve_uninstall_state() {
     fi
 
     if [[ -d "$visible_root/workspaces" ]]; then
-        mkdir -p "$preserve_root/visible"
-        cp -a "$visible_root/workspaces" "$preserve_root/visible/workspaces"
+        mkdir -p "$preserve_root/visible/workspaces"
+        cp -a "$visible_root/workspaces/." "$preserve_root/visible/workspaces/"
     fi
 
     printf '%s\n' "$preserve_root"

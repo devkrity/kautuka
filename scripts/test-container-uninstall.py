@@ -84,6 +84,8 @@ class NativeGuardTests(unittest.TestCase):
         script = r'''
 set -euo pipefail
 mount --make-rprivate /
+mount -t tmpfs -o size=8m,mode=0755 tmpfs /etc
+mkdir -p /etc/kautuka
 mount -t tmpfs -o size=8m,mode=0755 tmpfs /etc/kautuka
 mount -t tmpfs -o size=8m,mode=0755 tmpfs /opt
 export KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1

@@ -1203,3 +1203,42 @@ agent, role and component, so administrators can distinguish the same connector
 used by different owners. Focused browser-component regressions verify the
 zero-provider route and the selected owner's rule and approval request. These
 checks still do not replace the installed desktop/phone acceptance flow.
+
+## Installed appliance validation
+
+The private test release built from `ce3821f` has now been activated through the
+installed UpdateService, using a locally signed manifest, the configured artifact
+transport and the complete eleven-image offline inventory. Discovery alone was
+seeded by the fixture; acquisition, signature checks, staging, activation and
+health assessment used the real application path. The operation committed,
+cleared maintenance, selected all six target release pointers and ran the four
+expected immutable core images. An administrator created before the update
+could still log in afterward.
+
+The installed browser test used real authentication and APIs. At 1,280 pixels,
+an actual denied Gateway connection produced an attributed request; Allow became
+active and an explicit MCP retry succeeded with a connected audit event. At
+390 pixels, Block became active and the explicit retry failed with a new denied
+audit event. Both viewport overflow checks passed. Shared Gateway transport is
+attributed to Gateway. The controlled endpoint used Podman's existing host alias;
+fixture routing, HTTP chunk decoding and one browser selector were corrected
+without changing product enforcement.
+
+A second signed candidate deliberately failed activation while the fixture held
+the WebHost port. Automatic recovery reached `completed`, cleared maintenance and
+restored the healthy source release, its administrator and all three policy rules.
+The original observer encountered the status endpoint during service handoff;
+a separate continuation verified the terminal journal, free apply lease, source
+pointers, running image IDs and preserved application state. Committed-release
+rollback remains deliberately disabled by the existing update policy; no new
+rollback feature has been added.
+
+The real preserve-data uninstall retained the administrator database, private
+keys, nested Gateway data and workspace files. It also exposed an overly broad
+database search that copied an image-layer package-history database. Preservation
+now prunes the exact rootless Podman storage directory. Workspace copying also
+retains its normal layout when an earlier database capture already created the
+destination. Native regressions cover database/WAL/SHM exclusion, similarly named
+sibling directories and workspaces containing databases. Keeping the runtime
+account when retained files still belong to it is intentional. Cold first boot
+and a repeated installed uninstall with these corrections remain validation work.

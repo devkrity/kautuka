@@ -98,6 +98,14 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   printf content > "$internal/gateway-data/nested/application-state"
   printf state > "$internal/kautuka.db"
   printf workspace > "$visible/workspaces/agents/demo/notes.txt"
+  mkdir -p "$internal/.local/share/containers/storage/overlay/layer/diff/usr/lib/sysimage/tdnf"
+  mkdir -p "$internal/.local/share/containers-backup" "$visible/.local/share/containers/storage"
+  printf package-history > "$internal/.local/share/containers/storage/overlay/layer/diff/usr/lib/sysimage/tdnf/history.db"
+  printf package-wal > "$internal/.local/share/containers/storage/overlay/layer/diff/usr/lib/sysimage/tdnf/history.db-wal"
+  printf package-shm > "$internal/.local/share/containers/storage/overlay/layer/diff/usr/lib/sysimage/tdnf/history.db-shm"
+  printf visible-runtime > "$visible/.local/share/containers/storage/runtime.db"
+  printf sibling > "$internal/.local/share/containers-backup/example.db"
+  printf workspace-database > "$visible/workspaces/agents/demo/workspace.db"
   output="$(uninstall_release "$install" "$internal" "$visible" test.service kautuka-test false)"
   [[ -f "$internal/kautuka.db" && -f "$visible/workspaces/agents/demo/notes.txt" ]] || {
     echo "Default uninstall did not preserve Kautuka data." >&2
@@ -105,6 +113,10 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   }
   [[ "$(cat "$internal/gateway-data/gateway-auth.key")" == key && "$(cat "$internal/gateway-data/nested/application-state")" == content ]]
   [[ "$(cat "$internal/gateway-data/kautuka.db")" == registry && ! -e "$internal/gateway-data/gateway-data" ]]
+  [[ ! -e "$internal/.local/share/containers" && ! -e "$visible/.local/share/containers" ]]
+  [[ "$(cat "$internal/.local/share/containers-backup/example.db")" == sibling ]]
+  [[ "$(cat "$visible/workspaces/agents/demo/workspace.db")" == workspace-database ]]
+  [[ ! -e "$visible/workspaces/workspaces" ]]
   [[ ! -e "$visible/workspaces/agents/demo/.kautuka" ]] || {
     echo "Default uninstall left generated workspace state behind." >&2
     exit 1
