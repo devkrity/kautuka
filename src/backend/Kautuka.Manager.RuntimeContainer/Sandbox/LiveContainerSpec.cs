@@ -237,6 +237,34 @@ internal static class LiveContainerSpec
             && networkMode.ValueKind == JsonValueKind.String
             ? networkMode.GetString() ?? string.Empty
             : string.Empty;
+        if (expectedNetwork == "none")
+        {
+            if (mode != "none") return "its network is " + mode;
+            if (!container.TryGetProperty("NetworkSettings", out JsonElement offlineSettings) || offlineSettings.ValueKind != JsonValueKind.Object
+                || !offlineSettings.TryGetProperty("Networks", out JsonElement offlineNetworks)
+                || offlineNetworks.ValueKind is not (JsonValueKind.Object or JsonValueKind.Null))
+                return "its networkless attachments could not be inspected";
+            if (offlineNetworks.ValueKind == JsonValueKind.Object)
+            {
+                JsonProperty[] entries = [.. offlineNetworks.EnumerateObject()];
+                if (entries.Length == 0) return null;
+                // Podman 5.8 records an unassigned "none" placeholder, not an interface.
+                if (entries.Length != 1 || entries[0].Name != "none" || entries[0].Value.ValueKind != JsonValueKind.Object)
+                    return "its networkless specification has an attached network";
+                JsonElement entry = entries[0].Value;
+                if (!entry.TryGetProperty("NetworkID", out JsonElement networkId) || networkId.GetString() != "none")
+                    return "its networkless specification has a network identity";
+                foreach (string field in new[] { "EndpointID", "Gateway", "IPAddress", "IPv6Gateway", "GlobalIPv6Address", "MacAddress" })
+                    if (!entry.TryGetProperty(field, out JsonElement value) || value.ValueKind != JsonValueKind.String || !string.IsNullOrEmpty(value.GetString()))
+                        return "its networkless specification has an assigned endpoint";
+                foreach (string field in new[] { "IPPrefixLen", "GlobalIPv6PrefixLen" })
+                    if (!entry.TryGetProperty(field, out JsonElement value) || !value.TryGetInt32(out int prefix) || prefix != 0)
+                        return "its networkless specification has an assigned prefix";
+                if (entry.TryGetProperty("IPAMConfig", out JsonElement ipam) && ipam.ValueKind != JsonValueKind.Null)
+                    return "its networkless specification has address configuration";
+            }
+            return null;
+        }
         // Podman reports "bridge" for named bridge networks. NetworkMode describes
         // the mode; NetworkSettings.Networks identifies the actual attachments.
         if (!string.Equals(mode, "bridge", StringComparison.Ordinal)

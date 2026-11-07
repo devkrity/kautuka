@@ -14,6 +14,8 @@
     <Compile Include="ManagerSmoke.cs" />
     <Compile Include="../../src/shared/Kautuka.Telemetry/Security/LocalCaMtlsBootstrap.cs" />
     <Compile Include="../../src/tests/Kautuka.IntegrationTests/Fixtures/ContainerEgressManagerFixture.cs" />
+    <Compile Include="../../src/tests/Kautuka.IntegrationTests/Fixtures/CoreServiceManagerFixture.cs" />
     <ProjectReference Include="../../src/backend/Kautuka.Manager.RuntimeContainer/Kautuka.Manager.RuntimeContainer.csproj" />
+    <ProjectReference Include="../../src/shared/Kautuka.CredentialsHost.Protos/Kautuka.CredentialsHost.Protos.csproj" />
   </ItemGroup>
 </Project>

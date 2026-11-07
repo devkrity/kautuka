@@ -60,6 +60,9 @@ internal static class ContainerEgressManagerFixture
          new("egress-dns",data.GetProperty("dns").GetString()!,null),
          new("git-pkgs-proxy",data.GetProperty("pkgs").GetString()!,null),
          new("kautuka-base",data.GetProperty("sandbox").GetString()!,null)]);
+        if (data.TryGetProperty("coreCredentialsHost", out JsonElement credentialsImage))
+            allowlist = new RuntimeImageAllowlist(1, [.. allowlist.Images, new("core-credentialshost", credentialsImage.GetString()!, null),
+                new("core-gateway", data.GetProperty("coreGateway").GetString()!, null)]);
         var options = new ContainerEgressOptions
         {
             Enabled = true,
@@ -80,6 +83,8 @@ internal static class ContainerEgressManagerFixture
         WorkspaceMcpContainerConnectorDefinition Definition(string suffix) => new("owner::" + suffix, image, suffix == "d" ? "" : "/usr/bin/bash", suffix == "d" ? [] : ["/mcp-fixture.sh"], true, false, null, null, [], 20, 600);
         Apply(1, alpha);
         await runtime.EnsureReadyAsync(ct);
+        if (data.TryGetProperty("coreCredentialsHost", out _))
+            await CoreServiceManagerFixture.RunAsync(data, runner, runtime, allowlist, report, ct);
         report["bootstrapReady"] = true;
         await Console.Error.WriteLineAsync("fixture: bootstrap ready");
         var adminDenied = await native.RunAsync(["run", "--rm", "--pull=never", "--pod", "kautuka-egress", "--cap-drop=ALL",

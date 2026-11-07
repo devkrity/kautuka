@@ -47,6 +47,18 @@ builder.Services.AddSingleton(sp => new ContainerEgressRuntime(
     sp.GetRequiredService<RuntimeImageAllowlist>(),
     sp.GetRequiredService<WorkspaceRuntimePaths>().RuntimeRoot,
     sp.GetRequiredService<PodmanImageArchiveStore>()));
+builder.Services.AddOptions<CoreServiceOptions>().Bind(builder.Configuration.GetSection(CoreServiceOptions.Section));
+builder.Services.AddSingleton(sp =>
+{
+    CoreServiceOptions core = sp.GetRequiredService<IOptions<CoreServiceOptions>>().Value;
+    WorkspaceRuntimePaths paths = sp.GetRequiredService<WorkspaceRuntimePaths>();
+    string workspace = core.WorkspaceRoot ?? Path.Combine(KautukaHostPathPolicy.Resolve(builder.Configuration).VisibleRoot, "workspaces");
+    var corePaths = new CoreServicePaths(paths.SharedDataRoot, KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration),
+        Path.GetFullPath(workspace), core.ConfigurationRoot ?? Path.Combine(paths.RuntimeRoot, "core-config"),
+        KautukaDatabaseWriterLease.LockPath, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
+    return new CoreServiceSupervisor(sp.GetRequiredService<PodmanCommandRunner>(), sp.GetRequiredService<ContainerEgressRuntime>(),
+        sp.GetRequiredService<RuntimeImageAllowlist>(), corePaths, core);
+});
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();
 builder.Services.AddSingleton<IManagerRuntimeHealthCommand, PodmanManagerRuntimeHealthCommand>();
@@ -74,7 +86,8 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
     sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>(),
-    sp.GetRequiredService<ContainerEgressRuntime>()));
+    sp.GetRequiredService<ContainerEgressRuntime>(),
+    sp.GetRequiredService<CoreServiceSupervisor>()));
 builder.Services.AddGrpc(options =>
 {
     options.MaxReceiveMessageSize = GrpcMaxMessageSizeBytes;

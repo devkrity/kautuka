@@ -549,3 +549,67 @@ AOT snapshot by normalized-text SHA-256. Focused Windows checks passed 29 tests,
 including Gateway's live credential reload and failed publication retaining the
 old accepted identity. Application-service container launch remains the next
 integration step; this is not an installed container-release or recovery proof.
+
+
+Core service startup is now attached to the existing Manager worker's
+pre-desired-state phase. The initial opt-in `CoreServices` integration starts
+CredentialsHost and Gateway from verified local inventory entries
+`core-credentialshost` and `core-gateway`; it performs no pulls. CredentialsHost
+has no network. Gateway uses an admitted core allocation and normal policy-aware
+retirement. Both use UID/GID 1000 with keep-id, no capabilities, NNP, a readonly
+application root and private temporary storage. Adoption checks actual image,
+command, mounts, mapping, resources, environment and network state before reusing
+an exact container ID. Boot readiness requires a running process and an actual
+Unix-socket connection; it is separate from workspace execution readiness.
+
+Gateway's application state lives in a dedicated `gateway-data` directory. It
+receives a separate workspace-root RW mount at the same absolute host path,
+preserving existing attachment, skill-staging and file-browser access. It does
+not receive the entire shared state root. Private service state, Podman storage,
+run directories and control/configuration paths cannot serve as that workspace
+mount. The initializer rejects an unmigrated legacy root `kautuka.db`; installer
+relocation/ownership changes remain required before enabling this on an existing
+host installation. The same host writer-lock inode is mounted read-only at its
+existing fixed path, and the maintenance directory is mounted read-only so
+atomic marker changes remain visible. Client socket and published-identity
+mounts are narrow directory mounts. OTLP endpoints are explicitly empty in this
+initial pair; observability service integration is still pending.
+
+The first actual-container attempt recorded a Gateway `GLIBC_2.43` failure in
+`artifacts/container-egress/runtime-proof-0c3b34b9.json`, with clean teardown:
+a binary compiled on Fedora 44 cannot be assumed to run on the older Azure Linux
+runtime. The three existing application Dockerfiles now pair the Azure Linux 3
+AOT SDK with the Azure Linux 3 distroless runtime, both digest-pinned, and use the
+existing release artifact trimming properties. The AOT SDK supplies its own
+native toolchain, replacing the Debian-specific compiler installation. This
+follows [Microsoft's Linux Native AOT compatibility guidance](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
+and the [official SDK image variants](https://github.com/dotnet/dotnet-docker/blob/main/README.sdk.md).
+The build context excludes local development settings, private key files and
+databases. An isolated offline SDK development build is not a rootful
+application-runtime fallback; acceptance still uses the rootless service
+fixture and the actual published native dependencies.
+
+
+The core namespace diagnostic in
+`artifacts/container-egress/runtime-proof-5c5d9247.json` established Podman 5.8.9's
+networkless representation: `NetworkMode=none`, one unassigned `none` metadata
+entry, and only `lo` in the live namespace. Adoption now accepts only that empty
+placeholder (or no attachments), rejecting assigned endpoint/address/prefix data
+and additional networks. The fixture selects service identities by their labels
+and compares service-to-ID mappings, without depending on multi-inspect order.
+
+The core-pair checkpoint's native report
+`artifacts/container-egress/runtime-proof-c48aec52.json` passed with no cleanup
+errors. Both actual Azure Linux-built Native AOT services started under rootless
+Podman. CredentialsHost had only its loopback interface and answered an
+mTLS-authenticated health RPC over its Unix socket. Both service containers
+retained their exact IDs during reconciliation. The host exclusive-writer probe
+was blocked while the services ran and succeeded after Manager stopped them.
+The same run passed previous egress, package-service, certificate publication,
+source reuse, recovery and Node/Python/uv/binary dependency execution checks.
+All 64 runtime, shared and fixture source inputs match the native snapshot by
+normalized-text SHA-256. The focused Windows group passed 33 tests with one
+Linux-only skip. The architect found no remaining source blocker in this pair.
+This does not establish a complete installed deployment: ChannelHost, WebHost,
+observability, installer/data relocation, host artifact transport and container
+release/update integration remain unfinished.

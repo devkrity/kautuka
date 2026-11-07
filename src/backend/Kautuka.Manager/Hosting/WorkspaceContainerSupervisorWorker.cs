@@ -27,7 +27,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     WorkspaceExecTracker execTracker,
     IOptions<ManagerContainerStartupOptions> startupOptions,
     ILogger<WorkspaceContainerSupervisorWorker> logger,
-    ContainerEgressRuntime? egressRuntime = null) : BackgroundService
+    ContainerEgressRuntime? egressRuntime = null,
+    CoreServiceSupervisor? coreServices = null) : BackgroundService
 {
     /// <summary>
     /// Maximum time between drift audits when no exec activity is observed.
@@ -212,6 +213,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         if (!sidecarOrphanResult.Succeeded)
         {
             MarkFailed(snapshot, sidecarOrphanResult.FailureClass ?? "sidecar_orphan_reconcile_failed");
+            return;
+        }
+
+        if (coreServices is not null && !await coreServices.EnsureReadyAsync(cancellationToken).ConfigureAwait(false))
+        {
+            readinessGate.Reset();
+            MarkFailed(snapshot, "core_service_unavailable");
             return;
         }
 

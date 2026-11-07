@@ -184,6 +184,29 @@ public sealed class LiveContainerSpecTests
                 .ToDictionary(static name => name, static _ => new object(), StringComparer.Ordinal),
         };
 
+    [Theory]
+    [InlineData("IPAddress")]
+    [InlineData("Gateway")]
+    [InlineData("GlobalIPv6Address")]
+    [InlineData("IPv6Gateway")]
+    [InlineData("EndpointID")]
+    [InlineData("MacAddress")]
+    public void NetworklessPodmanPlaceholderDoesNotPermitAssignedEndpoints(string field)
+    {
+        JsonNode container = JsonNode.Parse(SidecarInspect(networkMode: "none", network: "none"))![0]!;
+        container["NetworkSettings"]!["Networks"] = JsonNode.Parse("""
+            {"none":{"EndpointID":"","Gateway":"","IPAddress":"","IPPrefixLen":0,
+            "IPv6Gateway":"","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"MacAddress":"","NetworkID":"none","IPAMConfig":null}}
+            """);
+        string? Drift() => LiveContainerSpec.DescribeSidecarDrift(container.ToJsonString(), "example/sidecar:1",
+            [new(8080, 80, "127.0.0.1")], "sha256:sidecar", expectedNetwork: "none");
+        Assert.Null(Drift());
+        container["NetworkSettings"]!["Networks"]!["none"]![field] = "assigned";
+        Assert.NotNull(Drift());
+        container["NetworkSettings"]!["Networks"] = new JsonObject { ["outside"] = new JsonObject() };
+        Assert.NotNull(Drift());
+    }
+
     private static ContainerContext Sandbox()
         => new(
             "agent",

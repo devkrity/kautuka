@@ -96,7 +96,7 @@ public sealed class ContainerEgressRuntime(
         IReadOnlyDictionary<string, string>? environment = null)
     {
         Scope scope = identity.Scope;
-        if (identity.Role is not ("connector" or "agent" or "package" or "materializer")) throw new ArgumentException("Unsupported source role.", nameof(identity));
+        if (identity.Role is not ("connector" or "agent" or "package" or "materializer" or "core")) throw new ArgumentException("Unsupported source role.", nameof(identity));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -593,7 +593,7 @@ public sealed class ContainerEgressRuntime(
             JsonElement labels = container.GetProperty("Config").GetProperty("Labels");
             string? state = container.GetProperty("State").GetProperty("Status").GetString();
             string? role = labels.GetProperty("kautuka.egress.source-role").GetString();
-            if (role is not ("connector" or "agent" or "package" or "materializer")) throw new InvalidOperationException("Unknown managed source role.");
+            if (role is not ("connector" or "agent" or "package" or "materializer" or "core")) throw new InvalidOperationException("Unknown managed source role.");
             if (retiring.Contains(id) || role == "materializer" && !ownedMaterializers.Contains(id)) { inactive.Add(id); continue; }
             if (state is not ("running" or "initialized" or "paused"))
             {

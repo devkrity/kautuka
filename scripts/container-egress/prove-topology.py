@@ -33,6 +33,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image-cache', required=True, type=pathlib.Path, help='Directory containing envoy.oci and dns.oci')
 parser.add_argument('--policy-fixture', required=True, type=pathlib.Path, help='C# test-exported cds/lds and mixed-cds/mixed-lds JSON files')
 parser.add_argument('--manager-smoke', type=pathlib.Path, help='Optional linux-x64 Native AOT Manager fixture executable')
+parser.add_argument('--core-build-root', type=pathlib.Path, help='Optional isolated native CredentialsHost/Gateway build snapshot')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -42,6 +43,14 @@ for role in (('envoy','dns','pkgs','sandbox') if options.manager_smoke is not No
         parser.error('missing offline '+role+'.oci image archive')
 if options.manager_smoke is not None and not options.manager_smoke.is_file():
     parser.error('missing Native AOT Manager fixture executable')
+if options.core_build_root is not None:
+    core_root = options.core_build_root
+    if core_root.is_symlink() or core_root.resolve().parent != pathlib.Path('/var/tmp') or not core_root.name.startswith('kautuka-core-native-'):
+        parser.error('core build must be an isolated task snapshot under /var/tmp')
+    if options.manager_smoke is None or not (options.image_cache/'core-base.oci').is_file():
+        parser.error('core test needs a Manager smoke binary and offline core-base.oci')
+    for service in ('CredentialsHost','Gateway'):
+        if not (core_root/'publish'/service/('Kautuka.'+service)).is_file(): parser.error('missing core native binary '+service)
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
 lock = os.open('/run/lock/kautuka-egress-proof.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -93,9 +102,9 @@ try:
     environment = ['env','-i','PATH=/usr/sbin:/usr/bin:/sbin:/bin','HOME='+str(root/'home'),
                    'XDG_RUNTIME_DIR=/run/user/'+uid,'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/'+uid+'/bus']
     base = ['runuser','-u',prefix,'--'] + environment
-    def podman(*args):
+    def podman(*args, timeout=60):
         if args[0]=='run': args=(args[0],'--pull=never',*args[1:])
-        return command(base+['podman',*args])
+        return command(base+['podman',*args],timeout=timeout)
     info = json.loads(podman('info','--format=json'))
     report['runtime'] = {'rootless':info['host']['security']['rootless'],'version':info['version']['Version'],
                          'networkBackend':info['host']['networkBackend']}
@@ -518,13 +527,34 @@ while True:
         podman('import','--change','ENTRYPOINT ["/usr/bin/bash","/mcp-fixture.sh"]',str(archive),mcp_image)
         helper_image='localhost/kautuka-egress-fixture:'+prefix
         podman('tag',tools,helper_image)
+        core_images={}
+        if options.core_build_root is not None:
+            base_archive=root/'home'/'core-base.oci'
+            shutil.copyfile(options.image_cache/'core-base.oci',base_archive)
+            os.chown(base_archive,user.pw_uid,user.pw_gid)
+            with tarfile.open(base_archive) as source:
+                index=json.load(source.extractfile('index.json'))
+                manifest=json.load(source.extractfile('blobs/sha256/'+index['manifests'][0]['digest'].split(':')[1]))
+                config_id=manifest['config']['digest']
+            podman('load','-i',str(base_archive))
+            core_base='localhost/kautuka-core-base:'+prefix
+            podman('tag',config_id,core_base)
+            for service in ('CredentialsHost','Gateway'):
+                context=root/'home'/('core-build-'+service)
+                context.mkdir()
+                shutil.copytree(options.core_build_root/'publish'/service,context/'payload')
+                recipe=context/'Containerfile'
+                recipe.write_text('FROM '+core_base+'\nCOPY payload/ /app/\nWORKDIR /app\nENTRYPOINT ["/app/Kautuka.'+service+'"]\n')
+                core_image='localhost/kautuka-core-'+service.lower()+':'+prefix
+                podman('build','--pull=never','--network=none','-t',core_image,'-f',str(recipe),str(context),timeout=180)
+                core_images['core'+service]=core_image
         binary=root/'home'/'manager-smoke'
         shutil.copyfile(options.manager_smoke,binary);binary.chmod(0o755)
         native_input=root/'home'/'manager-input.json'
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
-            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts)}))
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), **core_images}))
         native_input.chmod(0o644)
         p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
