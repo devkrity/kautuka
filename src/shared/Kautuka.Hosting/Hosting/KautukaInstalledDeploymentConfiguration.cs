@@ -12,18 +12,39 @@ public static class KautukaInstalledDeploymentConfiguration
         string contractPath = "/etc/kautuka/service-scope.json")
     {
         ArgumentNullException.ThrowIfNull(configuration);
-        configuration.AddJsonFile(settingsPath, optional: true, reloadOnChange: false);
-        if (!File.Exists(contractPath)) return;
-        using JsonDocument contract = JsonDocument.Parse(File.ReadAllText(contractPath));
+        // Exists/optional providers also report inaccessible files as absent.
+        // Only genuine absence may select the legacy deployment defaults.
+        byte[]? contractBytes = ReadOptional(contractPath);
+        byte[]? settingsBytes = ReadOptional(settingsPath);
+        if (settingsBytes is not null)
+        {
+            using var stream = new MemoryStream(settingsBytes, writable: false);
+            configuration.AddJsonStream(stream);
+        }
+        if (contractBytes is null) return;
+        using JsonDocument contract = JsonDocument.Parse(contractBytes);
         if (!contract.RootElement.TryGetProperty("applicationServices", out JsonElement mode)) return;
         if (mode.ValueKind != JsonValueKind.String || mode.GetString() is not ("host" or "containers"))
             throw new InvalidOperationException("Unsupported installed application service layout.");
         if (mode.GetString() != "containers") return;
-        if (!File.Exists(settingsPath))
+        if (settingsBytes is null)
             throw new InvalidOperationException("The installed container deployment requires its persistent settings file.");
-        using JsonDocument settings = JsonDocument.Parse(File.ReadAllText(settingsPath));
+        using JsonDocument settings = JsonDocument.Parse(settingsBytes);
         if (!Enabled(settings.RootElement, "CoreServices") || !Enabled(settings.RootElement, "ContainerEgress"))
             throw new InvalidOperationException("The installed container deployment requires enabled core and egress settings.");
+    }
+
+    private static byte[]? ReadOptional(string path)
+    {
+        try
+        {
+            byte[] bytes = File.ReadAllBytes(path);
+            // Preserve File.ReadAllText's acceptance of Windows UTF-8 files.
+            return bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF
+                ? bytes.AsSpan(3).ToArray() : bytes;
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
     }
 
     private static bool Enabled(JsonElement root, string section)

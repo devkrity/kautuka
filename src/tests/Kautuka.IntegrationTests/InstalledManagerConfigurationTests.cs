@@ -1,3 +1,5 @@
+using System.Text;
+
 using Kautuka.Hosting.Hosting;
 
 using Microsoft.Extensions.Configuration;
@@ -6,6 +8,57 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class InstalledManagerConfigurationTests
 {
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void ContainerDeploymentAcceptsUtf8Preambles(bool settingsBom, bool contractBom)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-bom-config-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string settings = Path.Combine(root, "manager.json");
+            string contract = Path.Combine(root, "service-scope.json");
+            File.WriteAllText(settings, "{\"CoreServices\":{\"Enabled\":true},\"ContainerEgress\":{\"Enabled\":true}}", new UTF8Encoding(settingsBom));
+            File.WriteAllText(contract, "{\"applicationServices\":\"containers\"}", new UTF8Encoding(contractBom));
+            using var configuration = new ConfigurationManager();
+            KautukaInstalledDeploymentConfiguration.Add(configuration, settings, contract);
+            Assert.True(configuration.GetValue<bool>("CoreServices:Enabled"));
+            Assert.True(configuration.GetValue<bool>("ContainerEgress:Enabled"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void InaccessibleDeploymentPathsCannotSelectLegacyDefaults(bool contractIsDirectory)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-unreadable-config-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string settings = Path.Combine(root, "manager.json");
+            string contract = Path.Combine(root, "service-scope.json");
+            Directory.CreateDirectory(contractIsDirectory ? contract : settings);
+            File.WriteAllText(contractIsDirectory ? settings : contract, "{}");
+            using var configuration = new ConfigurationManager();
+            Assert.Throws<UnauthorizedAccessException>(() => KautukaInstalledDeploymentConfiguration.Add(configuration, settings, contract));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void GenuinelyAbsentDeploymentFilesPreserveLegacyConfiguration()
+    {
+        string missing = Path.Combine(Path.GetTempPath(), "kautuka-absent-config-" + Guid.NewGuid().ToString("N"));
+        using var configuration = new ConfigurationManager();
+        configuration["ContainerEgress:Enabled"] = "false";
+        KautukaInstalledDeploymentConfiguration.Add(configuration, Path.Combine(missing, "manager.json"), Path.Combine(missing, "service-scope.json"));
+        Assert.Equal("false", configuration["ContainerEgress:Enabled"]);
+    }
+
     [Theory]
     [InlineData("host", null, true)]
     [InlineData("containers", null, false)]

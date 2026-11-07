@@ -988,3 +988,16 @@ to both the public key and installed configuration and rejects directory writes.
 The six installer shell regressions and four socket/permission checks pass in a
 private mount namespace. Installed startup remains unproven until the complete
 cohort becomes healthy; image loading and host activation alone do not prove it.
+
+The same trial exposed a fail-open selection bug: optional JSON loading and
+`File.Exists` could mistake an inaccessible installed deployment for an absent
+legacy configuration. Host startup now reads both files directly, tolerates only
+genuine file/directory absence, and loads the already-read settings bytes. Five
+actual .NET checks under Linux UID 65534 cover inaccessible parents, separately
+inaccessible settings, genuine absence, and readable container settings. All
+sixteen focused configuration/transport tests also pass, including UTF-8 BOM
+compatibility. After correcting the
+directory group and restarting the installed host services, the four core
+containers, package proxy and Envoy/DNS pod run; WebHost returns 200 and Gateway
+reports core readiness and healthy workspace state. This repaired run does not
+replace a clean fresh-install proof or installed update/recovery testing.
