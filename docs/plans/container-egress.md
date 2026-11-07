@@ -850,3 +850,21 @@ It ran in a private mount namespace that hid the test distro's existing helper
 directory; the fixture-owned installation paths were absent before the test and
 removed by its teardown. Local log:
 `artifacts/container-egress/recovery-format3-transaction.log`.
+
+The core supervisor now has a fixed update shutdown path that requires the
+long-lived Manager to be stopped by the transaction owner. It stops the existing
+owned Envoy container by its inspected immutable ID and confirms it is stopped
+before retiring the four owned core containers in reverse order. It performs no
+readiness/bootstrap, image acquisition or policy publication. Foreign ownership,
+uncertain inspection/stop and failed retirement refuse shutdown completion.
+The updater must still acquire the existing exclusive writer lease before
+snapshot/restore; successful retirement alone is not that lease.
+
+Five focused mock tests passed. Native AOT report
+`artifacts/container-egress/runtime-proof-a13051b1.json` passed with no cleanup
+errors and 70 matching normalized-text source hashes. It exercises the actual
+four core containers, confirms update shutdown leaves Envoy stopped and releases
+their host writer lock, then successfully reconstructs egress. Host artifact and
+cold-archive checks also passed. This focused run omits workload regressions and
+uses the bounded RAM-backed store; it does not prove persistence or the installed
+updater CLI/root-helper integration, which remain to be implemented.

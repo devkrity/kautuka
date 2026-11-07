@@ -105,10 +105,16 @@ internal static class CoreServiceManagerFixture
             report["coreServicesHeldHostWriterLock"] = true;
             report["coreServicesAdoptedSameIds"] = true;
         }
-        finally { await supervisor.StopAsync(CancellationToken.None); }
+        finally { await supervisor.StopForUpdateAsync(CancellationToken.None); }
         if (await ProbeExclusiveWriterLockAsync(writerLock, ct) != 0)
             throw new InvalidOperationException("Stopping core services did not release the updater's writer lock");
         report["coreServiceStopReleasedWriterLock"] = true;
+        PodmanCommandResult stopped = await runner.RunAsync(["inspect", "--format", "{{.State.Running}}", "kautuka-egress-envoy"], 10, ct);
+        if (stopped.ExitCode != 0 || stopped.StdOut.Trim() != "false")
+            throw new InvalidOperationException("Update shutdown did not leave the egress proxy stopped");
+        report["coreUpdateStopLeftEgressClosed"] = true;
+        await egress.EnsureReadyAsync(ct);
+        report["coreUpdateStopEgressRecovered"] = true;
         await Console.Error.WriteLineAsync("fixture: four actual application containers and HTTP/TLS publication passed");
     }
 

@@ -97,6 +97,34 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         finally { gate.Release(); }
     }
 
+    /// <summary>
+    /// Fixed update/boot-recovery shutdown after the long-lived Manager is stopped.
+    /// Leaves egress closed and requires no release images or security bootstrap.
+    /// </summary>
+    public async Task StopForUpdateAsync(CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await egress.StopForUpdateAsync(cancellationToken).ConfigureAwait(false);
+            foreach (string service in new[] { "webhost", "gateway", "channelhost", "credentialshost" })
+            {
+                string? json = await PodmanContainerInspector.ReadAsync(runner, "kautuka-" + service, cancellationToken).ConfigureAwait(false);
+                if (json is null) continue;
+                using JsonDocument document = JsonDocument.Parse(json);
+                JsonElement container = PodmanContainerInspector.Container(document.RootElement);
+                RequireOwnership(container, service);
+                string id = container.GetProperty("Id").GetString()!;
+                if (id.Length != 64 || id.Any(character => !char.IsAsciiHexDigitLower(character)))
+                    throw new InvalidOperationException("The core service has an invalid immutable identity.");
+                // The proxy is confirmed stopped. Do not invoke ordinary egress
+                // retirement, which would reconcile and restart the gateway.
+                await RetireAsync(id, networkless: true, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally { gate.Release(); }
+    }
+
     private void ValidateWebPublication()
     {
         if (!IPAddress.TryParse(options.WebHostBindAddress, out IPAddress? address) || address.AddressFamily != AddressFamily.InterNetwork || address.ToString() != options.WebHostBindAddress

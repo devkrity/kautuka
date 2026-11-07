@@ -664,6 +664,37 @@ public sealed partial class ContainerEgressRuntime(
             throw new InvalidOperationException("Uncertain policy could not be blackholed; no source allocation may be released.");
     }
 
+    // The update helper has stopped the long-lived Manager before this path.
+    // Recovery must be able to close egress without loading bootstrap images,
+    // publishing policy or starting any container.
+    internal async Task StopForUpdateAsync(CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ready = false;
+            active = null;
+            string? json = await PodmanContainerInspector.ReadAsync(runner, "kautuka-egress-envoy", cancellationToken).ConfigureAwait(false);
+            if (json is null) return;
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement container = PodmanContainerInspector.Container(document.RootElement);
+            string? id = container.GetProperty("Id").GetString();
+            if (id is null || !IsId(id)
+                || !container.GetProperty("Config").GetProperty("Labels").TryGetProperty(ownerLabel, out JsonElement owner)
+                || owner.GetString() != "true")
+                throw new InvalidOperationException("The egress proxy is not a recognized managed container; update shutdown is deferred.");
+            if (container.GetProperty("State").GetProperty("Running").GetBoolean())
+                _ = await RunAsync(["stop", "--time", "1", id], cancellationToken).ConfigureAwait(false);
+            string? stopped = await PodmanContainerInspector.ReadAsync(runner, id, cancellationToken).ConfigureAwait(false);
+            if (stopped is null) return;
+            using JsonDocument observed = JsonDocument.Parse(stopped);
+            JsonElement actual = PodmanContainerInspector.Container(observed.RootElement);
+            if (actual.GetProperty("Id").GetString() != id || actual.GetProperty("State").GetProperty("Running").GetBoolean())
+                throw new InvalidOperationException("The egress proxy could not be confirmed stopped; update shutdown is deferred.");
+        }
+        finally { gate.Release(); }
+    }
+
     private async Task RetireEmptyScopesAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult inventory = await RunAsync(["network", "ls", "--filter", "label=" + ownerLabel + "=true", "--format", "{{.Name}}"], cancellationToken).ConfigureAwait(false);
