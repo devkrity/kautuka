@@ -1153,3 +1153,27 @@ with the current Native AOT binary. The journal reached `completed` and the
 maintenance fence cleared. The snapshot/journal were not manually edited. This
 is evidence for the freshness fix, not the final signed-release update proof;
 the original binary remains in the disposable diagnostic backup.
+
+WSL packaging now stages the verified Linux payload and a fixed first-boot
+entrypoint, reusing the fresh installer instead of duplicating host-service
+provisioning. Only Manager and UpdateService become host units. Keys and DNS
+configuration are installation-specific. Retry preserves prepared state and
+refuses a newer installed release; uninstall removes the staged entrypoint so
+it cannot reinstall after removal. See `scripts/WSL-FIRST-BOOT.md` for the
+validation boundary. The launcher reads the container Gateway's setup-token
+path. Public update-source permissions are explicit, and runtime-user child
+commands close inherited installer lease descriptors while the parent retains
+its leases. Thirteen focused contract checks and six Fedora first-boot/launcher
+checks pass; real cold first boot remains required.
+
+An installed update exposed an Envoy startup race: detached process creation
+preceded the admin listener opening, and the first connection refusal escaped
+the existing policy-confirmation loop. Both admin reads now use bounded native
+curl connection-refusal retry, retaining strict command, JSON and accepted-
+version checks. The corrected Native AOT Manager completed the retained source
+recovery through the normal helper; the final signed target-update trial is
+still required. No readiness or maintenance check was bypassed.
+Three focused regressions and an offline setup-image curl proof pass: delayed
+admin startup succeeds, while permanent refusal and HTTP 403 remain failures.
+The existing administrator also logs in after source recovery. The curl fixture
+uses host loopback solely for retry semantics; it is not routing evidence.

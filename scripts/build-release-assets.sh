@@ -110,48 +110,6 @@ print("staged sidecar seal assertions passed")
 PY
 }
 
-assert_packed_appliance_network_seal() {
-  local rootfs_output="$1"
-  local kautuka_uid="${2:-}"
-
-  local sockets_conf
-  sockets_conf="$(tar -xOf "$rootfs_output" ./usr/lib/tmpfiles.d/kautuka-sockets.conf 2>/dev/null || true)"
-  [[ -n "$sockets_conf" ]] || {
-    echo "error: packed appliance missing ./usr/lib/tmpfiles.d/kautuka-sockets.conf" >&2
-    exit 1
-  }
-  local required_socket_dir
-  for required_socket_dir in manager updateservice gateway credentialshost channelhost; do
-    printf '%s\n' "$sockets_conf" | grep -q "d /run/kautuka/${required_socket_dir} " || {
-      echo "error: packed kautuka-sockets.conf missing directory for ${required_socket_dir}" >&2
-      exit 1
-    }
-  done
-  printf '%s\n' "$sockets_conf" | grep -Fqx 'f /run/kautuka-db-writer.lock 0644 root root -' || {
-    echo 'error: packed kautuka-sockets.conf is missing the root-owned database writer lease' >&2
-    exit 1
-  }
-
-  if [[ -n "$kautuka_uid" ]]; then
-    local restart_dropin
-    restart_dropin="$(tar -xOf "$rootfs_output" "./etc/systemd/system/user@${kautuka_uid}.service.d/20-kautuka-restart.conf" 2>/dev/null || true)"
-    [[ -n "$restart_dropin" ]] || {
-      echo "error: packed appliance missing user@${kautuka_uid} 20-kautuka-restart.conf drop-in" >&2
-      exit 1
-    }
-    printf '%s\n' "$restart_dropin" | grep -q 'TimeoutStopSec=5' || {
-      echo "error: packed user@ drop-in must set TimeoutStopSec=5" >&2
-      exit 1
-    }
-    printf '%s\n' "$restart_dropin" | grep -q 'Restart=on-failure' || {
-      echo "error: packed user@ drop-in must set Restart=on-failure" >&2
-      exit 1
-    }
-  fi
-
-  echo "packed appliance network seal assertions passed"
-}
-
 output_root=''
 private_key=''
 release_id=''
@@ -400,8 +358,14 @@ stage_provisioned_update_source() {
     local destination_path="$root_path/update-source.json"
     write_provisioned_update_source_document "$destination_path" "$manifest_url" "$channel" "$( [[ -n "$owner_spec" ]] && printf 'true' || printf 'false' )"
 
+    # This document contains a public feed URL, not credentials. Do not inherit
+    # a restrictive release-builder umask: the runtime must read it after the
+    # shared installer establishes its /etc/kautuka traversal group.
     if [[ -n "$owner_spec" ]]; then
       sudo chown "$owner_spec" "$destination_path"
+      sudo chmod 0644 "$destination_path"
+    else
+      chmod 0644 "$destination_path"
     fi
   fi
 
@@ -1075,592 +1039,39 @@ prewarm_rootfs() {
   harden_rootfs_sudo_bits "$rootfs_dir"
   tar -xzf "$platform_tarball" -C "$manager_extract_dir"
 
-  install_host_service() {
-    local service_key="$1"
-    local executable_name="$2"
-    local source_root="$3"
-
-    [[ -d "$source_root" ]] || return 0
-
-    local install_root="$rootfs_dir/opt/kautuka/${service_key}"
-    local version_root="$install_root/versions/$version"
-    local current_link="$install_root/current"
-    local unit_path="$user_unit_dir/kautuka-${service_key}.service"
-    local wants_path="$user_unit_dir/kautuka.target.wants/kautuka-${service_key}.service"
-    local log_dir="$visible_root/logs/${service_key}"
-    local extra_env=''
-    local unit_after='network.target'
-
-    sudo rm -rf "$version_root"
-    sudo mkdir -p "$version_root" "$log_dir"
-    sudo cp -a "$source_root/." "$version_root/"
-    sudo chmod +x "$version_root/$executable_name"
-    sudo ln -sfn "versions/$version" "$current_link"
-
-    if [[ "$service_key" == 'webhost' ]]; then
-      unit_after='kautuka-gateway.service'
-    elif [[ "$service_key" == 'gateway' ]]; then
-      unit_after='kautuka-credentialshost.service kautuka-manager.service'
-    elif [[ "$service_key" == 'channelhost' ]]; then
-      unit_after='kautuka-gateway.service'
-    fi
-
-    local service_unit_lines=(
-      '[Unit]'
-      "Description=Kautuka ${service_key}"
-      "After=${unit_after}"
-      'PartOf=kautuka.target'
-      ''
-      '[Service]'
-      'Type=exec'
-      "WorkingDirectory=/opt/kautuka/${service_key}/current"
-      "ExecStart=/opt/kautuka/${service_key}/current/${executable_name}"
-      'Environment=Kautuka__Mode=prod'
-      'Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka'
-      "Environment=Logging__FileLogDirectory=/var/lib/kautuka/logs/${service_key}"
-    )
-
-    if [[ -n "$extra_env" ]]; then
-      service_unit_lines+=("$extra_env")
-    fi
-
-    service_unit_lines+=(
-      'Restart=always'
-      'RestartSec=5'
-      'TimeoutStopSec=70'
-    )
-    # UpdateService must sudo the root helper. Match native installer:
-    # install_host_service_user leaves no_new_privileges empty for updateservice.
-    if [[ "$service_key" != 'updateservice' ]]; then
-      service_unit_lines+=('NoNewPrivileges=true')
-    else
-      # Keep apply-release children alive if this unit stops mid-apply.
-      service_unit_lines+=('KillMode=process')
-    fi
-    service_unit_lines+=(
-      ''
-      '[Install]'
-      'WantedBy=kautuka.target'
-    )
-
-    printf '%s\n' "${service_unit_lines[@]}" | sudo tee "$unit_path" >/dev/null
-
-    sudo mkdir -p "$(dirname "$wants_path")"
-    sudo ln -sfn "../kautuka-${service_key}.service" "$wants_path"
-  }
-
-  rootfs_uid() {
-    awk -F: -v n="$1" '$1 == n { print $3 }' "$rootfs_dir/etc/passwd"
-  }
-
-  rootfs_gid() {
-    awk -F: -v n="$1" '$1 == n { print $3 }' "$rootfs_dir/etc/group"
-  }
-
-  # Match installer chown_tree_excluding: never roll channel security material
-  # or isolated CredentialsHost state into the broad kautuka tree ownership.
-  chown_tree_excluding() {
-    local root="$1"
-    local owner="$2"
-    local excluded_root="$3"
-    local containers_root="$root/.local/share/containers"
-    local credentials_root="$root/credentials"
-    local credentials_state_root="$root/credentialsHost"
-
-    [[ -d "$root" ]] || return 0
-    sudo chown "$owner" "$root"
-    sudo find "$root" -mindepth 1 \
-      \( -path "$excluded_root" -o -path "$excluded_root/*" \
-         -o -path "$containers_root" -o -path "$containers_root/*" \
-         -o -path "$credentials_root" -o -path "$credentials_root/*" \
-         -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
-      -o -exec chown -h "$owner" {} +
-  }
-
-  require_rootfs_owner_mode() {
-    local path="$1"
-    local expected="$2"
-    local actual
-    actual="$(sudo stat -c '%u:%g:%a' "$path")"
-    if [[ "$actual" != "$expected" ]]; then
-      echo "error: rootfs ownership/mode mismatch for $path (expected $expected, found $actual)" >&2
-      exit 1
-    fi
-  }
-
-  ensure_rootfs_system_account() {
-    local user="$1"
-    if ! awk -F: -v n="$user" '$1 == n { found=1 } END { exit !found }' "$rootfs_dir/etc/passwd"; then
-      sudo chroot "$rootfs_dir" groupadd --system "$user"
-      sudo chroot "$rootfs_dir" useradd --system --gid "$user" --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$user"
-    fi
-  }
-
-  install_system_channel_service() {
-    local service_key="$1"
-    local service_description="$2"
-    local executable_name="$3"
-    local source_root="$4"
-    local runtime_user="$5"
-    local install_root="$rootfs_dir/opt/kautuka/${service_key}"
-    local version_root="$install_root/versions/$version"
-    local current_link="$install_root/current"
-    local unit_path="$rootfs_dir/etc/systemd/system/kautuka-${service_key}.service"
-    local log_dir="$visible_root/logs/${service_key}"
-    local state_write_path="$internal_state_root"
-    local dependencies='network-online.target'
-    local supplementary_groups=''
-    local material_environment=''
-
-    [[ -d "$source_root" ]] || return 0
-    ensure_rootfs_system_account "$runtime_user"
-
-    sudo rm -rf "$version_root"
-    sudo mkdir -p "$version_root" "$log_dir" "$rootfs_dir/etc/systemd/system/multi-user.target.wants"
-    sudo cp -a "$source_root/." "$version_root/"
-    sudo chmod +x "$version_root/$executable_name"
-    sudo ln -sfn "versions/$version" "$current_link"
-
-    if [[ "$service_key" == 'channelhost' ]]; then
-      state_write_path="$internal_state_root/channelHost"
-      material_environment="Environment=Kautuka__ChannelGateway__ProductionMaterial__ChannelPrivateRoot=/var/lib/kautuka/security/channel/channel-private
-Environment=Kautuka__ChannelGateway__ProductionMaterial__ChannelTrustRoot=/var/lib/kautuka/security/channel/channel-trust"
-    elif [[ "$service_key" == 'gateway' ]]; then
-      dependencies='network-online.target kautuka-channelhost.service'
-      supplementary_groups='SupplementaryGroups=kautuka kautuka-credentials-client'
-      material_environment="Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayPrivateRoot=/var/lib/kautuka/security/channel/gateway-private
-Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/lib/kautuka/security/channel/gateway-trust"
-    fi
-
-    sudo mkdir -p "$state_write_path"
-
-    {
-      printf '%s\n' \
-        '[Unit]' \
-        "Description=Kautuka ${service_description}" \
-        'Wants=network-online.target' \
-        'Requires=kautuka-update-recovery.service' \
-        'After=kautuka-update-recovery.service' \
-        'Requires=kautuka-channelhost.service' \
-        "After=${dependencies}" \
-        '' \
-        '[Service]' \
-        'Type=exec' \
-        "User=${runtime_user}" \
-        "Group=${runtime_user}"
-      if [[ -n "$supplementary_groups" ]]; then
-        printf '%s\n' "$supplementary_groups"
-      fi
-      printf '%s\n' \
-        "WorkingDirectory=/opt/kautuka/${service_key}/current" \
-        "ExecStart=/opt/kautuka/${service_key}/current/${executable_name}" \
-        'Environment=ASPNETCORE_ENVIRONMENT=Production' \
-        'Environment=Kautuka__Mode=prod' \
-        'Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka' \
-        "Environment=Logging__FileLogDirectory=/var/lib/kautuka/logs/${service_key}"
-      if [[ -n "$material_environment" ]]; then
-        printf '%s\n' "$material_environment"
-      fi
-      printf '%s\n' \
-        'UMask=0077' \
-        'NoNewPrivileges=true' \
-        'PrivateTmp=true' \
-        'ProtectHome=true' \
-        'ProtectSystem=strict' \
-        "ReadWritePaths=${state_write_path#${rootfs_dir}} ${log_dir#${rootfs_dir}} /run/kautuka/${service_key}" \
-        'Restart=always' \
-        'RestartSec=5' \
-        'TimeoutStopSec=70' \
-        '' \
-        '[Install]' \
-        'WantedBy=multi-user.target'
-    } | sudo tee "$unit_path" >/dev/null
-
-    if [[ "$service_key" == 'channelhost' ]]; then
-      sudo sed -i '/^Requires=kautuka-channelhost.service$/d' "$unit_path"
-    fi
-
-    sudo ln -sfn "../kautuka-${service_key}.service" "$rootfs_dir/etc/systemd/system/multi-user.target.wants/kautuka-${service_key}.service"
-  }
-
-  # A client can only traverse a 0750 socket directory if it belongs to the owning group.
-  # The group is always a dedicated "-client" group, never the server's own primary group:
-  # joining that would also hand over its group-readable state, which is precisely what
-  # the pre-existing kautuka-credentials-client split exists to prevent.
-  grant_socket_group_membership() {
-    local account="$1"
-    local group="$2"
-    grep -q "^${account}:" "$rootfs_dir/etc/passwd" || return 0
-    grep -q "^${group}:" "$rootfs_dir/etc/group" \
-      || sudo chroot "$rootfs_dir" groupadd --system "$group"
-    sudo chroot "$rootfs_dir" usermod --append --groups "$group" "$account"
-  }
-
-  # The services address each other over Unix sockets rather than loopback ports, because
-  # every running WSL2 distro shares a single network namespace and no bind address can
-  # make a port private to the appliance. /run is tmpfs, so the directories are declared
-  # to systemd-tmpfiles and recreated each boot.
-  #
-  # RuntimeDirectory= cannot do this job: manager, updateservice and webhost are
-  # user-scope units, whose RuntimeDirectory lands under /run/user/<uid>, and that
-  # directory is mode 0700 so the system-scope services could never traverse into it.
-  install_socket_runtime_dirs() {
-    local tmpfiles_path="$rootfs_dir/usr/lib/tmpfiles.d/kautuka-sockets.conf"
-    sudo mkdir -p "$(dirname "$tmpfiles_path")"
-
-    {
-      printf '%s\n' \
-        '# Managed by build-release-assets.sh.' \
-        '# One directory per service, owned by that service at 2750, so only the owner and' \
-        '# members of its client group can reach the socket inside. The setgid bit makes' \
-        '# bind() give the socket that client group instead of the service own group, which' \
-        '# is what lets the socket itself be 0660 rather than world-writable.' \
-        'd /run/kautuka 0755 root root -' \
-        'f /run/kautuka-db-writer.lock 0644 root root -'
-
-      # service_key:owner:traversal_group
-      local entry
-      local service_key
-      local owner
-      local group
-      for entry in \
-        'manager:kautuka:kautuka-manager-client' \
-        'updateservice:kautuka:kautuka-updateservice-client' \
-        'gateway:kautuka-gateway:kautuka-gateway-client' \
-        'credentialshost:kautuka-credentials:kautuka-credentials-client' \
-        'channelhost:kautuka-channelhost:kautuka-channelhost-client'; do
-        IFS=':' read -r service_key owner group <<<"$entry"
-        if grep -q "^${owner}:" "$rootfs_dir/etc/passwd"; then
-          printf 'd /run/kautuka/%s 2750 %s %s -\n' "$service_key" "$owner" "$group"
-        fi
-      done
-    } | sudo tee "$tmpfiles_path" >/dev/null
-
-    # One grant per client-to-server edge: WebHost (kautuka) reaches Gateway, and Gateway
-    # reaches Manager, UpdateService and ChannelHost. Gateway is already in
-    # kautuka-credentials-client, which covers CredentialsHost.
-    #
-    # Manager and UpdateService both run as kautuka, so their sockets could have been left
-    # in the kautuka group, which Gateway is already a member of. They are not, because
-    # that group is those services' own primary group: it also carries their
-    # group-readable state under /var/lib/kautuka, so relying on it would widen Gateway's
-    # reach well past the two sockets it actually needs. UpdateService still reaches the
-    # manager socket as its owner, so only Gateway needs the grant.
-    grant_socket_group_membership kautuka kautuka-gateway-client
-    grant_socket_group_membership kautuka-gateway kautuka-manager-client
-    grant_socket_group_membership kautuka-gateway kautuka-updateservice-client
-    grant_socket_group_membership kautuka-gateway kautuka-channelhost-client
-  }
-
-  manager_content_root="$manager_extract_dir"
-  if [[ -d "$manager_extract_dir/bin" ]]; then
-    manager_content_root="$manager_extract_dir/bin"
+  # Stage the identical Linux payload. Real rootless initialization and key
+  # generation happen in the imported distro, never in a fake chroot service bus.
+  local firstboot="$rootfs_dir/usr/local/lib/kautuka/firstboot"
+  sudo install -d -o root -g root -m 0755 "$firstboot" "$rootfs_dir/etc/kautuka" \
+    "$rootfs_dir/etc/systemd/system/multi-user.target.wants"
+  sudo cp -a "$manager_extract_dir" "$firstboot/payload"
+  copy_staged_oci_image_archives "$manager_extract_dir" "$firstboot/payload/oci-images" "$firstboot/payload/bin/runtime-images.json"
+  sudo chown -R root:root "$firstboot"
+  sudo chmod -R go-w "$firstboot"
+  sudo install -m 0755 "$source_root/scripts/kautuka-wsl-firstboot.sh" "$firstboot/start"
+  sudo install -m 0644 "$source_root/scripts/kautuka-install-linux.sh.in" "$firstboot/installer.sh"
+  [[ -n "$manifest_public_key" ]] || { echo 'error: WSL first boot requires the trusted release public key' >&2; exit 1; }
+  sudo install -m 0644 "$manifest_public_key" "$firstboot/manifest-public-key.pem"
+  python3 - "$version" "$channel" <<'PYMETA' | sudo tee "$firstboot/release.json" >/dev/null
+import json,sys
+print(json.dumps(dict(version=sys.argv[1],channel=sys.argv[2])))
+PYMETA
+  sudo chmod 0644 "$firstboot/release.json"
+  if [[ -n "$manifest_url" ]]; then
+    stage_provisioned_update_source "$rootfs_dir/etc/kautuka" '0:0'
   fi
-
-  kautuka_uid="$(awk -F: '$1 == "kautuka" { print $3 }' "$rootfs_dir/etc/passwd")"
-  kautuka_gid="$(awk -F: '$1 == "kautuka" { print $4 }' "$rootfs_dir/etc/passwd")"
-  if [[ -z "$kautuka_uid" || -z "$kautuka_gid" ]]; then
-    echo 'error: failed to resolve kautuka uid/gid from rootfs passwd.' >&2
-    exit 1
-  fi
-
-  install_root="$rootfs_dir/opt/kautuka/manager"
-  version_root="$install_root/versions/$version"
-  current_link="$install_root/current"
-  visible_root="$rootfs_dir/var/lib/kautuka"
-  internal_state_root="$rootfs_dir/var/lib/kautuka"
-  linger_dir="$rootfs_dir/var/lib/systemd/linger"
-  user_unit_dir="$rootfs_dir/var/lib/kautuka/.config/systemd/user"
-  service_unit_path="$user_unit_dir/kautuka-manager.service"
-  wants_dir="$user_unit_dir/default.target.wants"
-  update_policy_file="$rootfs_dir/var/lib/kautuka/updateService/update-runtime-policy.json"
-
-  sudo rm -rf "$version_root"
-  sudo mkdir -p "$version_root" "$visible_root/logs/manager" "$visible_root/workspaces" "$visible_root/oci-images" "$internal_state_root/manager" "$wants_dir" "$linger_dir" "$user_unit_dir/kautuka.target.wants" "$rootfs_dir/etc/kautuka"
-  sudo cp -a "$manager_content_root/." "$version_root/"
-  sudo chmod +x "$version_root/kautuka-manager"
-  sudo ln -sfn "versions/$version" "$current_link"
-  sudo touch "$linger_dir/kautuka"
-  copy_staged_oci_image_archives "$manager_extract_dir" "$visible_root/oci-images" "$version_root/runtime-images.json"
-  # Both release artifacts currently target linux/amd64. Preserve the exact
-  # inventory baked into this appliance for the detached release signature.
-  # A future additional platform needs a separate inventory, not this binding.
-  sudo install -m 0644 "$version_root/runtime-images.json" "$release_dir/runtime-images.bound.json"
-  sudo chown -R "$kautuka_uid:$kautuka_gid" "$visible_root/oci-images"
-  sudo chmod 0750 "$visible_root/oci-images"
-
-  # TimeoutStopSec bounds only the teardown of the user manager itself, so the
-  # manager unit keeps its own 70s for targeted stops and apply-release. Without
-  # it, podman retries transient scopes that systemd refuses once exit.target is
-  # queued, the stop outlasts the window WSL allows, and the abandoned cgroup
-  # makes the next start fail with EBUSY on cgroup reuse (systemd/systemd#41278).
-  # Restart= is the safety net for any teardown that still fails to complete:
-  # user@.service is static with no Restart=, so one leak would otherwise strand
-  # the user-scope services for a whole boot while the system units still report
-  # healthy. The leaked cgroup is empty, so a single retry claims it.
-  user_manager_dropin_dir="$rootfs_dir/etc/systemd/system/user@$kautuka_uid.service.d"
-  sudo mkdir -p "$user_manager_dropin_dir"
-  printf '%s\n' \
-    '[Unit]' \
-    'StartLimitIntervalSec=60' \
-    'StartLimitBurst=5' \
-    '' \
-    '[Service]' \
-    'Restart=on-failure' \
-    'RestartSec=5' \
-    'TimeoutStopSec=5' | sudo tee "$user_manager_dropin_dir/20-kautuka-restart.conf" >/dev/null
-  sudo chmod 644 "$user_manager_dropin_dir/20-kautuka-restart.conf"
-
-  printf '%s\n' \
-    '{' \
-    '  "schemaVersion": 2,' \
-    '  "username": "kautuka",' \
-    '  "target": "kautuka.target",' \
-    '  "userUnits": ["kautuka-manager.service", "kautuka-updateservice.service", "kautuka-webhost.service"],' \
-    '  "systemUnits": ["kautuka-gateway.service", "kautuka-channelhost.service", "kautuka-credentialshost.service"]' \
-    '}' | sudo tee "$rootfs_dir/etc/kautuka/service-scope.json" >/dev/null
-  sudo chmod 644 "$rootfs_dir/etc/kautuka/service-scope.json"
-
-  sudo mkdir -p "$(dirname "$update_policy_file")"
-  printf '%s\n' \
-    '{' \
-    '  "schemaVersion": 1,' \
-    "  \"releaseChannel\": \"$channel\"" \
-    '}' | sudo tee "$update_policy_file" >/dev/null
-  sudo chmod 640 "$update_policy_file"
-
-  if [[ -n "$manifest_url" || -n "$manifest_public_key" ]]; then
-    stage_provisioned_update_source "$rootfs_dir/etc/kautuka" "$kautuka_uid:$kautuka_gid"
-  fi
-
-  printf '%s\n' \
-    '[Unit]' \
-    'Description=Kautuka Manager' \
-    'After=network.target' \
-    'PartOf=kautuka.target' \
-    '' \
-    '[Service]' \
-    'Type=exec' \
-    'WorkingDirectory=/opt/kautuka/manager/current' \
-    'ExecStart=/opt/kautuka/manager/current/kautuka-manager' \
-    'Environment=Kautuka__Mode=prod' \
-    'Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka' \
-    'Environment=Logging__FileLogDirectory=/var/lib/kautuka/logs/manager' \
-    'Restart=always' \
-    'RestartSec=5' \
-    'Delegate=yes' \
-    'KillMode=process' \
-    'TasksMax=infinity' \
-    'TimeoutStopSec=70' \
-    '' \
-    '[Install]' \
-    'WantedBy=kautuka.target' | sudo tee "$service_unit_path" >/dev/null
-
-  local installed_units=(kautuka-manager.service)
-  if [[ -d "$manager_extract_dir/services/credentialshost" ]]; then
-    credential_group='kautuka-credentials-client'
-    credential_user='kautuka-credentials'
-    sudo chroot "$rootfs_dir" groupadd --system "$credential_group"
-    sudo chroot "$rootfs_dir" useradd --system --no-create-home --home-dir /var/lib/kautuka/credentials --shell /usr/sbin/nologin "$credential_user"
-    sudo chroot "$rootfs_dir" usermod --append --groups "$credential_group" "$credential_user"
-    sudo chroot "$rootfs_dir" usermod --append --groups "$credential_group" kautuka
-    credential_install_root="$rootfs_dir/opt/kautuka/credentialshost"
-    credential_version_root="$credential_install_root/versions/$version"
-    sudo mkdir -p "$credential_version_root" "$rootfs_dir/var/lib/kautuka/credentials/vault" "$rootfs_dir/var/lib/kautuka/credentials/transport" "$rootfs_dir/var/lib/kautuka/credentialsHost" "$rootfs_dir/var/lib/kautuka/logs/credentialshost"
-    sudo cp -a "$manager_extract_dir/services/credentialshost/." "$credential_version_root/"
-    sudo chmod +x "$credential_version_root/kautuka-credentialshost"
-    sudo ln -sfn "versions/$version" "$credential_install_root/current"
-    sudo mkdir -p "$rootfs_dir/etc/systemd/system/multi-user.target.wants"
-    printf '%s\n' \
-      '[Unit]' \
-      'Description=Kautuka Credentials Host' \
-      'Requires=kautuka-update-recovery.service' \
-      'After=kautuka-update-recovery.service network.target' \
-      'Before=kautuka-gateway.service' \
-      '' \
-      '[Service]' \
-      'Type=exec' \
-      "User=$credential_user" \
-      "Group=$credential_group" \
-      'UMask=0027' \
-      'WorkingDirectory=/opt/kautuka/credentialshost/current' \
-      'ExecStart=/opt/kautuka/credentialshost/current/kautuka-credentialshost' \
-      'Environment=Kautuka__Mode=prod' \
-      'Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka' \
-      'Environment=Logging__FileLogDirectory=/var/lib/kautuka/logs/credentialshost' \
-      'Restart=always' \
-      'RestartSec=5' \
-      'NoNewPrivileges=true' \
-      'PrivateTmp=true' \
-      'ProtectSystem=strict' \
-      'ReadWritePaths=/var/lib/kautuka/credentials /var/lib/kautuka/credentialsHost /var/lib/kautuka/logs/credentialshost /run/kautuka/credentialshost' \
-      '' \
-      '[Install]' \
-      'WantedBy=multi-user.target' | sudo tee "$rootfs_dir/etc/systemd/system/kautuka-credentialshost.service" >/dev/null
-    sudo ln -sfn ../kautuka-credentialshost.service "$rootfs_dir/etc/systemd/system/multi-user.target.wants/kautuka-credentialshost.service"
-  fi
-  install_system_channel_service channelhost ChannelHost kautuka-channelhost "$manager_extract_dir/services/channelhost" kautuka-channelhost
-  install_system_channel_service gateway Gateway kautuka-gateway "$manager_extract_dir/services/gateway" kautuka-gateway
-  if awk -F: '$1 == "kautuka-gateway" { found=1 } END { exit !found }' "$rootfs_dir/etc/passwd"; then
-    sudo chroot "$rootfs_dir" usermod --append --groups kautuka kautuka-gateway
-    if awk -F: '$1 == "kautuka-credentials-client" { found=1 } END { exit !found }' "$rootfs_dir/etc/group"; then
-      sudo chroot "$rootfs_dir" usermod --append --groups kautuka-credentials-client kautuka-gateway
-    fi
-  fi
-  install_socket_runtime_dirs
-
-  install_host_service updateservice kautuka-updateservice "$manager_extract_dir/services/updateservice"
-  [[ -d "$manager_extract_dir/services/updateservice" ]] && installed_units+=(kautuka-updateservice.service)
-  install_host_service webhost kautuka-webhost "$manager_extract_dir/services/webhost"
-  [[ -d "$manager_extract_dir/services/webhost" ]] && installed_units+=(kautuka-webhost.service)
-
-  activation_target_units="$(printf '%s\n' "${installed_units[@]}" | paste -sd' ' -)"
-  printf '%s\n' \
-    '[Unit]' \
-    'Description=Kautuka appliance runtime' \
-    "Wants=${activation_target_units}" \
-    'After=network.target' \
-    '' \
-    '[Install]' \
-    'WantedBy=default.target' | sudo tee "$user_unit_dir/kautuka.target" >/dev/null
-
-  sudo ln -sfn ../kautuka.target "$wants_dir/kautuka.target"
-
-  sudo mkdir -p "$rootfs_dir/usr/local/lib/kautuka" "$rootfs_dir/etc/sudoers.d"
-  # Prefer the repo helper over any helper embedded in the platform tarball so
-  # --prewarm-only rebakes pick up apply-release fixes without republishing.
-  if [[ -f "$source_root/scripts/kautuka-apply-release.sh" ]]; then
-    sudo install -m 0755 "$source_root/scripts/kautuka-apply-release.sh" "$rootfs_dir/usr/local/lib/kautuka/apply-release"
-  elif [[ -f "$manager_extract_dir/bin/kautuka-apply-release" ]]; then
-    sudo install -m 0755 "$manager_extract_dir/bin/kautuka-apply-release" "$rootfs_dir/usr/local/lib/kautuka/apply-release"
-  fi
-  if [[ -f "$source_root/scripts/kautuka-update-recovery.py" ]]; then
-    sudo install -m 0755 "$source_root/scripts/kautuka-update-recovery.py" "$rootfs_dir/usr/local/lib/kautuka/update-recovery.py"
-  elif [[ -f "$manager_extract_dir/bin/kautuka-update-recovery" ]]; then
-    sudo install -m 0755 "$manager_extract_dir/bin/kautuka-update-recovery" "$rootfs_dir/usr/local/lib/kautuka/update-recovery.py"
-  fi
-  sudo install -o root -g root -m 0755 "$manager_extract_dir/bin/kautuka-runtime-images" "$rootfs_dir/usr/local/lib/kautuka/runtime-images.py"
-  sudo install -m 0644 "$source_root/scripts/kautuka-update-recovery.service" "$rootfs_dir/etc/systemd/system/kautuka-update-recovery.service"
-  sudo ln -sfn ../kautuka-update-recovery.service "$rootfs_dir/etc/systemd/system/multi-user.target.wants/kautuka-update-recovery.service"
-  recovery_user_uid="$(rootfs_uid kautuka)"
-  if [[ -n "$recovery_user_uid" ]]; then
-    sudo mkdir -p "$rootfs_dir/etc/systemd/system/user@${recovery_user_uid}.service.d"
-    printf '%s\n' '[Unit]' 'Requires=kautuka-update-recovery.service' 'After=kautuka-update-recovery.service' \
-      | sudo tee "$rootfs_dir/etc/systemd/system/user@${recovery_user_uid}.service.d/10-kautuka-recovery.conf" >/dev/null
-    sudo chmod 0644 "$rootfs_dir/etc/systemd/system/user@${recovery_user_uid}.service.d/10-kautuka-recovery.conf"
-  fi
-  printf '%s\n' 'kautuka ALL=(root) NOPASSWD: /usr/local/lib/kautuka/apply-release' \
-    | sudo tee "$rootfs_dir/etc/sudoers.d/kautuka-apply-release" >/dev/null
-  sudo chmod 0440 "$rootfs_dir/etc/sudoers.d/kautuka-apply-release"
-
-  channelhost_bin="$manager_extract_dir/services/channelhost/kautuka-channelhost"
-  channel_security_root="$rootfs_dir/var/lib/kautuka/security/channel"
-  if [[ ! -x "$channelhost_bin" ]]; then
-    echo "error: channelhost binary missing or not executable: $channelhost_bin" >&2
-    exit 1
-  fi
-  if ! sudo test -e "$channel_security_root/gateway-private"; then
-    sudo mkdir -p "$rootfs_dir/var/lib/kautuka/security" "$channel_security_root"
-    sudo env -u Kautuka__Mode "$channelhost_bin" --provision-channel-security \
-      "$channel_security_root/gateway-private" \
-      "$channel_security_root/gateway-trust" \
-      "$channel_security_root/channel-private" \
-      "$channel_security_root/channel-trust" \
-      "$channel_security_root/offline-authority"
-  fi
-  if ! sudo test -d "$channel_security_root/channel-private" \
-    || ! sudo test -f "$channel_security_root/channel-private/channel-server.pfx"; then
-    echo "error: channel security material missing at $channel_security_root after provision." >&2
-    sudo find "$rootfs_dir/var/lib/kautuka/security" -printf '%p %u:%g %m\n' 2>/dev/null || true
-    exit 1
-  fi
-
-  # Installer parity: never fold channel security material into kautuka ownership.
-  chown_tree_excluding "$visible_root" "$kautuka_uid:$kautuka_gid" "$channel_security_root"
-  if [[ "$install_root" != "$visible_root" ]]; then
-    sudo chown -R 0:0 "$install_root"
-  fi
-  sudo chown -R 0:0 "$rootfs_dir/opt/kautuka/updateservice" "$rootfs_dir/opt/kautuka/webhost" 2>/dev/null || true
-  sudo chown -R 0:0 "$rootfs_dir/opt/kautuka/gateway" "$rootfs_dir/opt/kautuka/channelhost" "$rootfs_dir/opt/kautuka/credentialshost" 2>/dev/null || true
-
-  credential_uid="$(rootfs_uid kautuka-credentials)"
-  credential_client_gid="$(rootfs_gid kautuka-credentials-client)"
-  if [[ -n "$credential_uid" && -n "$credential_client_gid" ]]; then
-    sudo mkdir -p "$rootfs_dir/var/lib/kautuka/credentialsHost/vault" "$rootfs_dir/var/lib/kautuka/credentialsHost/transport"
-    sudo chown -R "$credential_uid:$credential_uid" \
-      "$rootfs_dir/var/lib/kautuka/credentials/vault" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost/vault" \
-      "$rootfs_dir/var/lib/kautuka/logs/credentialshost"
-    sudo chown "$credential_uid:$credential_client_gid" \
-      "$rootfs_dir/var/lib/kautuka/credentials" \
-      "$rootfs_dir/var/lib/kautuka/credentials/transport" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost/transport"
-    sudo chmod 700 \
-      "$rootfs_dir/var/lib/kautuka/credentials/vault" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost/vault" \
-      "$rootfs_dir/var/lib/kautuka/logs/credentialshost"
-    sudo chmod 2750 \
-      "$rootfs_dir/var/lib/kautuka/credentials" \
-      "$rootfs_dir/var/lib/kautuka/credentials/transport" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost" \
-      "$rootfs_dir/var/lib/kautuka/credentialsHost/transport"
-  fi
-
-  gateway_uid="$(rootfs_uid kautuka-gateway)"
-  gateway_gid="$(rootfs_gid kautuka-gateway)"
-  channelhost_uid="$(rootfs_uid kautuka-channelhost)"
-  channelhost_gid="$(rootfs_gid kautuka-channelhost)"
-  if [[ -z "$gateway_uid" || -z "$gateway_gid" || -z "$channelhost_uid" || -z "$channelhost_gid" ]]; then
-    echo 'error: failed to resolve gateway/channelhost uid/gid while applying channel security ownership.' >&2
-    exit 1
-  fi
-
-  sudo mkdir -p "$rootfs_dir/var/lib/kautuka/logs/gateway"
-  sudo chown -R "$gateway_uid:$gateway_gid" "$rootfs_dir/var/lib/kautuka/logs/gateway"
-  sudo chmod 700 "$rootfs_dir/var/lib/kautuka/logs/gateway"
-  sudo mkdir -p "$rootfs_dir/var/lib/kautuka/mcpb-bundles"
-  sudo chown -R "$gateway_uid:$kautuka_gid" "$rootfs_dir/var/lib/kautuka/mcpb-bundles"
-  sudo chmod 2750 "$rootfs_dir/var/lib/kautuka/mcpb-bundles"
-  sudo mkdir -p "$rootfs_dir/var/lib/kautuka/channelHost" "$rootfs_dir/var/lib/kautuka/logs/channelhost"
-  sudo chown -R "$channelhost_uid:$channelhost_gid" "$rootfs_dir/var/lib/kautuka/channelHost" "$rootfs_dir/var/lib/kautuka/logs/channelhost"
-  sudo chmod 700 "$rootfs_dir/var/lib/kautuka/channelHost" "$rootfs_dir/var/lib/kautuka/logs/channelhost"
-
+  # The base image owns the dedicated account. Its home is immutable ancestry;
+  # the shared installer creates only the required writable children on boot.
+  sudo chown root:root "$rootfs_dir/var/lib/kautuka"
+  sudo chmod 0755 "$rootfs_dir/var/lib/kautuka"
+  sudo install -m 0644 "$source_root/scripts/kautuka-wsl-firstboot.service" \
+    "$rootfs_dir/etc/systemd/system/kautuka-wsl-firstboot.service"
+  sudo ln -s ../kautuka-wsl-firstboot.service \
+    "$rootfs_dir/etc/systemd/system/multi-user.target.wants/kautuka-wsl-firstboot.service"
+  # Preserve the producer's bound inventory byte-for-byte for final signing.
+  sudo install -m 0644 "$firstboot/payload/bin/runtime-images.json" "$release_dir/runtime-images.bound.json"
   sudo install -D -m 0644 "$manager_extract_dir/LICENSE" "$rootfs_dir/usr/share/licenses/kautuka/LICENSE"
   sudo install -D -m 0644 "$manager_extract_dir/NOTICE" "$rootfs_dir/usr/share/licenses/kautuka/NOTICE"
-
-  # Match installer apply_channel_security_material_permissions.
-  sudo chown 0:0 "$rootfs_dir/var/lib/kautuka/security" "$channel_security_root"
-  sudo chmod 0711 "$rootfs_dir/var/lib/kautuka/security" "$channel_security_root"
-  sudo chown -R "$gateway_uid:$gateway_gid" "$channel_security_root/gateway-private"
-  sudo chmod 0700 "$channel_security_root/gateway-private"
-  sudo find "$channel_security_root/gateway-private" -type f -exec chmod 0600 {} +
-  sudo chown -R "0:$gateway_gid" "$channel_security_root/gateway-trust"
-  sudo chmod 0750 "$channel_security_root/gateway-trust"
-  sudo find "$channel_security_root/gateway-trust" -type f -exec chmod 0440 {} +
-  sudo chown -R "$channelhost_uid:$channelhost_gid" "$channel_security_root/channel-private"
-  sudo chmod 0700 "$channel_security_root/channel-private"
-  sudo find "$channel_security_root/channel-private" -type f -exec chmod 0600 {} +
-  sudo chown -R "0:$channelhost_gid" "$channel_security_root/channel-trust"
-  sudo chmod 0750 "$channel_security_root/channel-trust"
-  sudo find "$channel_security_root/channel-trust" -type f -exec chmod 0440 {} +
-  sudo chown -R 0:0 "$channel_security_root/offline-authority"
-  sudo chmod 0700 "$channel_security_root/offline-authority"
-  sudo find "$channel_security_root/offline-authority" -type f -exec chmod 0600 {} +
-
-  require_rootfs_owner_mode "$channel_security_root/channel-private" "${channelhost_uid}:${channelhost_gid}:700"
-  require_rootfs_owner_mode "$channel_security_root/channel-private/channel-server.pfx" "${channelhost_uid}:${channelhost_gid}:600"
-  require_rootfs_owner_mode "$channel_security_root/channel-trust" "0:${channelhost_gid}:750"
-  require_rootfs_owner_mode "$channel_security_root/gateway-private" "${gateway_uid}:${gateway_gid}:700"
-  require_rootfs_owner_mode "$channel_security_root/gateway-trust" "0:${gateway_gid}:750"
-  require_rootfs_owner_mode "$channel_security_root/offline-authority" "0:0:700"
-
-  # Match installer prepare_isolated_service_ancestors: isolated units must
-  # traverse the shared state root, and Gateway must be able to create kautuka.db.
-  if [[ -n "$kautuka_gid" ]]; then
-    sudo chown "0:$kautuka_gid" "$rootfs_dir/var/lib/kautuka" "$rootfs_dir/var/lib/kautuka/logs"
-    sudo chmod 0771 "$rootfs_dir/var/lib/kautuka" "$rootfs_dir/var/lib/kautuka/logs"
-  fi
 
   harden_rootfs_sudo_bits "$rootfs_dir"
 
@@ -1681,14 +1092,9 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
     echo "error: appliance sudo owner must be 0/0 (found ${packed_sudo_owner:-missing})" >&2
     exit 1
   }
-  local packed_channel_private_owner
-  packed_channel_private_owner="$(tar -tvf "$rootfs_output" | awk '/\.\/var\/lib\/kautuka\/security\/channel\/channel-private\/channel-server\.pfx$/ { owner = $2 } END { print owner }')"
-  [[ "$packed_channel_private_owner" == "${channelhost_uid}/${channelhost_gid}" ]] || {
-    echo "error: appliance channel-private owner must be ${channelhost_uid}/${channelhost_gid} (found ${packed_channel_private_owner:-missing})" >&2
-    exit 1
-  }
+  # No appliance-specific credentials or old host core units may be baked in.
+  python3 "$source_root/scripts/test-wsl-staged-rootfs.py" "$rootfs_output"
 
-  assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid"
 }
 
 log_phase "Prewarming WSL appliance rootfs"

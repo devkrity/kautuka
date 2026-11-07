@@ -22,6 +22,10 @@ public sealed class InstalledLinuxSmokeContractTests
         string endpoint = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Api", "InstallerEndpoints.cs"));
         string ui = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "wwwroot", "index.html"));
 
+        string system = File.ReadAllText(Path.Combine(projectRoot, "src", "installer", "Kautuka.Installer.Windows", "Installation", "WindowsApplianceInstaller.System.cs"));
+        Assert.Contains("/var/lib/kautuka/gateway-data/setup-token", system, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"/var/lib/kautuka/setup-token\"", system, StringComparison.Ordinal);
+
         Assert.Contains("app.MapPost(\"/api/appliance/setup-token\"", endpoint, StringComparison.Ordinal);
         Assert.Contains("if (!HasActionToken(ctx))", endpoint, StringComparison.Ordinal);
         Assert.Contains("CacheControl = \"no-store, no-cache\"", endpoint, StringComparison.Ordinal);

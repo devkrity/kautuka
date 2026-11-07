@@ -94,25 +94,25 @@ public sealed class LinuxApplyReleaseHelperContractTests
         string channelHost = File.ReadAllText(Path.Combine(projectRoot, "src", "backend", "Kautuka.ChannelHost", "Program.cs"));
 
         Assert.Contains("kautuka-update-recovery.py", releaseBuilder, StringComparison.Ordinal);
-        Assert.Contains("kautuka-update-recovery.service", releaseBuilder, StringComparison.Ordinal);
-        Assert.Contains("Requires=kautuka-update-recovery.service", releaseBuilder, StringComparison.Ordinal);
+        Assert.Contains("kautuka-update-recovery.service", installer, StringComparison.Ordinal);
+        Assert.Contains("Requires=kautuka-update-recovery.service", installer, StringComparison.Ordinal);
         Assert.Contains("f /run/kautuka-db-writer.lock 0644 root root -", installer + releaseBuilder, StringComparison.Ordinal);
         Assert.Contains("exclusive ? LockExclusive : LockShared", writerLease, StringComparison.Ordinal);
         Assert.Contains("AcquireForMode", channelHost, StringComparison.Ordinal);
         Assert.Contains("exclusive: provisioningChannelSecurity", channelHost, StringComparison.Ordinal);
         Assert.Contains("Kautuka__Mode=prod \"$channelhost_executable\" --provision-channel-security", installer, StringComparison.Ordinal);
-        Assert.Contains("env -u Kautuka__Mode", releaseBuilder, StringComparison.Ordinal);
+        Assert.Contains("kautuka-wsl-firstboot.sh", releaseBuilder, StringComparison.Ordinal);
         Assert.Contains("Requires=systemd-tmpfiles-setup.service", recoveryUnit + installer, StringComparison.Ordinal);
-        Assert.Contains("After=kautuka-update-recovery.service", releaseBuilder, StringComparison.Ordinal);
-        Assert.Contains("10-kautuka-recovery.conf", releaseBuilder, StringComparison.Ordinal);
+        Assert.Contains("After=kautuka-update-recovery.service", installer, StringComparison.Ordinal);
+        Assert.Contains("10-kautuka-recovery.conf", installer, StringComparison.Ordinal);
         Assert.Contains("kautuka-update-recovery", installer, StringComparison.Ordinal);
         Assert.Contains("kautuka-update-recovery.service", installer, StringComparison.Ordinal);
         Assert.Contains("safe update recovery support", installer, StringComparison.Ordinal);
         Assert.Contains("systemctl enable kautuka-update-recovery.service", installer, StringComparison.Ordinal);
         Assert.Contains("ExecStart=/usr/local/lib/kautuka/apply-release --boot-recover", installer, StringComparison.Ordinal);
         Assert.Contains("ExecStart=/usr/local/lib/kautuka/apply-release --boot-recover", recoveryUnit, StringComparison.Ordinal);
-        Assert.Contains("Environment=Kautuka__Mode=prod", releaseBuilder, StringComparison.Ordinal);
-        Assert.Contains("Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka", releaseBuilder, StringComparison.Ordinal);
+        Assert.Contains("Environment=Kautuka__Mode=prod", installer, StringComparison.Ordinal);
+        Assert.Contains("Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka", installer, StringComparison.Ordinal);
         Assert.Contains("Environment=Kautuka__Mode=prod", installer, StringComparison.Ordinal);
         Assert.Contains("Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka", installer, StringComparison.Ordinal);
     }
@@ -135,47 +135,22 @@ public sealed class LinuxApplyReleaseHelperContractTests
     }
 
     [Fact]
-    public void ApplianceBakeUsesTheHostUnionAndNumericOwnership()
+    public void ApplianceBakeStagesTheSharedContainerInstallerWithoutGeneratingKeys()
     {
-        string projectRoot = FindProjectRoot();
-        string bakePath = Path.Combine(projectRoot, "scripts", "build-release-assets.sh");
-
-        Assert.True(File.Exists(bakePath), $"Expected bake script to exist: {bakePath}");
-        string source = File.ReadAllText(bakePath);
-
-        Assert.Contains("\"schemaVersion\": 2,", source, StringComparison.Ordinal);
-        Assert.Contains("install_system_channel_service gateway", source, StringComparison.Ordinal);
-        Assert.Contains("stage_oci_image_archives", source, StringComparison.Ordinal);
-        Assert.Contains("runtime-images.json", source, StringComparison.Ordinal);
-        Assert.Contains("visible_root/oci-images", source, StringComparison.Ordinal);
-        Assert.Contains("install_system_channel_service channelhost", source, StringComparison.Ordinal);
-        Assert.Contains("rootfs_uid kautuka-credentials", source, StringComparison.Ordinal);
-        Assert.Contains("kautuka ALL=(root) NOPASSWD: /usr/local/lib/kautuka/apply-release", source, StringComparison.Ordinal);
-        Assert.Contains("rootfs_gid kautuka-channelhost", source, StringComparison.Ordinal);
-        Assert.Contains("rootfs_gid kautuka-gateway", source, StringComparison.Ordinal);
-        Assert.Contains("chown_tree_excluding \"$visible_root\" \"$kautuka_uid:$kautuka_gid\" \"$channel_security_root\"", source, StringComparison.Ordinal);
-        Assert.Contains("-o -exec chown -h \"$owner\" {} +", source, StringComparison.Ordinal);
-        Assert.Contains("local containers_root=\"$root/.local/share/containers\"", source, StringComparison.Ordinal);
-        Assert.Contains("local credentials_state_root=\"$root/credentialsHost\"", source, StringComparison.Ordinal);
-        Assert.Contains("\"$rootfs_dir/var/lib/kautuka/credentialsHost/vault\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chown -R \"0:$channelhost_gid\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chown -R \"0:$gateway_gid\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chown \"0:$kautuka_gid\" \"$rootfs_dir/var/lib/kautuka\" \"$rootfs_dir/var/lib/kautuka/logs\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chmod 0771 \"$rootfs_dir/var/lib/kautuka\" \"$rootfs_dir/var/lib/kautuka/logs\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo mkdir -p \"$rootfs_dir/var/lib/kautuka/mcpb-bundles\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chown -R \"$gateway_uid:$kautuka_gid\" \"$rootfs_dir/var/lib/kautuka/mcpb-bundles\"", source, StringComparison.Ordinal);
-        Assert.Contains("sudo chmod 2750 \"$rootfs_dir/var/lib/kautuka/mcpb-bundles\"", source, StringComparison.Ordinal);
-        Assert.Contains("harden_rootfs_sudo_bits \"$rootfs_dir\"", source, StringComparison.Ordinal);
-        Assert.Contains("require_rootfs_owner_mode \"$channel_security_root/channel-private\"", source, StringComparison.Ordinal);
-        Assert.Contains("appliance channel-private owner must be", source, StringComparison.Ordinal);
-        Assert.Contains("if [[ \"$service_key\" != 'updateservice' ]]; then", source, StringComparison.Ordinal);
-        Assert.Contains("Prefer the repo helper over any helper embedded in the platform tarball", source, StringComparison.Ordinal);
-        Assert.Contains("source_root/scripts/kautuka-apply-release.sh", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("install_host_service gateway", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("install_host_service channelhost", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sudo chown -R \"$credential_user:$credential_user\"", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sudo chown -R \"$kautuka_uid:$kautuka_gid\" \"$install_root\" \"$visible_root\" \"$internal_state_root\"", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"scope\": \"user\"", source, StringComparison.Ordinal);
+        string root = FindProjectRoot();
+        string source = File.ReadAllText(Path.Combine(root, "scripts", "build-release-assets.sh"));
+        string firstBoot = File.ReadAllText(Path.Combine(root, "scripts", "kautuka-wsl-firstboot.sh"));
+        Assert.Contains("copy_staged_oci_image_archives", source, StringComparison.Ordinal);
+        Assert.Contains("kautuka-install-linux.sh.in", source, StringComparison.Ordinal);
+        Assert.Contains("kautuka-wsl-firstboot.service", source, StringComparison.Ordinal);
+        Assert.Contains("test-wsl-staged-rootfs.py", source, StringComparison.Ordinal);
+        Assert.Contains("harden_rootfs_sudo_bits", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("--provision-channel-security", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("install_system_channel_service", source, StringComparison.Ordinal);
+        Assert.Contains("install_fresh_container_appliance", firstBoot, StringComparison.Ordinal);
+        Assert.Contains("activate_container_appliance", firstBoot, StringComparison.Ordinal);
+        Assert.Contains("flock --exclusive --nonblock --close", firstBoot, StringComparison.Ordinal);
+        Assert.Contains("assert_no_unresolved_update", firstBoot, StringComparison.Ordinal);
     }
 
     [Fact]

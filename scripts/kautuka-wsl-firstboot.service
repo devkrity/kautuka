@@ -1,0 +1,14 @@
+[Unit]
+Description=Prepare Kautuka container appliance on first boot
+Wants=network-online.target
+After=network-online.target systemd-logind.service
+ConditionPathExists=!/etc/kautuka/wsl-firstboot-complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kautuka/firstboot/start
+TimeoutStartSec=1200
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

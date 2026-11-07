@@ -774,7 +774,7 @@ public sealed partial class ContainerEgressRuntime(
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)
     {
-        PodmanCommandResult result = await HelperAsync("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", "2", "http://127.0.0.1:9901/config_dump"], cancellationToken).ConfigureAwait(false);
+        PodmanCommandResult result = await HelperAsync("/usr/bin/curl", AdminProbeArguments(), cancellationToken).ConfigureAwait(false);
         JsonArray configs = JsonNode.Parse(result.StdOut)!["configs"]!.AsArray();
         JsonObject clusters = configs.OfType<JsonObject>().Single(config => config["@type"]!.GetValue<string>().EndsWith(".ClustersConfigDump", StringComparison.Ordinal));
         JsonObject listeners = configs.OfType<JsonObject>().Single(config => config["@type"]!.GetValue<string>().EndsWith(".ListenersConfigDump", StringComparison.Ordinal));
@@ -867,7 +867,7 @@ public sealed partial class ContainerEgressRuntime(
         string observed = "";
         do
         {
-            PodmanCommandResult result = await HelperAsync("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--max-time", "2", "http://127.0.0.1:9901/config_dump"], cancellationToken).ConfigureAwait(false);
+            PodmanCommandResult result = await HelperAsync("/usr/bin/curl", AdminProbeArguments(), cancellationToken).ConfigureAwait(false);
             observed = result.StdOut;
             using JsonDocument dump = JsonDocument.Parse(result.StdOut);
             if (clusters ? expected.ClustersAreActive(dump.RootElement) : expected.ListenerIsActive(dump.RootElement)) return;
@@ -876,6 +876,13 @@ public sealed partial class ContainerEgressRuntime(
         await WriteAsync("unconfirmed-admin-dump.json", observed, CancellationToken.None).ConfigureAwait(false);
         throw new InvalidOperationException("Envoy did not confirm " + (clusters ? "clusters " : "listener ") + expected.Version + "; workload startup is denied.");
     }
+
+    // Podman detach/start confirms process creation before Envoy opens admin.
+    // Retry that native connection race; command, JSON and version failures
+    // remain strict. The helper's process timeout is still the outer bound.
+    internal static string[] AdminProbeArguments() =>
+        ["--silent", "--show-error", "--fail", "--max-time", "2", "--retry", "8", "--retry-connrefused",
+            "--retry-delay", "1", "--retry-max-time", "8", "http://127.0.0.1:9901/config_dump"];
 
     private async Task<PodmanCommandResult> HelperAsync(string entrypoint, string[] arguments, CancellationToken cancellationToken, bool networkAdmin = false)
     {

@@ -1,0 +1,15 @@
+# Container appliance first boot
+
+The release builder stages the Linux payload and its exact bound image inventory in the WSL rootfs. The Windows installer verifies the signed appliance bytes before importing the distro. The rootfs contains the release public key, a fixed root-owned first-boot entrypoint, and the shared Linux installer implementation. No appliance-specific channel keys are generated during packaging.
+
+On first boot, `kautuka-wsl-firstboot.service` runs the shared fresh installer with a real systemd user manager and rootless Podman. It stages and loads only the hash-checked offline archives, generates installation-specific security material, and derives DNS settings from that distro's runtime resolver. The resulting deployment has Manager and UpdateService host units; all four core application services run in containers. The existing Manager supervisor owns runtime startup and policy.
+
+The first-boot parent holds the installation/update lock without passing its descriptor to descendants. Before the deployment contract is published, the Linux installer's existing cleanup/retry behavior applies. After publication, retries validate the same release and container settings, recreate runtime prerequisites, and run the shared activation sequence without rewriting application data or identities. A completion file is written only after actual Web/Gateway/workspace readiness.
+
+First boot never prints the setup token. The Windows installer's existing protected, explicit token request reads `/var/lib/kautuka/gateway-data/setup-token` after health readiness and retains its user acknowledgement flow. The ten-minute Windows readiness timeout is unchanged; real cold-start timing remains to be measured.
+
+Validation currently covers packed-rootfs structure, missing archive and baked-key rejection, real isolated lock/dispatch retry behavior, the shared Linux file-preparation regression, and launcher/recovery contracts. These tests do not substitute for an imported-rootfs first boot with the actual user bus, eleven image loads, and healthy core services. No legacy deployment conversion is included.
+
+Uninstall disables/removes the first-boot unit and its exact staging directory after owned-container retirement, before deleting the completion marker. Ordinary updates retain the marker. If it is removed, first boot verifies that all six current release pointers still match its staged version and refuses an older payload; it does not roll back or reinstall over a newer release.
+
+The staged public update-source document uses explicit mode 0644, independent of the build umask. Shared preparation retains its manifest URL and writes the selected release channel separately. The installer runtime-user launcher closes descriptors 8 and 9 in both runuser and su branches while retaining the caller's leases. Native unprivileged child tests cover both branches.

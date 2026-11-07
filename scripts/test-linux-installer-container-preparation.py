@@ -24,6 +24,9 @@ for name, target in (('opt','/opt'), ('state','/var/lib'), ('local-lib','/usr/lo
     subprocess.run(['mount', '--bind', str(directory), target], check=True)
 upper, work = root/'etc-upper', root/'etc-work'; upper.mkdir(); work.mkdir()
 subprocess.run(['mount','-t','overlay','overlay','-o',f'lowerdir=/etc,upperdir={upper},workdir={work}','/etc'],check=True)
+# The lower host may already contain an appliance. Hide its contract only in
+# this private overlay; the fixture supplies its own settings and identity.
+pathlib.Path('/etc/kautuka/service-scope.json').unlink(missing_ok=True)
 resolver=pathlib.Path('/etc/resolv.conf')
 if resolver.is_symlink(): resolver.unlink()
 resolver.write_text('nameserver 192.0.2.53\n')
@@ -65,6 +68,20 @@ subprocess.run(['openssl','pkey','-in',str(private),'-pubout','-out',str(public)
 # A validated preprovided file retains its policy while gaining runtime-readable
 # permissions. This is preparation, so no application process is involved.
 etc=pathlib.Path('/etc/kautuka');etc.mkdir(exist_ok=True)
+# Exercise the real WSL feed writer with a restrictive builder umask, then
+# verify that the shared fresh preparation retains the feed and readability.
+builder=(scripts/'build-release-assets.sh').read_text()
+functions=[]
+for name in ('write_provisioned_update_source_document','stage_provisioned_update_source'):
+    begin=builder.index(name+'() {');end=builder.index('\n}\n',begin)+3
+    functions.append(builder[begin:end])
+feed_stage=root/'stage-feed.sh'
+feed_stage.write_text('set -euo pipefail\numask 077\nsudo() { "$@"; }\n'+
+                     '\n'.join(functions)+
+                     '\nmanifest_url=https://updates.example.test/preview/manifest.json\nchannel=preview\nmanifest_public_key=\nstage_provisioned_update_source /etc/kautuka 0:0\n')
+subprocess.run(['bash',str(feed_stage)],check=True)
+feed=etc/'update-source.json'
+assert feed.stat().st_mode & 0o777 == 0o644
 provided={'CoreServices':{'Enabled':True},'ContainerEgress':{'Enabled':True,'DnsUpstreams':['192.0.2.54'],'Grants':[]},
           'Kautuka':{'Telemetry':{'Otlp':dict(LogsEndpoint='',MetricsEndpoint='',TracesEndpoint='')}}}
 config=etc/'manager.json';config.write_text(json.dumps(provided));config.chmod(0o600)
@@ -137,6 +154,14 @@ for name in ('sidecars','proxy'):
     directory=pathlib.Path('/var/lib/kautuka')/name
     assert directory.is_dir() and directory.stat().st_mode & 0o777==0o700
 assert settings['ContainerEgress']['DnsUpstreams']
+assert json.loads(feed.read_text())['manifestUrl']=='https://updates.example.test/preview/manifest.json'
+assert json.loads(pathlib.Path('/var/lib/kautuka/updateService/update-runtime-policy.json').read_text())['releaseChannel']=='preview'
+# UID 65534 is not root and receives only the actual deployment directory group.
+import grp
+reader=subprocess.run(['setpriv','--reuid','65534','--regid',str(grp.getgrnam('kautuka').gr_gid),'--clear-groups',
+                       'python3','-c','import json; assert json.load(open("/etc/kautuka/update-source.json"))["manifestUrl"]=="https://updates.example.test/preview/manifest.json"'],
+                      capture_output=True,text=True)
+assert reader.returncode==0,reader.stdout+reader.stderr
 assert all(grant['AgentId']==grant['ComponentId'] for grant in settings['ContainerEgress']['Grants'])
 assert settings['Kautuka']['Telemetry']['Otlp']==dict(LogsEndpoint='',MetricsEndpoint='',TracesEndpoint='')
 before=events.read_text(); rejected=subprocess.run(command,env=env,capture_output=True,text=True)

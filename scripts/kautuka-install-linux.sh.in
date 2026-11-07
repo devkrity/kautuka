@@ -434,7 +434,7 @@ run_as_service_user() {
     local dbus_session_bus_address="unix:path=${xdg_runtime_dir}/bus"
     if command -v runuser >/dev/null 2>&1; then
         runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" DBUS_SESSION_BUS_ADDRESS="$dbus_session_bus_address" \
-            sh -c 'cd "$HOME" || exit; exec "$@"' kautuka "$@"
+            sh -c 'cd "$HOME" || exit; exec "$@"' kautuka "$@" 8>&- 9>&-
         return
     fi
 
@@ -445,7 +445,7 @@ run_as_service_user() {
         for arg in "$@"; do
             printf -v quoted_command '%s %q' "$quoted_command" "$arg"
         done
-        su -s /bin/sh "$service_user" -c "$quoted_command"
+        su -s /bin/sh "$service_user" -c "$quoted_command" 8>&- 9>&-
         return
     fi
 
@@ -2257,6 +2257,7 @@ uninstall_release() (
         'kautuka-activate.service'
         'kautuka-activate.path'
         'kautuka-update-recovery.service'
+        'kautuka-wsl-firstboot.service'
         'kautuka.target'
     )
 
@@ -2336,6 +2337,14 @@ uninstall_release() (
         best_effort_remove_file "/etc/systemd/system/$unit"
         best_effort_remove_file "/etc/systemd/user/$unit"
     done
+
+    # The completed marker is removed with /etc/kautuka below. Retire the
+    # bootstrap payload and its enablement link first so uninstall cannot cause
+    # an older appliance to install itself again at the next boot.
+    best_effort_remove_file '/etc/systemd/system/multi-user.target.wants/kautuka-wsl-firstboot.service'
+    best_effort_remove_tree '/usr/local/lib/kautuka/firstboot'
+    [[ ! -e /usr/local/lib/kautuka/firstboot && ! -L /usr/local/lib/kautuka/firstboot ]] \
+        || fail 'WSL first-boot payload remains; uninstall stopped before removing deployment state'
 
     local legacy_shared_user_unit_dir=''
     for legacy_shared_user_unit_dir in "${legacy_shared_user_unit_dirs[@]}"; do
@@ -2905,6 +2914,20 @@ EOF
         echo "Installed container appliance $version; host units are written but not started."
         return
     fi
+    activate_container_appliance "$content"
+)
+
+# Shared by interactive Linux installation and the fixed WSL first-boot entry.
+# File preparation is complete; retrying this function never rewrites payloads,
+# generates another identity, or resets application state.
+activate_container_appliance() {
+    local content="$1"
+    local service_home xdg_runtime_dir
+    service_home="$(get_service_user_home "$service_user")"
+    xdg_runtime_dir="$(resolve_user_runtime_dir "$service_user")"
+    install_user_target_unit "$service_home/.config/systemd/user" 'kautuka-manager.service kautuka-updateservice.service'
+    systemctl daemon-reload
+    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" daemon-reload
     systemctl enable kautuka-update-recovery.service
     run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" systemctl --user enable kautuka.target kautuka-manager.service kautuka-updateservice.service
     # Manager publishes its CA first. Its core worker waits for UpdateService's publication.
@@ -2960,7 +2983,7 @@ for container in actual:
                 | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("needsSetup"); print("true" if v is True else "false" if v is False else "unknown")')" \
                 || fail 'could not read first-run setup status; application state was preserved'
             [[ "$setup_needed" != unknown ]] || fail 'first-run setup status is incomplete'
-            if [[ "$setup_needed" == true ]]; then
+            if [[ "$setup_needed" == true && "${container_first_boot:-false}" != true ]]; then
                 confirm_first_admin_setup "$web_scheme://$web_address:$web_port" "$internal_state_root/gateway-data/setup-token" \
                     || fail 'first-run administrator setup token was not acknowledged'
             fi
@@ -2969,7 +2992,7 @@ for container in actual:
         sleep 2
     done
     fail 'container appliance did not become ready; preserve its state, inspect the two host-service journals, then retry activation with systemctl --user restart kautuka.target as the runtime owner'
-)
+}
 
 main() {
     local artifact=""
