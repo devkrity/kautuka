@@ -574,6 +574,9 @@ jobs:
     permissions:
       contents: read
     uses: ./.github/workflows/installed-linux-smoke.yml
+    secrets:
+      KAUTUKA_SMOKE_PASSWORD: ${{ secrets.KAUTUKA_SMOKE_PASSWORD }}
+      KAUTUKA_SMOKE_SETUP_TOKEN: ${{ secrets.KAUTUKA_SMOKE_SETUP_TOKEN }}
 
   prepare-stable-draft:
     name: Open Versioned Release Draft

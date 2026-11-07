@@ -1186,3 +1186,12 @@ release pair cannot reuse an earlier attempt's completion. The optional field
 lives in the existing update-state record; unknown older records retain the
 existing timeout path. Eighty-three focused updater integration tests pass,
 including persisted/restarted state and rollback capture/clearing.
+
+The Windows bootstrap guard accepts the staged first-boot layout while retaining
+the real health wait. Local smoke checks the container service contract, two
+host units and four owned, running core image IDs, after first boot completes.
+Remote HTTP smoke uses only explicitly supplied setup credentials. Image SBOM
+generation reads the signed Linux payload archives shared with WSL, and the
+reusable smoke job receives only its two named authentication secrets. Six
+focused smoke/layout regressions and five Windows installer tests pass; these
+checks do not establish a completed cold boot or installed approval flow.

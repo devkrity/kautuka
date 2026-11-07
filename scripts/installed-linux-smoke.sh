@@ -117,6 +117,34 @@ wait_http() {
 if [[ "$skip_systemd" != "1" ]]; then
   require_cmd systemctl
   require_cmd getent
+  require_cmd runuser
+
+  # A staged WSL appliance has no installed pointers until firstboot finishes.
+  firstboot_deadline=$((SECONDS + timeout_seconds))
+  while [[ "$(systemctl show -p LoadState --value kautuka-wsl-firstboot.service)" == loaded ]]; do
+    firstboot_state="$(systemctl show -p ActiveState --value kautuka-wsl-firstboot.service)"
+    [[ "$firstboot_state" != failed ]] || fail 'WSL firstboot failed'
+    if [[ "$firstboot_state" == active && -f /etc/kautuka/wsl-firstboot-complete ]]; then
+      break
+    fi
+    # On subsequent boots ConditionPathExists skips the completed oneshot.
+    if [[ "$firstboot_state" == inactive && -f /etc/kautuka/wsl-firstboot-complete ]]; then
+      break
+    fi
+    (( SECONDS < firstboot_deadline )) || fail 'WSL firstboot did not complete within the smoke budget'
+    sleep 2
+  done
+
+  python3 - "$service_user" <<'PY_SCOPE'
+import json, sys
+with open('/etc/kautuka/service-scope.json', encoding='utf-8-sig') as stream:
+    contract = json.load(stream)
+if (contract.get('schemaVersion') != 2 or contract.get('applicationServices') != 'containers'
+        or contract.get('username') != sys.argv[1] or contract.get('target') != 'kautuka.target'
+        or contract.get('userUnits') != ['kautuka-manager.service', 'kautuka-updateservice.service']
+        or contract.get('systemUnits') != []):
+    raise SystemExit('installed smoke requires the current container service-scope contract')
+PY_SCOPE
 
   state="$(systemctl is-system-running || true)"
   [[ "$state" == "running" ]] || fail "systemctl is-system-running reported ${state@Q}, expected running"
@@ -131,6 +159,7 @@ if [[ "$skip_systemd" != "1" ]]; then
   [[ -f "$dropin" ]] || fail "missing ${dropin}"
 
   export XDG_RUNTIME_DIR="/run/user/${service_uid}"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
   failed_user="$(runuser -u "$service_user" -- systemctl --user --failed --no-legend --plain || true)"
   [[ -z "$failed_user" ]] || fail "user-scope failed units: ${failed_user}"
 
@@ -146,13 +175,39 @@ if [[ "$skip_systemd" != "1" ]]; then
     [[ "$state" == "active" ]] || fail "${unit} ActiveState=${state@Q}, expected active (activating auto-restart is a crash loop)"
   }
 
-  assert_unit_active system kautuka-gateway.service
-  assert_unit_active system kautuka-channelhost.service
-  assert_unit_active system kautuka-credentialshost.service
   assert_unit_active user kautuka-manager.service
-  assert_unit_active user kautuka-webhost.service
   assert_unit_active user kautuka-updateservice.service
-  echo "systemd checks passed (user@${service_uid} drop-in present; core units active)."
+  core_deadline=$((SECONDS + timeout_seconds))
+  while true; do
+    observed="$(runuser -u "$service_user" -- podman inspect kautuka-credentialshost kautuka-channelhost kautuka-gateway kautuka-webhost 2>/dev/null)" || observed='[]'
+    if printf '%s' "$observed" | python3 -c '
+import json, re, sys
+roles = {"credentialshost", "channelhost", "gateway", "webhost"}
+with open("/opt/kautuka/manager/current/runtime-images.json", encoding="utf-8-sig") as stream:
+    entries = [entry for entry in json.load(stream)["images"] if entry["id"].startswith("core-")]
+images = {entry["id"].removeprefix("core-"): entry["localImageId"].removeprefix("sha256:") for entry in entries}
+if len(entries) != 4 or set(images) != roles or any(not re.fullmatch("[0-9a-f]{64}", identity) for identity in images.values()):
+    raise SystemExit("invalid installed core image inventory")
+actual = json.load(sys.stdin)
+if len(actual) != 4: raise SystemExit("expected four core containers")
+seen, ids = set(), set()
+for container in actual:
+    labels = container.get("Config", {}).get("Labels", {})
+    service = labels.get("kautuka.core-service")
+    identity = container.get("Id", "")
+    if (service not in images or service in seen or identity in ids or not re.fullmatch("[0-9a-f]{64}", identity)
+            or labels.get("kautuka.managed") != "manager" or container.get("State", {}).get("Status") != "running"
+            or container.get("Image", "").removeprefix("sha256:") != images[service]):
+        raise SystemExit("core container ownership, state or image mismatch")
+    seen.add(service)
+    ids.add(identity)
+' 2>/dev/null; then
+      break
+    fi
+    (( SECONDS < core_deadline )) || fail 'four owned core containers did not match the installed image inventory'
+    sleep 2
+  done
+  echo "Local layout checks passed (two host units and four Manager-owned, image-bound core containers)."
 fi
 
 wait_http "$base_url/"
@@ -166,8 +221,8 @@ setup_status="$(curl --silent --show-error --fail --max-time 10 "${base_url}/api
 needs_setup="$(printf '%s' "$setup_status" | json_get needsSetup)"
 
 if [[ "$needs_setup" == "true" ]]; then
-  if [[ -z "$setup_token" && -r /var/lib/kautuka/setup-token ]]; then
-    setup_token="$(cat /var/lib/kautuka/setup-token)"
+  if [[ "$skip_systemd" != "1" && -z "$setup_token" && -r /var/lib/kautuka/gateway-data/setup-token ]]; then
+    setup_token="$(cat /var/lib/kautuka/gateway-data/setup-token)"
   fi
   [[ -n "$setup_token" ]] || fail "first-admin setup requires the one-time token; set KAUTUKA_SMOKE_SETUP_TOKEN or run this smoke test as root on the appliance"
 

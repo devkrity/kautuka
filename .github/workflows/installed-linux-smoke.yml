@@ -9,6 +9,11 @@ name: Installed Linux Smoke
 on:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      KAUTUKA_SMOKE_PASSWORD:
+        required: false
+      KAUTUKA_SMOKE_SETUP_TOKEN:
+        required: false
 
 jobs:
   installed-linux-smoke:

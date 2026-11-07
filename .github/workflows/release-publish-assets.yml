@@ -241,7 +241,7 @@ jobs:
             docker run --rm \
               -v "$PWD:/src" \
               docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
-              "$archive_type:/src/sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name" \
+              "$archive_type:/src/sbom-input/linux-platform/oci-images/$archive_name" \
               -o spdx-json="/src/$release_dir/kautuka-${image_id}-image.spdx.json"
           done <<< "$image_archives"
           base_image="$(jq -r '.baseImage // empty' "$release_dir/THIRD_PARTY_COMPONENTS.json")"

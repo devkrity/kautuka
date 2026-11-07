@@ -150,12 +150,27 @@ internal static partial class WindowsApplianceInstaller
         Func<string, Task> log,
         CancellationToken cancellationToken)
     {
-        await log("Starting imported distro and verifying the prewarmed appliance image...").ConfigureAwait(false);
+        await log("Starting imported distro and verifying the appliance bootstrap layout...").ConfigureAwait(false);
         await RunWslBashAsync(
             state.DistroName,
-            "set -euo pipefail; test -d /opt/kautuka/manager/current; systemctl is-system-running --wait >/dev/null 2>&1 || true",
+            BootstrapLayoutCommand,
             cancellationToken).ConfigureAwait(false);
     }
+
+    // First boot creates the current pointers. This is a layout check only;
+    // WaitForWebUiReadyAsync still requires real Gateway and WebHost health.
+    internal const string BootstrapLayoutCommand = """
+        set -euo pipefail
+        if test -d /opt/kautuka/manager/current; then
+            exit 0
+        fi
+        test -x /usr/local/lib/kautuka/firstboot/start
+        test -f /usr/local/lib/kautuka/firstboot/installer.sh
+        test -f /usr/local/lib/kautuka/firstboot/release.json
+        test -f /usr/local/lib/kautuka/firstboot/manifest-public-key.pem
+        test -f /usr/local/lib/kautuka/firstboot/payload/bin/runtime-images.json
+        test -f /etc/systemd/system/kautuka-wsl-firstboot.service
+        """;
 
     private static void RegisterResumeRunOnce(string distroName)
     {
