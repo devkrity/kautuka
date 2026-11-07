@@ -411,9 +411,26 @@ echo 'verified snapshot, maintenance fencing, precommit recovery, unresolved-ope
 # Exercise the container transaction seam with a fixed Manager CLI stand-in.
 # Lifecycle is mocked here; the separate rootless proof uses actual containers.
 run_helper --complete-recovery --version 1.0.3
+printf '%s' "$temp_dir/lock" > /var/lib/kautuka-recovery/test-apply-lock-path
 cat > "$temp_dir/core-manager" <<'PY'
 #!/usr/bin/python3
-import fcntl, json, pathlib, sys
+import errno, fcntl, json, os, pathlib, sys
+# The parent still owns its apply lease, but no maintenance child (or a
+# subsequently spawned conmon) may inherit either helper descriptor.
+for fd in (8, 9):
+    try:
+        os.fstat(fd)
+    except OSError as error:
+        assert error.errno == errno.EBADF
+    else:
+        raise AssertionError(f'helper lease descriptor {fd} leaked to Manager')
+with open(pathlib.Path('/var/lib/kautuka-recovery/test-apply-lock-path').read_text()) as apply_lease:
+    try:
+        fcntl.flock(apply_lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        pass
+    else:
+        raise AssertionError('parent released its apply lease during Manager execution')
 if sys.argv[1:] == ['--update-core-capabilities']:
     print('core-service-update-v1'); raise SystemExit(0)
 action, operation = sys.argv[1:]

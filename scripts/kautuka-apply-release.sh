@@ -353,9 +353,12 @@ run_core_update_command() {
     local command=(runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" \
         USER="$service_user" LOGNAME="$service_user" XDG_RUNTIME_DIR="$runtime" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" Kautuka__Mode=prod Kautuka__ContainerStateRoot=/var/lib/kautuka)
-    capability="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" --update-core-capabilities)" || return 1
+    # These leases belong to this helper, not to Manager/Podman's long-lived
+    # descendants. Closing only the child's copies preserves the parent lease
+    # while preventing conmon/fuse-overlayfs from retaining it after we exit.
+    capability="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" --update-core-capabilities 8>&- 9>&-)" || return 1
     [[ "$capability" == core-service-update-v1 ]] || { echo 'error: Manager lacks container maintenance capability' >&2; return 1; }
-    result="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" "--update-core-$action" "$operation")" || return 1
+    result="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" "--update-core-$action" "$operation" 8>&- 9>&-)" || return 1
     python3 - "$action" "$operation" "$release" "$result" <<'PY'
 import json, re, sys
 action, operation, release, raw = sys.argv[1:]

@@ -1058,3 +1058,13 @@ table was removed, without altering the recovery snapshot, journal or fence.
 Diagnosis also found inherited apply-lock descriptors in runtime helper
 descendants. Recovery and that lifecycle defect remain under investigation;
 restored files alone are not successful application recovery.
+
+The apply-lock defect is now fixed: maintenance child commands close their
+inherited writer/apply descriptors, while the parent retains its leases. The
+full isolated signed-transaction regression passes, explicitly checking both
+child descriptor absence and continued parent exclusion. In the disposable
+installed appliance, stopping only the three verified managed holder containers
+released the original lock inode; no lock file or fence was deleted. Applying
+the same narrow helper fix allowed the existing source-runtime resume command
+to complete and WebHost health returned 200. Automatic journal completion and
+the intended source-to-target/recovery measurements remain separate gates.
