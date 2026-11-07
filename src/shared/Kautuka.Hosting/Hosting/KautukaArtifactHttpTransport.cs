@@ -32,6 +32,10 @@ public static class KautukaArtifactHttpTransport
             UseProxy = true,
             Proxy = new FixedProxy(),
             ConnectTimeout = TimeSpan.FromSeconds(10),
+            // Reusing a completed Unix CONNECT tunnel can retain a closed
+            // upstream connection. Artifact requests get a fresh tunnel;
+            // an in-progress download keeps its connection for its lifetime.
+            PooledConnectionLifetime = TimeSpan.Zero,
             ConnectCallback = async (context, cancellationToken) =>
             {
                 if (context.DnsEndPoint.Host != proxyAddress.Host || context.DnsEndPoint.Port != proxyAddress.Port)
