@@ -133,6 +133,9 @@ assert not (units/'default.target.wants/kautuka.target').exists(), '--skip-enabl
 for service in ('manager','updateservice','gateway','channelhost','credentialshost','webhost'):
     assert pathlib.Path('/opt/kautuka',service,'current').resolve()==pathlib.Path('/opt/kautuka',service,'versions/1.2.3')
 settings=json.loads(pathlib.Path('/etc/kautuka/manager.json').read_text())
+for name in ('sidecars','proxy'):
+    directory=pathlib.Path('/var/lib/kautuka')/name
+    assert directory.is_dir() and directory.stat().st_mode & 0o777==0o700
 assert settings['ContainerEgress']['DnsUpstreams']
 assert all(grant['AgentId']==grant['ComponentId'] for grant in settings['ContainerEgress']['Grants'])
 assert settings['Kautuka']['Telemetry']['Otlp']==dict(LogsEndpoint='',MetricsEndpoint='',TracesEndpoint='')

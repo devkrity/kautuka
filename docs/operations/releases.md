@@ -99,7 +99,10 @@ verification and the existing installation/update lock, before the legacy
 host-service installation path. Its fresh path keeps the state/cache parent
 root-owned, gives the runtime account only its writable subdirectories, stages
 offline images, provisions the disjoint Channel material, and installs only
-Manager and UpdateService as application host units. The six immutable payload
+Manager and UpdateService as application host units. Writable children include
+`sidecars` for hosted asset staging and `proxy` for
+the mandatory package service; neither service may create children directly
+under the immutable state parent. The six immutable payload
 roots remain for the updater's existing release-pointer contract. It seeds exact
 core-service grants matching each service identity, takes IPv4 DNS upstreams from
 the host resolver without a public-resolver fallback, and disables host OTLP

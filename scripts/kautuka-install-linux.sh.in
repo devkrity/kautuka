@@ -2638,7 +2638,7 @@ for service in ('manager', 'updateservice', 'gateway', 'channelhost', 'credentia
             info = parent.lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit('installed version ancestry must be root-owned and non-writable')
-for name in ('manager', 'updateService', 'gateway', 'gateway-data', 'credentialsHost', 'channelHost', 'agents', 'security'):
+for name in ('manager', 'updateService', 'gateway', 'gateway-data', 'credentialsHost', 'channelHost', 'agents', 'security', 'sidecars', 'proxy'):
     path = root / name
     if path.is_symlink() or (path.exists() and (not path.is_dir() or any(entry.is_file() or entry.is_symlink() for entry in path.rglob('*')))):
         raise SystemExit('existing application state requires migration/recovery; no files were changed')
@@ -2701,7 +2701,7 @@ PY
     xdg_runtime_dir="$(resolve_user_runtime_dir "$service_user")"
     unit_dir="$service_home/.config/systemd/user"
     install -d -o root -g "$service_group" -m 0750 "$internal_state_root"
-    for path in manager updateService credentialsHost channelHost gateway-data workspaces agents logs .cache .aspnet; do
+    for path in manager updateService credentialsHost channelHost gateway-data workspaces agents logs sidecars proxy .cache .aspnet; do
         [[ ! -L "$internal_state_root/$path" ]] || fail 'container state directory cannot be a symlink'
         install -d -o "$service_user" -g "$service_group" -m 0700 "$internal_state_root/$path"
     done
