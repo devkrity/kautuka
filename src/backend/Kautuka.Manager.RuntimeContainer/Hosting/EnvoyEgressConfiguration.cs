@@ -313,7 +313,7 @@ internal sealed record EnvoyEgressConfiguration(
     };
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA1308", Justification = "DNS names use lowercase ASCII for the wire policy.")]
-    private static EgressTcpRule Normalize(EgressTcpRule rule)
+    internal static EgressTcpRule Normalize(EgressTcpRule rule)
     {
         ArgumentNullException.ThrowIfNull(rule);
         if (!IPAddress.TryParse(rule.SourceAddress, out IPAddress? source) || !IsUnicastV4(source) || IPAddress.IsLoopback(source))

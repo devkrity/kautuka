@@ -9,6 +9,9 @@ service ManagerService {
   rpc GetHostStatus       (WorkspacePingRequest)     returns (ManagerStatusResponse);
   rpc ListRuntimeContainers (WorkspacePingRequest)   returns (ManagerRuntimeContainersResponse);
   rpc GetPkgsProxyCacheStats (WorkspacePingRequest)  returns (ManagerPkgsProxyCacheStatsResponse);
+  rpc GetNetworkAccessPolicy (NetworkAccessReadRequest) returns (NetworkAccessPolicyResponse);
+  rpc SetNetworkAccessRule (NetworkAccessRuleRequest) returns (NetworkAccessPolicyResponse);
+  rpc DecideNetworkAccessRequest (NetworkAccessDecisionRequest) returns (NetworkAccessPolicyResponse);
   rpc DescribeWorkspace   (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
   rpc RebuildWorkspace    (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
   rpc DeleteWorkspace     (WorkspaceResolvedRequest) returns (WorkspaceDeleteResponse);
@@ -21,6 +24,40 @@ service ManagerService {
   rpc ProbeMcpContainer   (WorkspaceMcpContainerProbeRequest) returns (WorkspaceMcpProbeResponse);
   rpc ListMcpContainerTools (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerListToolsResponse);
   rpc CallMcpContainerTool  (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerCallResponse);
+}
+
+// Gateway supplies this identity from its authenticated session, never from a
+// caller-selected actor field. Only Gateway's mTLS identity may call these RPCs.
+message NetworkAccessActorMessage { string user_id = 1; bool is_admin = 2; }
+message NetworkAccessIdentityMessage {
+  string scope_type = 1; string user_id = 2; string agent_id = 3;
+  string role = 4; string component_id = 5;
+}
+message NetworkAccessRuleMessage {
+  string id = 1; NetworkAccessIdentityMessage identity = 2;
+  string destination = 3; int32 port = 4; bool allowed = 5;
+  string updated_at_utc = 6;
+}
+message NetworkAccessRequestMessage {
+  string id = 1; NetworkAccessIdentityMessage identity = 2;
+  string destination = 3; int32 port = 4;
+  string created_at_utc = 5; string last_seen_at_utc = 6;
+  int64 attempts = 7; string status = 8;
+}
+message NetworkAccessReadRequest { NetworkAccessActorMessage actor = 1; }
+message NetworkAccessRuleRequest {
+  NetworkAccessActorMessage actor = 1; NetworkAccessRuleMessage rule = 2; int64 expected_revision = 3;
+}
+message NetworkAccessDecisionRequest {
+  NetworkAccessActorMessage actor = 1; string request_id = 2; bool allowed = 3; int64 expected_revision = 4;
+}
+message NetworkAccessPolicyResponse {
+  bool enabled = 1; int64 revision = 2; int64 active_revision = 3;
+  string active_version = 4; string activation_state = 5; string last_error = 6;
+  repeated NetworkAccessRuleMessage rules = 7;
+  repeated NetworkAccessRequestMessage requests = 8;
+  repeated NetworkAccessIdentityMessage sources = 9;
+  repeated NetworkAccessRuleMessage defaults = 10;
 }
 
 message WorkspacePingRequest {

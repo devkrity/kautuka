@@ -14,7 +14,7 @@ using ModelContextProtocol.Client;
 
 namespace Kautuka.Manager.Grpc;
 
-public sealed class WorkspaceGrpcService(
+public sealed partial class WorkspaceGrpcService(
     IContainerTool workspaceTool,
     WorkspaceDesiredStateStore desiredStateStore,
     WorkspaceReadinessGate readinessGate,
@@ -23,7 +23,8 @@ public sealed class WorkspaceGrpcService(
     WorkspaceContainerConnectorExecutionService connectorExecutionService,
     ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService,
     PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService,
-    ILogger<WorkspaceGrpcService> logger) : ManagerService.ManagerServiceBase
+    ILogger<WorkspaceGrpcService> logger,
+    ContainerEgressRuntime? egressRuntime = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;

@@ -153,7 +153,7 @@ using WebApplication app = builder.Build();
 
 app.GrantSocketGroupAccessWhenStarted(managerEndpoint);
 
-app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "GetHostStatus", "Ping", "UpdateDesiredState"));
+app.UseAdmissionFence(path => KautukaMaintenanceMode.IsAllowedGrpcRequest(path, "GetHostStatus", "Ping", "UpdateDesiredState", "GetNetworkAccessPolicy"));
 
 app.MapDefaultEndpoints();
 app.MapGrpcService<WorkspaceGrpcService>();

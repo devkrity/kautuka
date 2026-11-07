@@ -14,6 +14,11 @@ behavior, not an assertion that main already implements it.
 
 ## Outcome and boundaries
 
+Scope correction: legacy host-service-to-container deployment migration is out
+of scope and is not a completion gate. Support fresh containerised installations
+and updates within that layout. The new policy and approval UI, including the
+existing web/phone flow, is mandatory for completion and is not deferred.
+
 Containerise every application service except host Manager and UpdateService.
 All external TCP connections from managed core and workload containers pass
 through one Envoy intermediary. Unknown destinations are denied. Attribute
@@ -167,8 +172,8 @@ Retain the previous verified release until new-release health is accepted.
 
 Keep data outside disposable containers. Preserve existing schema/migration,
 backup and recovery safeguards. An older image is not a safe data rollback after
-an incompatible migration. Migrate supported host-service installations without
-discarding state, certificates, configuration or update-channel policy.
+an incompatible database migration. Preserve state, certificates, configuration
+and update-channel policy during updates within the container deployment.
 
 Initial installation supplies cached egress images, avoiding a download-the-proxy
 through-itself dependency. Updating/recovering egress must preserve the same
@@ -675,7 +680,7 @@ The host .NET handler uses an explicit fixed proxy and a Unix-only connection
 callback, with no loopback bypass, environment proxy selection or TCP fallback.
 The updater selects it when ContainerEgress:Enabled is true or an explicit
 ArtifactSocketPath is configured. Unconfigured legacy host-service deployment
-retains its current transport during this staged migration. The final appliance
+retains its existing transport; converting it is out of scope. The new appliance
 installer must select managed egress for both host processes and provision the
 initial authority policy and cached images before downloads depend on Envoy.
 An explicitly selected but unavailable socket fails closed. Signed manifests,
@@ -834,9 +839,9 @@ file sentinels and unrelated files survive. Existing dirfd ancestor locking and
 directory ownership/mode restoration also cover the new nested location.
 
 Format-2 snapshots retain their original verification and deletion scope: they
-cannot admit or delete uncaptured `gateway-data` state. The installer must take
-a format-3 snapshot before beginning the host-to-container layout migration;
-capture/restore themselves do not migrate files. The architect cleared this
+cannot admit or delete uncaptured `gateway-data` state. Container-layout updates
+use format-3 snapshots for their supported state; capture/restore themselves do
+not migrate files. Legacy deployment conversion is out of scope. The architect cleared this
 checkpoint. Recovery tests passed 28/28 on Fedora 44 WSL as root and 21 on Windows
 with seven Linux-specific skips. This is snapshot-engine evidence, not an
 installed container-update transaction or interruption/recovery proof.
@@ -900,15 +905,15 @@ unfinished, and container update activation must not be enabled before it exists
 
 The existing apply-release transaction now recognizes installer-owned
 `service-scope.json` with `applicationServices: containers`. Missing deployment
-metadata retains the legacy host path during conversion; unknown/malformed modes
+metadata retains the existing legacy host path; unknown/malformed modes
 fail. In container mode it drains host Manager, runs the fixed same-owner stop
 command with a clean environment, validates its operation/release/result, and
 only then acquires the exclusive database-writer lease. Startup uses the selected
 Manager verification command and validates four unique immutable container IDs
 before starting host Manager and checking Gateway health. Host application units
 do not substitute for container health. Capability negotiation covers both the
-installed helper and staged replacement helper. Installer conversion must wait
-for these capabilities and must not switch an unresolved legacy operation.
+installed helper and staged replacement helper. Container update activation
+requires these capabilities and must not switch an unresolved operation.
 
 Verification refreshes Manager's own transport publication and republishes
 UpdateService's existing canonical Gateway client identity without generating or
@@ -1014,4 +1019,42 @@ The isolated deployment loader also passes all five permission cases as an
 actual Native AOT executable under UID 65534. A separate wrong-UID full Manager
 probe exited 139 and does not establish a graceful startup diagnostic. Installed
 source-to-target update, controlled precommit recovery and postcommit fencing
-remain the next runtime gate, along with migration, uninstall and WSL packaging.
+remain the next runtime gate, along with uninstall and WSL packaging. Legacy
+host-to-container migration is excluded; the policy and approval UI remains a
+required deliverable.
+
+The policy/approval checkpoint adds a durable Manager-owned policy file, exact
+component/destination/port overrides, grouped denial requests, ownership checks
+at both Gateway and Manager, and revision-checked Allow/Keep blocked decisions.
+Policy publication uses the existing Envoy activation confirmation; a saved
+decision remains pending until accepted. Failure to restore the previous policy
+stops the proxy and reports recovery required. Decisions never replay a tool.
+The authenticated Network access page includes rules, pending approvals,
+decision history, activation status, and the same-network limitation, with
+responsive controls and a link from Approvals. Live log ingestion, stable audit
+attribution, audit browsing, and installed desktop/phone end-to-end approval
+verification remain required; the page alone does not establish those outcomes.
+
+Focused validation passes 65 backend tests and 14 frontend tests. Frontend type
+checking and the targeted lint check pass. The actual policy store also passes
+Native AOT execution as an unprivileged Linux user, including restart, owner
+isolation, Allow/Keep blocked persistence and UTF-8 directory durability. Snapshot
+format 4 captures policy/decision state; all 32 snapshot tests pass on Linux.
+Older snapshot formats retain their original inventory and cannot delete policy
+state they never captured. This is update recovery within the new layout, not
+legacy deployment migration.
+
+Two Chromium checks against the built UI pass at desktop width 1280 and phone
+width 390, using a clearly synthetic authenticated API fixture. Both exercise
+Allow, check the revision-bearing decision, and verify no horizontal overflow;
+the phone rendering was visually inspected. This proves responsive browser
+controls, not live proxy-log delivery, installed authentication or phone hardware.
+
+The installed update trial is not yet a recovery proof. Its first target
+activation failed before the intended WebHost-port fault, and source recovery
+then failed because the test marker used an unexpected database table. The
+strict schema guard correctly refused startup; only that disposable fixture
+table was removed, without altering the recovery snapshot, journal or fence.
+Diagnosis also found inherited apply-lock descriptors in runtime helper
+descendants. Recovery and that lifecycle defect remain under investigation;
+restored files alone are not successful application recovery.

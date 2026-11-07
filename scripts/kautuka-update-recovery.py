@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import NoReturn
 from pathlib import Path
 
-FORMAT = 3
+FORMAT = 4
 GATEWAY_DATABASES = (
     "kautuka.db", "kautuka-usage.db", "channel-outbox.db", "channel-conversations.db",
 )
@@ -245,11 +245,13 @@ def capture_directory_metadata(root: Path, entries: list[dict]) -> list[dict]:
 def fixed_inventory(snapshot_format: int = FORMAT) -> list[tuple[str, str]]:
     paths: list[tuple[str, str]] = [(name, "database") for name in DATABASES]
     paths.extend((name, "key") for name in ROOT_KEYS)
-    # Record both locations explicitly during the host-to-container transition.
-    # An absent record also removes target-only files during source recovery.
+    # Retain the prior inventory for supported snapshot formats. An explicit
+    # absent record removes target-only files during source recovery.
     if snapshot_format >= 3:
         paths.extend(("gateway-data/" + name, "database") for name in GATEWAY_DATABASES)
         paths.extend(("gateway-data/" + name, "key") for name in ROOT_KEYS)
+    if snapshot_format >= 4:
+        paths.append(("manager/egress/policy/state.json", "state"))
     for directory, names in SERVICE_KEYS.items():
         for name in names:
             paths.append(((Path(directory) / name).as_posix(), "key"))
@@ -405,7 +407,7 @@ def read_manifest(snapshot: Path, operation: str | None = None,
     if path.is_symlink() or not path.is_file():
         fail(f"snapshot manifest missing or invalid: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if type(manifest.get("format")) is not int or manifest["format"] not in (2, FORMAT):
+    if type(manifest.get("format")) is not int or manifest["format"] not in (2, 3, FORMAT):
         fail("unsupported snapshot format")
     for field, expected in (("operationId", operation), ("sourceRelease", source), ("targetRelease", target)):
         if expected is not None and manifest.get(field) != expected:

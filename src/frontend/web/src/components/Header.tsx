@@ -16,6 +16,7 @@ import {
   MemoryStick,
   MessageSquare,
   Moon,
+  Network,
   Plug,
   Settings,
   ShieldCheck,
@@ -56,6 +57,7 @@ const navItems: Array<{
   { to: '/workspace', label: 'Workspace', icon: MessageSquare },
   { to: '/workflows', label: 'Workflows', icon: GitBranch },
   { to: '/approvals', label: 'Approvals', icon: ShieldCheck },
+  { to: '/network-access', label: 'Network access', icon: Network },
   { to: '/autopilot', label: 'Auto-Pilot', icon: Timer },
   { to: '/connectors', label: 'Connectors', icon: Plug },
   { to: '/skills', label: 'Skills', icon: Sparkles },
@@ -111,7 +113,10 @@ export function Header({
     >
       <div className={cn('flex items-center justify-between', collapsed && 'flex-col gap-2')}>
         <Link to="/" aria-label="Kautuka home">
-          <BrandMark word={!collapsed} markClassName={collapsed ? 'h-7 w-7 text-base' : undefined} />
+          <BrandMark
+            word={!collapsed}
+            markClassName={collapsed ? 'h-7 w-7 text-base' : undefined}
+          />
         </Link>
         <Button
           variant="ghost"
@@ -147,16 +152,18 @@ export function Header({
                     : 'text-foreground/70 hover:bg-primary/5 hover:text-foreground',
                   collapsed && 'justify-center px-0'
                 )}
-                title={collapsed ? `${item.label}${item.experimental ? ' (experimental)' : ''}` : undefined}
+                title={
+                  collapsed
+                    ? `${item.label}${item.experimental ? ' (experimental)' : ''}`
+                    : undefined
+                }
               >
                 <item.icon className="h-4 w-4 shrink-0" />
                 {!collapsed && (
                   <span className="truncate">
                     {item.label}
                     {item.experimental ? (
-                      <span className="section-label ml-1 font-normal">
-                        Experimental
-                      </span>
+                      <span className="section-label ml-1 font-normal">Experimental</span>
                     ) : null}
                   </span>
                 )}

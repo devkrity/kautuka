@@ -257,7 +257,7 @@ internal static class GatewayApprovalEndpointMappings
                 : Results.Json(ToApprovalResponse(request, catalog, users, invocationLinks, continuations, workflows), KautukaJsonContext.Default.ApprovalResponse);
         });
 
-        return app;
+        return app.MapGatewayNetworkAccessEndpoints();
     }
 
     private static ApprovalResponse ToApprovalResponse(

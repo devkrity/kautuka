@@ -22,6 +22,9 @@ public sealed class ManagerRpcAuthorizationTests
     [InlineData("Exec")]
     [InlineData("UpdateDesiredState")]
     [InlineData("CallMcpContainerTool")]
+    [InlineData("GetNetworkAccessPolicy")]
+    [InlineData("SetNetworkAccessRule")]
+    [InlineData("DecideNetworkAccessRequest")]
     public void UpdateServiceIdentityCannotUseGatewayCapabilities(string method)
         => Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
             ManagerClientIdentities.UpdateServiceCommonName,
@@ -34,6 +37,9 @@ public sealed class ManagerRpcAuthorizationTests
     [InlineData("Exec")]
     [InlineData("UpdateDesiredState")]
     [InlineData("CallMcpContainerTool")]
+    [InlineData("GetNetworkAccessPolicy")]
+    [InlineData("SetNetworkAccessRule")]
+    [InlineData("DecideNetworkAccessRequest")]
     public void GatewayIdentityHasRequiredManagerCapabilities(string method)
         => Assert.True(ManagerRpcAuthorizationPolicy.IsAuthorized(
             ManagerClientIdentities.GatewayCommonName,

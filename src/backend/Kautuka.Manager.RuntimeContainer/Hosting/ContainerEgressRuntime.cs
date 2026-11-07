@@ -734,13 +734,18 @@ public sealed partial class ContainerEgressRuntime(
     {
         Source[] authorized = [.. sources.Values.Where(static source => source.Authorized)];
         Source? package = authorized.SingleOrDefault(static source => source.Identity.Role == "package");
-        IEnumerable<EgressTcpRule> rules = authorized.SelectMany(source => options.Grants
+        policySources = [.. authorized.Select(source => new NetworkAccessIdentity(source.Identity.Scope.Kind,
+            source.Identity.Scope.UserId, source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId)).Distinct()];
+        policyDefaults = [.. options.Grants, .. package is null ? Array.Empty<ContainerEgressGrant>() : packageUpstreams.Select(host => new ContainerEgressGrant
+        {
+            ScopeType = package.Identity.Scope.Kind, UserId = package.Identity.Scope.UserId, AgentId = package.Identity.Scope.AgentId,
+            Role = package.Identity.Role, ComponentId = package.Identity.ComponentId, Destination = host, Port = 443,
+        })];
+        IReadOnlyList<ContainerEgressGrant> grants = networkPolicy.EffectiveGrants(policyDefaults);
+        IEnumerable<EgressTcpRule> rules = authorized.SelectMany(source => grants
             .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
                 && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
             .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port)));
-        if (package is not null)
-            rules = rules.Concat(packageUpstreams
-                .Select(host => new EgressTcpRule(package.Container.Address, host, 443)));
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
         return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts);
@@ -779,13 +784,22 @@ public sealed partial class ContainerEgressRuntime(
         {
             await ActivateAsync(next, previous, cancellationToken).ConfigureAwait(false);
             active = next;
+            Interlocked.Exchange(ref activePolicyRevision, networkPolicy.Revision);
+            policyActivationError = null;
         }
         catch (Exception activationError)
         {
             if (previous is not null)
             {
                 try { await ActivateAsync(previous, next, CancellationToken.None).ConfigureAwait(false); }
-                catch (Exception recoveryError) { throw new AggregateException("Egress policy activation and recovery failed.", activationError, recoveryError); }
+                catch (Exception recoveryError)
+                {
+                    ready = false;
+                    recoveryRequiresProxyStop = true;
+                    try { await StopProxyAsync(CancellationToken.None).ConfigureAwait(false); }
+                    catch (Exception stopError) { throw new AggregateException("Egress policy activation, recovery and proxy shutdown failed.", activationError, recoveryError, stopError); }
+                    throw new AggregateException("Egress policy activation and recovery failed; the proxy was stopped.", activationError, recoveryError);
+                }
             }
 
             throw;

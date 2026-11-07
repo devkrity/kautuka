@@ -186,7 +186,7 @@ class RecoverySnapshotTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         manifest["format"] = 2
         manifest["entries"] = [entry for entry in manifest["entries"]
-                               if not entry["path"].startswith("gateway-data/")]
+                               if not entry["path"].startswith(("gateway-data/", "manager/egress/policy/"))]
         manifest_path.write_text(json.dumps(manifest))
         gateway_db = self.root / "gateway-data/kautuka.db"
         self._make_database(gateway_db, "existing", "uncaptured")
@@ -203,6 +203,48 @@ class RecoverySnapshotTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text())
         manifest["entries"] = [entry for entry in manifest["entries"]
                                if entry["path"] != "gateway-data/kautuka.db"]
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(RuntimeError, "inventory is incomplete"):
+            recovery.restore(self._args())
+
+    def test_format4_restores_network_policy_and_decisions(self):
+        policy = self.root / "manager/egress/policy/state.json"
+        policy.parent.mkdir(parents=True)
+        original = b'{"schemaVersion":1,"revision":7,"rules":[],"requests":[]}'
+        policy.write_bytes(original)
+        recovery.capture(self._args())
+        policy.write_bytes(b'{"schemaVersion":1,"revision":8,"rules":[],"requests":[]}')
+        recovery.restore(self._args())
+        self.assertEqual(original, policy.read_bytes())
+
+    def test_format4_absent_policy_removes_target_only_policy(self):
+        recovery.capture(self._args())
+        policy = self.root / "manager/egress/policy/state.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text("target-only-policy")
+        recovery.restore(self._args())
+        self.assertFalse(policy.exists())
+
+    def test_format3_does_not_modify_uncaptured_network_policy(self):
+        recovery.capture(self._args())
+        manifest_path = self.backups / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["format"] = 3
+        manifest["entries"] = [entry for entry in manifest["entries"]
+                               if entry["path"] != "manager/egress/policy/state.json"]
+        manifest_path.write_text(json.dumps(manifest))
+        policy = self.root / "manager/egress/policy/state.json"
+        policy.parent.mkdir(parents=True)
+        policy.write_text("uncaptured-policy")
+        recovery.restore(self._args())
+        self.assertEqual("uncaptured-policy", policy.read_text())
+
+    def test_format4_requires_explicit_policy_inventory(self):
+        recovery.capture(self._args())
+        manifest_path = self.backups / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"] = [entry for entry in manifest["entries"]
+                               if entry["path"] != "manager/egress/policy/state.json"]
         manifest_path.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(RuntimeError, "inventory is incomplete"):
             recovery.restore(self._args())

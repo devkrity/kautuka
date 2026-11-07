@@ -15,6 +15,12 @@ internal sealed record ManagerDesiredStateUpdateRequest(
 /// </summary>
 internal interface IManagerGrpcService
 {
+    Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
+        => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
+    Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default)
+        => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
+    Task<NetworkAccessPolicyResponse> DecideNetworkAccessRequestAsync(NetworkAccessDecisionRequest request, CancellationToken cancellationToken = default)
+        => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
     Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerStatusResponse> GetHostStatusAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerRuntimeContainersResponse> ListRuntimeContainersAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
