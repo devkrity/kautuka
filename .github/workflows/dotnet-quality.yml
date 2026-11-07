@@ -124,6 +124,12 @@ jobs:
       - name: Test Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Test container bootstrap and smoke regressions
+        run: |
+          sudo python3 -B ./scripts/test-container-uninstall.py
+          sudo python3 -B ./scripts/test-wsl-firstboot.py
+          python3 -B ./scripts/test-installed-container-smoke.py
+
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 

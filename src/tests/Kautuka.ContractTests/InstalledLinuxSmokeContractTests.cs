@@ -3,12 +3,12 @@ namespace Kautuka.ContractTests;
 public sealed class InstalledLinuxSmokeContractTests
 {
     [Fact]
-    public void SmokeRequiresCoreUnitsActiveNotActivating()
+    public void SmokeRequiresHostControllersActiveNotActivating()
     {
         string projectRoot = FindProjectRoot();
         string source = File.ReadAllText(Path.Combine(projectRoot, "scripts", "installed-linux-smoke.sh"));
 
-        Assert.Contains("assert_unit_active system kautuka-gateway.service", source, StringComparison.Ordinal);
+        Assert.Contains("assert_unit_active user kautuka-manager.service", source, StringComparison.Ordinal);
         Assert.Contains("assert_unit_active user kautuka-updateservice.service", source, StringComparison.Ordinal);
         Assert.Contains("activating auto-restart is a crash loop", source, StringComparison.Ordinal);
         Assert.Contains("KAUTUKA_SMOKE_SETUP_TOKEN", source, StringComparison.Ordinal);
