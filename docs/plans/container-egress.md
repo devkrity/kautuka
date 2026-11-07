@@ -937,3 +937,22 @@ assertion, corrected in the passing run. Logs:
 `artifacts/container-egress/core-update-transaction-resume.log`. Actual installed
 CLI/helper/systemd handoff, release packaging and installer activation still need
 end-to-end validation before this mode is shipped.
+
+Release archive staging now happens once before the Linux platform tarball is
+assembled. The Linux payload includes `bin/runtime-images.json` with archive,
+platform and config bindings plus the corresponding `oci-images` directory.
+WSL consumes this stage from the Linux payload, rebinds the packaged archives and
+requires the same canonical inventory bytes before copying either inventory or
+archives. WSL performs no independent pull/save, and the final signing inventory
+is copied from these same checked bytes. Prewarm-only input without the common
+stage fails rather than acquiring a different image set.
+
+The actual staging/binding/copy functions passed a Fedora test for byte-identical
+inventory/archive copying, zero registry operations during WSL copy, and refusal
+of changed archives or a missing stage before destination publication. Five
+archive binder tests and the release SDK, archive-list and image-inventory
+contract checks also passed. The architect cleared this ordering prerequisite.
+It still packages the current inventory: production of the complete same-release
+core and bootstrap image set remains unfinished. The existing core Dockerfiles
+also need version/source propagation and the Gateway built-in bundles before
+they provide the production release content.

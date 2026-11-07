@@ -14,7 +14,7 @@ cleanup() {
 }
 trap cleanup EXIT
 source_root="$tmp/source"
-mkdir -p "$source_root/src/backend/Kautuka.Manager" "$source_root/scripts" "$tmp/bin" "$tmp/rootfs"
+mkdir -p "$source_root/src/backend/Kautuka.Manager" "$source_root/scripts" "$tmp/bin" "$tmp/payload/bin" "$tmp/payload/oci-images"
 cp "$repo_root/scripts/bind-runtime-image-archives.py" "$source_root/scripts/"
 allowlist="$source_root/src/backend/Kautuka.Manager/runtime-images.json"
 export TEST_ARCHIVE_CALLS="$tmp/calls"
@@ -42,12 +42,13 @@ container_runtime=test-runtime
 log_phase() { :; }
 # Load the actual staging function without executing the release builder.
 source <(sed -n '/^stage_oci_image_archives() {/,/^}$/p' "$repo_root/scripts/build-release-assets.sh")
+source <(sed -n '/^copy_staged_oci_image_archives() {/,/^}$/p' "$repo_root/scripts/build-release-assets.sh")
 
 cat > "$allowlist" <<'EOF'
 {"images":[{"id":"base","image":"base-ref","archive":null},{"id":"one","image":"ghcr.io/example/one@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","archive":"one.tar"},{"id":"two","image":"ghcr.io/example/two@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","archive":"two.tar"}]}
 EOF
-stage_oci_image_archives "$tmp/rootfs" "$tmp/bound.json"
-python3 - "$tmp/bound.json" "$tmp/rootfs/var/lib/kautuka/oci-images" <<'PY'
+stage_oci_image_archives "$tmp/payload/oci-images" "$tmp/payload/bin/runtime-images.json"
+python3 - "$tmp/payload/bin/runtime-images.json" "$tmp/payload/oci-images" <<'PY'
 import json, pathlib, hashlib, sys
 bound=json.loads(pathlib.Path(sys.argv[1]).read_text())
 for image in bound['images']:
@@ -58,19 +59,34 @@ for image in bound['images']:
 PY
 [[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 4 ]]
 
+: > "$TEST_ARCHIVE_CALLS"
+copy_staged_oci_image_archives "$tmp/payload" "$tmp/wsl-images" "$tmp/wsl-inventory.json"
+cmp "$tmp/payload/bin/runtime-images.json" "$tmp/wsl-inventory.json"
+cmp "$tmp/payload/oci-images/one.tar" "$tmp/wsl-images/one.tar"
+cmp "$tmp/payload/oci-images/two.tar" "$tmp/wsl-images/two.tar"
+[[ ! -s "$TEST_ARCHIVE_CALLS" ]] || { echo 'copying the common stage performed registry IO' >&2; exit 1; }
+printf 'tampered' >> "$tmp/payload/oci-images/one.tar"
+if copy_staged_oci_image_archives "$tmp/payload" "$tmp/rejected-wsl-images" "$tmp/rejected.json" > "$tmp/log" 2>&1; then
+  echo 'tampered common archive was accepted' >&2; exit 1
+fi
+[[ ! -e "$tmp/rejected.json" && ! -e "$tmp/rejected-wsl-images" ]]
+if copy_staged_oci_image_archives "$tmp/absent-payload" "$tmp/rejected-wsl-images" "$tmp/rejected.json" > "$tmp/log" 2>&1; then
+  echo 'missing common inventory was accepted' >&2; exit 1
+fi
+
 for invalid in '{"id":"bad","image":"ref","archive":"../../escape.tar"}' \
   '{"id":"bad","image":"ref","archive":"one.tar"}' \
   '{"id":"bad","image":"ref","archive":42}'; do
   printf '{"images":[{"id":"one","image":"ghcr.io/example/one@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","archive":"one.tar"},%s]}\n' "$invalid" > "$allowlist"
   : > "$TEST_ARCHIVE_CALLS"
-  if stage_oci_image_archives "$tmp/rootfs" "$tmp/bound.json" > "$tmp/log" 2>&1; then
+  if stage_oci_image_archives "$tmp/payload/oci-images" "$tmp/payload/bin/runtime-images.json" > "$tmp/log" 2>&1; then
     echo 'invalid archive inventory was accepted' >&2; exit 1
   fi
   [[ ! -s "$TEST_ARCHIVE_CALLS" ]] || { echo 'invalid inventory performed a pull or save' >&2; exit 1; }
 done
 printf '{not json' > "$allowlist"
-if stage_oci_image_archives "$tmp/rootfs" "$tmp/bound.json" > "$tmp/log" 2>&1; then
+if stage_oci_image_archives "$tmp/payload/oci-images" "$tmp/payload/bin/runtime-images.json" > "$tmp/log" 2>&1; then
   echo 'malformed inventory was accepted' >&2; exit 1
 fi
 [[ ! -s "$TEST_ARCHIVE_CALLS" ]] || { echo 'malformed inventory performed a pull or save' >&2; exit 1; }
-echo 'Runtime archive staging skips registry-only images and fails closed on invalid inventories.'
+echo 'Common archive staging and byte-identical offline WSL copy reject invalid inventories and changed archives.'

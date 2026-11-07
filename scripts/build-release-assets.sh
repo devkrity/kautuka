@@ -442,10 +442,9 @@ run_repo_node() {
 }
 
 stage_oci_image_archives() {
-  local rootfs_dir="$1"
+  local dest="$1"
   local inventory_output="$2"
-  local allowlist="$source_root/src/backend/Kautuka.Manager/runtime-images.json"
-  local dest="$rootfs_dir/var/lib/kautuka/oci-images"
+  local allowlist="${3:-$source_root/src/backend/Kautuka.Manager/runtime-images.json}"
 
   if [[ ! -f "$allowlist" ]]; then
     echo "error: runtime image allowlist not found: $allowlist" >&2
@@ -497,6 +496,41 @@ PY
   fi
   sudo install -m 0644 "$bound_inventory" "$inventory_output"
   rm -f "$bound_inventory"
+}
+
+copy_staged_oci_image_archives() {
+  local payload="$1" dest="$2" inventory_output="$3" checked
+  local inventory="$payload/bin/runtime-images.json"
+  [[ -f "$inventory" && -d "$payload/oci-images" ]] || {
+    echo 'error: Linux payload lacks the common bound runtime image stage' >&2
+    return 1
+  }
+  checked="$(mktemp --suffix=.json)"
+  if ! python3 "$source_root/scripts/bind-runtime-image-archives.py" \
+      --inventory "$inventory" --archive-root "$payload/oci-images" --platform linux/amd64 --output "$checked"; then
+    rm -f "$checked"
+    return 1
+  fi
+  if ! cmp -s "$inventory" "$checked"; then
+    rm -f "$checked"
+    echo 'error: packaged runtime image bindings do not match their archives' >&2
+    return 1
+  fi
+  rm -f "$checked"
+  sudo mkdir -p "$dest"
+  local archive archive_rows
+  archive_rows="$(python3 - "$inventory" <<'PY'
+import json, sys
+for entry in json.load(open(sys.argv[1]))['images']:
+    if entry.get('archive') is not None:
+        print(entry['archive'])
+PY
+)" || return 1
+  while IFS= read -r archive; do
+    [[ -n "$archive" ]] || continue
+    sudo install -m 0644 "$payload/oci-images/$archive" "$dest/$archive" || return 1
+  done <<< "$archive_rows"
+  sudo install -m 0644 "$inventory" "$inventory_output"
 }
 
 log_phase() {
@@ -948,6 +982,12 @@ mkdir -p "$stage_dir/share/doc/kautuka/licenses"
 cp "$compliance_dir/THIRD_PARTY_NOTICES.txt" "$compliance_dir/THIRD_PARTY_COMPONENTS.json" "$compliance_dir/FRONTEND_DEPENDENCIES.json" "$stage_dir/share/doc/kautuka/"
 cp "$compliance_dir/licenses/"* "$stage_dir/share/doc/kautuka/licenses/"
 
+# Stage and bind once, before either platform artifact is assembled. WSL copies
+# these exact bytes from the Linux payload instead of independently pulling.
+log_phase "Staging common runtime image archives"
+stage_oci_image_archives "$stage_dir/oci-images" "$stage_dir/bin/runtime-images.json"
+cp "$stage_dir/bin/runtime-images.json" "$release_dir/runtime-images.bound.json"
+
 mkdir -p "$(dirname "$platform_tarball")"
 tar -czf "$platform_tarball" -C "$stage_dir" .
 fi
@@ -1337,7 +1377,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   sudo chmod +x "$version_root/kautuka-manager"
   sudo ln -sfn "versions/$version" "$current_link"
   sudo touch "$linger_dir/kautuka"
-  stage_oci_image_archives "$rootfs_dir" "$version_root/runtime-images.json"
+  copy_staged_oci_image_archives "$manager_extract_dir" "$visible_root/oci-images" "$version_root/runtime-images.json"
   # Both release artifacts currently target linux/amd64. Preserve the exact
   # inventory baked into this appliance for the detached release signature.
   # A future additional platform needs a separate inventory, not this binding.
