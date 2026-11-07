@@ -78,6 +78,8 @@ public sealed class DeferredSuccessTests
                 ]);
             issued.ServerCert.Dispose();
             issued.CaCert.Dispose();
+            Assert.Throws<InvalidOperationException>(() => _ = deferred.Value);
+            LocalCaMtlsBootstrap.PublishGatewayClientIdentity(Path.Combine(root, "manager"), ManagerClientIdentities.GatewayCertificateFileName);
 
             WorkspaceMtlsCerts loaded = deferred.Value;
             Assert.False(string.IsNullOrWhiteSpace(loaded.CaCert.Thumbprint));

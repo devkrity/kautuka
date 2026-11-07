@@ -19,27 +19,33 @@ internal sealed class CredentialClientCertificateRenewalService(
         using var timer = new PeriodicTimer(checkInterval, timeProvider);
         do
         {
-            (_, DateTimeOffset notAfter) = identityState.Current;
-            if (notAfter <= timeProvider.GetUtcNow().Add(renewalWindow))
-            {
-                try
-                {
-                    using X509Certificate2 certificate = LocalCaMtlsBootstrap.RenewGatewayClientCertificate(
-                        layout.TransportRoot,
-                        "Credentials",
-                        ".credentials-client.pfx");
-                    CredentialStorageLayout.PublishGatewayReadableFile(
-                        Path.Combine(layout.TransportRoot, ".credentials-client.pfx"));
-                    identityState.Activate(certificate.Thumbprint, certificate.NotAfter);
-                    CredentialClientCertificateRenewalLog.Renewed(logger, certificate.Thumbprint, certificate.NotAfter);
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    CredentialClientCertificateRenewalLog.Failed(logger, exception, notAfter);
-                }
-            }
+            RenewIfNeeded();
         }
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
+    }
+
+    internal void RenewIfNeeded()
+    {
+        (_, DateTimeOffset notAfter) = identityState.Current;
+        if (notAfter <= timeProvider.GetUtcNow().Add(renewalWindow))
+        {
+            try
+            {
+                using X509Certificate2 certificate = LocalCaMtlsBootstrap.RenewGatewayClientCertificate(
+                    layout.TransportRoot,
+                    "Credentials",
+                    ".credentials-client.pfx");
+                CredentialStorageLayout.PublishGatewayReadableFile(
+                    Path.Combine(layout.TransportRoot, ".credentials-client.pfx"));
+                LocalCaMtlsBootstrap.PublishGatewayClientIdentity(layout.TransportRoot, ".credentials-client.pfx");
+                identityState.Activate(certificate.Thumbprint, certificate.NotAfter);
+                CredentialClientCertificateRenewalLog.Renewed(logger, certificate.Thumbprint, certificate.NotAfter);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                CredentialClientCertificateRenewalLog.Failed(logger, exception, notAfter);
+            }
+        }
     }
 }
 

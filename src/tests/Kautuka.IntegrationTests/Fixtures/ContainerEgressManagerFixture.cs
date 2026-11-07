@@ -7,6 +7,7 @@ using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.Telemetry.Security;
 
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -30,6 +31,7 @@ internal static class ContainerEgressManagerFixture
         var report = new JsonObject();
         var trace = new List<string[]>();
         var native = new PodmanCommandRunner();
+        await CheckClientPublicationAsync(data, native, report, ct);
         bool failAdmin = false;
         ContainerEgressRuntime? recoveryRuntime = null;
         bool recoveredBeforeCommit = false;
@@ -275,6 +277,55 @@ internal static class ContainerEgressManagerFixture
         report["emptyScopesRetired"] = true; report["passed"] = true;
         return report;
     }
+    private static async Task CheckClientPublicationAsync(JsonElement data, PodmanCommandRunner native, JsonObject report, CancellationToken ct)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Client mount validation requires Linux.");
+        string root = Path.Combine(data.GetProperty("stateRoot").GetString()!, "client-publication-fixture");
+        string image = data.GetProperty("helper").GetString()!;
+        var (server, ca) = LocalCaMtlsBootstrap.EnsureAndLoad(root, "PublicationFixture",
+            [new("Kautuka Gateway Client", "gateway.pfx"), new("Kautuka Updater Client", "updater.pfx")]);
+        using (server)
+        using (ca)
+        {
+            string published = LocalCaMtlsBootstrap.GatewayClientDirectory(root);
+            Directory.CreateDirectory(Path.GetDirectoryName(published)!);
+            File.SetUnixFileMode(Path.GetDirectoryName(published)!, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            LocalCaMtlsBootstrap.PublishGatewayClientIdentity(root, "gateway.pfx");
+            var traversal = await native.RunAsync(["run", "--rm", "--pull=never", "--label", "kautuka.preparation-helper=true", "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                "--user", "1001:0", "--read-only", "--volume", root + ":/identity:ro", "--entrypoint", "/usr/bin/bash", image,
+                "-lc", "test -r /identity/clients/gateway/gateway.pfx && test ! -r /identity/.ca.key"], 15, ct);
+            if (traversal.ExitCode != 0) throw new InvalidOperationException("Published identity group traversal failed: " + traversal.StdErr);
+            string name = "kautuka-client-publication-" + Guid.NewGuid().ToString("N");
+            PodmanCommandResult? removed = null;
+            try
+            {
+                var created = await native.RunAsync(["run", "-d", "--pull=never", "--name", name, "--label", "kautuka.preparation-helper=true",
+                    "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--user", "1001:0", "--read-only",
+                    "--volume", published + ":/identity:ro", "--entrypoint", "/usr/bin/sleep", image, "300"], 15, ct);
+                string id = created.StdOut.Trim();
+                if (created.ExitCode != 0 || id.Length != 64 || !id.All(char.IsAsciiHexDigit))
+                    throw new InvalidOperationException("Could not start narrow client-identity mount fixture: " + created.StdErr);
+                var inventory = await native.RunAsync(["exec", id, "/usr/bin/bash", "-lc",
+                    "set -- /identity/.[!.]* /identity/*.pfx; test \"$#\" = 2 && test -r /identity/.ca.cer && test -r /identity/gateway.pfx && test ! -e /identity/.ca.key && test ! -e /identity/updater.pfx"], 15, ct);
+                if (inventory.ExitCode != 0) throw new InvalidOperationException("Gateway's narrow mount exposes unexpected identity material");
+                using var renewed = LocalCaMtlsBootstrap.RenewGatewayClientCertificate(root, "PublicationFixture", "gateway.pfx");
+                LocalCaMtlsBootstrap.PublishGatewayClientIdentity(root, "gateway.pfx");
+                string expected = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(published, "gateway.pfx"), ct)));
+                var visible = await native.RunAsync(["exec", id, "/usr/bin/openssl", "dgst", "-sha256", "/identity/gateway.pfx"], 15, ct);
+                if (visible.ExitCode != 0 || !visible.StdOut.Contains(expected, StringComparison.Ordinal))
+                    throw new InvalidOperationException("Atomic client renewal was not visible across the existing directory mount");
+                report["clientPublicationGroupTraversal"] = true;
+                report["clientPublicationNarrowMount"] = true;
+                report["clientPublicationRenewalVisibleAcrossMount"] = true;
+            }
+            finally
+            {
+                removed = await native.RunAsync(["rm", "--force", name], 15, CancellationToken.None);
+            }
+            if (removed.ExitCode != 0) throw new InvalidOperationException("Could not remove identity mount fixture: " + removed.StdErr);
+        }
+    }
+
     private static string WriteDependencyBundle(string root, string language)
     {
         string path = Path.Combine(root, "bundle-" + language + ".mcpb");

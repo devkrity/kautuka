@@ -518,3 +518,34 @@ The native test wrapper now preserves subprocess timeout and environment inputs;
 earlier wrapper/fingerprint failures are retained as diagnostic runs, not passing
 enforcement evidence. These results do not establish application-managed image
 acquisition or an installed application release/update transaction.
+
+
+Gateway's CredentialsHost, Manager and UpdateService clients now load derived
+`clients/gateway` directories. Each issuer publishes only its public CA and the
+explicit Gateway client PFX. Manager's separate UpdateService identity remains
+canonical and is not included in Gateway's publication. Both derived directory
+levels receive group traversal/setgid explicitly, including under a restrictive
+service umask. File permissions are set before atomic rename; unchanged contents
+retain their timestamps, and the directory inode is retained for bind mounts.
+CredentialsHost renewal publishes before activating its new accepted identity.
+A publication failure keeps the old in-memory identity active and logs the failed
+renewal. Canonical stores and recovery inventories are unchanged; publication is
+regenerated during bootstrap after recovery. Gateway does not fall back to private
+canonical material. Only the CredentialsHost Gateway client currently reloads a
+renewed PFX live; Manager/UpdateService client loading keeps its existing restart
+semantics. This publication seam alone does not launch application containers.
+
+
+The publication checkpoint's native report
+`artifacts/container-egress/runtime-proof-0fa89334.json` passed with clean teardown.
+The actual AOT publication helper repaired a deliberately private intermediate
+directory; a different container UID with the intended group traversed the
+published hierarchy while the CA key remained unreadable. A running networkless,
+capability-free container with only the published directory mounted read-only
+saw the two intended files and observed a renewed PFX after atomic replacement,
+without remounting. Prior egress and dependency-execution checks also passed.
+The shared publication source, native fixture and smoke project match the Linux
+AOT snapshot by normalized-text SHA-256. Focused Windows checks passed 29 tests,
+including Gateway's live credential reload and failed publication retaining the
+old accepted identity. Application-service container launch remains the next
+integration step; this is not an installed container-release or recovery proof.

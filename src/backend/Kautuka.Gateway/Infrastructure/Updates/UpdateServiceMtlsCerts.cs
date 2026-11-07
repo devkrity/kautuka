@@ -1,5 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 
+using Kautuka.Telemetry.Security;
+
 namespace Kautuka.Gateway.Infrastructure.Updates;
 
 internal sealed class UpdateServiceMtlsCerts
@@ -11,6 +13,8 @@ internal sealed class UpdateServiceMtlsCerts
     {
         string dataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(configuration, "updateService");
         dataRoot = Path.GetFullPath(dataRoot);
+
+        dataRoot = LocalCaMtlsBootstrap.GatewayClientDirectory(dataRoot);
 
         string caPath = Path.Combine(dataRoot, caCertFile);
         string pfxPath = Path.Combine(dataRoot, clientPfxFile);

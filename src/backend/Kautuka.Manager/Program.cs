@@ -105,6 +105,8 @@ var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCommonName,
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCertificateFileName),
     ]);
+LocalCaMtlsBootstrap.PublishGatewayClientIdentity(managerDataRoot,
+    Kautuka.Manager.Protos.ManagerClientIdentities.GatewayCertificateFileName);
 
 builder.WebHost.ConfigureKestrel(options =>
 {

@@ -23,6 +23,7 @@ updateServiceDataRoot = Path.GetFullPath(updateServiceDataRoot);
 Directory.CreateDirectory(updateServiceDataRoot);
 
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(updateServiceDataRoot, "UpdateService", ".updateservice-client.pfx");
+LocalCaMtlsBootstrap.PublishGatewayClientIdentity(updateServiceDataRoot, ".updateservice-client.pfx");
 
 builder.Services.AddGrpc();
 builder.Services.AddSingleton<UpdateServiceRuntimePaths>();

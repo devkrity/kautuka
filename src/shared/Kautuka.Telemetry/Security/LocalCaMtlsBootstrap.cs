@@ -144,6 +144,33 @@ public static class LocalCaMtlsBootstrap
         }
     }
 
+    public static string GatewayClientDirectory(string canonicalRoot)
+        => Path.Combine(canonicalRoot, "clients", "gateway");
+
+    /// <summary>Publishes only the public CA and the selected client's identity for a narrow directory mount.</summary>
+    public static void PublishGatewayClientIdentity(string canonicalRoot, string clientPfxFile)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientPfxFile);
+        if (Path.GetFileName(clientPfxFile) != clientPfxFile || !clientPfxFile.EndsWith(".pfx", StringComparison.Ordinal))
+            throw new ArgumentException("Select one client PFX file name.", nameof(clientPfxFile));
+        string clientsDirectory = Path.Combine(canonicalRoot, "clients");
+        string destinationDirectory = GatewayClientDirectory(canonicalRoot);
+        Directory.CreateDirectory(clientsDirectory);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(clientsDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.SetGroup);
+        Directory.CreateDirectory(destinationDirectory);
+        PublishGatewayReadableArtifacts(destinationDirectory, caCertFile, clientPfxFile);
+        foreach (string name in new[] { caCertFile, clientPfxFile })
+        {
+            string destination = Path.Combine(destinationDirectory, name);
+            byte[] bytes = File.ReadAllBytes(Path.Combine(canonicalRoot, name));
+            if (File.Exists(destination) && bytes.AsSpan().SequenceEqual(File.ReadAllBytes(destination)))
+                continue;
+            WriteAtomic(destination, bytes, gatewayReadable: true);
+        }
+    }
+
     public static X509Certificate2 EnsureDelegationSigningCertificate(
         string dataRoot,
         string serviceName,
@@ -317,7 +344,7 @@ public static class LocalCaMtlsBootstrap
         WriteAtomic(pfxPath, pfxBytes);
     }
 
-    private static void WriteAtomic(string path, ReadOnlySpan<byte> bytes)
+    private static void WriteAtomic(string path, ReadOnlySpan<byte> bytes, bool gatewayReadable = false)
     {
         string temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -334,8 +361,9 @@ public static class LocalCaMtlsBootstrap
                 stream.Flush(flushToDisk: true);
             }
             SetOwnerOnly(temporaryPath);
+            if (gatewayReadable && !OperatingSystem.IsWindows())
+                File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
             File.Move(temporaryPath, path, overwrite: true);
-            SetOwnerOnly(path);
         }
         finally
         {

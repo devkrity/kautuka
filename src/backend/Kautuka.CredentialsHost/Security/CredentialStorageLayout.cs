@@ -18,6 +18,8 @@ internal sealed class CredentialStorageLayout
     public string VaultRoot { get; }
     public string TransportRoot { get; }
 
+    public string GatewayClientRoot => Kautuka.Telemetry.Security.LocalCaMtlsBootstrap.GatewayClientDirectory(TransportRoot);
+
     public static void PublishGatewayReadableFile(string path)
     {
         if (!OperatingSystem.IsWindows())

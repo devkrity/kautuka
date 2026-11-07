@@ -1,5 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 
+using Kautuka.Telemetry.Security;
+
 namespace Kautuka.Gateway.Infrastructure.Sandbox;
 
 /// <summary>
@@ -20,6 +22,8 @@ internal sealed class WorkspaceMtlsCerts
     {
         string dataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(configuration, "manager");
         dataRoot = Path.GetFullPath(dataRoot);
+
+        dataRoot = LocalCaMtlsBootstrap.GatewayClientDirectory(dataRoot);
 
         string caPath = Path.Combine(dataRoot, caCertFile);
         string pfxPath = Path.Combine(dataRoot, clientPfxFile);

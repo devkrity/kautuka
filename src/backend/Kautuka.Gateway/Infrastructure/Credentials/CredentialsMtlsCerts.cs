@@ -1,5 +1,7 @@
 using System.Security.Cryptography.X509Certificates;
 
+using Kautuka.Telemetry.Security;
+
 namespace Kautuka.Gateway.Infrastructure.Credentials;
 
 /// <summary>
@@ -47,6 +49,8 @@ internal sealed class CredentialsMtlsCerts : IDisposable
     {
         string dataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(configuration, "credentialsHost");
         dataRoot = Path.Combine(Path.GetFullPath(dataRoot), "transport");
+
+        dataRoot = LocalCaMtlsBootstrap.GatewayClientDirectory(dataRoot);
 
         string caPath = Path.Combine(dataRoot, caCertFile);
         pfxPath = Path.Combine(dataRoot, clientPfxFile);

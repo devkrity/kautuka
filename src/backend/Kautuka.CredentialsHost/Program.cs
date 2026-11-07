@@ -74,6 +74,7 @@ if (backupPath is not null || restorePath is not null || rotateCredentialKey)
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(storageLayout.TransportRoot, "Credentials", ".credentials-client.pfx");
 CredentialStorageLayout.PublishGatewayReadableFile(Path.Combine(storageLayout.TransportRoot, ".ca.cer"));
 CredentialStorageLayout.PublishGatewayReadableFile(Path.Combine(storageLayout.TransportRoot, ".credentials-client.pfx"));
+LocalCaMtlsBootstrap.PublishGatewayClientIdentity(storageLayout.TransportRoot, ".credentials-client.pfx");
 using X509Certificate2 activeGatewayClientCert = X509CertificateLoader.LoadPkcs12FromFile(
     Path.Combine(storageLayout.TransportRoot, ".credentials-client.pfx"),
     password: null);
