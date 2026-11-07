@@ -183,7 +183,10 @@ public sealed class PodmanContainerToolTests
     [Fact]
     public void PreparedSandboxUsesTheShippedNonRootIdentityAndClientOnlyRouteConfiguration()
     {
-        var context = new ContainerContext("agent", "alpha", "owner", "/tmp/workspace", "/workspace", "localhost/kautuka-base:fixture", 1, "512m", 20, [], new Dictionary<string, string>());
+        var context = new ContainerContext("agent", "alpha", "owner", "/tmp/workspace", "/workspace", "localhost/kautuka-base:fixture", 1, "512m", 20, [], new Dictionary<string, string>())
+        {
+            ResolvedImage = new ResolvedRuntimeImage("localhost/kautuka-base:fixture", "linux/amd64", "sha256:" + new string('a', 64)),
+        };
         MethodInfo method = typeof(PodmanContainerTool).GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.NonPublic)!;
         var args = Assert.IsType<List<string>>(method.Invoke(null, [context, "fixture", "scope-network", "10.89.1.2"]));
         Assert.Equal("create", args[0]);
@@ -194,6 +197,8 @@ public sealed class PodmanContainerToolTests
         Assert.Equal("scope-network", args[args.IndexOf("--network") + 1]);
         Assert.Equal("10.89.1.2", args[args.IndexOf("--dns") + 1]);
         Assert.DoesNotContain("kautuka-sandbox", args);
+        Assert.Contains(context.ResolvedImage.LocalImageId, args);
+        Assert.DoesNotContain(context.Image, args);
     }
 
     private static List<string> InvokeBuildRunArguments(ContainerContext context, string containerName)
