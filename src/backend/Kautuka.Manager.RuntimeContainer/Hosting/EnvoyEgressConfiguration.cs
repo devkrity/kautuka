@@ -9,6 +9,9 @@ using System.Text.Json.Nodes;
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal sealed record EgressTcpRule(string SourceAddress, string Destination, int Port);
+internal sealed record EgressTelemetryRoute(string SourceAddress, string ProxyAddress);
+internal sealed record EgressTelemetryTarget(string BackendAddress, string ProxySourceAddress, IReadOnlyList<EgressTelemetryRoute> Routes);
+
 internal sealed record EgressPackageRoute(string SourceAddress, string ProxyAddress, string BackendAddress, string ProxySourceAddress);
 
 
@@ -21,7 +24,7 @@ internal sealed record EnvoyEgressConfiguration(
     private const string metadataNamespace = "kautuka.egress";
 
     internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null,
-        string? allocationVersion = null)
+        string? allocationVersion = null, EgressTelemetryTarget? telemetry = null, bool telemetryEnabled = false)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
@@ -34,6 +37,14 @@ internal sealed record EnvoyEgressConfiguration(
         if (packages.Length > 0 && (externalSourceAddress is null || packages.Any(route => route.ProxySourceAddress == externalSourceAddress)
             || packages.GroupBy(static route => (route.SourceAddress, route.ProxyAddress)).Any(static group => group.Count() != 1)))
             throw new ArgumentException("Package routes need unambiguous topology and separate outside/core source addresses.", nameof(packageRoutes));
+        if (telemetry is not null)
+        {
+            telemetry = new EgressTelemetryTarget(NormalizeAddress(telemetry.BackendAddress), NormalizeAddress(telemetry.ProxySourceAddress),
+                [.. telemetry.Routes.Select(static route => new EgressTelemetryRoute(NormalizeAddress(route.SourceAddress), NormalizeAddress(route.ProxyAddress))).Distinct()
+                    .OrderBy(static route => route.SourceAddress, StringComparer.Ordinal).ThenBy(static route => route.ProxyAddress, StringComparer.Ordinal)]);
+            if (externalSourceAddress is null || telemetry.ProxySourceAddress == externalSourceAddress)
+                throw new ArgumentException("Telemetry requires a separate core source address.", nameof(telemetry));
+        }
         string[] artifacts = [.. (artifactHosts ?? []).Select(host => Normalize(new EgressTcpRule("192.0.2.1", host, 443)).Destination)
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
         if (artifacts.Any(host => IPAddress.TryParse(host, out _))) throw new ArgumentException("Artifact hosts must be exact DNS names.", nameof(artifactHosts));
@@ -43,7 +54,8 @@ internal sealed record EnvoyEgressConfiguration(
         var clusterNames = new List<string>();
         var targets = normalized.Select(rule => (Destination: rule.Destination, Port: rule.Port, Name: "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture)), Bind: externalSourceAddress))
             .Concat(artifacts.Select(host => (Destination: host, Port: 443, Name: "upstream-" + Hash(host + ":443"), Bind: externalSourceAddress)))
-            .Distinct().Concat(packages.Select(route => (Destination: route.BackendAddress, Port: 20101, Name: PackageClusterName(route), Bind: (string?)route.ProxySourceAddress)).Distinct());
+            .Distinct().Concat(packages.Select(route => (Destination: route.BackendAddress, Port: 20101, Name: PackageClusterName(route), Bind: (string?)route.ProxySourceAddress)).Distinct())
+            .Concat(telemetry is null ? [] : new[] { (Destination: telemetry.BackendAddress, Port: 5080, Name: TelemetryClusterName(telemetry), Bind: (string?)telemetry.ProxySourceAddress) });
         foreach (var target in targets)
         {
             string destination = target.Destination;
@@ -122,9 +134,9 @@ internal sealed record EnvoyEgressConfiguration(
         deny["name"] = "deny";
         chains.Add((JsonNode)deny);
         listener["filter_chains"] = chains;
-        listener["filter_chain_matcher"] = SourceMatcher(normalized, packages);
+        listener["filter_chain_matcher"] = SourceMatcher(normalized, packages, telemetry);
         listener["access_log"] = new JsonArray(AccessLog("listener"));
-        JsonObject? artifactListener = artifacts.Length == 0 ? null : ArtifactListener(artifacts);
+        JsonObject? artifactListener = artifacts.Length == 0 && telemetry is null && !telemetryEnabled ? null : ArtifactListener(artifacts, telemetry);
         SetLogField(listener, "allocation", allocationVersion ?? string.Empty);
         if (artifactListener is not null) SetLogField(artifactListener, "allocation", allocationVersion ?? string.Empty);
         string version = Hash(clusters.ToJsonString() + "\n" + listener.ToJsonString() + (artifactListener is null ? "" : "\n" + artifactListener.ToJsonString()));
@@ -175,9 +187,26 @@ internal sealed record EnvoyEgressConfiguration(
         return false;
     }
 
-    private static JsonObject ArtifactListener(string[] hosts)
+    private static JsonObject ArtifactListener(string[] hosts, EgressTelemetryTarget? telemetry)
     {
         var virtualHosts = new JsonArray();
+        if (telemetry is not null)
+        {
+            var routes = new JsonArray();
+            foreach (string signal in new[] { "logs", "metrics", "traces" })
+                routes.Add((JsonNode)new JsonObject
+                {
+                    ["match"] = new JsonObject
+                    {
+                        ["path"] = "/api/default/v1/" + signal,
+                        ["headers"] = new JsonArray(new JsonObject { ["name"] = ":method", ["string_match"] = new JsonObject { ["exact"] = "POST" } })
+                    },
+                    ["route"] = new JsonObject { ["cluster"] = TelemetryClusterName(telemetry), ["timeout"] = "10s" }
+                });
+            routes.Add((JsonNode)new JsonObject { ["match"] = new JsonObject { ["prefix"] = "/" }, ["direct_response"] = new JsonObject { ["status"] = 403 } });
+            routes.Add((JsonNode)new JsonObject { ["match"] = new JsonObject { ["connect_matcher"] = new JsonObject() }, ["direct_response"] = new JsonObject { ["status"] = 403 } });
+            virtualHosts.Add((JsonNode)new JsonObject { ["name"] = "telemetry", ["domains"] = new JsonArray("kautuka-telemetry.internal"), ["routes"] = routes });
+        }
         foreach (string host in hosts)
             virtualHosts.Add((JsonNode)new JsonObject
             {
@@ -209,6 +238,7 @@ internal sealed record EnvoyEgressConfiguration(
         });
         JsonObject log = AccessLog("host-artifact");
         log["typed_config"]!["log_format"]!["json_format"]!["authority"] = "%REQ(:AUTHORITY)%";
+        log["typed_config"]!["log_format"]!["json_format"]!["request_method"] = "%REQ(:METHOD)%";
         log["typed_config"]!["log_format"]!["json_format"]!["status"] = "%RESPONSE_CODE%";
         return new JsonObject
         {
@@ -240,6 +270,8 @@ internal sealed record EnvoyEgressConfiguration(
         };
     }
 
+    private static string TelemetryClusterName(EgressTelemetryTarget target) => "telemetry-" + Hash(target.BackendAddress + ":5080@" + target.ProxySourceAddress);
+
     private static string PackageClusterName(EgressPackageRoute route) => "package-" + Hash(route.BackendAddress + ":20101@" + route.ProxySourceAddress);
 
     private static string NormalizeAddress(string value)
@@ -249,14 +281,15 @@ internal sealed record EnvoyEgressConfiguration(
         return address.ToString();
     }
 
-    private static JsonObject SourceMatcher(EgressTcpRule[] rules, EgressPackageRoute[] packages)
+    private static JsonObject SourceMatcher(EgressTcpRule[] rules, EgressPackageRoute[] packages, EgressTelemetryTarget? telemetry)
     {
         var sources = new JsonObject();
-        foreach (string source in rules.Select(static rule => rule.SourceAddress).Concat(packages.Select(static route => route.SourceAddress)).Distinct().Order(StringComparer.Ordinal))
+        foreach (string source in rules.Select(static rule => rule.SourceAddress).Concat(packages.Select(static route => route.SourceAddress)).Concat(telemetry?.Routes.Select(static route => route.SourceAddress) ?? []).Distinct().Order(StringComparer.Ordinal))
         {
             var ports = new JsonObject();
             foreach (int port in rules.Where(rule => rule.SourceAddress == source).Select(static rule => rule.Port)
-                .Concat(packages.Any(route => route.SourceAddress == source) ? [20101] : Array.Empty<int>()).Distinct().Order())
+                .Concat(packages.Any(route => route.SourceAddress == source) ? [20101] : Array.Empty<int>())
+                .Concat(telemetry?.Routes.Any(route => route.SourceAddress == source) == true ? [5080] : Array.Empty<int>()).Distinct().Order())
             {
                 var names = new JsonObject();
                 var addresses = new JsonObject();
@@ -276,6 +309,13 @@ internal sealed record EnvoyEgressConfiguration(
                     var endpoints = new JsonObject();
                     foreach (EgressPackageRoute route in routes) endpoints[route.ProxyAddress] = ChainAction(PackageClusterName(route));
                     ordinary = new JsonObject { ["matcher"] = ExactMatcher("destination_ip", "DestinationIPInput", endpoints, ordinary) };
+                }
+                if (port == 5080 && telemetry is not null)
+                {
+                    var endpoints = new JsonObject();
+                    foreach (EgressTelemetryRoute route in telemetry.Routes.Where(route => route.SourceAddress == source))
+                        endpoints[route.ProxyAddress] = ChainAction(TelemetryClusterName(telemetry));
+                    if (endpoints.Count > 0) ordinary = new JsonObject { ["matcher"] = ExactMatcher("destination_ip", "DestinationIPInput", endpoints, ordinary) };
                 }
                 ports[port.ToString(CultureInfo.InvariantCulture)] = ordinary;
             }

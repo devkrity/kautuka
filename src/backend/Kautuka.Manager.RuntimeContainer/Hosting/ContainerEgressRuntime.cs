@@ -42,6 +42,37 @@ public sealed partial class ContainerEgressRuntime(
     private bool ready;
 
     public bool Enabled => options.Enabled;
+    public bool TelemetryEnabled => Enabled && options.TelemetryEnabled;
+
+    public async Task<string?> GetCoreTelemetryEndpointAsync(CancellationToken cancellationToken)
+    {
+        if (!TelemetryEnabled) return null;
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await EnsureReadyCoreAsync(cancellationToken).ConfigureAwait(false);
+            return "http://" + networks[coreName].Gateway + ":5080/api/default";
+        }
+        finally { gate.Release(); }
+    }
+
+    private static bool IsTelemetrySource(SourceIdentity identity)
+        => identity.Role == "core" && identity.Scope.Kind == "core" && identity.ComponentId == "kautuka-openobserve";
+
+    internal async Task<bool> ProbeTelemetryAsync(PreparedPodmanContainer container, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!sources.TryGetValue(container.Id, out Source? source) || !IsTelemetrySource(source.Identity))
+                throw new InvalidOperationException("Telemetry health requires the registered collector.");
+            PodmanCommandResult result = await HelperAsync("/usr/bin/curl",
+                ["--silent", "--show-error", "--fail", "--max-time", "2", "--retry", "8", "--retry-connrefused", "--retry-delay", "1", "--retry-max-time", "8", "http://127.0.0.1:5080/healthz"],
+                cancellationToken, networkNamespace: container.SandboxKey).ConfigureAwait(false);
+            return result.ExitCode == 0;
+        }
+        finally { gate.Release(); }
+    }
     internal string MaterializationRoot { get; } = Path.Combine(stateRoot, "egress", "builds");
 
     public void Dispose()
@@ -126,11 +157,11 @@ public sealed partial class ContainerEgressRuntime(
                 throw;
             }
             // Native stop/exit may release an IP. Only the newly observed allocation may own its grants.
-            bool packageBoundaryChanged = identity.Role == "package";
+            bool packageBoundaryChanged = identity.Role == "package" || IsTelemetrySource(identity);
             foreach (string stale in sources.Where(pair => pair.Value.Container.NetworkName == prepared.NetworkName
                 && pair.Value.Container.Address == prepared.Address).Select(static pair => pair.Key).ToArray())
             {
-                packageBoundaryChanged |= sources[stale].Identity.Role == "package";
+                packageBoundaryChanged |= sources[stale].Identity.Role == "package" || IsTelemetrySource(sources[stale].Identity);
                 sources.Remove(stale);
             }
             sources.Add(prepared.Id, new Source(prepared, containerName, identity, Authorized: true));
@@ -233,7 +264,7 @@ public sealed partial class ContainerEgressRuntime(
             try
             {
                 await PublishAsync(CompileCurrent(), cancellationToken).ConfigureAwait(false);
-                if (source.Identity.Role == "package") await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
+                if (source.Identity.Role == "package" || IsTelemetrySource(source.Identity)) await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -290,7 +321,7 @@ public sealed partial class ContainerEgressRuntime(
         ResolvedRuntimeImage dns = await RequireCachedImageAsync("egress-dns", cancellationToken).ConfigureAwait(false);
         Directory.CreateDirectory(configurationRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        if (options.ArtifactHosts.Count > 0) await PrepareArtifactSocketDirectoryAsync(cancellationToken).ConfigureAwait(false);
+        if ((options.ArtifactHosts.Count > 0 || TelemetryEnabled)) await PrepareArtifactSocketDirectoryAsync(cancellationToken).ConfigureAwait(false);
         ScopeNetwork outside = await EnsureNetworkAsync(outsideName, "outside", isPrivate: false, cancellationToken).ConfigureAwait(false);
         outsideDefaultGateway = outside.NativeGateway ?? throw new InvalidOperationException("The outside network has no native gateway.");
         await LoadPrivateTopologyAsync(cancellationToken).ConfigureAwait(false);
@@ -402,7 +433,7 @@ public sealed partial class ContainerEgressRuntime(
             JsonElement host = container.GetProperty("HostConfig");
             JsonElement config = container.GetProperty("Config");
             JsonElement binds = host.GetProperty("Binds");
-            bool artifactMount = !isDns && options.ArtifactHosts.Count > 0;
+            bool artifactMount = !isDns && (options.ArtifactHosts.Count > 0 || TelemetryEnabled);
             string[] expectedBinds = artifactMount ? [configurationRoot + ":/egress:ro", artifactSocketRoot + ":/host-artifacts:rw"] : [configurationRoot + ":/egress:ro"];
             JsonElement mounts = container.GetProperty("Mounts");
             bool mountsMatch = mounts.ValueKind == JsonValueKind.Array && mounts.GetArrayLength() == expectedBinds.Length
@@ -459,7 +490,7 @@ public sealed partial class ContainerEgressRuntime(
         else
         {
             args.AddRange(["--log-driver=k8s-file", "--log-opt=max-size=16mb"]);
-            if (options.ArtifactHosts.Count > 0) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
+            if ((options.ArtifactHosts.Count > 0 || TelemetryEnabled)) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
         }
         args.Add(image);
         args.AddRange(isDns ? ["-conf", "/egress/Corefile"] : ["-c", "/egress/bootstrap.json", "--concurrency", "1"]);
@@ -593,6 +624,9 @@ public sealed partial class ContainerEgressRuntime(
               ip daddr 127.0.0.0/8 counter reject
             """);
         Source? package = sources.Values.SingleOrDefault(static source => source.Authorized && source.Identity.Role == "package");
+        Source? telemetry = TelemetryEnabled ? sources.Values.SingleOrDefault(static source => source.Authorized && IsTelemetrySource(source.Identity)) : null;
+        if (telemetry is not null)
+            text.Append(CultureInfo.InvariantCulture, $" meta skuid 65532 ip saddr {networks[coreName].Gateway} ip daddr {telemetry.Container.Address} tcp dport 5080 counter accept\n");
         if (package is not null)
             text.Append(CultureInfo.InvariantCulture, $" meta skuid 65532 ip saddr {networks[coreName].Gateway} ip daddr {package.Container.Address} tcp dport 20101 counter accept\n");
         if (networks.Count > 0) text.Append(CultureInfo.InvariantCulture, $" ip daddr {{ {subnets} }} counter reject\n");
@@ -766,10 +800,14 @@ public sealed partial class ContainerEgressRuntime(
             .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port)));
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
+        Source? collector = TelemetryEnabled ? authorized.SingleOrDefault(static source => IsTelemetrySource(source.Identity)) : null;
+        EgressTelemetryTarget? telemetry = collector is null ? null : new EgressTelemetryTarget(collector.Container.Address, networks[coreName].Gateway,
+            [.. authorized.Where(static source => source.Identity.Role == "core" && source.Identity.Scope.Kind == "core" && !IsTelemetrySource(source.Identity))
+                .Select(source => new EgressTelemetryRoute(source.Container.Address, networks[coreName].Gateway))]);
         string allocationVersion = networkAudit.RecordAllocations(sources.Values.Select(source => new NetworkAccessAllocation(
             source.Container.Address, source.Container.Id, new NetworkAccessIdentity(source.Identity.Scope.Kind, source.Identity.Scope.UserId,
                 source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId))));
-        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion);
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled);
     }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)
@@ -884,12 +922,17 @@ public sealed partial class ContainerEgressRuntime(
         ["--silent", "--show-error", "--fail", "--max-time", "2", "--retry", "8", "--retry-connrefused",
             "--retry-delay", "1", "--retry-max-time", "8", "http://127.0.0.1:9901/config_dump"];
 
-    private async Task<PodmanCommandResult> HelperAsync(string entrypoint, string[] arguments, CancellationToken cancellationToken, bool networkAdmin = false)
+    private async Task<PodmanCommandResult> HelperAsync(string entrypoint, string[] arguments, CancellationToken cancellationToken, bool networkAdmin = false, string? networkNamespace = null)
     {
         string operation = Guid.NewGuid().ToString("N");
         var args = new List<string> { "run", "--rm", "--pull=never", "--pod", podName, "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--label", "kautuka.preparation=" + operation, "--label", "kautuka.preparation-helper=true",
             "--read-only", "--user", networkAdmin ? "0:0" : "65533:65533", "--volume", configurationRoot + ":/egress:ro", "--entrypoint", entrypoint };
+        if (networkNamespace is not null)
+        {
+            int pod = args.IndexOf("--pod"); args.RemoveRange(pod, 2);
+            args.InsertRange(1, ["--network", "ns:" + networkNamespace]);
+        }
         if (networkAdmin) args.Add("--cap-add=NET_ADMIN");
         args.Add(helperImage!.LocalImageId);
         args.AddRange(arguments);

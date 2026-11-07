@@ -23,7 +23,8 @@ public static class KautukaHostLoggingExtensions
         string protocol = KautukaOtlpSettings.ResolveProtocol(builder.Configuration);
         string? headers = KautukaOtlpSettings.ResolveHeaders(builder.Configuration);
 
-        return AddKautukaLoggingCore(builder.Logging, builder.Services, defaultMinimumLevel, serviceName, otlpEndpoint, protocol, headers);
+        return AddKautukaLoggingCore(builder.Logging, builder.Services, defaultMinimumLevel, serviceName, otlpEndpoint, protocol, headers,
+            builder.Configuration[KautukaTelemetryDefaults.UnixSocketPathKey]);
     }
 
     public static KautukaLogLevelSwitch AddKautukaLogging(this ILoggingBuilder builder, LogLevel defaultMinimumLevel, string? serviceName = null)
@@ -45,7 +46,8 @@ public static class KautukaHostLoggingExtensions
         string? serviceName,
         string? otlpEndpoint,
         string protocol,
-        string? headers)
+        string? headers,
+        string? unixSocketPath = null)
     {
         KautukaLogLevelSwitch logLevelSwitch = new(defaultMinimumLevel);
         services.AddSingleton(logLevelSwitch);
@@ -82,6 +84,7 @@ public static class KautukaHostLoggingExtensions
                     exporter.Endpoint = logsEndpoint;
                     exporter.Protocol = exportProtocol;
                     exporter.Headers = string.IsNullOrWhiteSpace(headers) ? null : headers;
+                    ManagedTelemetryHttpTransport.Configure(exporter, logsEndpoint, unixSocketPath);
                 });
             });
         }

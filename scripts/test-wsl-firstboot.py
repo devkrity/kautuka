@@ -54,6 +54,48 @@ class StagedApplianceTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires private Linux root mounts')
 class FirstBootDispatchTests(unittest.TestCase):
+    def test_managed_telemetry_configuration_is_private_and_can_be_disabled(self):
+        scripts = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory(prefix='kautuka-telemetry-settings-', dir='/var/tmp') as temporary:
+            script = r'''
+set -euo pipefail
+mount --make-rprivate /
+mount -t tmpfs -o size=8m,mode=0755 tmpfs /etc
+mkdir -p /etc/kautuka "$2/payload"
+printf 'root:x:0:\n' > /etc/group
+printf 'nameserver 192.0.2.53\n' > /etc/resolv.conf
+export KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1
+source "$1/kautuka-install-linux.sh.in"
+write_container_deployment_configuration "$2/payload" root
+python3 - <<'PY'
+import json,pathlib
+p=pathlib.Path('/etc/kautuka/manager.json');d=json.loads(p.read_text())
+assert d['ContainerEgress']['TelemetryEnabled'] is True
+o=d['Kautuka']['Telemetry']['Otlp']
+for name in ['Logs','Metrics','Traces']:
+ assert o[name+'Endpoint']=='http://kautuka-telemetry.internal/api/default/v1/'+name.lower()
+assert o['UnixSocketPath']=='/var/lib/kautuka/manager/egress/host/connect.sock'
+assert p.stat().st_mode&0o777==0o640
+d['ContainerEgress']['TelemetryEnabled']=False
+for name in ['Logs','Metrics','Traces']:o[name+'Endpoint']=''
+o['UnixSocketPath']='';p.write_text(json.dumps(d))
+PY
+write_container_deployment_configuration "$2/payload" root
+python3 - <<'PY'
+import json,pathlib
+p=pathlib.Path('/etc/kautuka/manager.json');d=json.loads(p.read_text())
+d['ContainerEgress']['TelemetryEnabled']=True
+d['Kautuka']['Telemetry']['Otlp']['LogsEndpoint']='https://elsewhere.invalid/v1/logs'
+p.write_text(json.dumps(d))
+PY
+if write_container_deployment_configuration "$2/payload" root; then
+ echo 'External host telemetry endpoint was accepted' >&2; exit 1
+fi
+'''
+            result = subprocess.run(['unshare','--mount','--fork','bash','-c',script,'fixture',str(scripts),temporary],
+                                    capture_output=True,text=True,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
     def test_real_runuser_and_su_close_child_leases_retain_parent_locks(self):
         scripts = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory(prefix='kautuka-installer-fds-',dir='/var/tmp') as temporary:

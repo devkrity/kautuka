@@ -9,6 +9,26 @@ namespace Kautuka.IntegrationTests;
 public sealed class NetworkAccessAuditStoreTests : IDisposable
 {
     [Fact]
+    public void InternalIngestionDoesNotBecomeExternalArtifactAudit()
+    {
+        var store = new NetworkAccessAuditStore(AuditRoot);
+        static string HostLine(string method, string authority, int second)
+            => $"2026-11-07T12:00:{second:00}.123456789Z " + new JsonObject
+            {
+                ["phase"] = "host-artifact",
+                ["request_method"] = method,
+                ["authority"] = authority,
+                ["status"] = 403,
+            }.ToJsonString();
+        store.Observe(envoy, [HostLine("POST", "kautuka-telemetry.internal", 1),
+            HostLine("POST", "kautuka-telemetry.internal:80", 2),
+            HostLine("CONNECT", "kautuka-telemetry.internal:443", 3)], false);
+        NetworkAuditEvent entry = Assert.Single(store.Read(admin, 0, 50, null).Events);
+        Assert.Equal("kautuka-telemetry.internal", entry.Destination);
+        Assert.Equal(443, entry.Port);
+    }
+
+    [Fact]
     public async Task CollectorDetectsShortSameContainerRotationAndDoesNotRewriteIdleHistory()
     {
         string runtimeRoot = Path.Combine(root, "runtime");

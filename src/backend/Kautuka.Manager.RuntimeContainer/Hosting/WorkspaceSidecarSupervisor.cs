@@ -43,7 +43,7 @@ public sealed class WorkspaceSidecarSupervisor(
     private const int defaultRunningProbeIntervalMilliseconds = 1000;
 
     public IReadOnlyList<string> ManagedContainerNames => catalog.Sidecars
-        .Where(sidecar => egressRuntime?.Enabled != true || sidecar.Name == "kautuka-pkgs-proxy").Select(static sidecar => sidecar.Name).ToArray();
+        .Where(sidecar => egressRuntime?.Enabled != true || sidecar.Name == "kautuka-pkgs-proxy" || egressRuntime.TelemetryEnabled && sidecar.Name == telemetrySidecarName).Select(static sidecar => sidecar.Name).ToArray();
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -69,7 +69,23 @@ public sealed class WorkspaceSidecarSupervisor(
         {
             WorkspaceSidecarDefinition package = catalog.Sidecars.SingleOrDefault(static sidecar => sidecar.Name == "kautuka-pkgs-proxy")
                 ?? throw new InvalidOperationException("The required package service is missing from the verified catalog.");
-            return await EnsurePackageEgressAsync(package, cancellationToken).ConfigureAwait(false);
+            bool packageReady = await EnsurePackageEgressAsync(package, cancellationToken).ConfigureAwait(false);
+            if (egressRuntime.TelemetryEnabled)
+            {
+                WorkspaceSidecarDefinition? telemetry = catalog.Sidecars.SingleOrDefault(static sidecar => sidecar.Name == telemetrySidecarName);
+                if (telemetry is not null && ShouldEnableSidecar(telemetry))
+                {
+                    bool telemetryReady;
+                    try { telemetryReady = await EnsureTelemetryEgressAsync(telemetry, cancellationToken).ConfigureAwait(false); }
+                    catch (Exception error) when (error is not OperationCanceledException)
+                    {
+                        logger.LogWarning(error, "Optional managed telemetry is not ready.");
+                        telemetryReady = false;
+                    }
+                    if (telemetry.RequiredForReady && !telemetryReady) return false;
+                }
+            }
+            return packageReady;
         }
 
         int maxParallelism = startupOptions.GetEffectiveSidecarMaxConcurrency();
@@ -349,6 +365,89 @@ public sealed class WorkspaceSidecarSupervisor(
             await runtime.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    private async Task<bool> EnsureTelemetryEgressAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
+    {
+        ContainerEgressRuntime runtime = egressRuntime!;
+        if (sidecar.Command.Count != 0) throw new InvalidOperationException("Managed telemetry requires the released collector command.");
+        string image = allowlist.Images.SingleOrDefault(static entry => entry.Id == "openobserve")?.Image
+            ?? throw new InvalidOperationException("The verified telemetry image is missing from the release inventory.");
+        ResolvedRuntimeImage resolved = await runtime.ResolveRuntimeImageAsync(image, cancellationToken).ConfigureAwait(false);
+        string executionImage = resolved.ForSource(image);
+        sidecar = sidecar with { Image = image, Ports = [], BuildContext = null, Dockerfile = null };
+        await runtime.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
+        PreparedPodmanContainer? existing = state.IsRunning ? await runtime.FindSourceAsync(sidecar.Name, cancellationToken).ConfigureAwait(false) : null;
+        if (existing is not null)
+        {
+            PodmanCommandResult imageInspection = await podmanCommandRunner.RunAsync(["image", "inspect", "--format", "{{.Id}}", executionImage], 10, cancellationToken).ConfigureAwait(false);
+            if (imageInspection.ExitCode != 0) throw new ContainerInspectionUnavailableException("Telemetry image identity inspection failed.");
+            if (await TelemetrySecurityMatchesAsync(state.InspectJson!, executionImage, cancellationToken).ConfigureAwait(false)
+                && LiveContainerSpec.DescribeSidecarDrift(state.InspectJson!, executionImage, [], imageInspection.StdOut.Trim(), sidecar.Volumes, sidecar.Environment, "kautuka-core") is null)
+                return await runtime.ProbeTelemetryAsync(existing, cancellationToken).ConfigureAwait(false);
+        }
+        if (state.Exists)
+        {
+            using JsonDocument inspected = JsonDocument.Parse(state.InspectJson!);
+            await runtime.RetireAsync(inspected.RootElement[0].GetProperty("Id").GetString()!, cancellationToken).ConfigureAwait(false);
+        }
+        if (!EnsureVolumeHostPaths(sidecar)) return false;
+        var identity = new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("system", "core", "core"), "core", telemetrySidecarName);
+        PreparedPodmanContainer prepared = await runtime.PrepareAndAuthorizeAsync(identity, sidecar.Name, (network, dns) =>
+        {
+            List<string> args = BuildRunArguments(sidecar, resolved);
+            args[0] = "create"; args.Remove("-d");
+            args[args.IndexOf("--network") + 1] = network;
+            int alias = args.IndexOf("--network-alias"); args.RemoveRange(alias, 2);
+            args.InsertRange(1, ["--pull=never", "--restart=no", "--dns", dns, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+                "--user", "0:0", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid"]);
+            return args;
+        }, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            PodmanCommandResult started = await runtime.StartWithAdmissionAsync(prepared,
+                token => podmanCommandRunner.RunAsync(prepared.StartArguments(attach: false), 15, token), cancellationToken).ConfigureAwait(false);
+            if (started.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Start telemetry service", started));
+            return await runtime.ProbeTelemetryAsync(prepared, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await runtime.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task<bool> TelemetrySecurityMatchesAsync(string inspected, string image, CancellationToken cancellationToken)
+    {
+        using JsonDocument actual = JsonDocument.Parse(inspected);
+        PodmanCommandResult imageInspection = await podmanCommandRunner.RunAsync(["image", "inspect", image], 10, cancellationToken).ConfigureAwait(false);
+        if (imageInspection.ExitCode != 0) throw new ContainerInspectionUnavailableException("Telemetry image inspection failed.");
+        using JsonDocument expected = JsonDocument.Parse(imageInspection.StdOut);
+        JsonElement container = actual.RootElement[0];
+        JsonElement config = container.GetProperty("Config");
+        JsonElement host = container.GetProperty("HostConfig");
+        JsonElement expectedConfig = expected.RootElement[0].GetProperty("Config");
+        return config.GetProperty("User").GetString() == "0:0"
+            && host.GetProperty("ReadonlyRootfs").GetBoolean()
+            && host.GetProperty("RestartPolicy").GetProperty("Name").GetString() is "no" or ""
+            && host.GetProperty("SecurityOpt").EnumerateArray().Any(static value => value.GetString() == "no-new-privileges")
+            && NoCapabilities(container.GetProperty("BoundingCaps")) && NoCapabilities(container.GetProperty("EffectiveCaps"))
+            && TelemetryImageCommandMatches(config, expectedConfig, "Entrypoint")
+            && TelemetryImageCommandMatches(config, expectedConfig, "Cmd");
+    }
+
+    internal static bool TelemetryImageCommandMatches(JsonElement actual, JsonElement image, string property)
+    {
+        static string[]? Parts(JsonElement config, string key)
+        {
+            if (!config.TryGetProperty(key, out JsonElement value) || value.ValueKind == JsonValueKind.Null) return [];
+            if (value.ValueKind != JsonValueKind.Array || value.EnumerateArray().Any(static item => item.ValueKind != JsonValueKind.String)) return null;
+            return [.. value.EnumerateArray().Select(static item => item.GetString()!)];
+        }
+        string[]? observed = Parts(actual, property);
+        string[]? expected = Parts(image, property);
+        return observed is not null && expected is not null && observed.SequenceEqual(expected, StringComparer.Ordinal);
     }
 
     private static bool NoCapabilities(JsonElement capabilities)

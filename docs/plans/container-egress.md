@@ -1268,3 +1268,39 @@ the interactive Windows installer/import flow was not rerun end-to-end. Windows
 launcher/layout tests provide separate coverage. Mac appliance execution remains
 unverified and is not claimed here. No production release or merge was performed,
 and no legacy host-service deployment conversion is included.
+
+## Managed telemetry completion
+
+The earlier temporary OpenObserve/OTLP disablement is replaced by the existing
+collector running privately on the core network. Its verified image, persistent
+catalog volume and optional readiness policy are retained. It publishes no host
+ports and receives no default external grants. Networked core services use a
+stable core-facing ingestion endpoint. CredentialsHost remains networkless with
+its exporters disabled; its console output remains available through Podman.
+
+Manager and UpdateService use direct HTTP/protobuf over the existing egress Unix
+socket. Its fixed telemetry authority accepts only the three POST ingestion
+paths; artifact CONNECT policy remains separate. The exporters disable redirects
+and proxy discovery and have no TCP fallback. The private backend exception is
+bound to the topology-owned core address, so an ordinary external hostname rule
+cannot use DNS rebinding to reach the collector. Internal host ingestion does not
+become an external artifact audit event. The OpenObserve administrative UI remains
+private.
+
+The native prototype used the actual collector and Native AOT runtime on an
+ext4-backed disposable owner. It verified startup, unpublished ports, core-only
+access, denied host routes, adoption, recreation and persistence. A Native AOT
+probe using the production log, metric and trace exporters sent distinct host
+and core-container markers. Queries found both markers in all three signal types,
+and the records survived collector recreation. The ordinary external DNS-rebind
+probe hit the kernel rejection counter. Native validation also corrected missing
+image Entrypoint handling and retained a deny-only host listener while the optional
+collector is absent. Disposable-owner cleanup completed without errors.
+
+Fresh installations explicitly enable managed telemetry; explicit disablement
+keeps host endpoints empty. Existing private container configurations without
+that selection remain disabled. The shared installer validates only the internal
+host endpoints/socket and rejects external host OTLP destinations. Local Unix
+transport tests cover authority rejection and redirects; native installer tests
+cover generated configuration and disablement. The rebuilt installed telemetry
+layout remains the final integration check for this checkpoint.

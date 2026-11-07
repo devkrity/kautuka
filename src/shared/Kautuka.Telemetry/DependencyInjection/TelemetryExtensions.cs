@@ -70,6 +70,7 @@ public static class KautukaTelemetryExtensions
             exportProtocol,
             "/v1/metrics");
         string? headers = KautukaOtlpSettings.ResolveHeaders(builder.Configuration);
+        string? unixSocketPath = builder.Configuration[KautukaTelemetryDefaults.UnixSocketPathKey];
         string? serviceName = builder.Configuration[$"{KautukaTelemetryDefaults.SectionPrefix}:ServiceName"];
 
         builder.Services.TryAddSingleton(new TelemetryDiagnosticsState(
@@ -110,6 +111,7 @@ public static class KautukaTelemetryExtensions
                         options.Endpoint = metricsEndpoint;
                         options.Protocol = exportProtocol;
                         options.Headers = string.IsNullOrWhiteSpace(headers) ? null : headers;
+                        ManagedTelemetryHttpTransport.Configure(options, metricsEndpoint, unixSocketPath);
                     });
                 }
 
@@ -136,6 +138,7 @@ public static class KautukaTelemetryExtensions
                         options.Endpoint = tracesEndpoint;
                         options.Protocol = exportProtocol;
                         options.Headers = string.IsNullOrWhiteSpace(headers) ? null : headers;
+                        ManagedTelemetryHttpTransport.Configure(options, tracesEndpoint, unixSocketPath);
                     });
                 }
 

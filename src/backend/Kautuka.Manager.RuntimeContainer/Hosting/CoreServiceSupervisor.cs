@@ -20,7 +20,8 @@ public sealed record CoreServiceUpdateIdentity(string Service, string ContainerI
 
 /// <summary>Fixed application services, reconciled by the existing Manager worker before Gateway's desired state.</summary>
 public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerEgressRuntime egress,
-    RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options, PodmanImageArchiveStore? archives = null) : IDisposable
+    RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options, PodmanImageArchiveStore? archives = null,
+    IConfiguration? applicationConfiguration = null) : IDisposable
 {
     private readonly PodmanImageArchiveStore imageStore = archives ?? new PodmanImageArchiveStore(runner, Path.Combine(paths.StateRoot, "oci-images"), inventory,
         Microsoft.Extensions.Logging.Abstractions.NullLogger<PodmanImageArchiveStore>.Instance);
@@ -280,7 +281,17 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             ["Kautuka__Telemetry__Otlp__LogsEndpoint"] = "",
             ["Kautuka__Telemetry__Otlp__MetricsEndpoint"] = "",
             ["Kautuka__Telemetry__Otlp__TracesEndpoint"] = "",
+            ["Kautuka__Telemetry__Otlp__UnixSocketPath"] = "",
         };
+        string? telemetryEndpoint = networkless ? null : await egress.GetCoreTelemetryEndpointAsync(ct).ConfigureAwait(false);
+        if (telemetryEndpoint is not null)
+        {
+            foreach ((string signal, string path) in new[] { ("Logs", "logs"), ("Metrics", "metrics"), ("Traces", "traces") })
+                environment["Kautuka__Telemetry__Otlp__" + signal + "Endpoint"] = telemetryEndpoint + "/v1/" + path;
+            environment["Kautuka__Telemetry__Otlp__Protocol"] = "http/protobuf";
+            if (applicationConfiguration?["Kautuka:Telemetry:Otlp:Headers"] is string headers)
+                environment["Kautuka__Telemetry__Otlp__Headers"] = headers;
+        }
         if (networkless) mounts.Add(new(Path.Combine(paths.StateRoot, "credentialsHost"), containerStateRoot + "/credentialsHost", false));
         else if (id == "gateway")
         {

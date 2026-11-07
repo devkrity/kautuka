@@ -2706,8 +2706,20 @@ if path.exists() or path.is_symlink():
         if address.version != 4 or address.is_loopback or address.is_unspecified or address.is_multicast:
             raise SystemExit('installed deployment DNS upstreams must be non-loopback IPv4 addresses')
     otlp = settings.get('Kautuka', {}).get('Telemetry', {}).get('Otlp', {})
-    if any(otlp.get(key) != '' for key in ('LogsEndpoint', 'MetricsEndpoint', 'TracesEndpoint')):
-        raise SystemExit('container deployment must explicitly disable host OTLP endpoints until managed telemetry is configured')
+    telemetry = settings.get('ContainerEgress', {}).get('TelemetryEnabled', False)
+    if not isinstance(telemetry, bool):
+        raise SystemExit('managed telemetry selection must be a boolean')
+    signals = {'LogsEndpoint': 'logs', 'MetricsEndpoint': 'metrics', 'TracesEndpoint': 'traces'}
+    if telemetry:
+        if any(otlp.get(key) not in ('', 'http://kautuka-telemetry.internal/api/default/v1/' + signal)
+               for key, signal in signals.items()):
+            raise SystemExit('managed host OTLP endpoints must use the private ingestion route')
+        if any(otlp.get(key) for key in signals) and otlp.get('UnixSocketPath') != '/var/lib/kautuka/manager/egress/host/connect.sock':
+            raise SystemExit('managed host OTLP requires the existing egress Unix socket')
+        if str(otlp.get('Protocol', 'http/protobuf')).lower() not in ('http/protobuf', 'http'):
+            raise SystemExit('managed telemetry requires HTTP/protobuf')
+    elif any(otlp.get(key) != '' for key in signals):
+        raise SystemExit('disabled managed telemetry requires explicitly empty host OTLP endpoints')
     os.chown(path, 0, grp.getgrnam(group).gr_gid)
     os.chmod(path, 0o640)
 else:
@@ -2734,8 +2746,13 @@ else:
     grants = [dict(ScopeType='core', UserId='system', AgentId=component, Role='core', ComponentId=component, Destination=host, Port=443)
               for component, hosts in (('gateway', gateway), ('channelhost', channel)) for host in hosts]
     settings = {'CoreServices': {'Enabled': True, 'WorkspaceRoot': '/var/lib/kautuka/workspaces', 'ConfigurationRoot': '/var/lib/kautuka/manager/core-config'},
-                'ContainerEgress': {'Enabled': True, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
-                'Kautuka': {'Telemetry': {'Otlp': {'LogsEndpoint': '', 'MetricsEndpoint': '', 'TracesEndpoint': ''}}}}
+                'ContainerEgress': {'Enabled': True, 'TelemetryEnabled': True, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
+                'Kautuka': {'Telemetry': {'Otlp': {
+                    'LogsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/logs',
+                    'MetricsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/metrics',
+                    'TracesEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/traces',
+                    'Protocol': 'http/protobuf',
+                    'UnixSocketPath': '/var/lib/kautuka/manager/egress/host/connect.sock'}}}}
     descriptor, temporary = tempfile.mkstemp(prefix='.manager-', dir=path.parent)
     try:
         with os.fdopen(descriptor, 'w') as stream:

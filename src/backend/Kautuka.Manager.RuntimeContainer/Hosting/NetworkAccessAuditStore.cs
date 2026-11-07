@@ -116,6 +116,11 @@ internal sealed class NetworkAccessAuditStore(string root)
                     JsonElement value = document.RootElement;
                     string phase = Text(value, "phase");
                     if (phase is not ("listener" or "proxy" or "host-artifact")) continue;
+                    // Local ingestion shares the host socket but is not external artifact access.
+                    string authorityValue = Text(value, "authority");
+                    if (phase == "host-artifact" && Text(value, "request_method") == "POST"
+                        && (authorityValue.Equals("kautuka-telemetry.internal", StringComparison.OrdinalIgnoreCase)
+                            || authorityValue.Equals("kautuka-telemetry.internal:80", StringComparison.OrdinalIgnoreCase))) continue;
                     parsed++;
                     string rawId = Hash(Encoding.UTF8.GetBytes(envoyContainerId + "\0" + line));
                     string source = Text(value, "source");
