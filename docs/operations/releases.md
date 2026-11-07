@@ -94,6 +94,16 @@ Before switching release pointers, the root helper writes an operation-bound jou
 
 After a committed update, built-in connector bootstrap waits until the maintenance fence is removed before contacting Manager. During a user-initiated update, the initiating browser shows restart progress instead of a transient updater socket error for up to 12 minutes; unrelated failures and an outage that outlasts that window remain visible.
 
+Container deployment settings live in the installer-owned
+`/etc/kautuka/manager.json`, shared by ordinary Manager startup and its fixed
+update-maintenance command. On Linux this file overrides release defaults and
+normal environment/argument configuration, and is read once without live reload.
+It is optional for legacy host installations; the installer must publish and
+validate container enablement, DNS and core settings before enabling the
+container service contract. Updates preserve it instead of copying deployment
+settings into each release. The maintenance command still forces the production
+mode/state root and adds no environment or argument configuration providers.
+
 ## Build identity and verification
 
 The release tag resolves version, channel, tag, and source commit. CI stamps .NET, frontend, installers, container tags, manifests, and artifacts from that identity. `Directory.Build.props` contains only `KautukaDevVersion` for unpublished local `-dev` builds. Before publication the workflow checks the signed manifest and checksums, component identity, asset names, and channel tag format. The About screen, diagnostics, and startup logs show the full version and source SHA; installer and download names show the product version.

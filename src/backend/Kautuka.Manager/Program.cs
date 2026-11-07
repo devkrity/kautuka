@@ -24,6 +24,10 @@ const int GrpcMaxMessageSizeBytes = 4 * 1024 * 1024;
 KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
 
 var builder = WebApplication.CreateSlimBuilder(args);
+// Installed deployment settings survive release changes and are authoritative
+// over release defaults and environment/argument deployment overrides.
+if (OperatingSystem.IsLinux())
+    builder.Configuration.AddJsonFile("/etc/kautuka/manager.json", optional: true, reloadOnChange: false);
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
