@@ -24,13 +24,14 @@ internal sealed class PodmanContainerPreparation(PodmanCommandRunner runner)
         IReadOnlyList<string> createArguments,
         string networkName,
         string gateway,
-        string routeHelperImage,
+        ResolvedRuntimeImage routeHelper,
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null)
     {
         ArgumentNullException.ThrowIfNull(createArguments);
         ArgumentException.ThrowIfNullOrWhiteSpace(networkName);
-        ContainerImageProvenancePolicy.EnsureTrusted(routeHelperImage, "Route helper");
+        ContainerImageProvenancePolicy.EnsureTrusted(routeHelper.SourceReference, "Route helper");
+        if (!RuntimeImageEntry.IsLocalId(routeHelper.LocalImageId)) throw new InvalidOperationException("The route helper requires a verified immutable image ID.");
         if (createArguments.Count == 0 || createArguments[0] != "create" || !createArguments.Contains("--pull=never"))
         {
             throw new ArgumentException("Preparation requires a create command with --pull=never.", nameof(createArguments));
@@ -65,7 +66,7 @@ internal sealed class PodmanContainerPreparation(PodmanCommandRunner runner)
             string[] helper = ["run", "--rm", "--pull=never", "--label", operationLabel + "=" + operation,
                 "--label", helperLabel + "=true", "--network", "ns:" + prepared.SandboxKey,
                 "--user", "0:0", "--cap-drop=ALL", "--cap-add=NET_ADMIN", "--security-opt=no-new-privileges",
-                "--read-only", "--entrypoint", "/usr/sbin/ip", routeHelperImage,
+                "--read-only", "--entrypoint", "/usr/sbin/ip", routeHelper.LocalImageId,
                 "route", "replace", "default", "via", gatewayAddress.ToString()];
             _ = await RunAsync(helper, cancellationToken).ConfigureAwait(false);
             PreparedPodmanContainer after = await InspectAsync(id, networkName, cancellationToken).ConfigureAwait(false);
@@ -77,7 +78,7 @@ internal sealed class PodmanContainerPreparation(PodmanCommandRunner runner)
             string[] readRoutes = ["run", "--rm", "--pull=never", "--label", operationLabel + "=" + operation,
                 "--label", helperLabel + "=true", "--network", "ns:" + prepared.SandboxKey,
                 "--user", "65532:65532", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only",
-                "--entrypoint", "/usr/sbin/ip", routeHelperImage, "-j", "-4", "route", "show", "default"];
+                "--entrypoint", "/usr/sbin/ip", routeHelper.LocalImageId, "-j", "-4", "route", "show", "default"];
             PodmanCommandResult routes = await RunAsync(readRoutes, cancellationToken).ConfigureAwait(false);
             using JsonDocument document = JsonDocument.Parse(routes.StdOut);
             JsonElement defaults = document.RootElement;

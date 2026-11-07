@@ -33,6 +33,7 @@ internal static class ContainerEgressManagerFixture
         var trace = new List<string[]>();
         var native = new PodmanCommandRunner();
         await CheckClientPublicationAsync(data, native, report, ct);
+        await ImageArchiveManagerFixture.RunAsync(data, native, report, ct);
         bool failAdmin = false;
         ContainerEgressRuntime? recoveryRuntime = null;
         bool recoveredBeforeCommit = false;
@@ -75,6 +76,24 @@ internal static class ContainerEgressManagerFixture
                 new("core-gateway", data.GetProperty("coreGateway").GetString()!, null),
                 new("core-channelhost", data.GetProperty("coreChannelHost").GetString()!, null),
                 new("core-webhost", data.GetProperty("coreWebHost").GetString()!, null)]);
+        // This fixture starts with native cached images. Bind their actual immutable IDs explicitly;
+        // the deliberately absent archive names cannot serve as a cold-bootstrap fallback.
+        var boundImages = new List<RuntimeImageEntry>();
+        foreach (RuntimeImageEntry entry in allowlist.Images)
+        {
+            PodmanCommandResult inspectedImage = await native.RunAsync(["image", "inspect", entry.Image], 15, ct);
+            if (inspectedImage.ExitCode != 0) throw new InvalidOperationException("Fixture cache image inspection failed.");
+            using JsonDocument imageDocument = JsonDocument.Parse(inspectedImage.StdOut);
+            ResolvedRuntimeImage cached = ResolvedRuntimeImage.FromInspection(entry.Image, imageDocument.RootElement[0]);
+            boundImages.Add(entry with
+            {
+                Archive = "cache-hit-only-" + entry.Id + ".oci",
+                ArchiveSha256 = new string('0', 64),
+                Platform = cached.Platform,
+                LocalImageId = cached.LocalImageId
+            });
+        }
+        allowlist = new RuntimeImageAllowlist(1, boundImages);
         var options = new ContainerEgressOptions
         {
             Enabled = true,

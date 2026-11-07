@@ -443,6 +443,7 @@ run_repo_node() {
 
 stage_oci_image_archives() {
   local rootfs_dir="$1"
+  local inventory_output="$2"
   local allowlist="$source_root/src/backend/Kautuka.Manager/runtime-images.json"
   local dest="$rootfs_dir/var/lib/kautuka/oci-images"
 
@@ -487,6 +488,15 @@ PY
     rm -f "$tmp_archive"
     sudo chmod 644 "$dest/$archive_name"
   done <<< "$image_rows"
+  local bound_inventory
+  bound_inventory="$(mktemp --suffix=.json)"
+  if ! python3 "$source_root/scripts/bind-runtime-image-archives.py" \
+      --inventory "$allowlist" --archive-root "$dest" --platform linux/amd64 --output "$bound_inventory"; then
+    rm -f "$bound_inventory"
+    return 1
+  fi
+  sudo install -m 0644 "$bound_inventory" "$inventory_output"
+  rm -f "$bound_inventory"
 }
 
 log_phase() {
@@ -1327,7 +1337,11 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   sudo chmod +x "$version_root/kautuka-manager"
   sudo ln -sfn "versions/$version" "$current_link"
   sudo touch "$linger_dir/kautuka"
-  stage_oci_image_archives "$rootfs_dir"
+  stage_oci_image_archives "$rootfs_dir" "$version_root/runtime-images.json"
+  # Both release artifacts currently target linux/amd64. Preserve the exact
+  # inventory baked into this appliance for the detached release signature.
+  # A future additional platform needs a separate inventory, not this binding.
+  sudo install -m 0644 "$version_root/runtime-images.json" "$release_dir/runtime-images.bound.json"
   sudo chown -R "$kautuka_uid:$kautuka_gid" "$visible_root/oci-images"
   sudo chmod 0750 "$visible_root/oci-images"
 
@@ -1660,7 +1674,7 @@ run_repo_node "$source_root/scripts/generate-release-manifest.mjs" \
   --channel "$channel" \
   --artifact-base-url "$artifact_base_url" \
   --published-at "$published_at" \
-  --runtime-images "$source_root/src/backend/Kautuka.Manager/runtime-images.json" \
+  --runtime-images "$release_dir/runtime-images.bound.json" \
   "${manifest_args[@]}"
 
 (

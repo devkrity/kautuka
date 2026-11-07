@@ -84,10 +84,23 @@ async function loadRuntimeImages(runtimeImagesPath) {
       );
     }
 
+    const binding = {};
+    if ([entry.archiveSha256, entry.platform, entry.localImageId].some((value) => value != null)) {
+      if (typeof entry.archive !== "string" || !/^[a-z0-9][a-z0-9.-]*\.(?:tar|oci)$/u.test(entry.archive)
+          || typeof entry.archiveSha256 !== "string" || !/^[a-fA-F0-9]{64}$/u.test(entry.archiveSha256)
+          || !["linux/amd64", "linux/arm64"].includes(entry.platform)
+          || typeof entry.localImageId !== "string" || !/^sha256:[a-fA-F0-9]{64}$/u.test(entry.localImageId)) {
+        throw new Error(`Incomplete or invalid archive/config binding for runtime image ${entry.id}`);
+      }
+      binding.archiveSha256 = entry.archiveSha256;
+      binding.platform = entry.platform;
+      binding.localImageId = entry.localImageId;
+    }
     return stable({
       id: entry.id,
       image: entry.image,
       archive: entry.archive ?? null,
+      ...binding,
     });
   });
 }

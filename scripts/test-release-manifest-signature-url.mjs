@@ -99,6 +99,24 @@ try {
   assert.equal(manifest.artifacts.find((asset) => asset.platform === "linux-x64").url, `${exactReleaseBase}/kautuka-linux-amd64.tar.gz`);
   assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "exact-tag artifact and signature URLs remain covered by the manifest signature");
 
+  const inventoryPath = path.join(tempRoot, "runtime-images.json");
+  const boundImage = { id: "core-gateway", image: `ghcr.io/devkrity/kautuka-gateway@sha256:${"a".repeat(64)}`,
+    archive: "gateway.oci", archiveSha256: "b".repeat(64), platform: "linux/amd64", localImageId: `sha256:${"c".repeat(64)}` };
+  await fs.writeFile(inventoryPath, JSON.stringify({ schemaVersion: 1, images: [boundImage] }));
+  generate(["--runtime-images", inventoryPath]);
+  manifestBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  manifest = JSON.parse(manifestBytes.toString("utf8"));
+  signature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  assert.deepEqual(manifest.runtimeImages, [boundImage], "the archive/config binding must survive manifest generation");
+  assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true);
+  const changedBinding = manifestBytes.toString("utf8").replace(boundImage.localImageId, `sha256:${"d".repeat(64)}`);
+  assert.equal(cryptoVerify("sha256", Buffer.from(changedBinding), publicKey, signature), false,
+    "the config binding is covered by the release signature");
+  const partial = { ...boundImage }; delete partial.platform;
+  await fs.writeFile(inventoryPath, JSON.stringify({ images: [partial] }));
+  assert.notEqual(generateRaw(["--runtime-images", inventoryPath]).status, 0, "partial archive identity must not be signed");
+  assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), manifestBytes);
+
   for (const [type, options] of [["rsa", { modulusLength: 2048 }], ["ec", { namedCurve: "secp384r1" }]]) {
     const badKey = generateKeyPairSync(type, options).privateKey;
     const badKeyPath = path.join(tempRoot, `${type}-wrong-key.pem`);

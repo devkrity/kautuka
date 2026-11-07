@@ -18,8 +18,10 @@ public sealed record CoreServicePaths(string StateRoot, string SocketRoot, strin
 
 /// <summary>Fixed application services, reconciled by the existing Manager worker before Gateway's desired state.</summary>
 public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerEgressRuntime egress,
-    RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options) : IDisposable
+    RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options, PodmanImageArchiveStore? archives = null) : IDisposable
 {
+    private readonly PodmanImageArchiveStore imageStore = archives ?? new PodmanImageArchiveStore(runner, Path.Combine(paths.StateRoot, "oci-images"), inventory,
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<PodmanImageArchiveStore>.Instance);
     private readonly SemaphoreSlim gate = new(1, 1);
     private const string containerSocketRoot = "/run/kautuka";
     private const string containerStateRoot = "/data";
@@ -54,7 +56,7 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             foreach (string service in new[] { "credentialshost", "channelhost", "gateway", "manager", "updateservice" })
                 Directory.CreateDirectory(Path.Combine(paths.SocketRoot, service));
             await egress.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
-            Service credentials = BuildService("credentialshost", "Kautuka.CredentialsHost", networkless: true);
+            Service credentials = await BuildServiceAsync("credentialshost", "Kautuka.CredentialsHost", networkless: true, cancellationToken).ConfigureAwait(false);
             string credentialsId = await EnsureServiceAsync(credentials, cancellationToken).ConfigureAwait(false);
             if (!await WaitForSocketAsync(credentialsId, "credentialshost", cancellationToken).ConfigureAwait(false)) return false;
             foreach ((string service, string identity) in new[] { ("manager", Kautuka.Manager.Protos.ManagerClientIdentities.GatewayCertificateFileName),
@@ -64,13 +66,13 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
                 string published = Path.Combine(root, "clients", "gateway");
                 if (!Directory.Exists(published) || !File.Exists(Path.Combine(published, ".ca.cer")) || !File.Exists(Path.Combine(published, identity))) return false;
             }
-            Service channel = BuildService("channelhost", "Kautuka.ChannelHost", networkless: false);
+            Service channel = await BuildServiceAsync("channelhost", "Kautuka.ChannelHost", networkless: false, cancellationToken).ConfigureAwait(false);
             string channelId = await EnsureServiceAsync(channel, cancellationToken).ConfigureAwait(false);
             if (!await WaitForSocketAsync(channelId, "channelhost", cancellationToken).ConfigureAwait(false)) return false;
-            Service gateway = BuildService("gateway", "Kautuka.Gateway", networkless: false);
+            Service gateway = await BuildServiceAsync("gateway", "Kautuka.Gateway", networkless: false, cancellationToken).ConfigureAwait(false);
             string gatewayId = await EnsureServiceAsync(gateway, cancellationToken).ConfigureAwait(false);
             if (!await WaitForSocketAsync(gatewayId, "gateway", cancellationToken).ConfigureAwait(false)) return false;
-            Service web = BuildService("webhost", "Kautuka.WebHost", networkless: false);
+            Service web = await BuildServiceAsync("webhost", "Kautuka.WebHost", networkless: false, cancellationToken).ConfigureAwait(false);
             string webId = await EnsureServiceAsync(web, cancellationToken).ConfigureAwait(false);
             return await WaitForWebAsync(webId, cancellationToken).ConfigureAwait(false);
         }
@@ -183,11 +185,12 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         }
     }
 
-    private Service BuildService(string id, string executable, bool networkless)
+    private async Task<Service> BuildServiceAsync(string id, string executable, bool networkless, CancellationToken ct)
     {
         string image = inventory.Images.SingleOrDefault(entry => entry.Id == "core-" + id)?.Image
             ?? throw new InvalidOperationException("The verified release inventory is missing core-" + id + ".");
         ContainerImageProvenancePolicy.EnsureTrusted(image, "Core service " + id, inventory.ImageReferences, requireListed: true);
+        ResolvedRuntimeImage resolved = await imageStore.ResolveCachedAsync(image, ct).ConfigureAwait(false);
         var mounts = new List<WorkspaceSidecarVolumeBinding>
         {
             new(paths.MaintenanceRoot, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!, true),
@@ -251,18 +254,18 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             ? [new(options.WebHostPort, 20229, options.WebHostBindAddress)] : [];
         string configuration = Path.Combine(paths.ConfigurationRoot, id + ".json");
         string configurationHash = id == "webhost" && options.WebHostCertificateDirectory is not null
-            ? Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(options.WebHostCertificateDirectory, "edge.pfx")))) : "";
+            ? Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(options.WebHostCertificateDirectory, "edge.pfx"), ct).ConfigureAwait(false))) : "";
         if (File.Exists(configuration))
         {
             mounts.Add(new(configuration, "/app/appsettings.Production.json", true));
-            configurationHash += Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(configuration)));
+            configurationHash += Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(configuration, ct).ConfigureAwait(false)));
         }
         IEnumerable<string> specification = new[] { id, executable, image, configurationHash }
             .Concat(mounts.Select(mount => mount.HostPath + ":" + mount.ContainerPath + ":" + mount.ReadOnly))
             .Concat(environment.Select(pair => pair.Key + "=" + pair.Value))
             .Concat(ports.Select(port => port.HostBindAddress + ":" + port.HostPort + ":" + port.ContainerPort));
         string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', specification))));
-        return new Service(id, executable, image, networkless, mounts, environment, ports, fingerprint);
+        return new Service(id, executable, resolved.LocalImageId, networkless, mounts, environment, ports, fingerprint);
     }
 
     private static List<string> CreateArguments(Service service, string network, string? dns)

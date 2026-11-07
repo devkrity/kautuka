@@ -57,7 +57,7 @@ builder.Services.AddSingleton(sp =>
         Path.GetFullPath(workspace), core.ConfigurationRoot ?? Path.Combine(paths.RuntimeRoot, "core-config"),
         KautukaDatabaseWriterLease.LockPath, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
     return new CoreServiceSupervisor(sp.GetRequiredService<PodmanCommandRunner>(), sp.GetRequiredService<ContainerEgressRuntime>(),
-        sp.GetRequiredService<RuntimeImageAllowlist>(), corePaths, core);
+        sp.GetRequiredService<RuntimeImageAllowlist>(), corePaths, core, sp.GetRequiredService<PodmanImageArchiveStore>());
 });
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();

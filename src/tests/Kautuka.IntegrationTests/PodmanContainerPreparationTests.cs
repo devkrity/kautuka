@@ -10,7 +10,7 @@ public sealed class PodmanContainerPreparationTests
     private static readonly string id = new('a', 64);
     private const string network = "kautuka-owner-agent";
     private const string sandbox = "/run/user/60123/netns/netns-1234-abcd";
-    private const string helper = "localhost/kautuka-route:fixture";
+    private static readonly ResolvedRuntimeImage helper = new("localhost/kautuka-route:fixture", "linux/amd64", "sha256:" + new string('f', 64));
 
     [Fact]
     public async Task PreparationUsesNativeAssignedIdentityWithoutStartingApplication()
@@ -30,6 +30,8 @@ public sealed class PodmanContainerPreparationTests
         Assert.Contains("ns:" + sandbox, route);
         Assert.DoesNotContain(route, argument => argument.StartsWith("container:", StringComparison.Ordinal));
         Assert.Contains("--pull=never", route);
+        Assert.Contains(helper.LocalImageId, route);
+        Assert.DoesNotContain(helper.SourceReference, route);
         Assert.Equal(new[] { "start", id }, prepared.StartArguments(attach: false));
         Assert.Equal(new[] { "start", "--attach", "--interactive", id }, prepared.StartArguments(attach: true));
     }

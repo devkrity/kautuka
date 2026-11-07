@@ -31,7 +31,9 @@ public sealed class ContainerEgressRuntime(
     private readonly string artifactSocketRoot = Path.Combine(stateRoot, "egress", "host");
     public string ArtifactSocketPath => Path.Combine(artifactSocketRoot, "connect.sock");
     private EnvoyEgressConfiguration? active;
-    private string? helperImage;
+    private readonly PodmanImageArchiveStore imageStore = archives ?? new PodmanImageArchiveStore(runner, Path.Combine(stateRoot, "oci-images"),
+        allowlist, Microsoft.Extensions.Logging.Abstractions.NullLogger<PodmanImageArchiveStore>.Instance);
+    private ResolvedRuntimeImage? helperImage;
     private string? infraId;
     private string? podId;
     private string? outsideDefaultGateway;
@@ -281,11 +283,10 @@ public sealed class ContainerEgressRuntime(
             throw new InvalidOperationException("Configure explicit non-loopback IPv4 DNS upstreams for the appliance resolver.");
         }
 
-        if (archives is not null) await archives.EnsureArchivedImagesLoadedAsync(cancellationToken).ConfigureAwait(false);
         helperImage = await RequireCachedImageAsync("egress-setup", cancellationToken).ConfigureAwait(false);
         await RecoverHelpersAsync(cancellationToken).ConfigureAwait(false);
-        string envoy = await RequireCachedImageAsync("egress-envoy", cancellationToken).ConfigureAwait(false);
-        string dns = await RequireCachedImageAsync("egress-dns", cancellationToken).ConfigureAwait(false);
+        ResolvedRuntimeImage envoy = await RequireCachedImageAsync("egress-envoy", cancellationToken).ConfigureAwait(false);
+        ResolvedRuntimeImage dns = await RequireCachedImageAsync("egress-dns", cancellationToken).ConfigureAwait(false);
         Directory.CreateDirectory(configurationRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         if (options.ArtifactHosts.Count > 0) await PrepareArtifactSocketDirectoryAsync(cancellationToken).ConfigureAwait(false);
@@ -299,7 +300,7 @@ public sealed class ContainerEgressRuntime(
                 "--label", ownerLabel + "=true", "--dns", "127.0.0.1", "--sysctl", "net.ipv4.ip_unprivileged_port_start=0",
                 "--sysctl", "net.ipv4.ip_forward=0",
                 "--exit-policy", "continue",
-                "--security-opt", "no-new-privileges", "--infra-image", helperImage,
+                "--security-opt", "no-new-privileges", "--infra-image", helperImage.LocalImageId,
                 "--infra-command", "/usr/bin/sleep infinity", "--network", outsideName], cancellationToken).ConfigureAwait(false);
         }
 
@@ -366,14 +367,12 @@ public sealed class ContainerEgressRuntime(
         recoveryRequiresProxyStop = false;
     }
 
-    private async Task<string> RequireCachedImageAsync(string id, CancellationToken cancellationToken)
+    private async Task<ResolvedRuntimeImage> RequireCachedImageAsync(string id, CancellationToken cancellationToken)
     {
         RuntimeImageEntry entry = allowlist.Images.SingleOrDefault(image => image.Id == id)
             ?? throw new InvalidOperationException("The verified runtime image inventory is missing " + id + ".");
         ContainerImageProvenancePolicy.EnsureTrusted(entry.Image, id);
-        if (!await ExistsAsync(["image", "exists", entry.Image], cancellationToken).ConfigureAwait(false))
-            throw new InvalidOperationException("The verified local bootstrap image is unavailable: " + id + ". Implicit pulls are disabled.");
-        return entry.Image;
+        return await imageStore.ResolveCachedAsync(entry.Image, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task PrepareArtifactSocketDirectoryAsync(CancellationToken ct)
@@ -388,8 +387,9 @@ public sealed class ContainerEgressRuntime(
         if (ownership != "0:0") throw new InvalidOperationException("Cannot confirm host artifact socket directory mapping.");
     }
 
-    private async Task EnsureServiceAsync(string name, string image, bool isDns, CancellationToken cancellationToken, bool requireRunning = false)
+    private async Task EnsureServiceAsync(string name, ResolvedRuntimeImage resolved, bool isDns, CancellationToken cancellationToken, bool requireRunning = false)
     {
+        string image = resolved.LocalImageId;
         if (await ExistsAsync(["container", "exists", name], cancellationToken).ConfigureAwait(false))
         {
             using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", name], cancellationToken).ConfigureAwait(false)).StdOut);
@@ -817,7 +817,7 @@ public sealed class ContainerEgressRuntime(
             "--label", "kautuka.preparation=" + operation, "--label", "kautuka.preparation-helper=true",
             "--read-only", "--user", networkAdmin ? "0:0" : "65533:65533", "--volume", configurationRoot + ":/egress:ro", "--entrypoint", entrypoint };
         if (networkAdmin) args.Add("--cap-add=NET_ADMIN");
-        args.Add(helperImage!);
+        args.Add(helperImage!.LocalImageId);
         args.AddRange(arguments);
         pendingHelpers.Add(operation);
         try

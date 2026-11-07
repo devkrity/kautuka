@@ -539,6 +539,25 @@ while True:
         podman('import','--change','ENTRYPOINT ["/usr/bin/bash","/mcp-fixture.sh"]',str(archive),mcp_image)
         helper_image='localhost/kautuka-egress-fixture:'+prefix
         podman('tag',tools,helper_image)
+        archive_root=root/'home'/'archive-proof'
+        archive_root.mkdir()
+        os.chown(archive_root,user.pw_uid,user.pw_gid)
+        (archive_root/'Containerfile').write_text('FROM scratch\nLABEL kautuka.archive.fixture='+prefix+'\n')
+        archive_image='localhost/kautuka-archive-proof:'+prefix
+        podman('build','--pull=never','--network=none','-t',archive_image,str(archive_root),timeout=120)
+        archive_info=json.loads(podman('image','inspect',archive_image))[0]
+        archive_file=archive_root/'image.oci'
+        podman('save','--format','oci-archive','-o',str(archive_file),archive_image,timeout=120)
+        with tarfile.open(archive_file) as source:
+            archive_index=json.load(source.extractfile('index.json'))
+            source_digest=archive_index['manifests'][0]['digest']
+            archive_manifest=json.load(source.extractfile('blobs/sha256/'+source_digest.split(':')[1]))
+            archive_config=archive_manifest['config']['digest']
+        with archive_file.open('rb') as content: archive_hash=hashlib.file_digest(content,'sha256').hexdigest()
+        archive_proof={'root':str(archive_root),'source':'ghcr.io/devkrity/native-archive-fixture@'+source_digest,
+            'sha256':archive_hash,'platform':archive_info['Os']+'/'+archive_info['Architecture'],'localImageId':archive_config}
+        report['archiveProofInput']=archive_proof
+        podman('rmi',archive_info['Id'])
         core_images={}
         if options.core_build_root is not None:
             base_archive=root/'home'/'core-base.oci'
@@ -585,7 +604,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_f
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
-            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, 'hostOnly':options.host_only, 'artifactCertificate':str(fixture/'cert.pem'), **core_images}))
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, 'hostOnly':options.host_only, 'artifactCertificate':str(fixture/'cert.pem'), 'archiveProof':archive_proof, **core_images}))
         native_input.chmod(0o644)
         p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}

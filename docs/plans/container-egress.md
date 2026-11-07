@@ -709,3 +709,32 @@ that failure cleaned up and did not reproduce in the rerun. Its exact cause is
 not established. The 30-second preparation budget is unchanged. Preparation
 errors now identify the native operation, and the fixture records slow/failed
 operation timing without printing argument lists or environment values.
+
+Release archive resolution now retains the signed repository reference for
+authorization and uses the inspected immutable config ID for bootstrap helpers
+and core-service creation/adoption. A bound entry requires archive SHA-256,
+Linux platform and config ID together. Missing cached images are loaded only
+after archive verification; mismatched identities/platforms fail closed without
+a pull. The legacy archive-loading entry point delegates to this same verifier
+when binding metadata is present. Podman's native bare-hex config ID is
+normalized to `sha256:` form without relaxing signed input validation.
+
+The release producer binds staged Docker/OCI archives without extracting them,
+then includes these fields in the detached signed manifest. The WSL version root
+and signer receive the same generated inventory. Both current release targets
+are linux/amd64; another platform requires its own inventory. Association with
+the repository reference relies on the trusted producer's pinned pull/save
+sequence, not on a claim that a converted archive proves registry provenance.
+This does not yet complete Linux archive distribution, bootstrap/core image
+publishing, application-managed registry acquisition or installer activation.
+
+Focused native report `artifacts/container-egress/runtime-proof-dc1efc0b.json`
+passed with clean teardown. It covers a genuinely absent tiny OCI image loaded
+from a synthetic trusted inventory, config-ID resolution without repository
+metadata, tamper rejection before a second load, host artifact transport and
+the four core services. The other images in that fixture use cache-hit bindings;
+this is not cold-install or real release-signature provenance evidence. The
+final combined runtime regression is being rebuilt after the legacy-entry-point
+correction. Producer checks pass for OCI/Docker wrappers, wrong platform,
+changed config blobs, ambiguous multi-image archives, traversal, signed binding
+preservation/tamper rejection and mocked native archive staging.

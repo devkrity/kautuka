@@ -93,7 +93,44 @@ public sealed record RuntimeImageAllowlist(
 public sealed record RuntimeImageEntry(
     string Id,
     string Image,
-    string? Archive);
+    string? Archive,
+    string? ArchiveSha256 = null,
+    string? Platform = null,
+    string? LocalImageId = null)
+{
+    internal bool HasArchiveIdentity => ArchiveSha256 is not null || Platform is not null || LocalImageId is not null;
+
+    internal void ValidateArchiveIdentity()
+    {
+        if (!HasArchiveIdentity) return;
+        if (string.IsNullOrWhiteSpace(Archive) || Archive is "." or ".." || Archive.IndexOfAny(['/', '\\', ':', '\0', '\r', '\n']) >= 0
+            || Path.IsPathRooted(Archive) || ArchiveSha256 is null || ArchiveSha256.Length != 64 || !ArchiveSha256.All(char.IsAsciiHexDigit)
+            || Platform is not ("linux/amd64" or "linux/arm64") || !IsLocalId(LocalImageId))
+            throw new InvalidOperationException("The signed image entry must contain a portable archive name, SHA-256, Linux platform and immutable config ID.");
+    }
+
+    internal static bool IsLocalId(string? value)
+    {
+        if (value is null || !value.StartsWith("sha256:", StringComparison.Ordinal) || value.Length != 71) return false;
+        foreach (char character in value.AsSpan(7))
+            if (!char.IsAsciiHexDigit(character)) return false;
+        return true;
+    }
+}
+
+internal sealed record ResolvedRuntimeImage(string SourceReference, string Platform, string LocalImageId)
+{
+    internal static ResolvedRuntimeImage FromInspection(string sourceReference, JsonElement image)
+    {
+        string? id = image.GetProperty("Id").GetString();
+        // Podman inspection reports the config ID as bare hex; signed metadata uses its algorithm prefix.
+        if (id?.Length == 64) id = "sha256:" + id;
+        string platform = image.GetProperty("Os").GetString() + "/" + image.GetProperty("Architecture").GetString();
+        if (!RuntimeImageEntry.IsLocalId(id) || platform is not ("linux/amd64" or "linux/arm64"))
+            throw new InvalidOperationException("Native image inspection did not contain a valid Linux config identity.");
+        return new(sourceReference, platform, id!);
+    }
+}
 
 public static class RuntimeImageAllowlistLoader
 {
@@ -135,6 +172,7 @@ public static class RuntimeImageAllowlistLoader
                 }
 
                 ContainerImageProvenancePolicy.EnsureTrusted(entry.Image, $"Allowlist entry '{entry.Id}'");
+                entry.ValidateArchiveIdentity();
             }
 
             return loaded;
