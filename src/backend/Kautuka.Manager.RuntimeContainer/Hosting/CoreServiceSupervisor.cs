@@ -1,5 +1,9 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+using Microsoft.Extensions.Configuration;
 using System.Text;
 using System.Text.Json;
 
@@ -20,7 +24,7 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
     private const string containerSocketRoot = "/run/kautuka";
     private const string containerStateRoot = "/data";
     private sealed record Service(string Id, string Executable, string Image, bool Networkless,
-        IReadOnlyList<WorkspaceSidecarVolumeBinding> Mounts, IReadOnlyDictionary<string, string> Environment, string Fingerprint)
+        IReadOnlyList<WorkspaceSidecarVolumeBinding> Mounts, IReadOnlyDictionary<string, string> Environment, IReadOnlyList<WorkspaceSidecarPortBinding> Ports, string Fingerprint)
     {
         internal string Name => "kautuka-" + Id;
     }
@@ -39,13 +43,15 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             if (File.Exists(maintenance) && KautukaMaintenanceMode.ShouldSuppressWorkers(await File.ReadAllTextAsync(maintenance, cancellationToken).ConfigureAwait(false)))
                 return false;
             if (!File.Exists(paths.WriterLock)) throw new InvalidOperationException("The installer must provision the host database-writer lock before starting services.");
+            ValidateWebPublication();
+            RequireChannelMaterial();
             string gatewayData = Path.Combine(paths.StateRoot, "gateway-data");
             if (File.Exists(Path.Combine(paths.StateRoot, "kautuka.db")))
                 throw new InvalidOperationException("The release installer must relocate the legacy Gateway database before enabling container services.");
             await ValidateWorkspaceRootAsync(gatewayData, cancellationToken).ConfigureAwait(false);
-            foreach (string directory in new[] { gatewayData, paths.WorkspaceRoot, paths.MaintenanceRoot, Path.Combine(paths.StateRoot, "credentialsHost") })
+            foreach (string directory in new[] { gatewayData, paths.WorkspaceRoot, paths.MaintenanceRoot, Path.Combine(paths.StateRoot, "credentialsHost"), Path.Combine(paths.StateRoot, "channelHost") })
                 Directory.CreateDirectory(directory);
-            foreach (string service in new[] { "credentialshost", "gateway", "manager", "updateservice" })
+            foreach (string service in new[] { "credentialshost", "channelhost", "gateway", "manager", "updateservice" })
                 Directory.CreateDirectory(Path.Combine(paths.SocketRoot, service));
             await egress.EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
             Service credentials = BuildService("credentialshost", "Kautuka.CredentialsHost", networkless: true);
@@ -58,9 +64,15 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
                 string published = Path.Combine(root, "clients", "gateway");
                 if (!Directory.Exists(published) || !File.Exists(Path.Combine(published, ".ca.cer")) || !File.Exists(Path.Combine(published, identity))) return false;
             }
+            Service channel = BuildService("channelhost", "Kautuka.ChannelHost", networkless: false);
+            string channelId = await EnsureServiceAsync(channel, cancellationToken).ConfigureAwait(false);
+            if (!await WaitForSocketAsync(channelId, "channelhost", cancellationToken).ConfigureAwait(false)) return false;
             Service gateway = BuildService("gateway", "Kautuka.Gateway", networkless: false);
             string gatewayId = await EnsureServiceAsync(gateway, cancellationToken).ConfigureAwait(false);
-            return await WaitForSocketAsync(gatewayId, "gateway", cancellationToken).ConfigureAwait(false);
+            if (!await WaitForSocketAsync(gatewayId, "gateway", cancellationToken).ConfigureAwait(false)) return false;
+            Service web = BuildService("webhost", "Kautuka.WebHost", networkless: false);
+            string webId = await EnsureServiceAsync(web, cancellationToken).ConfigureAwait(false);
+            return await WaitForWebAsync(webId, cancellationToken).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
@@ -70,7 +82,7 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            foreach (string service in new[] { "gateway", "credentialshost" })
+            foreach (string service in new[] { "webhost", "gateway", "channelhost", "credentialshost" })
             {
                 string? json = await PodmanContainerInspector.ReadAsync(runner, "kautuka-" + service, cancellationToken).ConfigureAwait(false);
                 if (json is null) continue;
@@ -81,6 +93,70 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             }
         }
         finally { gate.Release(); }
+    }
+
+    private void ValidateWebPublication()
+    {
+        if (!IPAddress.TryParse(options.WebHostBindAddress, out IPAddress? address) || address.AddressFamily != AddressFamily.InterNetwork || address.ToString() != options.WebHostBindAddress
+            || options.WebHostPort is < 1 or > 65535)
+            throw new InvalidOperationException("WebHost publication requires an IPv4 address and a valid TCP port.");
+        if (options.WebHostCertificateDirectory is null)
+        {
+            if (options.WebHostBindAddress != "127.0.0.1") throw new InvalidOperationException("LAN WebHost publication requires edge.pfx in its certificate directory.");
+        }
+        else if (string.IsNullOrWhiteSpace(options.WebHostCertificateDirectory)
+            || !File.Exists(Path.Combine(options.WebHostCertificateDirectory, "edge.pfx")))
+            throw new InvalidOperationException("The WebHost certificate directory must contain edge.pfx.");
+    }
+
+    private void RequireChannelMaterial()
+    {
+        foreach ((string directory, string[] files) in new[]
+        {
+            ("gateway-private", new[] { "gateway-channel-client.pfx", "gateway-channel-delegation.pfx" }),
+            ("gateway-trust", new[] { "channel-ca.cer" }),
+            ("channel-private", new[] { "channel-server.pfx" }),
+            ("channel-trust", new[] { "channel-ca.cer", "gateway-channel-client.cer", "gateway-channel-delegation.cer" }),
+        })
+            foreach (string file in files)
+                if (!File.Exists(Path.Combine(paths.StateRoot, "security", "channel", directory, file)))
+                    throw new InvalidOperationException("The installer must provision the disjoint Channel security inventories before application startup.");
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5400", Justification = "Local readiness pins the installed certificate; online revocation is not part of this check.")]
+    private async Task<bool> WaitForWebAsync(string id, CancellationToken ct)
+    {
+        IPAddress address = IPAddress.Parse(options.WebHostBindAddress);
+        if (address.Equals(IPAddress.Any)) address = IPAddress.Loopback;
+        string configuration = Path.Combine(paths.ConfigurationRoot, "webhost.json");
+        using var settings = new ConfigurationManager();
+        settings.AddJsonFile(configuration, optional: true);
+        using X509Certificate2? expected = options.WebHostCertificateDirectory is null ? null
+            : X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(options.WebHostCertificateDirectory, "edge.pfx"), settings["WebHost:Tls:CertificatePassword"]);
+        using var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false };
+        if (expected is not null)
+        {
+            string fingerprint = expected.GetCertHashString(HashAlgorithmName.SHA256);
+            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => certificate is not null
+                && certificate.NotBefore.ToUniversalTime() <= DateTime.UtcNow && certificate.NotAfter.ToUniversalTime() > DateTime.UtcNow
+                && certificate.GetCertHashString(HashAlgorithmName.SHA256) == fingerprint;
+        }
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(1) };
+        var endpoint = new Uri((expected is null ? "http" : "https") + "://" + address + ":" + options.WebHostPort + "/health");
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            if ((await CommandAsync(["inspect", "--format", "{{.State.Running}}", id], ct).ConfigureAwait(false)).StdOut.Trim() != "true") return false;
+            try
+            {
+                using HttpResponseMessage response = await client.GetAsync(endpoint, ct).ConfigureAwait(false);
+                if (response.StatusCode == HttpStatusCode.OK
+                    && await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false) == "{\"status\":\"ok\"}") return true;
+            }
+            catch (HttpRequestException) { }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            await Task.Delay(250, ct).ConfigureAwait(false);
+        }
+        return false;
     }
 
     private async Task ValidateWorkspaceRootAsync(string gatewayData, CancellationToken ct)
@@ -114,10 +190,13 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         ContainerImageProvenancePolicy.EnsureTrusted(image, "Core service " + id, inventory.ImageReferences, requireListed: true);
         var mounts = new List<WorkspaceSidecarVolumeBinding>
         {
-            new(paths.WriterLock, KautukaDatabaseWriterLease.LockPath, true),
             new(paths.MaintenanceRoot, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!, true),
-            new(Path.Combine(paths.SocketRoot, id), containerSocketRoot + "/" + id, false),
         };
+        if (id != "webhost")
+        {
+            mounts.Add(new(paths.WriterLock, KautukaDatabaseWriterLease.LockPath, true));
+            mounts.Add(new(Path.Combine(paths.SocketRoot, id), containerSocketRoot + "/" + id, false));
+        }
         var environment = new SortedDictionary<string, string>(StringComparer.Ordinal)
         {
             ["Kautuka__Mode"] = "prod",
@@ -132,36 +211,58 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             ["Kautuka__Telemetry__Otlp__TracesEndpoint"] = "",
         };
         if (networkless) mounts.Add(new(Path.Combine(paths.StateRoot, "credentialsHost"), containerStateRoot + "/credentialsHost", false));
-        else
+        else if (id == "gateway")
         {
             mounts.Add(new(Path.Combine(paths.StateRoot, "gateway-data"), containerStateRoot, false));
             mounts.Add(new(paths.WorkspaceRoot, paths.WorkspaceRoot, false));
             environment["Kautuka__Workspace__BaseRoot"] = paths.WorkspaceRoot;
-            foreach (string client in new[] { "manager", "updateservice", "credentialshost" })
+            foreach (string client in new[] { "manager", "updateservice", "credentialshost", "channelhost" })
                 mounts.Add(new(Path.Combine(paths.SocketRoot, client), containerSocketRoot + "/" + client, true));
             foreach (string service in new[] { "manager", "updateService", "credentialsHost/transport" })
                 mounts.Add(new(Path.Combine(paths.StateRoot, service, "clients", "gateway"), containerStateRoot + "/" + service + "/clients/gateway", true));
             foreach (string kind in new[] { "gateway-private", "gateway-trust" })
             {
                 string source = Path.Combine(paths.StateRoot, "security", "channel", kind);
-                if (!Directory.Exists(source)) continue;
                 string destination = "/security/channel/" + kind;
                 mounts.Add(new(source, destination, true));
                 environment["Kautuka__ChannelGateway__ProductionMaterial__" + (kind == "gateway-private" ? "GatewayPrivateRoot" : "GatewayTrustRoot")] = destination;
             }
         }
+        else if (id == "channelhost")
+        {
+            mounts.Add(new(Path.Combine(paths.StateRoot, "channelHost"), containerStateRoot + "/channelHost", false));
+            foreach (string kind in new[] { "channel-private", "channel-trust" })
+            {
+                string destination = "/security/channel/" + kind;
+                mounts.Add(new(Path.Combine(paths.StateRoot, "security", "channel", kind), destination, true));
+                environment["Kautuka__ChannelGateway__ProductionMaterial__" + (kind == "channel-private" ? "ChannelPrivateRoot" : "ChannelTrustRoot")] = destination;
+            }
+        }
+        else if (id == "webhost")
+        {
+            mounts.Add(new(Path.Combine(paths.SocketRoot, "gateway"), containerSocketRoot + "/gateway", true));
+            environment["WebHost__ListenAddress"] = "0.0.0.0";
+            environment["WebHost__DeploymentMode"] = options.WebHostCertificateDirectory is null ? "managed-loopback" : "managed-tls";
+            environment["WebHost__Tls__CertificatePath"] = options.WebHostCertificateDirectory is null ? "" : "/security/webhost/edge.pfx";
+            if (options.WebHostCertificateDirectory is not null)
+                mounts.Add(new(Path.GetFullPath(options.WebHostCertificateDirectory), "/security/webhost", true));
+        }
+        IReadOnlyList<WorkspaceSidecarPortBinding> ports = id == "webhost"
+            ? [new(options.WebHostPort, 20229, options.WebHostBindAddress)] : [];
         string configuration = Path.Combine(paths.ConfigurationRoot, id + ".json");
-        string configurationHash = "";
+        string configurationHash = id == "webhost" && options.WebHostCertificateDirectory is not null
+            ? Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(options.WebHostCertificateDirectory, "edge.pfx")))) : "";
         if (File.Exists(configuration))
         {
             mounts.Add(new(configuration, "/app/appsettings.Production.json", true));
-            configurationHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(configuration)));
+            configurationHash += Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(configuration)));
         }
         IEnumerable<string> specification = new[] { id, executable, image, configurationHash }
             .Concat(mounts.Select(mount => mount.HostPath + ":" + mount.ContainerPath + ":" + mount.ReadOnly))
-            .Concat(environment.Select(pair => pair.Key + "=" + pair.Value));
+            .Concat(environment.Select(pair => pair.Key + "=" + pair.Value))
+            .Concat(ports.Select(port => port.HostBindAddress + ":" + port.HostPort + ":" + port.ContainerPort));
         string fingerprint = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', specification))));
-        return new Service(id, executable, image, networkless, mounts, environment, fingerprint);
+        return new Service(id, executable, image, networkless, mounts, environment, ports, fingerprint);
     }
 
     private static List<string> CreateArguments(Service service, string network, string? dns)
@@ -176,6 +277,8 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         foreach (WorkspaceSidecarVolumeBinding mount in service.Mounts)
             args.AddRange(["--volume", mount.HostPath + ":" + mount.ContainerPath + (mount.ReadOnly ? ":ro" : ":rw")]);
         foreach ((string key, string value) in service.Environment) args.AddRange(["--env", key + "=" + value]);
+        foreach (WorkspaceSidecarPortBinding port in service.Ports)
+            args.AddRange(["--publish", port.HostBindAddress + ":" + port.HostPort + ":" + port.ContainerPort + "/tcp"]);
         args.Add(service.Image);
         return args;
     }
@@ -258,7 +361,7 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         }
         string json = container.GetRawText();
         string expectedNetwork = service.Networkless ? "none" : "kautuka-core";
-        if (LiveContainerSpec.DescribeSidecarDrift(json, service.Image, [], imageId, service.Mounts, service.Environment, expectedNetwork) is not null) return false;
+        if (LiveContainerSpec.DescribeSidecarDrift(json, service.Image, service.Ports, imageId, service.Mounts, service.Environment, expectedNetwork) is not null) return false;
         string[] environment = [.. config.GetProperty("Env").EnumerateArray().Select(value => value.GetString()!)];
         if (service.Environment.Any(pair => !environment.Contains(pair.Key + "=" + pair.Value, StringComparer.Ordinal))) return false;
         if (service.Networkless) return true;

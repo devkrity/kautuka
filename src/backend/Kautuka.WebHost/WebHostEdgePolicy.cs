@@ -37,7 +37,10 @@ internal static class WebHostEdgePolicy
                 configuration["WebHost:Tls:CertificatePassword"]);
         }
 
-        if (!IPAddress.IsLoopback(address) && certificate is null)
+        bool managedLoopback = configuration["WebHost:DeploymentMode"] == "managed-loopback"
+            && address.Equals(IPAddress.Any) && port == 20229
+            && OperatingSystem.IsLinux() && File.Exists("/run/.containerenv");
+        if (!IPAddress.IsLoopback(address) && certificate is null && !managedLoopback)
             throw new InvalidOperationException("WebHost requires a TLS certificate when listening on a non-loopback address.");
 
         return new WebHostEdgeBinding(address, port, certificate);

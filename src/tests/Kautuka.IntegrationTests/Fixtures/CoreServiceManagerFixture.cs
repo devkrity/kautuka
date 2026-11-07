@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -29,25 +30,34 @@ internal static class CoreServiceManagerFixture
             server.Dispose(); ca.Dispose();
             LocalCaMtlsBootstrap.PublishGatewayClientIdentity(canonical, file);
         }
+        string channelSecurity = Path.Combine(root, "security", "channel");
+        ChannelSecurityMaterialProvisioner.Provision(new ChannelSecurityMaterialDirectories(
+            Path.Combine(channelSecurity, "gateway-private"), Path.Combine(channelSecurity, "gateway-trust"),
+            Path.Combine(channelSecurity, "channel-private"), Path.Combine(channelSecurity, "channel-trust")));
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int webPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var options = new CoreServiceOptions { Enabled = true, WebHostPort = webPort };
         string writerLock = Path.Combine(root, "db-writer.lock");
         await File.WriteAllTextAsync(writerLock, "", ct);
         string sockets = Path.Combine(Path.GetDirectoryName(root)!, "core-sockets");
         var paths = new CoreServicePaths(root, sockets, Path.Combine(root, "workspaces"), Path.Combine(root, "core-config"),
             writerLock, Path.Combine(root, "maintenance"));
-        using var supervisor = new CoreServiceSupervisor(runner, egress, inventory, paths, new CoreServiceOptions { Enabled = true });
+        using var supervisor = new CoreServiceSupervisor(runner, egress, inventory, paths, options);
         try
         {
             if (!await supervisor.EnsureReadyAsync(ct))
             {
                 string logs = "";
-                foreach (string name in new[] { "kautuka-credentialshost", "kautuka-gateway" })
+                foreach (string name in new[] { "kautuka-credentialshost", "kautuka-channelhost", "kautuka-gateway", "kautuka-webhost" })
                 {
                     var result = await runner.RunAsync(["logs", name], 10, ct);
                     logs += name + ": " + result.StdOut + result.StdErr;
                 }
                 throw new InvalidOperationException("Core service bootstrap failed: " + logs);
             }
-            using JsonDocument first = JsonDocument.Parse((await runner.RunAsync(["inspect", "kautuka-credentialshost", "kautuka-gateway"], 10, ct)).StdOut);
+            using JsonDocument first = JsonDocument.Parse((await runner.RunAsync(["inspect", "kautuka-credentialshost", "kautuka-channelhost", "kautuka-gateway", "kautuka-webhost"], 10, ct)).StdOut);
             Dictionary<string, string> ids = ServiceIds(first.RootElement);
             JsonElement credentials = first.RootElement.EnumerateArray().Single(item => item.GetProperty("Config").GetProperty("Labels").GetProperty("kautuka.core-service").GetString() == "credentialshost");
             var interfaces = await runner.RunAsync(["run", "--rm", "--pull=never", "--network", "container:" + credentials.GetProperty("Id").GetString(),
@@ -63,13 +73,33 @@ internal static class CoreServiceManagerFixture
             report["coreCredentialsInterfaces"] = JsonNode.Parse(interfaces.StdOut);
             report["coreCredentialsNetworkMetadata"] = JsonNode.Parse(credentials.GetProperty("NetworkSettings").GetProperty("Networks").GetRawText());
             await CheckCredentialRpcAsync(root, sockets, ct);
+            await CheckWebAsync(webPort, null, ct);
             if (await ProbeExclusiveWriterLockAsync(writerLock, ct) != 1)
                 throw new InvalidOperationException("Container writers do not hold the host updater's lock inode");
             if (!await supervisor.EnsureReadyAsync(ct)) throw new InvalidOperationException("Core services could not be adopted");
-            using JsonDocument adopted = JsonDocument.Parse((await runner.RunAsync(["inspect", "kautuka-credentialshost", "kautuka-gateway"], 10, ct)).StdOut);
+            using JsonDocument adopted = JsonDocument.Parse((await runner.RunAsync(["inspect", "kautuka-credentialshost", "kautuka-channelhost", "kautuka-gateway", "kautuka-webhost"], 10, ct)).StdOut);
             Dictionary<string, string> adoptedIds = ServiceIds(adopted.RootElement);
             if (ids.Any(pair => adoptedIds[pair.Key] != pair.Value))
                 throw new InvalidOperationException("Unchanged core services were replaced during adoption");
+            string certificateDirectory = Path.Combine(root, "security", "webhost");
+            Directory.CreateDirectory(certificateDirectory);
+            using RSA key = RSA.Create(2048);
+            var request = new CertificateRequest("CN=Kautuka WebHost Fixture", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            var san = new SubjectAlternativeNameBuilder();
+            san.AddIpAddress(IPAddress.Loopback); san.AddDnsName("localhost");
+            request.CertificateExtensions.Add(san.Build());
+            using X509Certificate2 certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
+            await File.WriteAllBytesAsync(Path.Combine(certificateDirectory, "edge.pfx"), certificate.Export(X509ContentType.Pkcs12), ct);
+            options.WebHostCertificateDirectory = certificateDirectory;
+            if (!await supervisor.EnsureReadyAsync(ct)) throw new InvalidOperationException("TLS WebHost did not become ready");
+            await CheckWebAsync(webPort, certificate, ct);
+            using JsonDocument tlsInspection = JsonDocument.Parse((await runner.RunAsync(["inspect", "kautuka-credentialshost", "kautuka-channelhost", "kautuka-gateway", "kautuka-webhost"], 10, ct)).StdOut);
+            Dictionary<string, string> tlsIds = ServiceIds(tlsInspection.RootElement);
+            if (tlsIds["webhost"] == ids["webhost"] || ids.Any(pair => pair.Key != "webhost" && tlsIds[pair.Key] != pair.Value))
+                throw new InvalidOperationException("Enabling TLS did not replace only WebHost");
+            report["coreWebPublishedHttpAndTls"] = true;
+            report["coreWebForwardedGatewaySetupStatus"] = true;
+            report["coreTlsReplacedOnlyWebHost"] = true;
             report["coreCredentialsNetworkless"] = true;
             report["coreCredentialsAuthenticatedHealthRpc"] = true;
             report["coreServicesHeldHostWriterLock"] = true;
@@ -79,7 +109,7 @@ internal static class CoreServiceManagerFixture
         if (await ProbeExclusiveWriterLockAsync(writerLock, ct) != 0)
             throw new InvalidOperationException("Stopping core services did not release the updater's writer lock");
         report["coreServiceStopReleasedWriterLock"] = true;
-        await Console.Error.WriteLineAsync("fixture: actual CredentialsHost and Gateway containers passed");
+        await Console.Error.WriteLineAsync("fixture: four actual application containers and HTTP/TLS publication passed");
     }
 
     private static Dictionary<string, string> ServiceIds(JsonElement inspection)
@@ -87,9 +117,30 @@ internal static class CoreServiceManagerFixture
         Dictionary<string, string> ids = inspection.EnumerateArray().ToDictionary(
             item => item.GetProperty("Config").GetProperty("Labels").GetProperty("kautuka.core-service").GetString()!,
             item => item.GetProperty("Id").GetString()!, StringComparer.Ordinal);
-        if (ids.Count != 2 || !ids.ContainsKey("credentialshost") || !ids.ContainsKey("gateway"))
-            throw new InvalidOperationException("The core fixture did not inspect exactly the two expected service identities");
+        if (ids.Count != 4 || new[] { "credentialshost", "channelhost", "gateway", "webhost" }.Any(service => !ids.ContainsKey(service)))
+            throw new InvalidOperationException("The core fixture did not inspect exactly the four expected service identities");
         return ids;
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5400", Justification = "Local readiness pins the installed certificate; online revocation is not part of this check.")]
+    private static async Task CheckWebAsync(int port, X509Certificate2? certificate, CancellationToken ct)
+    {
+        using var handler = new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false };
+        if (certificate is not null)
+            handler.ServerCertificateCustomValidationCallback = (_, peer, _, _) => peer is not null
+                && peer.GetCertHashString(HashAlgorithmName.SHA256) == certificate.GetCertHashString(HashAlgorithmName.SHA256);
+        using var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+            BaseAddress = new Uri((certificate is null ? "http" : "https") + "://127.0.0.1:" + port)
+        };
+        using HttpResponseMessage health = await client.GetAsync(new Uri("/health", UriKind.Relative), ct);
+        if (health.StatusCode != HttpStatusCode.OK || await health.Content.ReadAsStringAsync(ct) != "{\"status\":\"ok\"}")
+            throw new InvalidOperationException("The published WebHost did not serve its health response");
+        using HttpResponseMessage setup = await client.GetAsync(new Uri("/api/auth/setup/status", UriKind.Relative), ct);
+        using JsonDocument body = JsonDocument.Parse(await setup.Content.ReadAsStringAsync(ct));
+        if (setup.StatusCode != HttpStatusCode.OK || !body.RootElement.TryGetProperty("needsSetup", out JsonElement needsSetup) || !needsSetup.GetBoolean())
+            throw new InvalidOperationException("WebHost did not forward the first-run Gateway setup response over its Unix socket");
     }
 
     private static async Task CheckCredentialRpcAsync(string root, string sockets, CancellationToken ct)

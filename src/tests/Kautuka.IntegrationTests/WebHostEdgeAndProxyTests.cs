@@ -36,6 +36,19 @@ public sealed class WebHostEdgeAndProxyTests
         Assert.Contains("requires a TLS certificate", exception.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("0.0.0.0", 20230)]
+    [InlineData("192.0.2.1", 20229)]
+    public void ManagedLoopbackModeCannotAuthorizeOtherContainerBindings(string address, int port)
+    {
+        IConfiguration configuration = Configuration(new Dictionary<string, string?>
+        {
+            ["WebHost:ListenAddress"] = address,
+            ["WebHost:DeploymentMode"] = "managed-loopback",
+        });
+        Assert.Throws<InvalidOperationException>(() => WebHostEdgePolicy.Resolve(configuration, port));
+    }
+
     [Fact]
     public void NonLoopbackBindingLoadsConfiguredCertificate()
     {

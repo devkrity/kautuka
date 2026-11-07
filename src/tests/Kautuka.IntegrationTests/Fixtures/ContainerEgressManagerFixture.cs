@@ -62,7 +62,9 @@ internal static class ContainerEgressManagerFixture
          new("kautuka-base",data.GetProperty("sandbox").GetString()!,null)]);
         if (data.TryGetProperty("coreCredentialsHost", out JsonElement credentialsImage))
             allowlist = new RuntimeImageAllowlist(1, [.. allowlist.Images, new("core-credentialshost", credentialsImage.GetString()!, null),
-                new("core-gateway", data.GetProperty("coreGateway").GetString()!, null)]);
+                new("core-gateway", data.GetProperty("coreGateway").GetString()!, null),
+                new("core-channelhost", data.GetProperty("coreChannelHost").GetString()!, null),
+                new("core-webhost", data.GetProperty("coreWebHost").GetString()!, null)]);
         var options = new ContainerEgressOptions
         {
             Enabled = true,
@@ -85,6 +87,13 @@ internal static class ContainerEgressManagerFixture
         await runtime.EnsureReadyAsync(ct);
         if (data.TryGetProperty("coreCredentialsHost", out _))
             await CoreServiceManagerFixture.RunAsync(data, runner, runtime, allowlist, report, ct);
+        if (data.TryGetProperty("coreOnly", out JsonElement coreOnly) && coreOnly.GetBoolean())
+        {
+            if (!data.TryGetProperty("coreCredentialsHost", out _)) throw new InvalidOperationException("Core-only proof requires application images.");
+            report["proofScope"] = "core-services-only";
+            report["passed"] = true;
+            return report;
+        }
         report["bootstrapReady"] = true;
         await Console.Error.WriteLineAsync("fixture: bootstrap ready");
         var adminDenied = await native.RunAsync(["run", "--rm", "--pull=never", "--pod", "kautuka-egress", "--cap-drop=ALL",

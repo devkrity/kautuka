@@ -613,3 +613,51 @@ Linux-only skip. The architect found no remaining source blocker in this pair.
 This does not establish a complete installed deployment: ChannelHost, WebHost,
 observability, installer/data relocation, host artifact transport and container
 release/update integration remain unfinished.
+
+The next core integration extends the same supervisor to CredentialsHost,
+ChannelHost, Gateway and WebHost, with reverse-order retirement. ChannelHost
+receives its own state and the existing disjoint production channel inventories;
+Gateway receives the ChannelHost socket and its own channel client identities.
+The offline channel authority is not mounted into either service.
+
+WebHost receives no Gateway database, workspace, client PFX, writer lock or
+writable service-state mount. Its existing Unix-socket Gateway hop is preserved.
+Manager publishes exactly one IPv4 TCP port to container port 20229. HTTP is
+permitted only for the explicit managed-loopback deployment with host publication
+127.0.0.1; the container itself listens on the private core interface. Other host
+bindings require an edge.pfx in the configured certificate directory, mounted
+read-only. The optional certificate password remains in webhost.json. Readiness
+requires the actual /health response, using an exact installed-certificate pin
+and validity check for HTTPS. It is a local readiness check, not browser PKI or
+revocation validation. Certificate content participates in the service fingerprint;
+replacement recreates WebHost on reconciliation rather than reloading it live.
+The image recipe requires the same-release web-assets image for its frontend.
+Native service-fixture payloads alone do not establish the packaged frontend.
+
+Update integration remains pending: the existing updater checks host service
+units, and its Manager client currently has status-only authorization. The
+container release path must add narrowly authorized UpdateService lifecycle
+operations, replace those unit checks with deployment health, and preserve the
+existing maintenance journal and exclusive database-writer fence. A maintenance
+marker suppresses new reconciliation; it does not itself stop running writers.
+
+`artifacts/container-egress/runtime-proof-88bca744.json` passed with no cleanup
+errors on the preceding four-service build. It verified networkless CredentialsHost
+mTLS health, shared writer-lock fencing, unchanged-ID adoption, published WebHost
+HTTP and HTTPS, Gateway setup-status forwarding over the Unix socket, and
+replacement of only WebHost when enabling TLS. All prior workload, package,
+source-reuse and dependency-execution regressions also passed. That run preceded
+the local pinned-health correction removing the online revocation request; the
+corrected build is being verified separately with the explicitly scoped
+`--core-only` test mode. The focused Windows group passed 39 tests.
+
+The corrected core-only native report
+`artifacts/container-egress/runtime-proof-75cdf94a.json` passed with clean teardown.
+It explicitly reports `core-services-only`: the four real application services,
+HTTP/TLS publication, Gateway forwarding, same-ID adoption, WebHost-only TLS
+replacement, networkless credentials and writer-lock checks all passed. It does
+not repeat the workload regressions covered by the preceding full report.
+All 65 runtime/shared/fixture inputs match the final native build snapshot by
+normalized-text SHA-256. The architect's final source review found no remaining
+blocker. Container-release acquisition, installer activation, full frontend image
+packaging, updater lifecycle operations and installed-system recovery remain open.

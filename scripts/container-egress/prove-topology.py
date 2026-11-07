@@ -33,7 +33,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image-cache', required=True, type=pathlib.Path, help='Directory containing envoy.oci and dns.oci')
 parser.add_argument('--policy-fixture', required=True, type=pathlib.Path, help='C# test-exported cds/lds and mixed-cds/mixed-lds JSON files')
 parser.add_argument('--manager-smoke', type=pathlib.Path, help='Optional linux-x64 Native AOT Manager fixture executable')
-parser.add_argument('--core-build-root', type=pathlib.Path, help='Optional isolated native CredentialsHost/Gateway build snapshot')
+parser.add_argument('--core-build-root', type=pathlib.Path, help='Optional isolated native application-service build snapshot')
+parser.add_argument('--core-only', action='store_true', help='Run only core-service Manager acceptance, omitting workload regressions')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -49,8 +50,9 @@ if options.core_build_root is not None:
         parser.error('core build must be an isolated task snapshot under /var/tmp')
     if options.manager_smoke is None or not (options.image_cache/'core-base.oci').is_file():
         parser.error('core test needs a Manager smoke binary and offline core-base.oci')
-    for service in ('CredentialsHost','Gateway'):
+    for service in ('CredentialsHost','ChannelHost','Gateway','WebHost'):
         if not (core_root/'publish'/service/('Kautuka.'+service)).is_file(): parser.error('missing core native binary '+service)
+if options.core_only and options.core_build_root is None: parser.error('--core-only requires --core-build-root')
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
 lock = os.open('/run/lock/kautuka-egress-proof.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -539,7 +541,7 @@ while True:
             podman('load','-i',str(base_archive))
             core_base='localhost/kautuka-core-base:'+prefix
             podman('tag',config_id,core_base)
-            for service in ('CredentialsHost','Gateway'):
+            for service in ('CredentialsHost','ChannelHost','Gateway','WebHost'):
                 context=root/'home'/('core-build-'+service)
                 context.mkdir()
                 shutil.copytree(options.core_build_root/'publish'/service,context/'payload')
@@ -554,7 +556,7 @@ while True:
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
-            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), **core_images}))
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, **core_images}))
         native_input.chmod(0o644)
         p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
@@ -572,12 +574,13 @@ while True:
         if p.returncode: raise RuntimeError('Native Manager lifecycle failed: '+p.stdout[-3000:]+' '+p.stderr[-8000:])
         report['managerRuntime']=json.loads(p.stdout.strip().splitlines()[-1])
         workspace_file=root/'home'/'managed'/'alpha'/'native-fixture.txt'
-        if not workspace_file.is_file() or workspace_file.stat().st_uid!=user.pw_uid: raise RuntimeError('sandbox file is not owned by the runtime host account')
-        report['sandboxFileOwnedByRuntime']=True
+        if not options.core_only:
+            if not workspace_file.is_file() or workspace_file.stat().st_uid!=user.pw_uid: raise RuntimeError('sandbox file is not owned by the runtime host account')
+            report['sandboxFileOwnedByRuntime']=True
         report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
         report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
-    report['scope'] = 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
+    report['scope'] = 'rootless-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
 except Exception as error:
     report['error'] = str(error)
