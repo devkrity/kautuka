@@ -3,7 +3,7 @@ using System.Text;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
-public sealed class PodmanCommandRunner
+public sealed partial class PodmanCommandRunner
 {
     public const string BinaryName = "podman";
     private readonly Func<IReadOnlyList<string>, int, CancellationToken, IReadOnlyDictionary<string, string>?, Task<PodmanCommandResult>>? commandHandler;

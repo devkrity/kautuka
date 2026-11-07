@@ -432,6 +432,19 @@ public sealed partial class ContainerEgressRuntime(
                 || !(artifactMount ? groups.SequenceEqual(new[] { "0" }) : groups.Length == 0))
                 throw new InvalidOperationException("Existing egress service does not match its managed pod, image and security specification.");
             bool running = container.GetProperty("State").GetProperty("Running").GetBoolean();
+            if (!isDns && (!host.TryGetProperty("LogConfig", out JsonElement log)
+                || log.GetProperty("Type").GetString() != "k8s-file"
+                || !string.Equals(log.GetProperty("Size").GetString(), "16MB", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (running || requireRunning)
+                    throw new InvalidOperationException("The managed proxy's audit log options differ; controlled proxy replacement is required.");
+                // Proper update shutdown has already closed egress. Replace
+                // only the exact stopped, fully validated managed container.
+                await TryFinalNetworkAuditAsync(cancellationToken).ConfigureAwait(false);
+                _ = await RunAsync(["rm", container.GetProperty("Id").GetString()!], cancellationToken).ConfigureAwait(false);
+                await EnsureServiceAsync(name, resolved, isDns, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (requireRunning && !running) throw new InvalidOperationException("Egress changed during adoption; recovery must be retried before startup.");
             if (running) return;
             _ = await RunAsync(["start", container.GetProperty("Id").GetString()!], cancellationToken).ConfigureAwait(false);
@@ -443,7 +456,11 @@ public sealed partial class ContainerEgressRuntime(
             "--label", "kautuka.managed=manager", "--label", ownerLabel + "=true", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--user", "65532:65532", "--volume", configurationRoot + ":/egress:ro" };
         if (isDns) args.Add("--cap-add=NET_BIND_SERVICE");
-        else if (options.ArtifactHosts.Count > 0) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
+        else
+        {
+            args.AddRange(["--log-driver=k8s-file", "--log-opt=max-size=16mb"]);
+            if (options.ArtifactHosts.Count > 0) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
+        }
         args.Add(image);
         args.AddRange(isDns ? ["-conf", "/egress/Corefile"] : ["-c", "/egress/bootstrap.json", "--concurrency", "1"]);
         _ = await RunAsync(args, cancellationToken).ConfigureAwait(false);
@@ -691,6 +708,7 @@ public sealed partial class ContainerEgressRuntime(
             JsonElement actual = PodmanContainerInspector.Container(observed.RootElement);
             if (actual.GetProperty("Id").GetString() != id || actual.GetProperty("State").GetProperty("Running").GetBoolean())
                 throw new InvalidOperationException("The egress proxy could not be confirmed stopped; update shutdown is deferred.");
+            await TryFinalNetworkAuditAsync(cancellationToken).ConfigureAwait(false);
         }
         finally { gate.Release(); }
     }
@@ -748,7 +766,10 @@ public sealed partial class ContainerEgressRuntime(
             .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port)));
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
-        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts);
+        string allocationVersion = networkAudit.RecordAllocations(sources.Values.Select(source => new NetworkAccessAllocation(
+            source.Container.Address, source.Container.Id, new NetworkAccessIdentity(source.Identity.Scope.Kind, source.Identity.Scope.UserId,
+                source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId))));
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion);
     }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)

@@ -396,9 +396,9 @@ stop_container_core() {
 write_durable_record() {
     local destination="$1" operation_id="$2" phase="$3" source_release="$4" target_release="$5" snapshot="$6"
     shift 6
-    python3 - "$destination" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "$database_root" "$@" <<'PY'
-import json, os, sys, tempfile
-path, operation, phase, source, target, snapshot, data_root, *pairs = sys.argv[1:]
+    python3 - "$destination" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "$database_root" "$maintenance_path" "$@" <<'PY'
+import json, os, stat, sys, tempfile
+path, operation, phase, source, target, snapshot, data_root, fence_path, *pairs = sys.argv[1:]
 pointers = {}
 manifest_sha256 = None
 for pair in pairs:
@@ -419,6 +419,18 @@ document = {
 }
 if manifest_sha256 is not None:
     document['snapshotManifestSha256'] = manifest_sha256
+# A validated retry does not create a new admission fence. Moving its timestamp
+# would invalidate desired state that Manager already accepted under this fence.
+if path == fence_path and os.path.lexists(path):
+    existing = os.lstat(path)
+    if not stat.S_ISREG(existing.st_mode) or existing.st_uid != 0 or existing.st_mode & 0o022:
+        raise SystemExit('error: existing maintenance fence is not a safe root-owned regular file')
+    try:
+        with open(path, encoding='utf-8') as stream:
+            if json.load(stream) == document:
+                raise SystemExit(0)
+    except (ValueError, UnicodeError):
+        pass  # Reconstruct a malformed fence from the validated journal.
 os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
 fd, temporary = tempfile.mkstemp(prefix='.record-', dir=os.path.dirname(path))
 try:

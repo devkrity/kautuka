@@ -8,6 +8,43 @@ namespace Kautuka.IntegrationTests;
 public sealed class EnvoyEgressConfigurationTests
 {
     [Fact]
+    public void LogAttributionChangesEvenWhenNeitherAllocationHasAnAllowRule()
+    {
+        EnvoyEgressConfiguration first = EnvoyEgressConfiguration.Compile([], "10.89.0.2", artifactHosts: ["registry.example.com"], allocationVersion: new string('a', 64));
+        EnvoyEgressConfiguration second = EnvoyEgressConfiguration.Compile([], "10.89.0.2", artifactHosts: ["registry.example.com"], allocationVersion: new string('b', 64));
+        Assert.NotEqual(first.Version, second.Version);
+        using JsonDocument document = JsonDocument.Parse(first.ListenerDocument);
+        JsonElement[] loggers = [.. AccessLoggers(document.RootElement)];
+        Assert.NotEmpty(loggers);
+        foreach (JsonElement logger in loggers)
+        {
+            JsonElement log = logger.GetProperty("typed_config").GetProperty("log_format").GetProperty("json_format");
+            Assert.Equal(first.Version, log.GetProperty("publication").GetString());
+            Assert.Equal(new string('a', 64), log.GetProperty("allocation").GetString());
+            Assert.Equal("%STREAM_ID%", log.GetProperty("stream_id").GetString());
+            Assert.Equal("%CONNECTION_ID%", log.GetProperty("connection_id").GetString());
+            Assert.Equal("%START_TIME(%s.%9f)%", log.GetProperty("connection_started").GetString());
+            Assert.Equal("%FILTER_CHAIN_NAME%", log.GetProperty("filter_chain").GetString());
+        }
+    }
+
+    private static IEnumerable<JsonElement> AccessLoggers(JsonElement node)
+    {
+        if (node.ValueKind == JsonValueKind.Object)
+        {
+            if (node.TryGetProperty("name", out JsonElement name) && name.ValueKind == JsonValueKind.String
+                && name.GetString() == "envoy.access_loggers.stderr") yield return node;
+            foreach (JsonProperty property in node.EnumerateObject())
+                foreach (JsonElement logger in AccessLoggers(property.Value)) yield return logger;
+        }
+        else if (node.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement item in node.EnumerateArray())
+                foreach (JsonElement logger in AccessLoggers(item)) yield return logger;
+        }
+    }
+
+    [Fact]
     public async Task ExactRulesPreserveSourceBoundariesAndChooseApprovedUpstream()
     {
         EnvoyEgressConfiguration config = EnvoyEgressConfiguration.Compile([

@@ -4,7 +4,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 public sealed record NetworkAccessPolicyView(NetworkAccessPolicyState Policy, long ActiveRevision,
     string? ActiveVersion, string ActivationState, string? LastError,
-    IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults);
+    IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults, bool RequestCapacityReached = false);
 
 public sealed partial class ContainerEgressRuntime
 {
@@ -19,10 +19,11 @@ public sealed partial class ContainerEgressRuntime
         NetworkAccessPolicyState policy = networkPolicy.Read(actor);
         long accepted = Interlocked.Read(ref activePolicyRevision);
         string? error = Volatile.Read(ref policyActivationError);
+        if (recoveryRequiresProxyStop) error ??= "Network policy cannot be confirmed. Runtime recovery is required.";
         return new NetworkAccessPolicyView(policy, accepted, active?.Version,
             !Enabled ? "disabled" : error is not null ? "failed" : !ready || accepted != policy.Revision ? "pending" : "active",
             error, [.. policySources.Where(identity => NetworkAccessPolicyStore.CanAccess(actor, identity))],
-            [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))]);
+            [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))], networkPolicy.RequestCapacityReached);
     }
 
     public Task<NetworkAccessPolicyView> SetNetworkAccessRuleAsync(NetworkAccessActor actor, NetworkAccessIdentity identity,

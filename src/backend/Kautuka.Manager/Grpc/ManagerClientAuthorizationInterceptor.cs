@@ -43,6 +43,7 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "ListRuntimeContainers",
         servicePrefix + "GetPkgsProxyCacheStats",
         servicePrefix + "GetNetworkAccessPolicy",
+        servicePrefix + "GetNetworkAudit",
         servicePrefix + "SetNetworkAccessRule",
         servicePrefix + "DecideNetworkAccessRequest",
         servicePrefix + "DescribeWorkspace",

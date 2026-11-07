@@ -27,6 +27,12 @@ for (const width of [1280, 390]) {
         return json(state);
       }
       if (path === '/api/network-access') return json(state);
+      if (path === '/api/network-access/audit') return json({
+        events: [{ sequence: 1, id: 'audit-1', startedAtUtc: '2026-11-07T00:00:00Z', observedAtUtc: '2026-11-07T00:01:00Z',
+          identity, containerId: 'fixture-container', sourceAddress: '10.89.1.10:50000', destination: 'graph.microsoft.com', port: 443,
+          outcome: 'denied', connected: false, closed: true, bytesSent: 0, bytesReceived: 0, durationMilliseconds: 0 }],
+        nextBefore: 0, coverageGaps: 1, unattributedConnections: 0, lastError: null,
+      });
       return json({});
     });
     await page.goto('/network-access');
@@ -36,6 +42,9 @@ for (const width of [1280, 390]) {
     await expect(page.getByText('No pending network approvals.')).toBeVisible();
     expect(decisions).toEqual([{ allowed: true, expectedRevision: 7 }]);
     await expect(page.getByLabel('Hostname or IPv4 address')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Connection audit' })).toBeVisible();
+    await expect(page.getByText('Blocked · graph.microsoft.com:443')).toBeVisible();
+    await expect(page.getByText(/Some connection records are missing/)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: `artifacts/network-access-${width}.png`, fullPage: true });
   });

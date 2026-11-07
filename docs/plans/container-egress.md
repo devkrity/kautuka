@@ -1077,3 +1077,44 @@ local bundle assets were present. The fixture now excludes only that importer;
 production registration and dedicated bootstrap tests are unchanged. The three
 affected management/mail checks pass with the real bundle assets still present.
 The complete hook run must pass before the checkpoint is reported as pushed.
+
+## Policy, approval and audit completion checkpoint
+
+The preceding checkpoint subsequently passed the complete push hooks: 2,595
+backend tests and 546 frontend tests, with five backend skips. It is pushed;
+the branch remains unmerged. The policy and approval UI is mandatory on desktop
+and phone. Legacy deployment migration is excluded, not deferred.
+
+The current extension collects bounded native Podman/Envoy connection logs in
+Manager and exposes an owner-filtered, paged audit API and responsive audit view.
+Publication-time allocation maps preserve container attribution across IP reuse.
+Repeated collection coalesces connection phases and does not duplicate pending
+requests. Only attributable listener denials create approval requests. Unknown
+sources stay visible to administrators without assigning them to a current IP
+owner. Pending approvals, rule editing and activation status remain part of the
+same page; the header shows a pending-request badge.
+
+This is bounded connection history, not a durable packet ledger. Envoy log
+rotation, collection downtime and retention limits can omit events. Known gaps
+are displayed; traffic rejected by Linux is not logged individually. Manager
+retains at most 2,048 connection events and 128 allocation maps. Permissions are
+checked before paging. Shared-service requests are attributed to the service
+that opens the connection, including Gateway-delegated calls and package-service
+fetches; they do not acquire a separate logical-caller identity.
+
+Hostname rules match visible TLS SNI. Non-SNI TCP, including plain HTTP, needs an
+explicit IPv4/port rule. Containers on the same network can reach each other
+directly; this feature controls outbound access.
+
+Recovery freshness also needs both sides of the existing acceptance contract:
+replaying an identical, validated desired-state version persists its acceptance,
+and writing a semantically identical maintenance fence preserves its timestamp.
+This avoids invalidating a legitimate acceptance while retaining the writer
+lease, journal and fence. It does not add a new recovery protocol.
+
+Focused API/store checks pass 65 tests, the frontend suite passes 549 tests, and
+the production UI builds. Two Chromium checks pass at widths 1,280 and 390 using
+synthetic authenticated API fixtures, including Allow and audit rendering.
+Installed authentication, live approval through that UI, final update recovery,
+uninstall and platform packaging remain completion gates. These local browser
+checks do not substitute for that installed end-to-end verification.

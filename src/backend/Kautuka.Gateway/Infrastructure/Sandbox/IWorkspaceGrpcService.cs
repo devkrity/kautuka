@@ -15,6 +15,8 @@ internal sealed record ManagerDesiredStateUpdateRequest(
 /// </summary>
 internal interface IManagerGrpcService
 {
+    Task<NetworkAuditResponse> GetNetworkAuditAsync(NetworkAuditReadRequest request, CancellationToken cancellationToken = default)
+        => Task.FromException<NetworkAuditResponse>(new NotSupportedException());
     Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
         => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
     Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default)

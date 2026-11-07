@@ -39,6 +39,12 @@ const fixture = (): NetworkAccessView => ({
     },
   ],
 });
+const mockView = (data: NetworkAccessView) =>
+  get.mockImplementation(async (path: string) => ({
+    data: path.endsWith('/audit')
+      ? { events: [], nextBefore: 0, coverageGaps: 0, unattributedConnections: 0, lastError: null }
+      : data,
+  }));
 const renderPage = () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -53,7 +59,48 @@ const renderPage = () => {
 describe('NetworkAccessPage', () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    get.mockResolvedValue({ data: fixture() });
+    mockView(fixture());
+  });
+
+  it('loads further policy pages with the displayed revision', async () => {
+    const first = { ...fixture(), nextOffset: 50, ruleCount: 51 };
+    const second = {
+      ...fixture(),
+      nextOffset: 0,
+      requests: [],
+      rules: [
+        {
+          id: 'rule-51',
+          identity,
+          destination: 'next.example.com',
+          port: 443,
+          allowed: true,
+          updatedAtUtc: null,
+        },
+      ],
+    };
+    get.mockImplementation(async (path: string, options?: { params?: { offset?: number } }) => ({
+      data: path.endsWith('/audit')
+        ? {
+            events: [],
+            nextBefore: 0,
+            coverageGaps: 0,
+            unattributedConnections: 0,
+            lastError: null,
+          }
+        : options?.params?.offset === 50
+          ? second
+          : first,
+    }));
+    renderPage();
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Load more policy and requests' })
+    );
+    expect(await screen.findByText('Allow next.example.com:443')).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/network-access', { params: { offset: 50, revision: 7 } });
+    expect(
+      screen.queryByRole('button', { name: 'Load more policy and requests' })
+    ).not.toBeInTheDocument();
   });
 
   it.each([
@@ -106,7 +153,7 @@ describe('NetworkAccessPage', () => {
     data.activationState = 'failed';
     data.revision = 8;
     data.lastError = 'The proxy did not accept the new policy.';
-    get.mockResolvedValue({ data });
+    mockView(data);
     renderPage();
     expect(await screen.findByText('Changes could not be applied')).toBeInTheDocument();
     expect(screen.queryByText('Policy active')).not.toBeInTheDocument();
@@ -125,7 +172,7 @@ describe('NetworkAccessPage', () => {
     const data = fixture();
     data.enabled = false;
     data.activationState = 'disabled';
-    get.mockResolvedValue({ data });
+    mockView(data);
     renderPage();
     expect(await screen.findByRole('button', { name: 'Allow' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Keep blocked' })).toBeDisabled();

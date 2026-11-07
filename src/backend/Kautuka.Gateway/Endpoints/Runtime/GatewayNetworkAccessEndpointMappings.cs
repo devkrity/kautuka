@@ -12,18 +12,29 @@ internal sealed record NetworkAccessRequestDto(string Id, NetworkAccessIdentityD
     string CreatedAtUtc, string LastSeenAtUtc, long Attempts, string Status);
 internal sealed record NetworkAccessViewDto(bool Enabled, long Revision, long ActiveRevision, string? ActiveVersion,
     string ActivationState, string? LastError, IReadOnlyList<NetworkAccessRuleDto> Rules, IReadOnlyList<NetworkAccessRequestDto> Requests,
-    IReadOnlyList<NetworkAccessIdentityDto> Sources, IReadOnlyList<NetworkAccessRuleDto> Defaults);
+    IReadOnlyList<NetworkAccessIdentityDto> Sources, IReadOnlyList<NetworkAccessRuleDto> Defaults, int NextOffset = 0,
+    int RuleCount = 0, int RequestCount = 0, int SourceCount = 0, int DefaultCount = 0, int PendingRequestCount = 0, bool RequestCapacityReached = false);
 internal sealed record NetworkAccessRuleChangeDto(NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, long ExpectedRevision);
 internal sealed record NetworkAccessDecisionDto(bool Allowed, long ExpectedRevision);
 
-internal static class GatewayNetworkAccessEndpointMappings
+internal static partial class GatewayNetworkAccessEndpointMappings
 {
     public static WebApplication MapGatewayNetworkAccessEndpoints(this WebApplication app)
     {
-        app.MapGet("/api/network-access", async (HttpContext context, IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager, CancellationToken ct) =>
+        MapNetworkAudit(app);
+        app.MapGet("/api/network-access", async (HttpContext context, IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager,
+            int? offset, long? revision, bool? summary, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null) return Results.Unauthorized();
-            return await NetworkResultAsync(() => manager.GetNetworkAccessPolicyAsync(new NetworkAccessReadRequest { Actor = Actor(user) }, ct)).ConfigureAwait(false);
+            if (offset < 0 || revision < 0) return Results.BadRequest();
+            return await NetworkResultAsync(() => manager.GetNetworkAccessPolicyAsync(new NetworkAccessReadRequest
+            {
+                Actor = Actor(user),
+                Offset = offset ?? 0,
+                SummaryOnly = summary ?? false,
+                ExpectedRevision = revision ?? 0,
+                EnforceRevision = revision.HasValue,
+            }, ct)).ConfigureAwait(false);
         });
         app.MapPut("/api/network-access/rules", async (NetworkAccessRuleChangeDto request, HttpContext context,
             IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager, CancellationToken ct) =>
@@ -102,5 +113,6 @@ internal static class GatewayNetworkAccessEndpointMappings
             [.. value.Rules.Select(Rule)],
             [.. value.Requests.Select(request => new NetworkAccessRequestDto(request.Id, Identity(request.Identity), request.Destination,
                 request.Port, request.CreatedAtUtc, request.LastSeenAtUtc, request.Attempts, request.Status))],
-            [.. value.Sources.Select(Identity)], [.. value.Defaults.Select(Rule)]);
+            [.. value.Sources.Select(Identity)], [.. value.Defaults.Select(Rule)], value.NextOffset,
+            value.RuleCount, value.RequestCount, value.SourceCount, value.DefaultCount, value.PendingRequestCount, value.RequestCapacityReached);
 }

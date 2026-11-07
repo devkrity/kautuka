@@ -6,8 +6,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { ShowMoreButton } from '@/components/layout/ShowMoreButton';
-import { useProgressiveLimit } from '@/components/layout/useProgressiveLimit';
+import { NetworkAudit } from '@/features/network-access/NetworkAudit';
 import {
   identityKey,
   identityLabel,
@@ -24,13 +23,9 @@ export function NetworkAccessPage() {
   const [port, setPort] = React.useState('443');
   const [allowed, setAllowed] = React.useState('allow');
   const data = query.data;
-  const pending = useProgressiveLimit(
-    data?.requests.filter((item) => item.status === 'pending') ?? []
-  );
-  const decisions = useProgressiveLimit(
-    data?.requests.filter((item) => item.status !== 'pending') ?? []
-  );
-  const rules = useProgressiveLimit(data?.rules ?? []);
+  const pending = data?.requests.filter((item) => item.status === 'pending') ?? [];
+  const decisions = data?.requests.filter((item) => item.status !== 'pending') ?? [];
+  const rules = data?.rules ?? [];
   const identities = new Map(
     [
       ...(data?.sources ?? []),
@@ -44,7 +39,9 @@ export function NetworkAccessPage() {
   const error = change.error
     ? isAxiosError(change.error) && change.error.response?.status === 409
       ? 'The policy changed while you were editing. The latest policy has been loaded; review it and try again.'
-      : 'The change could not be saved or applied. Refresh to check its current status before retrying.'
+      : isAxiosError(change.error) && change.error.response?.status === 400
+        ? 'Use an exact hostname or IPv4 address and a TCP port from 1 to 65535. URLs, wildcards and IPv6 are not supported.'
+        : 'The change could not be saved or applied. Refresh to check its current status before retrying.'
     : null;
   const edit = (rule: NetworkRule) => {
     setSelected(identityKey(rule.identity));
@@ -97,10 +94,17 @@ export function NetworkAccessPage() {
             <h2 id="network-pending" className="text-lg font-semibold">
               Pending network approvals
             </h2>
-            {pending.visibleItems.length === 0 && (
+            {(data.requestCapacityReached ||
+              Math.max(data.pendingRequestCount, pending.length) >= 500) && (
+              <Alert>
+                Network requests have reached the 500-group limit. Review the connection audit for
+                additional blocked destinations and resolve existing requests.
+              </Alert>
+            )}
+            {pending.length === 0 && (
               <p className="text-sm text-muted-foreground">No pending network approvals.</p>
             )}
-            {pending.visibleItems.map((request) => (
+            {pending.map((request) => (
               <article key={request.id} className="rounded-xl border border-border p-4 space-y-3">
                 <p className="font-medium break-all">
                   {request.destination}:{request.port}
@@ -143,7 +147,15 @@ export function NetworkAccessPage() {
                 </div>
               </article>
             ))}
-            <ShowMoreButton count={pending.hiddenCount} onClick={pending.showMore} />
+            {query.hasNextPage && (
+              <Button
+                variant="outline"
+                disabled={query.isFetchingNextPage}
+                onClick={() => void query.fetchNextPage()}
+              >
+                Load more policy and requests
+              </Button>
+            )}
           </section>
 
           <section className="workspace-panel space-y-4" aria-labelledby="network-rules">
@@ -153,6 +165,10 @@ export function NetworkAccessPage() {
             <p className="text-sm text-muted-foreground">
               Rules apply to one component and an exact hostname or IPv4 address and TCP port. All
               other destinations stay blocked.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Hostname rules match TLS SNI. For other TCP connections, including plain HTTP, use an
+              IPv4 address and port.
             </p>
             <form
               className="grid gap-3 sm:grid-cols-2"
@@ -225,7 +241,7 @@ export function NetworkAccessPage() {
                 </Button>
               </div>
             </form>
-            {rules.visibleItems.map((rule) => (
+            {rules.map((rule) => (
               <article
                 key={rule.id}
                 className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border p-3"
@@ -243,7 +259,6 @@ export function NetworkAccessPage() {
                 </Button>
               </article>
             ))}
-            <ShowMoreButton count={rules.hiddenCount} onClick={rules.showMore} />
             {data.defaults.length > 0 && (
               <details>
                 <summary className="cursor-pointer text-sm font-medium">
@@ -272,10 +287,10 @@ export function NetworkAccessPage() {
             <h2 id="network-history" className="text-lg font-semibold">
               Approval history
             </h2>
-            {decisions.visibleItems.length === 0 && (
+            {decisions.length === 0 && (
               <p className="text-sm text-muted-foreground">No network decisions yet.</p>
             )}
-            {decisions.visibleItems.map((request) => (
+            {decisions.map((request) => (
               <div
                 key={request.id}
                 className="rounded-xl border border-border p-3 text-sm break-all"
@@ -285,8 +300,8 @@ export function NetworkAccessPage() {
                 <p className="text-muted-foreground">{identityLabel(request.identity)}</p>
               </div>
             ))}
-            <ShowMoreButton count={decisions.hiddenCount} onClick={decisions.showMore} />
           </section>
+          <NetworkAudit />
           <p className="text-sm text-muted-foreground">
             Containers on the same network can reach each other directly. Only outbound traffic is
             controlled.

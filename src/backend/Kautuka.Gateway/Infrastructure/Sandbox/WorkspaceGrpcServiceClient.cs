@@ -17,6 +17,10 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
     internal static readonly TimeSpan DesiredStateMaterializationDeadline = TimeSpan.FromMinutes(31);
     private readonly ManagerService.ManagerServiceClient client = new(callInvoker);
 
+    public Task<NetworkAuditResponse> GetNetworkAuditAsync(NetworkAuditReadRequest request, CancellationToken cancellationToken = default)
+        => Call("GetNetworkAudit", () => client.GetNetworkAuditAsync(request,
+            headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(30), cancellationToken: cancellationToken).ResponseAsync);
+
     public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
         => Call("GetNetworkAccessPolicy", () => client.GetNetworkAccessPolicyAsync(request,
             headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(30), cancellationToken: cancellationToken).ResponseAsync);

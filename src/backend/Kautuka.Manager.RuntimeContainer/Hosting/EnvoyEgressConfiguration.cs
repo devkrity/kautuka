@@ -20,7 +20,8 @@ internal sealed record EnvoyEgressConfiguration(
     internal const string ArtifactListenerName = "host-artifacts";
     private const string metadataNamespace = "kautuka.egress";
 
-    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null)
+    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null,
+        string? allocationVersion = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
@@ -124,7 +125,11 @@ internal sealed record EnvoyEgressConfiguration(
         listener["filter_chain_matcher"] = SourceMatcher(normalized, packages);
         listener["access_log"] = new JsonArray(AccessLog("listener"));
         JsonObject? artifactListener = artifacts.Length == 0 ? null : ArtifactListener(artifacts);
+        SetLogField(listener, "allocation", allocationVersion ?? string.Empty);
+        if (artifactListener is not null) SetLogField(artifactListener, "allocation", allocationVersion ?? string.Empty);
         string version = Hash(clusters.ToJsonString() + "\n" + listener.ToJsonString() + (artifactListener is null ? "" : "\n" + artifactListener.ToJsonString()));
+        SetLogField(listener, "publication", version);
+        if (artifactListener is not null) SetLogField(artifactListener, "publication", version);
         SetMarker(listener, version);
         var listeners = new JsonArray(listener);
         if (artifactListener is not null) { SetMarker(artifactListener, version); listeners.Add((JsonNode)artifactListener); }
@@ -385,6 +390,8 @@ internal sealed record EnvoyEgressConfiguration(
               "timestamp": "%START_TIME%", "event_type": "%ACCESS_LOG_TYPE%", "source": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
               "source_address": "%DOWNSTREAM_REMOTE_ADDRESS%", "destination": "%DOWNSTREAM_LOCAL_ADDRESS%",
               "sni": "%REQUESTED_SERVER_NAME%", "upstream_cluster": "%UPSTREAM_CLUSTER%", "details": "%CONNECTION_TERMINATION_DETAILS%",
+              "filter_chain": "%FILTER_CHAIN_NAME%", "stream_id": "%STREAM_ID%", "connection_id": "%CONNECTION_ID%",
+              "connection_started": "%START_TIME(%s.%9f)%",
               "bytes_received": "%BYTES_RECEIVED%", "bytes_sent": "%BYTES_SENT%", "duration_ms": "%DURATION%"
             } }
           }
@@ -392,5 +399,22 @@ internal sealed record EnvoyEgressConfiguration(
         """)!.AsObject();
         log["typed_config"]!["log_format"]!["json_format"]!["phase"] = phase;
         return log;
+    }
+
+    private static void SetLogField(JsonNode node, string name, string value)
+    {
+        if (node is JsonObject obj)
+        {
+            if (obj["name"] is JsonValue logger && logger.TryGetValue(out string? loggerName)
+                && loggerName == "envoy.access_loggers.stderr")
+                obj["typed_config"]!["log_format"]!["json_format"]![name] = value;
+            foreach (KeyValuePair<string, JsonNode?> property in obj.ToArray())
+                if (property.Value is not null) SetLogField(property.Value, name, value);
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (JsonNode? item in array)
+                if (item is not null) SetLogField(item, name, value);
+        }
     }
 }

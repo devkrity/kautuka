@@ -16,6 +16,7 @@ namespace Kautuka.Gateway.Serialization;
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(GatewaySlackPairingStatusResponse))]
+[JsonSerializable(typeof(NetworkAuditPageDto))]
 [JsonSerializable(typeof(NetworkAccessViewDto))]
 [JsonSerializable(typeof(NetworkAccessRuleChangeDto))]
 [JsonSerializable(typeof(NetworkAccessDecisionDto))]

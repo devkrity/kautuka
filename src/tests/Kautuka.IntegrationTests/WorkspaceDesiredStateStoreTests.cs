@@ -15,6 +15,46 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceDesiredStateStoreTests
 {
     [Fact]
+    public void OnlyValidatedReplayRefreshesPersistedAcceptanceWithoutChangingVersion()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"kautuka-manager-freshness-{Guid.NewGuid():N}");
+        string path = Path.Combine(root, "desired-state.json");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var store = new WorkspaceDesiredStateStore(path, NullLogger<WorkspaceDesiredStateStore>.Instance);
+            ManagerRuntimeSettings settings = CreateRuntimeSettings(root);
+            store.ApplyDesiredState(5, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change,
+                settings, [], [], [], "epoch");
+            byte[] original = File.ReadAllBytes(path);
+            DateTime fence = DateTime.UtcNow.AddMinutes(-1);
+            File.SetLastWriteTimeUtc(path, fence.AddMinutes(-1));
+            DateTime stale = File.GetLastWriteTimeUtc(path);
+
+            var restarted = new WorkspaceDesiredStateStore(path, NullLogger<WorkspaceDesiredStateStore>.Instance);
+            Assert.True(File.GetLastWriteTimeUtc(path) < fence);
+            Assert.Equal(stale, File.GetLastWriteTimeUtc(path));
+            Assert.Throws<InvalidOperationException>(() => restarted.ApplyDesiredState(5,
+                Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change,
+                settings, [], [CreateConnector("changed-content")], [], "epoch"));
+            Assert.Equal(stale, File.GetLastWriteTimeUtc(path));
+            Assert.Equal(original, File.ReadAllBytes(path));
+            Assert.True(restarted.ApplyDesiredState(4, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change,
+                settings, [], [], [], "epoch").IsStale);
+            Assert.Equal(stale, File.GetLastWriteTimeUtc(path));
+
+            WorkspaceDesiredStateApplyResult replay = restarted.ApplyDesiredState(5,
+                Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change,
+                settings, [], [], [], "epoch");
+            Assert.True(replay.IsReplay);
+            Assert.Equal(5, restarted.Snapshot.Version);
+            Assert.True(File.GetLastWriteTimeUtc(path) > fence);
+            Assert.Equal(original, File.ReadAllBytes(path));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void AnOldImagePreparationCannotChangeANewerConnectorStatus()
     {
         var store = new WorkspaceDesiredStateStore();

@@ -10,6 +10,7 @@ service ManagerService {
   rpc ListRuntimeContainers (WorkspacePingRequest)   returns (ManagerRuntimeContainersResponse);
   rpc GetPkgsProxyCacheStats (WorkspacePingRequest)  returns (ManagerPkgsProxyCacheStatsResponse);
   rpc GetNetworkAccessPolicy (NetworkAccessReadRequest) returns (NetworkAccessPolicyResponse);
+  rpc GetNetworkAudit (NetworkAuditReadRequest) returns (NetworkAuditResponse);
   rpc SetNetworkAccessRule (NetworkAccessRuleRequest) returns (NetworkAccessPolicyResponse);
   rpc DecideNetworkAccessRequest (NetworkAccessDecisionRequest) returns (NetworkAccessPolicyResponse);
   rpc DescribeWorkspace   (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
@@ -44,7 +45,21 @@ message NetworkAccessRequestMessage {
   string created_at_utc = 5; string last_seen_at_utc = 6;
   int64 attempts = 7; string status = 8;
 }
-message NetworkAccessReadRequest { NetworkAccessActorMessage actor = 1; }
+message NetworkAccessReadRequest {
+  NetworkAccessActorMessage actor = 1; int32 offset = 2; bool summary_only = 3;
+  int64 expected_revision = 4; bool enforce_revision = 5;
+}
+message NetworkAuditReadRequest { NetworkAccessActorMessage actor = 1; int64 before = 2; int32 limit = 3; }
+message NetworkAuditEventMessage {
+  int64 sequence = 1; string id = 2; string started_at_utc = 3; string observed_at_utc = 4;
+  NetworkAccessIdentityMessage identity = 5; string container_id = 6; string source_address = 7;
+  string destination = 8; int32 port = 9; string outcome = 10; bool connected = 11; bool closed = 12;
+  int64 bytes_sent = 13; int64 bytes_received = 14; int64 duration_milliseconds = 15; string publication = 16;
+}
+message NetworkAuditResponse {
+  repeated NetworkAuditEventMessage events = 1; int64 next_before = 2; int64 coverage_gaps = 3;
+  int64 unattributed_connections = 4; string last_error = 5;
+}
 message NetworkAccessRuleRequest {
   NetworkAccessActorMessage actor = 1; NetworkAccessRuleMessage rule = 2; int64 expected_revision = 3;
 }
@@ -58,6 +73,9 @@ message NetworkAccessPolicyResponse {
   repeated NetworkAccessRequestMessage requests = 8;
   repeated NetworkAccessIdentityMessage sources = 9;
   repeated NetworkAccessRuleMessage defaults = 10;
+  int32 next_offset = 11; int32 rule_count = 12; int32 request_count = 13;
+  int32 source_count = 14; int32 default_count = 15; int32 pending_request_count = 16;
+  bool request_capacity_reached = 17;
 }
 
 message WorkspacePingRequest {

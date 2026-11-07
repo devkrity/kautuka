@@ -18,6 +18,32 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class GatewayNetworkAccessEndpointTests
 {
+    [Fact]
+    public async Task AuditUsesAuthenticatedOwnerAndBoundedPaging()
+    {
+        var manager = new RecordingManager();
+        await using WebApplication app = await CreateAsync(manager, new Guard());
+        using HttpResponseMessage response = await app.GetTestClient().GetAsync(
+            new Uri("http://localhost/api/network-access/audit?before=17&limit=25&userId=victim&isAdmin=true"), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("owner", manager.Actor?.UserId);
+        Assert.False(manager.Actor?.IsAdmin);
+        Assert.Equal(17, manager.Audit?.Before);
+        Assert.Equal(25, manager.Audit?.Limit);
+    }
+
+    [Theory]
+    [InlineData("before=-1")]
+    [InlineData("limit=101")]
+    public async Task InvalidAuditPagingDoesNotCallManager(string query)
+    {
+        var manager = new RecordingManager();
+        await using WebApplication app = await CreateAsync(manager, new Guard());
+        using HttpResponseMessage response = await app.GetTestClient().GetAsync(new Uri("http://localhost/api/network-access/audit?" + query), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Null(manager.Actor);
+    }
+
     private static readonly JsonSerializerOptions json = new() { TypeInfoResolver = new DefaultJsonTypeInfoResolver() };
 
     [Theory]
@@ -102,7 +128,14 @@ public sealed class GatewayNetworkAccessEndpointTests
     {
         public NetworkAccessActorMessage? Actor { get; private set; }
         public NetworkAccessDecisionRequest? Decision { get; private set; }
+        public NetworkAuditReadRequest? Audit { get; private set; }
         public StatusCode? Error { get; init; }
+        public Task<NetworkAuditResponse> GetNetworkAuditAsync(NetworkAuditReadRequest request, CancellationToken cancellationToken = default)
+        {
+            Actor = request.Actor;
+            Audit = request;
+            return Task.FromResult(new NetworkAuditResponse());
+        }
         private Task<NetworkAccessPolicyResponse> Result(NetworkAccessActorMessage actor)
         {
             Actor = actor;

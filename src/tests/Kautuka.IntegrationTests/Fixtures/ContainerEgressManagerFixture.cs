@@ -110,6 +110,7 @@ internal static class ContainerEgressManagerFixture
         var options = new ContainerEgressOptions
         {
             Enabled = true,
+            MaxPrivateNetworks = 4,
             ArtifactHosts = data.TryGetProperty("artifactCertificate", out _) ? ["artifact.kautuka.test"] : [],
             DnsUpstreams = ["10.247.90.20"],
             Grants = [
@@ -130,6 +131,23 @@ internal static class ContainerEgressManagerFixture
         ContainerContext Context(string agent) => new("agent", agent, "owner", Path.Combine(stateRoot, agent), "/workspace", image, 1, "512m", 20, [], new Dictionary<string, string> { { "AGENT_PRIVATE", "fixture-no-forward" } });
         WorkspaceMcpContainerConnectorDefinition Definition(string suffix) => new("owner::" + suffix, image, suffix == "d" ? "" : "/usr/bin/bash", suffix == "d" ? [] : ["/mcp-fixture.sh"], true, false, null, null, [], 20, 600);
         Apply(1, alpha);
+        string acceptancePath = Path.Combine(stateRoot, "native-acceptance-proof.json");
+        var acceptanceSettings = new ManagerRuntimeSettings(new WorkspaceDefinition { BaseRoot = stateRoot }, new SandboxRuntimeDefinition(), new WorkspaceTelemetryDefinition());
+        var accepted = new WorkspaceDesiredStateStore(acceptancePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        accepted.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap, acceptanceSettings, [alpha], definitions, [], "native-publisher");
+        byte[] acceptanceBytes = await File.ReadAllBytesAsync(acceptancePath, ct);
+        DateTime oldAcceptance = DateTime.UtcNow.AddMinutes(-1);
+        File.SetLastWriteTimeUtc(acceptancePath, oldAcceptance);
+        var acceptingRestart = new WorkspaceDesiredStateStore(acceptancePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        if (File.GetLastWriteTimeUtc(acceptancePath) != oldAcceptance)
+            throw new InvalidOperationException("Merely loading native desired state refreshed its acceptance timestamp.");
+        var freshReplay = acceptingRestart.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap, acceptanceSettings, [alpha], definitions, [], "native-publisher");
+        byte[] replayBytes = await File.ReadAllBytesAsync(acceptancePath, ct);
+        if (!freshReplay.IsReplay || acceptingRestart.Snapshot.AcceptedVersion != 1
+            || File.GetLastWriteTimeUtc(acceptancePath) <= oldAcceptance
+            || !acceptanceBytes.AsSpan().SequenceEqual(replayBytes))
+            throw new InvalidOperationException("Native validated replay did not preserve content/version and refresh acceptance persistence.");
+        report["nativeValidatedReplayRefreshesAcceptance"] = true;
         await runtime.EnsureReadyAsync(ct);
         if (data.TryGetProperty("artifactCertificate", out _))
             await HostArtifactManagerFixture.RunAsync(data, runner, runtime, report, ct);
@@ -320,6 +338,37 @@ internal static class ContainerEgressManagerFixture
             await Check("a", alpha, "exit:0");
             string nameA = service.TrackedContainerNames.Single(name => name.Contains("-a-", StringComparison.Ordinal));
             var first = await runtime.FindSourceAsync(nameA, ct) ?? throw new InvalidOperationException("Source A not tracked");
+            // Measure core + two live agent scopes + management, and verify
+            // capacity refusal before choosing the installed default.
+            ContainerContext gamma = Context("gamma");
+            store.ApplyDesiredState(2, WorkspaceDesiredStateSyncReason.Change, acceptanceSettings, [alpha, beta, gamma], definitions, []);
+            await Check("c", beta, "exit:0");
+            await Check("c", alpha, "exit:35");
+            var managementHold = service.CallToolAsync("owner::d", null, "hold", "{}", 20, false, null, WorkspaceMcpExecutionContext.Isolated, ct);
+            int privateCount = 0;
+            for (int attempt = 0; attempt < 80; attempt++)
+            {
+                var inventory = await native.RunAsync(["network", "ls", "--filter", "label=kautuka.egress=true", "--format", "{{.Name}}"], 10, ct);
+                privateCount = inventory.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries).Count(name => name != "kautuka-outside");
+                if (privateCount == 4 || managementHold.IsCompleted) break;
+                await Task.Delay(25, ct);
+            }
+            if (privateCount != 4) throw new InvalidOperationException("Four simultaneous private networks were not observed.");
+            var atCapacity = await service.CallToolAsync("owner::a", null, "allowed", "{}", 20, false, gamma, WorkspaceMcpExecutionContext.Isolated, ct);
+            if (atCapacity.Ok || atCapacity.FailureMessage?.Contains("capacity", StringComparison.OrdinalIgnoreCase) != true)
+                throw new InvalidOperationException("A fifth private scope was not refused explicitly: " + atCapacity.FailureMessage);
+            var managementResult = await managementHold;
+            if (!managementResult.Ok || managementResult.Result?.Contains("held", StringComparison.Ordinal) != true)
+                throw new InvalidOperationException("Concurrent management scope did not complete: " + managementResult.FailureMessage);
+            await Check("a", alpha, "exit:0");
+            await Check("c", beta, "exit:0");
+            report["fourPrivateNetworksMeasured"] = true;
+            report["fifthPrivateNetworkRefusedWithoutFallback"] = true;
+            report["sameConnectorSeparatedAcrossLiveAgents"] = true;
+            // The desired-state version changed above; capture the currently
+            // reconciled instance rather than the former version's ID.
+            nameA = service.TrackedContainerNames.Single(name => name.Contains("-a-", StringComparison.Ordinal));
+            first = await runtime.FindSourceAsync(nameA, ct) ?? throw new InvalidOperationException("Current source A not tracked");
             var beforeAdoption = await native.RunAsync(["inspect", "--format", "{{.State.Pid}}", "kautuka-egress-envoy"], 15, ct);
             using (var restartedManager = new ContainerEgressRuntime(runner, options, allowlist, stateRoot))
             {
@@ -360,10 +409,58 @@ internal static class ContainerEgressManagerFixture
             int sourceStop = trace.FindIndex(traceStart, command => command[0] == "stop" && command.Contains(replacement.Id));
             if (proxyStop < 0 || sourceStop <= proxyStop) throw new InvalidOperationException("Uncertain retirement released source before blackholing proxy");
             report["proxyStoppedBeforeSource"] = true;
+            if (runtime.GetNetworkAccessPolicy(new NetworkAccessActor("owner", false)).ActivationState != "failed")
+                throw new InvalidOperationException("Unconfirmed policy was presented as merely pending.");
+            report["uncertainPolicyVisibleAsFailed"] = true;
             await Check("b", alpha, "exit:35");
             report["recoveredWithoutOldGrant"] = true;
             await Console.Error.WriteLineAsync("fixture: uncertain-policy recovery passed");
-            Apply(2, beta);
+            // Real denied connection -> durable request -> accepted policy ->
+            // explicit client retry. No held socket or tool continuation.
+            await runtime.CollectNetworkAuditAsync(ct);
+            var owner = new NetworkAccessActor("owner", false);
+            NetworkAccessPolicyView policy = runtime.GetNetworkAccessPolicy(owner);
+            NetworkAccessRequest request = policy.Policy.Requests.Single(item => item.Identity.AgentId == "alpha"
+                && item.Identity.ComponentId == "owner::b" && item.Destination == "allowed.kautuka.test" && item.Port == 8443);
+            if (request.Status != "pending") throw new InvalidOperationException("Native denied connection did not create a pending request.");
+            long attempts = request.Attempts;
+            await runtime.CollectNetworkAuditAsync(ct);
+            if (runtime.GetNetworkAccessPolicy(owner).Policy.Requests.Single(item => item.Id == request.Id).Attempts != attempts)
+                throw new InvalidOperationException("Native log overlap counted a denied attempt twice.");
+            NetworkAuditPage audit = runtime.GetNetworkAudit(owner, limit: 100);
+            if (!audit.Events.Any(item => item.Identity?.ComponentId == "owner::b" && item.Outcome == "denied")
+                || !audit.Events.Any(item => item.Identity?.ComponentId == "owner::a" && item.Connected && item.Closed))
+                throw new InvalidOperationException("Native audit did not attribute denials and coalesce connected/completion observations.");
+            if (runtime.GetNetworkAudit(new NetworkAccessActor("other-owner", false)).Events.Count != 0)
+                throw new InvalidOperationException("Native audit exposed another owner's connections.");
+            using (var restartedAudit = new ContainerEgressRuntime(runner, options, allowlist, stateRoot))
+            {
+                await restartedAudit.EnsureReadyAsync(ct);
+                await restartedAudit.CollectNetworkAuditAsync(ct);
+                if (restartedAudit.GetNetworkAccessPolicy(owner).Policy.Requests.Single(item => item.Id == request.Id).Attempts != attempts)
+                    throw new InvalidOperationException("Native Manager restart counted persisted denial logs twice.");
+            }
+            NetworkAccessPolicyView allowed = await runtime.DecideNetworkAccessRequestAsync(owner, request.Id, true, policy.Policy.Revision, ct);
+            if (allowed.ActivationState != "active") throw new InvalidOperationException("Native Allow was not confirmed by the proxy.");
+            await Check("b", alpha, "exit:0");
+            NetworkAccessPolicyView blocked = await runtime.SetNetworkAccessRuleAsync(owner, request.Identity, request.Destination,
+                request.Port, false, allowed.Policy.Revision, ct);
+            if (blocked.ActivationState != "active") throw new InvalidOperationException("Native Keep blocked was not confirmed by the proxy.");
+            await Check("b", alpha, "exit:35");
+            await runtime.CollectNetworkAuditAsync(ct);
+            if (runtime.GetNetworkAccessPolicy(owner).Policy.Requests.Single(item => item.Id == request.Id).Status != "blocked")
+                throw new InvalidOperationException("A durable blocked decision reopened a native request.");
+            report["nativeNetworkAuditAndApproval"] = new JsonObject
+            {
+                ["denialAttributed"] = true,
+                ["connectedAndCompletionCoalesced"] = true,
+                ["overlapAndRestartDeduplicated"] = true,
+                ["ownerFiltered"] = true,
+                ["allowActivatedAndRetrySucceeded"] = true,
+                ["blockActivatedAndRetryDenied"] = true,
+            };
+            await Console.Error.WriteLineAsync("fixture: live network audit and approval passed");
+            Apply(3, beta);
             var retired = await service.RemoveOrphanedConnectorContainersAsync(ct);
             if (!retired.Succeeded) throw new InvalidOperationException("Agent scope retirement failed");
             await Check("c", beta, "exit:0");

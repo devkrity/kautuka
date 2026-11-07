@@ -543,3 +543,41 @@ for release in ('1.0.6', '1.0.7', '1.0.8'):
     assert (cache / name).read_bytes() == data
 print('verified retained source and target offline images')
 PY
+
+# Exercise the actual record writer and freshness predicate without replacing
+# the operation used by the transaction tests above.
+python3 - "$temp_dir" "$script_dir/kautuka-apply-release.sh" <<'PY'
+import json, os, pathlib, subprocess, sys, time
+root, helper = map(pathlib.Path, sys.argv[1:])
+source = helper.read_text()
+writer = source[source.index('write_durable_record() {'):source.index('\nread_journal_field() {')]
+waiter = source[source.index('wait_for_manager_desired_state() {'):source.index('\nclear_maintenance_fence() {')]
+predicate = waiter.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+fence = root / 'freshness-fence.json'
+state = root / 'freshness-state.json'
+def write(operation='a'*32, phase='recovered', digest='b'*64):
+    subprocess.run(['bash', '-c', writer + '\nmaintenance_path="$1"; database_root=/var/lib/kautuka; '
+                    'write_durable_record "$1" "$2" "$3" 1.0.6 1.0.8 /snapshot manager=1.0.6 "snapshotManifestSha256=$4"',
+                    'fixture', str(fence), operation, phase, digest], check=True)
+def fresh():
+    return subprocess.run(['python3', '-c', predicate, str(state), str(fence)]).returncode == 0
+write()
+past = time.time_ns() - 10_000_000_000
+os.utime(fence, ns=(past, past))
+state.write_text(json.dumps({'SchemaVersion':1,'AcceptedVersion':5,'RuntimeSettings':{}}))
+os.utime(state, ns=(past-1_000_000_000, past-1_000_000_000))
+assert not fresh(), 'stale persisted state must not prove acceptance'
+before = fence.stat()
+write()
+assert (fence.stat().st_ino, fence.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+assert not fresh(), 'equivalent fence retry must not make stale state fresh'
+# C# tests prove this rewrite occurs only after a validated Manager replay.
+state.write_text(state.read_text())
+assert fresh()
+for changed in ({'phase':'completed'}, {'operation':'c'*32}, {'digest':'d'*64}):
+    write()
+    os.utime(fence, ns=(past, past))
+    write(**changed)
+    assert fence.stat().st_mtime_ns > past, 'changed fence semantics must replace the record'
+print('equivalent fence preservation, changed semantics and stale/fresh acceptance predicate passed')
+PY

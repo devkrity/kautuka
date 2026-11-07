@@ -23,6 +23,7 @@ public sealed class ManagerRpcAuthorizationTests
     [InlineData("UpdateDesiredState")]
     [InlineData("CallMcpContainerTool")]
     [InlineData("GetNetworkAccessPolicy")]
+    [InlineData("GetNetworkAudit")]
     [InlineData("SetNetworkAccessRule")]
     [InlineData("DecideNetworkAccessRequest")]
     public void UpdateServiceIdentityCannotUseGatewayCapabilities(string method)
@@ -38,6 +39,7 @@ public sealed class ManagerRpcAuthorizationTests
     [InlineData("UpdateDesiredState")]
     [InlineData("CallMcpContainerTool")]
     [InlineData("GetNetworkAccessPolicy")]
+    [InlineData("GetNetworkAudit")]
     [InlineData("SetNetworkAccessRule")]
     [InlineData("DecideNetworkAccessRequest")]
     public void GatewayIdentityHasRequiredManagerCapabilities(string method)

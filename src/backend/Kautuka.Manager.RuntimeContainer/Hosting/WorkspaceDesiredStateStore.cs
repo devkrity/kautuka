@@ -114,6 +114,10 @@ public sealed class WorkspaceDesiredStateStore
                 }
 
                 bool requiresReconciliation = reconciledDesiredStateVersion != acceptedDesiredStateVersion;
+                // A successful replay is a fresh acceptance by this Manager.
+                // Recovery uses persistence freshness to distinguish it from
+                // merely loading state that predates the maintenance fence.
+                PersistState();
                 WorkspaceDesiredStateApplyResult replay = WorkspaceDesiredStateApplyResult.IgnoredReplay(
                     acceptedDesiredStateVersion,
                     pendingPreviousConnectors,

@@ -15,7 +15,7 @@ using ManagerWorkspaceDefinition = Kautuka.Manager.RuntimeContainer.Configuratio
 
 namespace Kautuka.IntegrationTests;
 
-public sealed class WorkspaceGrpcServiceTests
+public sealed partial class WorkspaceGrpcServiceTests
 {
     [Theory]
     [InlineData("user-missing")]

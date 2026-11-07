@@ -2,6 +2,7 @@ import { BrandMark } from '@/components/BrandMark';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { APPROVAL_REFRESH_INTERVAL_MS, usePendingApprovals } from '@/features/approvals';
+import { useNetworkAccessSummary } from '@/features/network-access/networkAccess';
 import { useCurrentUser, UserProfileDialog, UserVersionInfo } from '@/features/auth';
 import { ROLE_ADMIN } from '@/features/settings';
 import { cn } from '@/lib/utils';
@@ -94,6 +95,8 @@ export function Header({
     refetchIntervalInBackground: false,
   });
   const pendingApprovals = pendingList.length;
+  const { data: networkSummary } = useNetworkAccessSummary(authenticated);
+  const pendingNetwork = networkSummary?.pendingRequestCount ?? 0;
 
   const { data: user } = useCurrentUser();
   const userInitials = user?.displayName
@@ -141,9 +144,20 @@ export function Header({
                 : item.to;
             const active =
               location.pathname === item.to || location.pathname.startsWith(item.to + '/');
+            const badgeCount =
+              item.to === '/approvals'
+                ? pendingApprovals
+                : item.to === '/network-access'
+                  ? pendingNetwork
+                  : 0;
             return (
               <Link
                 key={item.to}
+                aria-label={
+                  collapsed
+                    ? `${item.label}${badgeCount > 0 ? ` (${badgeCount} pending)` : ''}`
+                    : undefined
+                }
                 to={itemTo}
                 className={cn(
                   'relative flex items-center gap-3 rounded-md px-4 py-2.5 text-sm font-medium transition-colors',
@@ -167,7 +181,7 @@ export function Header({
                     ) : null}
                   </span>
                 )}
-                {item.to === '/approvals' && pendingApprovals > 0 && (
+                {badgeCount > 0 && (
                   <span
                     className={cn(
                       'inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-xs font-semibold',
@@ -177,7 +191,7 @@ export function Header({
                       collapsed ? 'absolute -right-1 -top-1' : 'ml-auto'
                     )}
                   >
-                    {pendingApprovals > 99 ? '99+' : pendingApprovals}
+                    {badgeCount > 99 ? '99+' : badgeCount}
                   </span>
                 )}
               </Link>
