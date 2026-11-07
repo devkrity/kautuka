@@ -3,7 +3,7 @@ namespace Kautuka.ContractTests;
 public sealed class LinuxChannelSecurityInstallerContractTests
 {
     [Fact]
-    public void ProductionInstallerPreservesTheChannelProcessAndKeyBoundary()
+    public void LegacyHostInstallerPreservesTheChannelProcessAndKeyBoundary()
     {
         string projectRoot = FindProjectRoot();
         string installerPath = Path.Combine(projectRoot, "scripts", "kautuka-install-linux.sh.in");
@@ -35,10 +35,12 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         int socketClientGroupSetup = source.IndexOf("grant_socket_group_membership \"$service_user\" kautuka-gateway-client", socketRuntimeDirs, StringComparison.Ordinal);
         int socketGroupValidation = source.IndexOf("getent group \"$group\" >/dev/null 2>&1 || fail", socketRuntimeDirs, StringComparison.Ordinal);
         Assert.True(socketRuntimeDirs >= 0 && socketClientGroupSetup > socketRuntimeDirs && socketClientGroupSetup < socketGroupValidation,
-            "Fresh installs must create client groups before validating socket tmpfiles entries.");
+            "The host layout must create client groups before validating socket tmpfiles entries.");
 
-        int credentialsAccount = source.IndexOf("ensure_isolated_service_account kautuka-credentials kautuka-credentials", StringComparison.Ordinal);
-        int socketDirs = source.IndexOf("install_socket_runtime_dirs \"$service_user\"", StringComparison.Ordinal);
+        int mainStart = source.IndexOf("\nmain() {", StringComparison.Ordinal);
+        Assert.True(mainStart >= 0);
+        int credentialsAccount = source.IndexOf("ensure_isolated_service_account kautuka-credentials kautuka-credentials", mainStart, StringComparison.Ordinal);
+        int socketDirs = source.IndexOf("install_socket_runtime_dirs \"$service_user\"", mainStart, StringComparison.Ordinal);
         Assert.True(credentialsAccount >= 0 && credentialsAccount < socketDirs, "CredentialsHost account must exist before socket tmpfiles are written.");
         Assert.Contains("/etc/systemd/system/${unit_name}", source, StringComparison.Ordinal);
         Assert.Contains("User=${runtime_user}", source, StringComparison.Ordinal);

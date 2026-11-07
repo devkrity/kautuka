@@ -284,12 +284,19 @@ public sealed class LinuxApplyReleaseHelperContractTests
         string regression = File.ReadAllText(Path.Combine(projectRoot, "scripts", "test-linux-installer-security.sh"));
         string verifiedRunner = File.ReadAllText(Path.Combine(projectRoot, "scripts", "install-verified-linux.sh"));
 
-        int verificationIndex = installer.IndexOf("verify_linux_release \"${verification_args[@]}\"", StringComparison.Ordinal);
-        int accountMutationIndex = installer.IndexOf("ensure_service_account \"$service_user\"", StringComparison.Ordinal);
-        int packageMutationIndex = installer.LastIndexOf("    ensure_dotnet_host_libraries", StringComparison.Ordinal);
+        int mainStart = installer.IndexOf("\nmain() {", StringComparison.Ordinal);
+        Assert.True(mainStart >= 0);
+        string main = installer[mainStart..];
+        int verificationIndex = main.IndexOf("verify_linux_release \"${verification_args[@]}\"", StringComparison.Ordinal);
+        int accountMutationIndex = main.IndexOf("ensure_service_account \"$service_user\"", StringComparison.Ordinal);
+        int packageMutationIndex = main.LastIndexOf("    ensure_dotnet_host_libraries", StringComparison.Ordinal);
         Assert.True(verificationIndex >= 0, "Network install must call the signed release verifier.");
         Assert.True(accountMutationIndex > verificationIndex, "Account creation must follow release verification.");
         Assert.True(packageMutationIndex > verificationIndex, "System package installation must follow release verification.");
+        Assert.True(main.IndexOf("install_fresh_container_appliance \"$tmp_root/extracted\"", StringComparison.Ordinal) > verificationIndex,
+            "The container preparation path must follow release verification.");
+        Assert.True(main.IndexOf("extract_release \"$artifact\"", StringComparison.Ordinal) > verificationIndex,
+            "Temporary extraction must follow release verification.");
         Assert.Contains("cat \"$release_verifier_source\"", generator, StringComparison.Ordinal);
         Assert.Contains("openssl dgst -sha256 -verify", verifier, StringComparison.Ordinal);
         Assert.Contains("sha256sum", verifier, StringComparison.Ordinal);
