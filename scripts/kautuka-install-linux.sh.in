@@ -1656,11 +1656,89 @@ resolve_uninstall_delete_data() {
     printf '%s\n' "$delete_data"
 }
 
+# New appliance releases are self-contained. Never try to pull their offline
+# manifest references (the core manifests need not be published to a registry).
+prepare_install_offline_images() {
+    local content_root="$1" service_user="$2" service_home="$3" xdg_runtime_dir="$4"
+    local plan status image_id archive identity inspection
+    if plan="$(python3 - "$content_root" <<'PY'
+import hashlib, json, pathlib, re, stat, sys
+content = pathlib.Path(sys.argv[1])
+with (content / 'runtime-images.json').open() as stream:
+    inventory = json.load(stream)
+entries = inventory.get('images')
+if inventory.get('schemaVersion') != 1 or not isinstance(entries, list):
+    raise SystemExit('invalid runtime image inventory')
+roles = {'kautuka-base', 'openobserve', 'git-pkgs-proxy', 'core-credentialshost',
+         'core-channelhost', 'core-gateway', 'core-webhost', 'egress-setup',
+         'egress-envoy', 'egress-dns', 'image-acquisition'}
+new_roles = roles - {'kautuka-base', 'openobserve', 'git-pkgs-proxy'}
+if not any(isinstance(entry, dict) and entry.get('id') in new_roles for entry in entries):
+    raise SystemExit(30)  # Legacy payload; caller retains its old image path.
+if len(entries) != len(roles):
+    raise SystemExit('incomplete offline appliance image inventory')
+seen, rows = set(), []
+for entry in entries:
+    role, digest, name, identity = (entry.get(key) for key in ('id', 'archiveSha256', 'archive', 'localImageId'))
+    if role not in roles or role in seen or not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{64}', digest):
+        raise SystemExit('invalid offline appliance image binding')
+    if name not in (f'{role}-{digest}.tar', f'{role}-{digest}.oci') or entry.get('platform') != 'linux/amd64':
+        raise SystemExit('invalid offline appliance archive name/platform')
+    if not isinstance(identity, str) or not re.fullmatch('sha256:[a-f0-9]{64}', identity):
+        raise SystemExit('missing offline appliance config identity')
+    archive = content.parent / 'oci-images' / name
+    if not stat.S_ISREG(archive.lstat().st_mode):
+        raise SystemExit('offline appliance archive must be a regular file')
+    with archive.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+            raise SystemExit('offline appliance archive differs from signed inventory')
+    seen.add(role)
+    rows.append((role, str(archive), identity))
+# Validate the complete inventory before the first Podman operation.
+for row in rows: print('\t'.join(row))
+PY
+)"; then
+        :
+    else
+        status=$?
+        [[ "$status" == 30 ]] && return 30
+        fail 'could not validate the complete offline appliance image set'
+    fi
+    while IFS=$'\t' read -r image_id archive identity; do
+        [[ -n "$image_id" ]] || continue
+        status=0
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman image exists "$identity" || status=$?
+        [[ "$status" == 0 || "$status" == 1 ]] || fail "could not query the runtime image store for '$image_id'"
+        if [[ "$status" == 1 ]]; then
+            printf 'Loading verified offline image: %s\n' "$image_id"
+            # Root opens its private verified payload; only archive bytes reach
+            # the runtime owner. No readable temporary payload copy is needed.
+            run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman load < "$archive" \
+                || fail "could not load offline image '$image_id'"
+        fi
+        inspection="$(run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman image inspect "$identity")" \
+            || fail "could not inspect offline image '$image_id'"
+        printf '%s' "$inspection" | python3 -c '
+import json, sys
+value = json.load(sys.stdin)
+if not isinstance(value, list) or len(value) != 1:
+    raise SystemExit("expected one loaded offline image")
+image = value[0]
+actual = image.get("Id", "")
+if actual.removeprefix("sha256:") != sys.argv[1].removeprefix("sha256:") or image.get("Os") != "linux" or image.get("Architecture") != "amd64":
+    raise SystemExit("loaded offline image identity/platform differs from signed inventory")
+' "$identity" || fail "offline image '$image_id' failed identity/platform verification"
+    done <<< "$plan"
+}
+
 prepare_install_images() {
     local content_root="$1"
     local service_user="$2"
     local service_home="$3"
     local xdg_runtime_dir="$4"
+    local offline_status=0
+    prepare_install_offline_images "$content_root" "$service_user" "$service_home" "$xdg_runtime_dir" && return 0 || offline_status=$?
+    [[ "$offline_status" == 30 ]] || return "$offline_status"
     local image_plan=''
     local image_id=''
     local image_ref=''

@@ -94,6 +94,22 @@ Before switching release pointers, the root helper writes an operation-bound jou
 
 After a committed update, built-in connector bootstrap waits until the maintenance fence is removed before contacting Manager. During a user-initiated update, the initiating browser shows restart progress instead of a transient updater socket error for up to 12 minutes; unrelated failures and an outage that outlasts that window remain visible.
 
+The Linux installer recognizes the complete eleven-role offline appliance
+inventory and validates every archive before the first Podman operation. It
+streams missing archives from its root-private extraction to the dedicated
+runtime owner and verifies the resulting config ID and platform, including for
+cache hits. Engine errors stop installation; only an absent image permits load.
+A partial or corrupt appliance inventory cannot fall back to registry pulls or
+local builds. Legacy payloads without appliance roles retain their previous
+preparation path.
+
+Both offline and legacy image-preparation regressions pass. A real rootless
+Podman check proved stdin loading from a root-private payload and cached identity
+inspection; it deliberately reused one small image across all eleven fixture
+roles. The separate producer proof covers actual new core/bootstrap images.
+This image preparation step does not itself establish the permanent recovery
+cache or enable the container service layout.
+
 For container deployments, the root apply helper stages the eleven offline image
 roles before installing the target Manager. Archive names include their signed
 SHA-256 and existing files must match that digest. The shared cache is
