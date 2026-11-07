@@ -101,6 +101,24 @@ make_signed_release() {
         printf '#!/usr/bin/env bash\n# Kautuka-Apply-Protocol: 4\nprintf "%%s\\n" safe-state-recovery-v2\n' > "$payload/bin/kautuka-apply-release"
         chmod 755 "$payload/bin/kautuka-apply-release"
     fi
+    if [[ -f "$temp_dir/core-manager" ]]; then
+        python3 - "$payload" "$release" <<'PY'
+import hashlib, json, pathlib, sys
+payload, release = pathlib.Path(sys.argv[1]), sys.argv[2]
+archives = payload / 'oci-images'; archives.mkdir()
+roles = ('kautuka-base', 'openobserve', 'git-pkgs-proxy', 'core-credentialshost',
+         'core-channelhost', 'core-gateway', 'core-webhost', 'egress-setup',
+         'egress-envoy', 'egress-dns', 'image-acquisition')
+entries = []
+for role in roles:
+    data = ('fixture archive ' + role + ' ' + release).encode()
+    digest = hashlib.sha256(data).hexdigest()
+    name = f'{role}-{digest}.oci'
+    (archives / name).write_bytes(data)
+    entries.append(dict(id=role, archive=name, archiveSha256=digest, platform='linux/amd64'))
+(payload / 'bin/runtime-images.json').write_text(json.dumps(dict(schemaVersion=1, images=entries)))
+PY
+    fi
     tar --owner=1234 --group=1234 -czf "$stage/kautuka-linux-amd64.tar.gz" -C "$payload" .
     python3 - "$stage" "$release" <<'PY'
 import hashlib, json, os, sys
@@ -428,7 +446,7 @@ exec "$@"
 SH
 chmod 755 "$temp_dir/mock/runuser"
 chown 992:992 /run/user/992
-printf '%s\n' '{"schemaVersion":1,"scope":"user","username":"kautuka","applicationServices":"containers"}' > /etc/kautuka/service-scope.json
+printf '%s\n' '{"schemaVersion":2,"username":"kautuka","target":"kautuka.target","userUnits":["kautuka-manager.service","kautuka-updateservice.service"],"systemUnits":[],"applicationServices":"containers"}' > /etc/kautuka/service-scope.json
 run_helper --capabilities | grep -Fxq container-core-update-v1
 make_signed_release 1.0.6
 touch /etc/kautuka/.core-deny-stop
@@ -487,3 +505,14 @@ assert events[0]['action'] == 'stop' and events[0]['phase'] == 'capturing'
 assert any(e['action'] == 'verify' and e['phase'] == 'aborted' for e in events)
 PY
 echo 'container CLI retirement, fenced stop failure, phase-selected verification, commit and wrong-cohort recovery passed'
+
+# Target staging never deletes the archive set needed by source recovery.
+python3 - <<'PY'
+import hashlib, pathlib
+cache = pathlib.Path('/var/lib/kautuka/oci-images')
+for release in ('1.0.6', '1.0.7', '1.0.8'):
+    data = ('fixture archive core-gateway ' + release).encode()
+    name = 'core-gateway-' + hashlib.sha256(data).hexdigest() + '.oci'
+    assert (cache / name).read_bytes() == data
+print('verified retained source and target offline images')
+PY

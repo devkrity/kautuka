@@ -94,6 +94,21 @@ Before switching release pointers, the root helper writes an operation-bound jou
 
 After a committed update, built-in connector bootstrap waits until the maintenance fence is removed before contacting Manager. During a user-initiated update, the initiating browser shows restart progress instead of a transient updater socket error for up to 12 minutes; unrelated failures and an outage that outlasts that window remain visible.
 
+For container deployments, the root apply helper stages the eleven offline image
+roles before installing the target Manager. Archive names include their signed
+SHA-256 and existing files must match that digest. The shared cache is
+`/var/lib/kautuka/oci-images`, root:kautuka mode 0750 with root:kautuka mode 0640
+files under root-owned, non-writable ancestry. The helper flushes new files and
+directory entries and retains source-release archives. It rejects a legacy
+service-writable data parent; installer conversion must establish this layout
+before enabling container mode. Archive validation does not replace release
+signature verification or runtime config-ID/platform checks.
+
+The Fedora update transaction regression covers archive retention across target
+staging, invalid cohort recovery and interrupted-update source recovery. It uses
+signed fixture archives and mocked lifecycle/systemd calls; actual installed
+container handoff remains a separate release gate.
+
 Container deployment settings live in the installer-owned
 `/etc/kautuka/manager.json`, shared by ordinary Manager startup and its fixed
 update-maintenance command. On Linux this file overrides release defaults and
