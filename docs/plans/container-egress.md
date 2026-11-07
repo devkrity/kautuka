@@ -1,6 +1,6 @@
 # Container deployment and outbound access control
 
-**Status:** Active — implemented on the unmerged feature branch; installed validation is recorded below.
+**Status:** Active — implementation and local acceptance complete on the unmerged feature branch; final evidence is recorded below.
 **Owner:** Kautuka runtime and UpdateService maintainers.
 **Activation condition:** User-authorised replacement design; first demonstrate
 the small rootless egress topology before integrating application deployment.
@@ -1303,4 +1303,62 @@ that selection remain disabled. The shared installer validates only the internal
 host endpoints/socket and rejects external host OTLP destinations. Local Unix
 transport tests cover authority rejection and redirects; native installer tests
 cover generated configuration and disablement. The rebuilt installed telemetry
-layout remains the final integration check for this checkpoint.
+layout remained the final integration check for that checkpoint; the result follows.
+
+## Final local acceptance
+
+The final application source is `d6c11b8`. A private signed test release,
+`0.1.20-preview.1004`, was built from that exact commit: both host services are
+Native AOT Linux executables, and all four core service images contain their real
+application payloads. The complete eleven-image inventory was verified against
+the assembled artifact. No production image, release or merge was published.
+
+The fresh firstboot service completed successfully in 40.78 seconds. Both host
+units were active; the four core containers matched the expected immutable image
+identities; WebHost and runtime health were ready. All eleven installed image
+identities and Linux/amd64 platforms were checked. The installed collector ran
+only on the private core network, without published ports, with a read-only root,
+zero effective capabilities and no-new-privileges. Actual logs and runtime metrics
+from Manager, UpdateService, Gateway, ChannelHost and WebHost were queried from
+the collector. CredentialsHost remained networkless with exporters disabled.
+The earlier Native AOT SDK proof separately covers all three signal types and
+collector-recreation persistence; this idle installed run does not claim that
+application traces were generated.
+
+This run followed successful termination of only the Fedora test distro. WSL's
+shared kernel boot ID did not change. The initial observer incorrectly required
+a kernel restart and was retained as failed evidence. A subsequent observer also
+required all eleven load messages, but only the final role's message was available
+in the journal; that failed observation is retained too. The final report records
+the incomplete journal coverage, verifies every installed image directly and
+does not claim a newly measured kernel restart or completion-marker ordering.
+The earlier full cold-kernel firstboot test retains its separate eleven-load and
+readiness-order evidence. No installation or enforcement change was needed for
+these observer corrections.
+
+The acceptance evidence is cumulative; historical pending statements above
+describe the checkpoint at which they were written, not additional open gates:
+
+| Requirement | Local evidence |
+| --- | --- |
+| Rootless routing, live second-scope attachment, DNS, isolation and fail closed | Fedora foundation proof and `runtime-proof-498c086f.json` |
+| User-agent connector identity, lifecycle, normal execution and package access | Manager runtime proof and the connector/package checkpoints above |
+| Exact policy, accepted activation, attributed audit and desktop/phone approvals | Installed desktop Allow/retry and phone Block/deny reports and screenshots for release 1002 |
+| Verified container release staging, successful update and failed-activation recovery | `installed-update-1002-attempt2.json` and `installed-health-recovery-1003-confirmed.json` |
+| Fresh installation and persistent state | Cold firstboot 1002, `fresh-firstboot-1004-result.json`, corrected installed uninstall and vault cryptography reports |
+| Private managed telemetry | `telemetry-native-eab08f15.json` and `installed-telemetry-1004.json` |
+| Current application validation | `push-managed-telemetry.log`: 2,640 backend tests passed, five skipped; 551 frontend tests passed; lint and builds passed |
+
+Detailed reports and screenshots remain under the local
+`artifacts/container-egress` directory. Earlier preserved test application data
+was moved aside with matching file hashes before the fresh 1004 installation.
+The parked branch was not modified. The v6 branch remains unmerged.
+
+The declared v1 limits remain: four active private networks, visible SNI or
+explicit IPv4/port TCP rules, direct same-network communication, new-connection
+policy changes, bounded audit retention and the trusted runtime-owner boundary.
+Gateway-delegated traffic is attributed to Gateway. Temporary approvals and
+package-name policy remain explicitly deferred. Legacy deployment conversion is
+excluded. Interactive Windows import and Mac execution are not claimed by these
+tests; Fedora Linux behavior was exercised inside WSL, not on separate bare-metal
+hardware.
