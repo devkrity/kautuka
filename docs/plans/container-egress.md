@@ -1001,3 +1001,17 @@ directory group and restarting the installed host services, the four core
 containers, package proxy and Envoy/DNS pod run; WebHost returns 200 and Gateway
 reports core readiness and healthy workspace state. This repaired run does not
 replace a clean fresh-install proof or installed update/recovery testing.
+
+The corrected installer has now activated the actual rootless appliance from
+empty application state without manual repair, reusing the verified offline
+image cache. The expected eight containers run, all four core config IDs match
+the packaged inventory, WebHost returns 200, and Gateway reports core readiness
+and healthy workspace state. First-administrator setup remains untouched; the
+test stopped the installer at its secure acknowledgement gate rather than
+claiming completed user setup. This uses the real four core images and prepared
+web/MCPB assets, with the two host services rebuilt after the configuration fix.
+The isolated deployment loader also passes all five permission cases as an
+actual Native AOT executable under UID 65534. A separate wrong-UID full Manager
+probe exited 139 and does not establish a graceful startup diagnostic. Installed
+source-to-target update, controlled precommit recovery and postcommit fencing
+remain the next runtime gate, along with migration, uninstall and WSL packaging.
