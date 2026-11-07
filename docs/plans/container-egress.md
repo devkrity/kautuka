@@ -978,3 +978,13 @@ stock Skopeo's digest-preserving mode passed the native format comparison.
 
 Full pipeline execution, corresponding source/license coverage for the added
 images, installed image staging and installer activation remain release gates.
+
+The real fresh-install trial loaded all eleven offline images and reached user
+service activation. It then exposed a directory permission regression: writing
+the trusted public key replaced `/etc/kautuka`'s runtime traversal group. The key
+installer now preserves that group while retaining root ownership and removing
+group/other write access. An actual non-root Linux regression verifies access
+to both the public key and installed configuration and rejects directory writes.
+The six installer shell regressions and four socket/permission checks pass in a
+private mount namespace. Installed startup remains unproven until the complete
+cohort becomes healthy; image loading and host activation alone do not prove it.

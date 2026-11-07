@@ -12,6 +12,7 @@ import unittest
 SOURCE = Path(__file__).with_name('kautuka-install-linux.sh.in').read_text()
 FUNCTION = 'install_socket_runtime_dirs() {' + SOURCE.split('install_socket_runtime_dirs() {', 1)[1].split('\ninstall_apply_release_helper() {', 1)[0]
 ROOTLESS = 'ensure_rootless_podman_ready() {' + SOURCE.split('ensure_rootless_podman_ready() {', 1)[1].split('\nensure_service_account() {', 1)[0]
+TRUST_KEY = 'write_trusted_manifest_public_key() {' + SOURCE.split('write_trusted_manifest_public_key() {', 1)[1].split('\nrequire_trusted_manifest_public_key_for_network_install() {', 1)[0]
 
 @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root and systemd-tmpfiles required')
 class ContainerSocketsTests(unittest.TestCase):
@@ -65,6 +66,29 @@ class ContainerSocketsTests(unittest.TestCase):
         result = self.run_helper('unknown')
         self.assertNotEqual(0, result.returncode)
         self.assertFalse((self.root / 'tmpfiles.d').exists())
+
+    def test_public_key_install_keeps_runtime_traversal_without_directory_write(self):
+        directory = self.root / 'config'; directory.mkdir(mode=0o750)
+        os.chown(directory, 0, self.account.pw_gid)
+        config = directory / 'manager.json'; config.write_text('{}\n')
+        os.chown(config, 0, self.account.pw_gid); config.chmod(0o640)
+        key = directory / 'manifest-public-key.pem'
+        script = self.root / 'key.sh'
+        script.write_text('set -euo pipefail\n' + TRUST_KEY
+                          + '\nwrite_trusted_manifest_public_key test-public-key "' + str(key) + '"\n')
+        result = subprocess.run(['bash', str(script)], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual((0, self.account.pw_gid, 0o750),
+                         (directory.stat().st_uid, directory.stat().st_gid, directory.stat().st_mode & 0o777))
+        read = subprocess.run(['runuser', '-u', 'nobody', '--', 'cat', str(key)], capture_output=True, text=True)
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual('test-public-key\n', read.stdout)
+        read_config = subprocess.run(['runuser', '-u', 'nobody', '--', 'cat', str(config)], capture_output=True, text=True)
+        self.assertEqual(0, read_config.returncode, read_config.stderr)
+        write = subprocess.run(['runuser', '-u', 'nobody', '--', 'touch', str(directory / 'forbidden')], capture_output=True, text=True)
+        self.assertNotEqual(0, write.returncode)
+        self.assertEqual(0, key.stat().st_uid)
+        self.assertEqual(0o644, key.stat().st_mode & 0o777)
 
     def test_failed_rootless_info_keeps_container_home_root_owned(self):
         home = self.root / 'home'; home.mkdir(mode=0o750)
