@@ -247,7 +247,12 @@ public sealed class UpdateServiceIntegration(
         if (string.Equals(journal.Phase, "verifying", StringComparison.Ordinal)
             || string.Equals(journal.Phase, "committed", StringComparison.Ordinal))
         {
-            if (await WaitForReleaseHealthAsync(journal.TargetRelease, requireCurrentUpdater: true, cancellationToken).ConfigureAwait(false))
+            bool ready = await PrepareTargetRuntimeForCommitAsync(journal.Phase,
+                () => UsesContainerCoreServices()
+                    ? RunApplyReleaseHelperAsync(["--resume-runtime"], cancellationToken) : Task.CompletedTask,
+                () => WaitForReleaseHealthAsync(journal.TargetRelease, requireCurrentUpdater: true, cancellationToken),
+                () => RecoverAndHandoffToSourceAsync(journal.SourceRelease, cancellationToken).AsTask(), cancellationToken, logger).ConfigureAwait(false);
+            if (ready)
             {
                 await RunApplyReleaseHelperAsync(["--commit", "--version", journal.TargetRelease!], cancellationToken).ConfigureAwait(false);
                 RequestHostRestart("committed update", journal.TargetRelease!);
@@ -260,8 +265,7 @@ public sealed class UpdateServiceIntegration(
                 return false;
             }
 
-            logger.LogWarning("Target release {ReleaseId} did not pass readiness before the safe recovery deadline; restoring the verified pre-update snapshot.", journal.TargetRelease);
-            await RecoverAndHandoffToSourceAsync(journal.SourceRelease, cancellationToken).ConfigureAwait(false);
+            logger.LogWarning("Target release {ReleaseId} did not pass readiness; verified source recovery was attempted.", journal.TargetRelease);
             journal = ReadRecoveryJournal();
         }
         else if (!string.Equals(journal.Phase, "recovered", StringComparison.Ordinal))
@@ -284,6 +288,9 @@ public sealed class UpdateServiceIntegration(
             return false;
         }
 
+        if (UsesContainerCoreServices())
+            await RunApplyReleaseHelperAsync(["--resume-runtime"], cancellationToken).ConfigureAwait(false);
+
         if (!await WaitForReleaseHealthAsync(journal.SourceRelease, requireCurrentUpdater: true, cancellationToken).ConfigureAwait(false))
         {
             logger.LogError("Restored source release {ReleaseId} did not become healthy; maintenance remains enabled.", journal.SourceRelease);
@@ -293,6 +300,24 @@ public sealed class UpdateServiceIntegration(
         await RunApplyReleaseHelperAsync(["--complete-recovery", "--version", journal.SourceRelease], cancellationToken).ConfigureAwait(false);
         RequestHostRestart("completed safe recovery", journal.SourceRelease);
         return true;
+    }
+
+    internal static async Task<bool> PrepareTargetRuntimeForCommitAsync(string phase, Func<Task> resume,
+        Func<Task<bool>> observeHealth, Func<Task> recoverSource, CancellationToken cancellationToken, ILogger? logger = null)
+    {
+        if (phase is not ("verifying" or "committed")) throw new ArgumentException("Expected a target verification phase.", nameof(phase));
+        cancellationToken.ThrowIfCancellationRequested();
+        bool resumed = true;
+        try { await resume().ConfigureAwait(false); }
+        catch (Exception error) when (phase == "verifying" && !cancellationToken.IsCancellationRequested && error is not OperationCanceledException)
+        {
+            logger?.LogWarning(error, "Target runtime resume failed before commit; recovering the verified source state.");
+            resumed = false;
+        }
+        if (resumed && await observeHealth().ConfigureAwait(false)) return true;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (phase == "verifying") await recoverSource().ConfigureAwait(false);
+        return false;
     }
 
     private async ValueTask RecoverAndHandoffToSourceAsync(string? sourceRelease, CancellationToken cancellationToken)
@@ -362,6 +387,13 @@ public sealed class UpdateServiceIntegration(
                 pointersConsistent = false;
                 break;
             }
+        }
+
+        if (UsesContainerCoreServices())
+        {
+            return (pointersConsistent,
+                IsSystemdUnitActive(systemctlExecutablePath, ["--user", "is-active", "--quiet", "kautuka-manager.service"])
+                && IsSystemdUnitActive(systemctlExecutablePath, ["--user", "is-active", "--quiet", "kautuka-updateservice.service"]));
         }
 
         bool credentialsActive = File.Exists("/etc/systemd/system/kautuka-credentialshost.service")
@@ -435,6 +467,9 @@ public sealed class UpdateServiceIntegration(
             preparedArtifacts.PlatformPackagePath);
 
         string capability = await RunApplyReleaseHelperAsync(["--capabilities"], cancellationToken).ConfigureAwait(false);
+        if (UsesContainerCoreServices() && !capability.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => line.Trim() == "container-core-update-v1"))
+            throw new InvalidOperationException("The installed helper cannot safely update container core services. Run the current signed installer bootstrap.");
         if (!capability.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
                 .Any(line => string.Equals(line.Trim(), "safe-state-recovery-v5", StringComparison.Ordinal)))
         {
@@ -1039,6 +1074,19 @@ public sealed class UpdateServiceIntegration(
         }
 
         return false;
+    }
+
+    private static bool UsesContainerCoreServices()
+        => File.Exists(serviceScopeDocumentPath) && ParseContainerCoreServices(File.ReadAllText(serviceScopeDocumentPath));
+
+    internal static bool ParseContainerCoreServices(string json)
+    {
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement root = document.RootElement;
+        if (!root.TryGetProperty("applicationServices", out JsonElement mode)) return false;
+        if (mode.ValueKind != JsonValueKind.String || mode.GetString() is not ("host" or "containers"))
+            throw new InvalidOperationException("Unsupported installed application service layout.");
+        return mode.GetString() == "containers";
     }
 
     private InstalledServiceScope? ReadInstalledServiceScope()

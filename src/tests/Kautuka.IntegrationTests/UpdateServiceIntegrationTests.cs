@@ -19,6 +19,52 @@ namespace Kautuka.IntegrationTests;
 public sealed class UpdateServiceIntegrationTests
 {
     [Fact]
+    public async Task FailedPrecommitRuntimeResumeAttemptsSourceRecoveryBeforeAnotherHealthWait()
+    {
+        int observed = 0, recovered = 0;
+        bool ready = await UpdateServiceIntegration.PrepareTargetRuntimeForCommitAsync("verifying",
+            () => Task.FromException(new InvalidOperationException("target startup failed")),
+            () => { observed++; return Task.FromResult(true); },
+            () => { recovered++; return Task.CompletedTask; }, TestContext.Current.CancellationToken);
+        Assert.False(ready);
+        Assert.Equal(0, observed);
+        Assert.Equal(1, recovered);
+    }
+
+    [Fact]
+    public async Task FailedCommittedRuntimeResumeCannotRestoreSource()
+    {
+        bool recovered = false;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => UpdateServiceIntegration.PrepareTargetRuntimeForCommitAsync("committed",
+            () => Task.FromException(new InvalidOperationException("forward repair failed")), () => Task.FromResult(false),
+            () => { recovered = true; return Task.CompletedTask; }, TestContext.Current.CancellationToken));
+        Assert.False(recovered);
+    }
+
+    [Fact]
+    public async Task CancellationDuringRuntimeResumeCannotAuthorizeSourceRestore()
+    {
+        bool recovered = false;
+        await Assert.ThrowsAsync<OperationCanceledException>(() => UpdateServiceIntegration.PrepareTargetRuntimeForCommitAsync("verifying",
+            () => Task.FromException(new OperationCanceledException()), () => Task.FromResult(false),
+            () => { recovered = true; return Task.CompletedTask; }, TestContext.Current.CancellationToken));
+        Assert.False(recovered);
+    }
+
+    [Theory]
+    [InlineData("{}", false)]
+    [InlineData("{\"applicationServices\":\"host\"}", false)]
+    [InlineData("{\"applicationServices\":\"containers\"}", true)]
+    public void InstalledLayoutSelectsOnlyTheDeclaredRuntime(string json, bool containers)
+        => Assert.Equal(containers, UpdateServiceIntegration.ParseContainerCoreServices(json));
+
+    [Theory]
+    [InlineData("{\"applicationServices\":\"unknown\"}")]
+    [InlineData("{\"applicationServices\":true}")]
+    public void UnknownInstalledLayoutCannotFallBackToHostServices(string json)
+        => Assert.Throws<InvalidOperationException>(() => UpdateServiceIntegration.ParseContainerCoreServices(json));
+
+    [Fact]
     public void UpdateOptionsValidationSucceedsWhenNoReleaseSourceIsConfigured()
     {
         var validator = new UpdateOptionsValidation();

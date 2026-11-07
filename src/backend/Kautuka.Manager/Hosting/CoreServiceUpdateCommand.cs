@@ -3,6 +3,8 @@ using System.Text.Json;
 using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.Protos;
+using Kautuka.Telemetry.Security;
 
 namespace Kautuka.Manager.Hosting;
 
@@ -51,6 +53,18 @@ internal static class CoreServiceUpdateCommand
                 configuration.GetSection(ContainerEgressOptions.Section).Bind(egressOptions);
                 inventory = RuntimeImageAllowlistLoader.Load(Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName),
                     requirePresent: true, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+                if (!coreOptions.Enabled || !egressOptions.Enabled)
+                    throw new InvalidOperationException("The selected release does not enable the container runtime.");
+                var (server, ca) = LocalCaMtlsBootstrap.EnsureAndLoad("/var/lib/kautuka/manager", "Manager",
+                    [new LocalMtlsClientCertificate(ManagerClientIdentities.GatewayCommonName, ManagerClientIdentities.GatewayCertificateFileName),
+                        new LocalMtlsClientCertificate(ManagerClientIdentities.UpdateServiceCommonName, ManagerClientIdentities.UpdateServiceCertificateFileName)]);
+                server.Dispose();
+                ca.Dispose();
+                LocalCaMtlsBootstrap.PublishGatewayClientIdentity("/var/lib/kautuka/manager", ManagerClientIdentities.GatewayCertificateFileName);
+                // Restore captures canonical transport state, not these derived
+                // narrow publications. Copy UpdateService's existing identity;
+                // only its own bootstrap may generate or rotate that identity.
+                LocalCaMtlsBootstrap.PublishGatewayClientIdentity("/var/lib/kautuka/updateService", ".updateservice-client.pfx");
             }
             var runner = new PodmanCommandRunner();
             var archives = new PodmanImageArchiveStore(runner, "/var/lib/kautuka/oci-images", inventory,
@@ -151,5 +165,5 @@ internal static class CoreServiceUpdateCommand
 
     private static bool IsOperationId(string value) => value.Length == 32 && value.All(char.IsAsciiHexDigitLower);
     private static bool IsRelease(string value) => value.Length is > 0 and <= 128 && value[0] != '.'
-        && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_');
+        && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_' or '+');
 }

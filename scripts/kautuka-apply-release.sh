@@ -13,6 +13,7 @@ Usage:
   kautuka-apply-release --boot-recover
   kautuka-apply-release --commit --version <version>
   kautuka-apply-release --complete-recovery --version <source-version>
+  kautuka-apply-release --resume-runtime
   kautuka-apply-release --capabilities
 EOF
 }
@@ -30,6 +31,7 @@ boot_recover='false'
 commit='false'
 complete_recovery='false'
 capabilities='false'
+resume_runtime='false'
 
 if [[ ${EUID} -ne 0 ]]; then
     echo 'error: kautuka-apply-release must run as root.' >&2
@@ -110,6 +112,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --capabilities)
             capabilities='true'
+            shift
+            ;;
+        --resume-runtime)
+            resume_runtime='true'
             shift
             ;;
         -h|--help)
@@ -282,6 +288,97 @@ service_user='kautuka'
 database_root='/var/lib/kautuka'
 database_writer_lock='/run/kautuka-db-writer.lock'
 database_writer_lease_active='false'
+
+# Installer-owned deployment choice. Older installs retain their host layout;
+# malformed contracts never silently select a less restrictive lifecycle.
+application_services="$(python3 - <<'PY'
+import json, os, stat
+path = '/etc/kautuka/service-scope.json'
+if not os.path.lexists(path):
+    print('host')
+else:
+    for parent in ('/etc/kautuka', path):
+        info = os.lstat(parent)
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SystemExit('error: service scope contract must have root-owned, non-writable ancestry')
+    with open(path) as stream:
+        document = json.load(stream)
+    mode = document.get('applicationServices', 'host')
+    if document.get('schemaVersion') != 1 or mode not in ('host', 'containers'):
+        raise SystemExit('error: unsupported application service layout')
+    if mode == 'containers' and (document.get('username') != 'kautuka' or document.get('scope') != 'user'):
+        raise SystemExit('error: container services require the dedicated kautuka user runtime')
+    print(mode)
+PY
+)"
+if [[ "$application_services" == containers ]]; then system_units=(); fi
+
+run_core_update_command() {
+    local action="$1" release="$2" operation service_home service_uid runtime executable result capability path
+    require_version_token "$release" || return 1
+    executable="/opt/kautuka/manager/versions/$release/kautuka-manager"
+    for path in "$journal_path" "$maintenance_path"; do
+        [[ -f "$path" && ! -L "$path" && "$(stat -c '%u' "$path")" == 0 \
+            && -z "$(find "$path" -maxdepth 0 -perm /022 -print -quit)" ]] || {
+            echo 'error: unsafe core update operation record; maintenance retained' >&2; return 1;
+        }
+    done
+    [[ -f "$executable" && -x "$executable" && ! -L "$executable" \
+        && "$(readlink -f "$executable")" == "$executable" ]] || {
+        echo 'error: compatible installed Manager maintenance executable is missing' >&2; return 1;
+    }
+    for path in /opt/kautuka/manager /opt/kautuka/manager/versions "/opt/kautuka/manager/versions/$release" "$executable"; do
+        [[ ! -L "$path" && "$(stat -c '%u' "$path")" == 0 \
+            && -z "$(find "$path" -maxdepth 0 -perm /022 -print -quit)" ]] || {
+            echo 'error: Manager release paths must be root-owned and not writable by others' >&2; return 1;
+        }
+    done
+    service_uid="$(id -u "$service_user")" || return 1
+    service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+    runtime="/run/user/$service_uid"
+    [[ -n "$service_home" && -d "$runtime" && ! -L "$runtime" && "$(stat -c '%u' "$runtime")" == "$service_uid" ]] || {
+        echo 'error: dedicated rootless runtime directory is unavailable; maintenance retained' >&2; return 1;
+    }
+    operation="$(read_journal_field operationId)" || return 1
+    local command=(runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" \
+        USER="$service_user" LOGNAME="$service_user" XDG_RUNTIME_DIR="$runtime" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" Kautuka__Mode=prod Kautuka__ContainerStateRoot=/var/lib/kautuka)
+    capability="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" --update-core-capabilities)" || return 1
+    [[ "$capability" == core-service-update-v1 ]] || { echo 'error: Manager lacks container maintenance capability' >&2; return 1; }
+    result="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" "--update-core-$action" "$operation")" || return 1
+    python3 - "$action" "$operation" "$release" "$result" <<'PY'
+import json, re, sys
+action, operation, release, raw = sys.argv[1:]
+if len(raw) > 16384:
+    raise SystemExit('error: oversized core maintenance result')
+result = json.loads(raw)
+if result.get('action') != action or result.get('operationId') != operation or result.get('release') != release:
+    raise SystemExit('error: core maintenance result does not match the active operation')
+if result.get('stopped' if action == 'stop' else 'ready') is not True:
+    raise SystemExit('error: core maintenance action did not complete')
+if action == 'verify':
+    cohort = result.get('cohort')
+    if not isinstance(cohort, list) or len(cohort) != 4 or {item.get('service') for item in cohort} != {'credentialshost','channelhost','gateway','webhost'}:
+        raise SystemExit('error: core verification did not observe exactly the fixed cohort')
+    if any(not re.fullmatch('[a-f0-9]{64}', item.get('containerId', '')) or
+           not re.fullmatch('(?:sha256:)?[a-f0-9]{64}', item.get('imageId', '')) for item in cohort):
+        raise SystemExit('error: invalid immutable core verification identities')
+    if len({item['containerId'] for item in cohort}) != 4:
+        raise SystemExit('error: core verification reused a container identity')
+PY
+}
+
+stop_container_core() {
+    local release
+    # Either recorded release may retire an owned old/new cohort. A failed
+    # candidate never authorizes restoration; one must confirm complete stop.
+    for release in "$(basename "$(readlink -f /opt/kautuka/manager/current)")" \
+        "$(read_journal_field sourceRelease)" "$(read_journal_field targetRelease)"; do
+        if run_core_update_command stop "$release"; then return 0; fi
+    done
+    echo 'error: no compatible Manager confirmed core retirement; maintenance retained' >&2
+    return 1
+}
 
 write_durable_record() {
     local destination="$1" operation_id="$2" phase="$3" source_release="$4" target_release="$5" snapshot="$6"
@@ -540,7 +637,9 @@ assert_supported_data_configuration() {
         service_uid="$(id -u "$service_user")" || { echo 'error: Kautuka service user is missing' >&2; return 1; }
         service_home="$(getent passwd "$service_user" | cut -d: -f6)"
         xdg_runtime_dir="/run/user/${service_uid}"
-        for unit in kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service kautuka-manager.service kautuka-updateservice.service kautuka-webhost.service; do
+        local validation_units=(kautuka-gateway.service kautuka-channelhost.service kautuka-credentialshost.service kautuka-manager.service kautuka-updateservice.service kautuka-webhost.service)
+        if [[ "$application_services" == containers ]]; then validation_units=(kautuka-manager.service kautuka-updateservice.service); fi
+        for unit in "${validation_units[@]}"; do
             if [[ -f "/etc/systemd/system/${unit}" || "$unit" == 'kautuka-gateway.service' || "$unit" == 'kautuka-channelhost.service' || "$unit" == 'kautuka-credentialshost.service' ]]; then
                 [[ -f "/etc/systemd/system/${unit}" ]] || { echo "error: supported system service unit is missing: $unit" >&2; return 1; }
                 [[ "$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)" == 'loaded' ]] || { echo "error: systemd did not load required service unit: $unit" >&2; return 1; }
@@ -628,6 +727,7 @@ assert_supported_data_configuration() {
 }
 
 assert_maintenance_webhost() {
+    [[ "$application_services" == containers ]] && return 0
     local marker="/opt/kautuka/webhost/current/.maintenance-page-v1"
     [[ -f "$marker" && ! -L "$marker" && "$(stat -c '%u' "$marker")" == 0 \
         && -z "$(find "$marker" -maxdepth 0 -perm /022 -print -quit)" \
@@ -705,6 +805,7 @@ stop_database_writers() {
     local unit active service_passwd service_home service_uid xdg_runtime_dir pid
     local live_user_units=("${user_units[@]}")
     if is_disposable_test; then
+        if [[ "$application_services" == containers ]]; then stop_container_core || return 1; fi
         return 0
     fi
 
@@ -757,6 +858,7 @@ stop_database_writers() {
             DBUS_SESSION_BUS_ADDRESS="unix:path=${xdg_runtime_dir}/bus" systemctl --user show --property=MainPID --value "$unit" 2>/dev/null || true)"
         [[ -z "$pid" || "$pid" == '0' ]] || { echo "error: database writer remains after user-service stop: $unit (pid $pid)" >&2; return 1; }
     done
+    if [[ "$application_services" == containers ]]; then stop_container_core || return 1; fi
     assert_database_writers_absent || return 1
 }
 
@@ -812,7 +914,8 @@ for entry in os.scandir('/proc'):
             command = stream.read().replace(b'\0', b' ').decode(errors='replace')
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         continue
-    if any(f'{prefix}{service}/' in candidate and '/versions/' in candidate
+    container_writers = ('/app/Kautuka.Gateway', '/app/Kautuka.ChannelHost', '/app/Kautuka.CredentialsHost')
+    if exe in container_writers or any(f'{prefix}{service}/' in candidate and '/versions/' in candidate
            for candidate in (exe, command) for service in services):
         found.append((pid, exe))
 if found:
@@ -946,7 +1049,11 @@ stage_version_roots() {
         echo 'error: signed target bundle lacks the required safe-state-recovery-v5 apply/admission protocol' >&2
         exit 1
     }
-    [[ -f "$extract_root/services/webhost/.maintenance-page-v1" \
+    if [[ "$application_services" == containers ]] && ! grep -Fq 'container-core-update-v1' "$manager_source/kautuka-apply-release"; then
+        echo 'error: target helper cannot maintain container core services' >&2
+        return 1
+    fi
+    [[ "$application_services" == containers ]] || [[ -f "$extract_root/services/webhost/.maintenance-page-v1" \
         && ! -L "$extract_root/services/webhost/.maintenance-page-v1" \
         && "$(cat "$extract_root/services/webhost/.maintenance-page-v1")" == 'kautuka-maintenance-page-v1' ]] || {
         echo 'error: signed target bundle cannot serve the maintenance page' >&2
@@ -1051,6 +1158,27 @@ retarget_current() {
 }
 
 start_units() {
+    if [[ "$application_services" == containers ]]; then
+        local selected_release service_uid service_home runtime
+        selected_release="$(basename "$(readlink -f /opt/kautuka/manager/current)")"
+        service_uid="$(id -u "$service_user")" || return 1
+        service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+        runtime="/run/user/$service_uid"
+        if ! is_disposable_test; then
+            runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" XDG_RUNTIME_DIR="$runtime" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user stop kautuka-manager.service || return 1
+            local manager_pid
+            manager_pid="$(runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" XDG_RUNTIME_DIR="$runtime" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user show --property=MainPID --value kautuka-manager.service)" || return 1
+            [[ "$manager_pid" == 0 ]] || { echo 'error: Manager remains alive during core verification' >&2; return 1; }
+        fi
+        run_core_update_command verify "$selected_release" || return 1
+        if is_disposable_test; then return 0; fi
+        runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" XDG_RUNTIME_DIR="$runtime" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user start kautuka-manager.service || return 1
+        check_gateway_health
+        return $?
+    fi
     local service_home
     local service_uid
     local xdg_runtime_dir
@@ -1217,6 +1345,22 @@ verify_runtime_health() {
             return 1
         }
     done
+    if [[ "$application_services" == containers ]]; then
+        # start_units already obtained exact cohort evidence through Manager.
+        # No host application unit may substitute for that verification.
+        if is_disposable_test; then check_gateway_health; return $?; fi
+        local service_uid service_home runtime
+        service_uid="$(id -u "$service_user")" || return 1
+        service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+        runtime="/run/user/$service_uid"
+        runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" XDG_RUNTIME_DIR="$runtime" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user is-active --quiet kautuka-manager.service || return 1
+        pid="$(runuser -u "$service_user" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$service_home" XDG_RUNTIME_DIR="$runtime" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" systemctl --user show --property=MainPID --value kautuka-manager.service)" || return 1
+        [[ "$(readlink -f "/proc/$pid/exe")" == "/opt/kautuka/manager/versions/$version/kautuka-manager" ]] || return 1
+        check_gateway_health
+        return $?
+    fi
     for unit in "${system_units[@]}"; do
         systemctl is-active --quiet "$unit" || return 1
         is_disposable_test && continue
@@ -1507,10 +1651,27 @@ if [[ "$capabilities" == 'true' ]]; then
     assert_database_writer_lock_ready || exit 1
     assert_maintenance_webhost || exit 1
     printf '%s\n' 'safe-state-recovery-v5'
+    if [[ "$application_services" == containers ]]; then printf '%s\n' 'container-core-update-v1'; fi
     exit 0
 fi
 
 assert_no_legacy_recovery_markers
+
+if [[ "$resume_runtime" == true ]]; then
+    [[ "$application_services" == containers ]] || { echo 'error: runtime resume requires container services' >&2; exit 1; }
+    assert_supported_data_configuration true
+    ensure_maintenance_fence_from_journal || exit 1
+    phase="$(read_journal_field phase)"
+    case "$phase" in
+        recovered) selected_release="$(read_journal_field sourceRelease)" ;;
+        verifying|committed) selected_release="$(read_journal_field targetRelease)" ;;
+        *) echo 'error: runtime resume requires a verified recovery or activation decision' >&2; exit 1 ;;
+    esac
+    # Runtime-only continuation after the user session is available. Never
+    # replay an already restored snapshot or change the durable decision.
+    start_units && verify_runtime_health "$selected_release" || exit 1
+    exit 0
+fi
 
 check_terminal_recovery_decision() {
     local phase

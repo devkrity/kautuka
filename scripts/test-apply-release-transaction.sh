@@ -94,6 +94,7 @@ make_signed_release() {
         chmod 755 "$destination/kautuka-$service"
     done
     printf '%s\n' 'kautuka-maintenance-page-v1' > "$payload/services/webhost/.maintenance-page-v1"
+    if [[ -f "$temp_dir/core-manager" ]]; then cp "$temp_dir/core-manager" "$payload/bin/kautuka-manager"; fi
     if [[ "$protocol" == current ]]; then
         cp "$script_dir/kautuka-apply-release.sh" "$payload/bin/kautuka-apply-release"
     else
@@ -386,3 +387,103 @@ run_helper --boot-recover
 [[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.3 ]]
 [[ "$(python3 -c 'import json;print(json.load(open("/var/lib/kautuka-recovery/operation.json"))["phase"])')" == recovered ]]
 echo 'verified snapshot, maintenance fencing, precommit recovery, unresolved-operation rejection, and committed roll-forward passed'
+
+# Exercise the container transaction seam with a fixed Manager CLI stand-in.
+# Lifecycle is mocked here; the separate rootless proof uses actual containers.
+run_helper --complete-recovery --version 1.0.3
+cat > "$temp_dir/core-manager" <<'PY'
+#!/usr/bin/python3
+import fcntl, json, pathlib, sys
+if sys.argv[1:] == ['--update-core-capabilities']:
+    print('core-service-update-v1'); raise SystemExit(0)
+action, operation = sys.argv[1:]
+action = action.removeprefix('--update-core-')
+release = pathlib.Path(__file__).parent.name
+record = json.loads(pathlib.Path('/var/lib/kautuka-recovery/operation.json').read_text())
+assert record['operationId'] == operation
+with open('/run/kautuka-db-writer.lock') as lease:
+    fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+if action == 'stop' and pathlib.Path('/etc/kautuka/.core-deny-stop').exists():
+    raise SystemExit(1)
+with open('/var/lib/kautuka-recovery/test-core-events.jsonl', 'a') as stream:
+    stream.write(json.dumps({'action':action, 'release':release, 'phase':record['phase']}) + '\n')
+result = {'action':action, 'operationId':operation, 'release':release,
+          'stopped' if action == 'stop' else 'ready':True}
+if action == 'verify':
+    pathlib.Path('/var/lib/kautuka-recovery/test-core-running').write_text(release)
+    result['cohort'] = [{'service':name, 'containerId':chr(97+i)*64, 'imageId':'e'*64}
+                        for i,name in enumerate(('credentialshost','channelhost','gateway','webhost'))]
+    if release == '1.0.7': result['cohort'][0]['containerId'] = 'invalid'
+else:
+    pathlib.Path('/var/lib/kautuka-recovery/test-core-running').unlink(missing_ok=True)
+print(json.dumps(result))
+PY
+chmod 755 "$temp_dir/core-manager"
+cp "$temp_dir/core-manager" /opt/kautuka/manager/versions/1.0.3/kautuka-manager
+cat > "$temp_dir/mock/runuser" <<'SH'
+#!/bin/sh
+while [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+SH
+chmod 755 "$temp_dir/mock/runuser"
+chown 992:992 /run/user/992
+printf '%s\n' '{"schemaVersion":1,"scope":"user","username":"kautuka","applicationServices":"containers"}' > /etc/kautuka/service-scope.json
+run_helper --capabilities | grep -Fxq container-core-update-v1
+make_signed_release 1.0.6
+touch /etc/kautuka/.core-deny-stop
+set +e
+run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.6 >"$temp_dir/core-stop-failure.log" 2>&1
+core_stop_status=$?
+set -e
+[[ $core_stop_status -ne 0 && -f /var/lib/kautuka-recovery/maintenance.json ]]
+[[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.3 ]]
+rm /etc/kautuka/.core-deny-stop
+run_helper --recover
+run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.6
+run_helper --commit --version 1.0.6
+[[ ! -e /var/lib/kautuka-recovery/maintenance.json ]]
+make_signed_release 1.0.7
+set +e
+run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.7 >"$temp_dir/core-cohort-failure.log" 2>&1
+core_cohort_status=$?
+set -e
+[[ $core_cohort_status -ne 0 && -f /var/lib/kautuka-recovery/maintenance.json ]]
+[[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.6 ]]
+run_helper --complete-recovery --version 1.0.6
+make_signed_release 1.0.8
+set +e
+PATH="$temp_dir/mock:$PATH" KAUTUKA_DISPOSABLE_TEST=1 KAUTUKA_TEST_CRASH_AT=switched \
+  KAUTUKA_APPLY_DETACHED=1 KAUTUKA_APPLY_LOCK="$temp_dir/lock" \
+  /usr/local/lib/kautuka/apply-release --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.8 >/dev/null 2>&1
+core_boot_crash=$?
+set -e
+[[ $core_boot_crash -ne 0 && ! -e /var/lib/kautuka-recovery/test-core-running ]]
+run_helper --boot-recover
+[[ ! -e /var/lib/kautuka-recovery/test-core-running ]]
+python3 - <<'PY'
+import json, sqlite3
+assert json.load(open('/var/lib/kautuka-recovery/operation.json'))['phase'] == 'recovered'
+with sqlite3.connect('/var/lib/kautuka/kautuka.db') as db:
+    db.execute("insert into registry values ('post-restore-write')")
+PY
+run_helper --resume-runtime
+[[ "$(cat /var/lib/kautuka-recovery/test-core-running)" == 1.0.6 ]]
+[[ -f /var/lib/kautuka-recovery/maintenance.json ]]
+python3 - <<'PY'
+import json, sqlite3
+assert json.load(open('/var/lib/kautuka-recovery/operation.json'))['phase'] == 'recovered'
+with sqlite3.connect('/var/lib/kautuka/kautuka.db') as db:
+    assert db.execute("select count(*) from registry where value='post-restore-write'").fetchone()[0] == 1
+PY
+run_helper --complete-recovery --version 1.0.6
+python3 - <<'PY'
+import json
+events = [json.loads(line) for line in open('/var/lib/kautuka-recovery/test-core-events.jsonl')]
+assert any(e == {'action':'verify','release':'1.0.6','phase':'verified'} for e in events)
+assert any(e == {'action':'verify','release':'1.0.6','phase':'committed'} for e in events)
+assert any(e == {'action':'verify','release':'1.0.6','phase':'recovered'} for e in events)
+assert events[0]['action'] == 'stop' and events[0]['phase'] == 'capturing'
+assert any(e['action'] == 'verify' and e['phase'] == 'aborted' for e in events)
+PY
+echo 'container CLI retirement, fenced stop failure, phase-selected verification, commit and wrong-cohort recovery passed'

@@ -897,3 +897,43 @@ verification, ordinary fence refusal, actual core health, closed-proxy shutdown,
 writer-lock release and subsequent egress recovery. This RAM-backed fixture does
 not execute the installed CLI/root-helper transaction. That wiring remains
 unfinished, and container update activation must not be enabled before it exists.
+
+The existing apply-release transaction now recognizes installer-owned
+`service-scope.json` with `applicationServices: containers`. Missing deployment
+metadata retains the legacy host path during conversion; unknown/malformed modes
+fail. In container mode it drains host Manager, runs the fixed same-owner stop
+command with a clean environment, validates its operation/release/result, and
+only then acquires the exclusive database-writer lease. Startup uses the selected
+Manager verification command and validates four unique immutable container IDs
+before starting host Manager and checking Gateway health. Host application units
+do not substitute for container health. Capability negotiation covers both the
+installed helper and staged replacement helper. Installer conversion must wait
+for these capabilities and must not switch an unresolved legacy operation.
+
+Verification refreshes Manager's own transport publication and republishes
+UpdateService's existing canonical Gateway client identity without generating or
+rotating UpdateService keys. These narrow publication directories are derived
+state and are not restored from snapshots. Stop remains bootstrap-free.
+
+Offline boot restoration continues without a user bus, with the existing process
+guard extended to the actual container executable paths and exclusive writer
+locking still required. Once the user session is available, UpdateService calls
+`--resume-runtime` before waiting for container health. That fixed action starts
+the recorded verification cohort while retaining the fence and durable decision;
+it never restores an already recovered snapshot. Failed target resume before
+commit attempts source recovery; committed failure and cancellation cannot
+authorize source restoration.
+
+The architect cleared the corrected failure paths. Focused checks passed 103
+tests. Actual Manager and UpdateService Native AOT publishing also succeeded.
+The Fedora transaction regression passed, including failed core retirement
+retaining maintenance, phase-selected verification, committed startup, invalid
+cohort recovery, offline restore with no core services and runtime-only resume
+preserving a post-restore database write. Lifecycle/systemd are mocked in this
+transaction fixture; the real core-container proofs remain separate. The first
+expanded run reached the recovery cases but failed an overstrict event-order
+assertion, corrected in the passing run. Logs:
+`artifacts/container-egress/core-update-transaction.log` and
+`artifacts/container-egress/core-update-transaction-resume.log`. Actual installed
+CLI/helper/systemd handoff, release packaging and installer activation still need
+end-to-end validation before this mode is shipped.

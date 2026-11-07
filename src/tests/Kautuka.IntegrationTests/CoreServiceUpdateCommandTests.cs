@@ -8,6 +8,16 @@ public sealed class CoreServiceUpdateCommandTests
 {
     private const string operation = "0123456789abcdef0123456789abcdef";
 
+    [Fact]
+    public void RecordedSemverBuildMetadataIsAValidInstalledReleaseDirectory()
+    {
+        JsonObject record = Record();
+        record["targetRelease"] = "1.0.1+build.42";
+        string json = record.ToJsonString();
+        Assert.Equal("1.0.1+build.42", CoreServiceUpdateCommand.ValidateOperation(operation, json, json,
+            "/opt/kautuka/manager/versions/1.0.1+build.42/kautuka-manager"));
+    }
+
     [Theory]
     [InlineData("1.0.0")]
     [InlineData("1.0.1")]
