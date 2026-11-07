@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -52,7 +53,16 @@ internal static class ContainerEgressManagerFixture
             }
             if (failAdmin && actual.Contains("http://127.0.0.1:9901/config_dump")) return new PodmanCommandResult(1, "", "fixture control-plane outage");
             if (actual[0] == "stop" && actual.Contains("kautuka-egress-envoy")) failAdmin = false;
-            return await native.RunAsync(actual, timeout, token, environment);
+            long started = Stopwatch.GetTimestamp();
+            PodmanCommandResult result = await native.RunAsync(actual, timeout, token, environment);
+            TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
+            if (elapsed.TotalSeconds >= 5 || result.ExitCode != 0)
+            {
+                int nameArgument = actual.IndexOf("--name");
+                string name = nameArgument >= 0 && nameArgument + 1 < actual.Count ? actual[nameArgument + 1] : "";
+                await Console.Error.WriteLineAsync($"fixture: podman {actual[0]} {name} elapsed={elapsed.TotalSeconds:F1}s budget={timeout}s result={result.TerminationReason}");
+            }
+            return result;
         });
         var allowlist = new RuntimeImageAllowlist(1, [
          new("egress-setup",data.GetProperty("helper").GetString()!,null),

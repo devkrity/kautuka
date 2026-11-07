@@ -697,3 +697,15 @@ by normalized-text SHA-256. Focused Windows checks passed 23 transport/compiler
 tests and 70 updater/source-policy tests. The architect cleared the corrections.
 A full native regression with the host listener enabled is running separately;
 this focused result does not claim core-service or workload regression coverage.
+
+The combined native rerun
+`artifacts/container-egress/runtime-proof-a2cff49a.json` passed with no cleanup
+errors. It exercised the host-artifact listener alongside all four core services,
+source policy publication/recovery, the package service, sandbox execution and
+Node/Python/uv/binary dependency execution. All 67 runtime/shared/fixture inputs
+match this diagnostic AOT snapshot by normalized-text SHA-256. The preceding
+combined run `runtime-proof-9daa819a.json` timed out during sandbox preparation;
+that failure cleaned up and did not reproduce in the rerun. Its exact cause is
+not established. The 30-second preparation budget is unchanged. Preparation
+errors now identify the native operation, and the fixture records slow/failed
+operation timing without printing argument lists or environment values.

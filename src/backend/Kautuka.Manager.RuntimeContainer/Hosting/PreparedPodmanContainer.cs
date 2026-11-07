@@ -208,14 +208,14 @@ internal sealed class PodmanContainerPreparation(PodmanCommandRunner runner)
             && parts[5].All(static c => char.IsAsciiLetterOrDigit(c) || c == '-');
     }
 
-    private async Task<PodmanCommandResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken,
+    private async Task<PodmanCommandResult> RunAsync(string[] arguments, CancellationToken cancellationToken,
         IReadOnlyDictionary<string, string>? environment = null)
     {
         PodmanCommandResult result = await runner.RunAsync(arguments, 30, cancellationToken, environment).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (result.ExitCode != 0)
         {
-            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Podman container preparation", result));
+            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Podman container preparation " + arguments[0], result));
         }
 
         return result;
