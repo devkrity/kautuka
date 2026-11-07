@@ -233,13 +233,17 @@ jobs:
             docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
             dir:/src/sbom-input/wsl-appliance \
             -o spdx-json="/src/$release_dir/kautuka-wsl-appliance.spdx.json"
+          image_archives="$(node scripts/list-runtime-image-archives.mjs "$release_dir/kautuka-platform-release.json")"
           while IFS=$'\t' read -r image_id archive_name; do
+            [[ -n "$image_id" ]] || continue
+            archive_type=docker-archive
+            if [[ "$archive_name" == *.oci ]]; then archive_type=oci-archive; fi
             docker run --rm \
               -v "$PWD:/src" \
               docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \
-              docker-archive:"/src/sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name" \
+              "$archive_type:/src/sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name" \
               -o spdx-json="/src/$release_dir/kautuka-${image_id}-image.spdx.json"
-          done < <(node scripts/list-runtime-image-archives.mjs)
+          done <<< "$image_archives"
           base_image="$(jq -r '.baseImage // empty' "$release_dir/THIRD_PARTY_COMPONENTS.json")"
           if [[ -z "$base_image" ]]; then
             echo 'error: release component inventory has no immutable kautuka-base image digest.' >&2

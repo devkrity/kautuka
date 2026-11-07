@@ -1,0 +1,7 @@
+ARG SETUP_BASE_IMAGE
+FROM ${SETUP_BASE_IMAGE}
+RUN microdnf install -y bash coreutils curl iproute nftables \
+    && microdnf clean all \
+    && mkdir -p /usr/share/doc/kautuka \
+    && rpm -qa --qf '%{SOURCERPM}\n' | sort -u > /usr/share/doc/kautuka/FEDORA_SOURCE_RPMS.txt
+CMD ["/usr/bin/sleep", "infinity"]

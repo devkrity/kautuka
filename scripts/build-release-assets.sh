@@ -475,7 +475,7 @@ for entry in images:
     print("\t".join(values))
 PY
 )" || { echo 'error: failed to parse runtime image inventory.' >&2; return 1; }
-  sudo mkdir -p "$dest"
+  mkdir -p "$dest"
   while IFS=$'\t' read -r image_id image_ref archive_name; do
     [[ -n "$image_id" && -n "$image_ref" && -n "$archive_name" ]] || continue
     log_phase "Saving first-boot OCI archive ${image_id}"
@@ -483,9 +483,9 @@ PY
     tmp_archive="$(mktemp --suffix=.tar)"
     "$container_runtime" pull "$image_ref"
     "$container_runtime" save -o "$tmp_archive" "$image_ref"
-    sudo cp "$tmp_archive" "$dest/$archive_name"
+    cp "$tmp_archive" "$dest/$archive_name"
     rm -f "$tmp_archive"
-    sudo chmod 644 "$dest/$archive_name"
+    chmod 644 "$dest/$archive_name"
   done <<< "$image_rows"
   local bound_inventory
   bound_inventory="$(mktemp --suffix=.json)"
@@ -494,7 +494,7 @@ PY
     rm -f "$bound_inventory"
     return 1
   fi
-  sudo install -m 0644 "$bound_inventory" "$inventory_output"
+  install -m 0644 "$bound_inventory" "$inventory_output"
   rm -f "$bound_inventory"
 }
 
@@ -986,6 +986,9 @@ cp "$compliance_dir/licenses/"* "$stage_dir/share/doc/kautuka/licenses/"
 # these exact bytes from the Linux payload instead of independently pulling.
 log_phase "Staging common runtime image archives"
 stage_oci_image_archives "$stage_dir/oci-images" "$stage_dir/bin/runtime-images.json"
+python3 "$source_root/scripts/package-runtime-images.py" --source-root "$source_root" \
+  --payload "$stage_dir" --work-root "$work_dir" --runtime "$container_runtime" \
+  --version "$version" --numeric-version "$numeric_version" --source-sha "$source_sha"
 cp "$stage_dir/bin/runtime-images.json" "$release_dir/runtime-images.bound.json"
 
 mkdir -p "$(dirname "$platform_tarball")"

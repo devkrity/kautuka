@@ -952,7 +952,29 @@ inventory/archive copying, zero registry operations during WSL copy, and refusal
 of changed archives or a missing stage before destination publication. Five
 archive binder tests and the release SDK, archive-list and image-inventory
 contract checks also passed. The architect cleared this ordering prerequisite.
-It still packages the current inventory: production of the complete same-release
-core and bootstrap image set remains unfinished. The existing core Dockerfiles
-also need version/source propagation and the Gateway built-in bundles before
-they provide the production release content.
+The common stage now includes the base image as an offline archive. The release
+producer adds the four same-release Native AOT core images plus setup, Envoy,
+DNS and image-acquisition images, producing eleven bound roles. Core publication
+uses a pinned Azure Linux AOT SDK/runtime pair, a fresh source tree, release
+version/source metadata and the prepared Gateway bundles and WebHost assets.
+Stock Skopeo exports local images with `--preserve-digests` and no network access;
+conversion must preserve the inspected config ID. Archives receive SHA-256-based
+names before the complete inventory is atomically published. Linux and WSL share
+these exact bytes, and SBOM enumeration reads the generated manifest. Build-stage
+files belong to the invoking builder; only rootfs installation uses root.
+
+Four synthetic-engine producer checks and the archive-list check pass. A full
+Fedora producer run compiled all four actual Native AOT services, exported all
+eight new roles, validated eleven bindings, cold-loaded Gateway and WebHost into
+a second empty store, checked their bundled assets and excluded build recipes,
+and verified setup tool paths. Its original three images and prepared assets
+were fixtures; this does not prove their real release provenance or contents.
+The passing report is
+`artifacts/container-egress/release-producer-native-preserved.json`. An earlier
+6-GiB scratch run exhausted space on the last export; the passing run used a
+bounded 9-GiB scratch store, which is not a production sizing measurement. Forced
+OCI conversion previously changed Envoy's config ID and was correctly rejected;
+stock Skopeo's digest-preserving mode passed the native format comparison.
+
+Full pipeline execution, corresponding source/license coverage for the added
+images, installed image staging and installer activation remain release gates.
