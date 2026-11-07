@@ -591,6 +591,7 @@ public sealed class UpdateServiceIntegrationTests
 
             UpdateStatusSnapshot applying = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
             Assert.Equal(UpdateWorkflowState.Applying, applying.State);
+            Assert.Equal(string.Empty, (await stateStore.GetAsync(TestContext.Current.CancellationToken)).RecoveryOperationIdAtStart);
             Assert.Equal(releaseId, hostIntegration.ActivatedReleaseId);
             Assert.True(File.Exists(hostIntegration.ActivatedPlatformPackagePath));
             Assert.Equal(string.Empty, hostIntegration.ActivatedPlatformExtractedPath);
@@ -1791,18 +1792,119 @@ public sealed class UpdateServiceIntegrationTests
         {
             State = UpdateWorkflowState.Applying,
             PendingOperation = "apply",
+            RecoveryOperationIdAtStart = string.Empty,
             CurrentRelease = source,
             AvailableRelease = target,
             StagedRelease = target,
             StateChangedAtUtc = DateTimeOffset.UtcNow,
         });
         var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), source.Version,
-            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget);
+            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget, recoveryOperationId: "completed-operation");
         var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
             new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
 
         UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
         Assert.Equal(expected, status.State);
+    }
+
+    [Theory]
+    [InlineData("old-operation", "old-operation", UpdateWorkflowState.Applying)]
+    [InlineData("old-operation", "new-operation", UpdateWorkflowState.Available)]
+    [InlineData(null, "new-operation", UpdateWorkflowState.Applying)]
+    [InlineData("", "new-operation", UpdateWorkflowState.Available)]
+    [InlineData("old-operation", null, UpdateWorkflowState.Applying)]
+    [InlineData("old-operation", "", UpdateWorkflowState.Applying)]
+    public async Task RestartedCoordinatorRequiresANewCompletedJournalForTheSameReleasePair(
+        string? baseline, string? observedOperation, UpdateWorkflowState expected)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            var options = Options.Create(new UpdateOptions { StateRootPath = directory });
+            var store = new JsonUpdateStateStore(options);
+            UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+            UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+            await store.SaveAsync(UpdateStateRecord.CreateDefault() with
+            {
+                State = UpdateWorkflowState.Applying,
+                PendingOperation = "apply",
+                CurrentRelease = source,
+                AvailableRelease = target,
+                StagedRelease = target,
+                StateChangedAtUtc = DateTimeOffset.UtcNow,
+                RecoveryOperationIdAtStart = baseline,
+            }, TestContext.Current.CancellationToken);
+            if (baseline is null)
+            {
+                string path = Path.Combine(directory, "update-state.json");
+                var legacy = System.Text.Json.Nodes.JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
+                legacy.Remove("recoveryOperationIdAtStart");
+                await File.WriteAllTextAsync(path, legacy.ToJsonString(), TestContext.Current.CancellationToken);
+            }
+
+            // Use a fresh store and coordinator: this must work without an in-memory apply gate/context.
+            var restartedStore = new JsonUpdateStateStore(options);
+            Assert.Equal(baseline, (await restartedStore.GetAsync(TestContext.Current.CancellationToken)).RecoveryOperationIdAtStart);
+            var integration = new RecordingUpdateServiceIntegration(directory, source.Version,
+                recoveryPhase: "completed", recoverySource: source.Version, recoveryTarget: target.ReleaseId,
+                recoveryOperationId: observedOperation);
+            var coordinator = CreateCoordinator(restartedStore, new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+            UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(expected, status.State);
+            UpdateStateRecord persisted = await new JsonUpdateStateStore(options).GetAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(expected == UpdateWorkflowState.Applying ? baseline : null, persisted.RecoveryOperationIdAtStart);
+            Assert.Equal(expected == UpdateWorkflowState.Applying ? target : null, persisted.StagedRelease);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("previous-completed-operation")]
+    public async Task RollbackCapturesItsJournalBaselineBeforeActivationAndClearsItAfterRecovery(string? existingOperation)
+    {
+        string directory = CreateTempDirectory();
+        try
+        {
+            var options = Options.Create(new UpdateOptions { StateRootPath = directory });
+            var store = new JsonUpdateStateStore(options);
+            UpdateReleaseReference source = CreateRelease("0.2.0", "preview");
+            UpdateReleaseReference target = CreateRelease("0.1.0", "preview");
+            await store.SaveAsync(UpdateStateRecord.CreateDefault() with
+            {
+                State = UpdateWorkflowState.Current,
+                CurrentRelease = source,
+                LastKnownGoodRelease = target,
+            }, TestContext.Current.CancellationToken);
+            var integration = new RecordingUpdateServiceIntegration(directory, source.Version,
+                recoveryPhase: "completed", recoverySource: source.Version, recoveryTarget: target.ReleaseId,
+                recoveryOperationId: existingOperation);
+            var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+            UpdateStatusSnapshot started = await coordinator.RevertToLastKnownGoodAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(UpdateWorkflowState.Applying, started.State);
+            Assert.Equal(existingOperation ?? string.Empty,
+                (await new JsonUpdateStateStore(options).GetAsync(TestContext.Current.CancellationToken)).RecoveryOperationIdAtStart);
+
+            var restarted = CreateCoordinator(new JsonUpdateStateStore(options), new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+            Assert.Equal(UpdateWorkflowState.Applying, (await restarted.GetStatusAsync(TestContext.Current.CancellationToken)).State);
+            var recoveredIntegration = new RecordingUpdateServiceIntegration(directory, source.Version,
+                recoveryPhase: "completed", recoverySource: source.Version, recoveryTarget: target.ReleaseId,
+                recoveryOperationId: "this-attempt-completed");
+            var recovered = CreateCoordinator(new JsonUpdateStateStore(options), new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: recoveredIntegration);
+            Assert.Equal(UpdateWorkflowState.Current, (await recovered.GetStatusAsync(TestContext.Current.CancellationToken)).State);
+            Assert.Null((await new JsonUpdateStateStore(options).GetAsync(TestContext.Current.CancellationToken)).RecoveryOperationIdAtStart);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -2225,14 +2327,15 @@ public sealed class UpdateServiceIntegrationTests
         bool recoveryRequired = false,
         string? recoveryPhase = null,
         string? recoverySource = null,
-        string? recoveryTarget = null) : IUpdateServiceIntegration
+        string? recoveryTarget = null,
+        string? recoveryOperationId = null) : IUpdateServiceIntegration
     {
         public string? ActivatedReleaseId { get; private set; }
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryOperationId: recoveryOperationId, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {

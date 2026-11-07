@@ -185,6 +185,7 @@ internal sealed class UpdateCoordinator(
                 LastKnownGoodRelease = state.CurrentRelease ?? state.LastKnownGoodRelease,
                 State = UpdateWorkflowState.Applying,
                 PendingOperation = "apply",
+                RecoveryOperationIdAtStart = hostContext.RecoveryOperationId ?? string.Empty,
                 StateChangedAtUtc = DateTimeOffset.UtcNow,
                 LastError = null,
             };
@@ -252,6 +253,7 @@ internal sealed class UpdateCoordinator(
                     StagedRelease = sourceUnchanged ? null : nextState.StagedRelease,
                     PreparedArtifacts = sourceUnchanged ? null : nextState.PreparedArtifacts,
                     PendingOperation = sourceUnchanged ? null : nextState.PendingOperation,
+                    RecoveryOperationIdAtStart = sourceUnchanged ? null : nextState.RecoveryOperationIdAtStart,
                     StateChangedAtUtc = DateTimeOffset.UtcNow,
                     LastError = restored
                         ? "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release."
@@ -321,6 +323,7 @@ internal sealed class UpdateCoordinator(
                 LastKnownGoodRelease = state.CurrentRelease ?? state.LastKnownGoodRelease,
                 State = UpdateWorkflowState.Applying,
                 PendingOperation = "rollback",
+                RecoveryOperationIdAtStart = hostContext.RecoveryOperationId ?? string.Empty,
                 StateChangedAtUtc = DateTimeOffset.UtcNow,
                 LastError = null,
             };
@@ -682,6 +685,7 @@ internal sealed class UpdateCoordinator(
             PreparedArtifacts = null,
             LastKnownGoodRelease = preservedRollbackTarget,
             PendingOperation = null,
+            RecoveryOperationIdAtStart = null,
             EligibilityState = UpdateEligibilityState.None,
             EligibilityReason = UpdateEligibilityReason.None,
             LastError = null,
@@ -809,6 +813,7 @@ internal sealed class UpdateCoordinator(
             StagedRelease = null,
             PreparedArtifacts = null,
             PendingOperation = null,
+            RecoveryOperationIdAtStart = null,
             LastError = null,
         };
 
@@ -833,9 +838,14 @@ internal sealed class UpdateCoordinator(
         }
 
         // A completed durable recovery journal is stronger evidence than a
-        // timeout. Match both ends of this operation before clearing Applying;
-        // an unrelated older journal must never finalize a newer operation.
-        bool completedRecovery = !hostContext.RecoveryRequired
+        // timeout. Match both ends and require a journal newer than the one
+        // observed when this attempt began. Retrying the same release pair must
+        // not accept a previous attempt's completed journal after a restart.
+        // Legacy states have no baseline and retain the ordinary timeout path.
+        bool completedRecovery = state.RecoveryOperationIdAtStart is not null
+            && !string.IsNullOrWhiteSpace(hostContext.RecoveryOperationId)
+            && !string.Equals(state.RecoveryOperationIdAtStart, hostContext.RecoveryOperationId, StringComparison.Ordinal)
+            && !hostContext.RecoveryRequired
             && string.Equals(hostContext.RecoveryPhase, "completed", StringComparison.Ordinal)
             && string.Equals(hostContext.RecoverySourceRelease, hostContext.ManagerReleaseId, StringComparison.OrdinalIgnoreCase)
             && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase);
@@ -879,6 +889,7 @@ internal sealed class UpdateCoordinator(
             StagedRelease = null,
             PreparedArtifacts = null,
             PendingOperation = null,
+            RecoveryOperationIdAtStart = null,
             LastError = message,
         };
 
@@ -909,6 +920,7 @@ internal sealed class UpdateCoordinator(
             AvailableRelease = null,
             PreparedArtifacts = null,
             PendingOperation = null,
+            RecoveryOperationIdAtStart = null,
             LastError = state.LastKnownGoodRelease is null
                 || string.Equals(state.LastKnownGoodRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
                 ? "A previous update was interrupted and its target record was lost. The current runtime is healthy; check for updates again."

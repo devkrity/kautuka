@@ -18,7 +18,9 @@ public sealed record UpdateStateRecord(
     DateTimeOffset? StateChangedAtUtc,
     string? SourceRepositoryOwner,
     string? SourceRepositoryName,
-    string? PendingOperation = null)
+    string? PendingOperation = null,
+    // null: legacy/unknown baseline; empty: observed no journal when this attempt began.
+    string? RecoveryOperationIdAtStart = null)
 {
     public const int CurrentSchemaVersion = 3;
 

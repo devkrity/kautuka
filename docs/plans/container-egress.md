@@ -1177,3 +1177,12 @@ Three focused regressions and an offline setup-image curl proof pass: delayed
 admin startup succeeds, while permanent refusal and HTTP 403 remain failures.
 The existing administrator also logs in after source recovery. The curl fixture
 uses host loopback solely for retry semantics; it is not routing evidence.
+
+Update-state reconciliation now records the recovery operation observed when
+apply or rollback begins. After a coordinator restart, a completed journal can
+resolve that attempt immediately only when its operation ID differs from the
+known baseline and the existing release/health checks pass. Retrying the same
+release pair cannot reuse an earlier attempt's completion. The optional field
+lives in the existing update-state record; unknown older records retain the
+existing timeout path. Eighty-three focused updater integration tests pass,
+including persisted/restarted state and rollback capture/clearing.
