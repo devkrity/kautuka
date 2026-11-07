@@ -824,3 +824,29 @@ image-removal issue when the acquired image was also the cached helper; the
 fixture now removes only inspected tags before testing offline restoration.
 Installed deployment, updater integration, release publication, persistent audit
 and approval UI remain unfinished.
+
+The existing update snapshot engine now writes format 3. Its explicit inventory
+includes Gateway databases, machine/auth keys and validated per-agent databases
+under both the legacy data root and `gateway-data`. It does not copy workspaces,
+arbitrary databases, container storage or whole service directories. Absent fixed
+records authorize removal of supported target-only files during recovery; user
+file sentinels and unrelated files survive. Existing dirfd ancestor locking and
+directory ownership/mode restoration also cover the new nested location.
+
+Format-2 snapshots retain their original verification and deletion scope: they
+cannot admit or delete uncaptured `gateway-data` state. The installer must take
+a format-3 snapshot before beginning the host-to-container layout migration;
+capture/restore themselves do not migrate files. The architect cleared this
+checkpoint. Recovery tests passed 28/28 on Fedora 44 WSL as root and 21 on Windows
+with seven Linux-specific skips. This is snapshot-engine evidence, not an
+installed container-update transaction or interruption/recovery proof.
+
+The existing disposable apply-release transaction regression also passed using
+the format-3 engine: snapshot verification, maintenance fencing, injected
+precommit interruption/recovery, unresolved-operation refusal, committed forward
+recovery and terminal snapshot-replay refusal. The test's systemd/lifecycle and
+health checks are mocked, so it does not establish container cohort management.
+It ran in a private mount namespace that hid the test distro's existing helper
+directory; the fixture-owned installation paths were absent before the test and
+removed by its teardown. Local log:
+`artifacts/container-egress/recovery-format3-transaction.log`.

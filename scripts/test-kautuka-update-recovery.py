@@ -8,6 +8,7 @@ import signal
 import stat
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("kautuka-update-recovery.py")
@@ -132,6 +133,120 @@ class RecoverySnapshotTests(unittest.TestCase):
         rows = snapshot_db.execute("SELECT value FROM registry ORDER BY value").fetchall()
         snapshot_db.close()
         self.assertEqual([("live-wal-row",), ("wal-committed",)], rows)
+
+    def test_container_gateway_state_and_agents_restore_without_touching_user_files(self):
+        gateway = self.root / "gateway-data"
+        for name in recovery.GATEWAY_DATABASES:
+            self._make_database(gateway / name, "source", name)
+        (gateway / "kautuka.key").write_bytes(b"source-machine-key")
+        agent = gateway / "agents/agent-123/agent.db"
+        self._make_database(agent, "source", "agent-before-update")
+        user_file = gateway / "agents/agent-123/files/sentinel.txt"
+        user_file.parent.mkdir()
+        user_file.write_text("user file")
+        recovery.capture(self._args())
+        for name in recovery.GATEWAY_DATABASES:
+            self._make_database(gateway / name, "target", "migration")
+        (gateway / "kautuka.key").write_bytes(b"target-machine-key")
+        agent.unlink()
+        target_agent = gateway / "agents/new-agent/agent.db"
+        self._make_database(target_agent, "target", "target-only")
+        arbitrary = gateway / "untracked.db"
+        self._make_database(arbitrary, "user", "preserve")
+
+        recovery.restore(self._args())
+
+        for name in recovery.GATEWAY_DATABASES:
+            with closing(sqlite3.connect(gateway / name)) as db:
+                self.assertEqual([(name,)], db.execute("SELECT value FROM source").fetchall())
+        with closing(sqlite3.connect(agent)) as db:
+            self.assertEqual([("agent-before-update",)], db.execute("SELECT value FROM source").fetchall())
+        self.assertFalse(target_agent.exists())
+        self.assertEqual(b"source-machine-key", (gateway / "kautuka.key").read_bytes())
+        self.assertEqual("user file", user_file.read_text())
+        self.assertTrue(arbitrary.exists())
+
+    def test_format3_absent_gateway_entries_remove_only_target_created_supported_state(self):
+        recovery.capture(self._args())
+        gateway = self.root / "gateway-data"
+        self._make_database(gateway / "kautuka.db", "target", "new-layout")
+        self._make_database(gateway / "agents/new-agent/agent.db", "target", "new-agent")
+        (gateway / "gateway-auth.key").write_bytes(b"target-key")
+        sentinel = gateway / "keep.txt"
+        sentinel.write_text("user state")
+        recovery.restore(self._args())
+        self.assertFalse((gateway / "kautuka.db").exists())
+        self.assertFalse((gateway / "gateway-auth.key").exists())
+        self.assertFalse((gateway / "agents/new-agent/agent.db").exists())
+        self.assertEqual("user state", sentinel.read_text())
+
+    def test_format2_recovery_does_not_delete_uncaptured_container_state(self):
+        recovery.capture(self._args())
+        manifest_path = self.backups / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["format"] = 2
+        manifest["entries"] = [entry for entry in manifest["entries"]
+                               if not entry["path"].startswith("gateway-data/")]
+        manifest_path.write_text(json.dumps(manifest))
+        gateway_db = self.root / "gateway-data/kautuka.db"
+        self._make_database(gateway_db, "existing", "uncaptured")
+        self._make_database(self.root / "kautuka.db", "target", "changed")
+        recovery.restore(self._args())
+        with closing(sqlite3.connect(gateway_db)) as db:
+            self.assertEqual([("uncaptured",)], db.execute("SELECT value FROM existing").fetchall())
+        with closing(sqlite3.connect(self.root / "kautuka.db")) as db:
+            self.assertEqual([("wal-committed",)], db.execute("SELECT value FROM registry").fetchall())
+
+    def test_format3_requires_explicit_absent_gateway_inventory(self):
+        recovery.capture(self._args())
+        manifest_path = self.backups / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["entries"] = [entry for entry in manifest["entries"]
+                               if entry["path"] != "gateway-data/kautuka.db"]
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(RuntimeError, "inventory is incomplete"):
+            recovery.restore(self._args())
+
+    def test_format2_rejects_injected_container_state(self):
+        recovery.capture(self._args())
+        manifest_path = self.backups / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["format"] = 2
+        manifest_path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(RuntimeError, "outside the supported"):
+            recovery.verify(self._args())
+
+    @unittest.skipIf(os.name == "nt", "Linux ancestor and ownership checks")
+    def test_container_gateway_symlinked_ancestors_fail_closed(self):
+        external = Path(self.temp.name) / "external"
+        external.mkdir()
+        gateway = self.root / "gateway-data"
+        gateway.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "symbolic|unsupported"):
+            recovery.capture(self._args())
+        gateway.unlink()
+        gateway.mkdir()
+        (gateway / "agents").symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "unsupported agents state root"):
+            recovery.capture(self._args())
+
+    @unittest.skipIf(os.name == "nt", "Linux directory metadata checks")
+    def test_container_gateway_directory_metadata_restored(self):
+        agent = self.root / "gateway-data/agents/agent-123/agent.db"
+        self._make_database(agent, "source", "saved")
+        directories = [self.root / path for path in
+                       ("gateway-data", "gateway-data/agents", "gateway-data/agents/agent-123")]
+        for directory, mode in zip(directories, (0o750, 0o710, 0o700)):
+            directory.chmod(mode)
+        expected = [(directory.stat().st_uid, directory.stat().st_gid,
+                     stat.S_IMODE(directory.stat().st_mode)) for directory in directories]
+        recovery.capture(self._args())
+        for directory in directories:
+            directory.chmod(0o777)
+        recovery.restore(self._args())
+        self.assertEqual(expected, [(directory.stat().st_uid, directory.stat().st_gid,
+                                    stat.S_IMODE(directory.stat().st_mode))
+                                   for directory in directories])
 
     def test_restore_requires_exact_operation_identity(self):
         recovery.capture(self._args())

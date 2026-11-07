@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Capture and restore Kautuka's explicitly supported application database set.
 
-This utility is called only by the root-owned update helper after host writers
+This utility is called only by the root-owned update helper after all writers
 have been stopped. It deliberately excludes workspaces, attachments, Podman
 storage, updater state, logs, and arbitrary service directories.
 """
@@ -23,7 +23,10 @@ from datetime import datetime, timezone
 from typing import NoReturn
 from pathlib import Path
 
-FORMAT = 2
+FORMAT = 3
+GATEWAY_DATABASES = (
+    "kautuka.db", "kautuka-usage.db", "channel-outbox.db", "channel-conversations.db",
+)
 DATABASES = (
     "kautuka.db",
     "kautuka-usage.db",
@@ -239,9 +242,14 @@ def capture_directory_metadata(root: Path, entries: list[dict]) -> list[dict]:
     return result
 
 
-def fixed_inventory() -> list[tuple[str, str]]:
+def fixed_inventory(snapshot_format: int = FORMAT) -> list[tuple[str, str]]:
     paths: list[tuple[str, str]] = [(name, "database") for name in DATABASES]
     paths.extend((name, "key") for name in ROOT_KEYS)
+    # Record both locations explicitly during the host-to-container transition.
+    # An absent record also removes target-only files during source recovery.
+    if snapshot_format >= 3:
+        paths.extend(("gateway-data/" + name, "database") for name in GATEWAY_DATABASES)
+        paths.extend(("gateway-data/" + name, "key") for name in ROOT_KEYS)
     for directory, names in SERVICE_KEYS.items():
         for name in names:
             paths.append(((Path(directory) / name).as_posix(), "key"))
@@ -261,8 +269,8 @@ def fixed_inventory() -> list[tuple[str, str]]:
     return list(dict.fromkeys(paths))
 
 
-def inventory(data_root: Path) -> list[tuple[str, str]]:
-    paths = fixed_inventory()
+def inventory(data_root: Path, snapshot_format: int = FORMAT) -> list[tuple[str, str]]:
+    paths = fixed_inventory(snapshot_format)
     for directory in CHANNEL_SECURITY_FILES:
         root = data_root / directory
         if not root.exists() and not root.is_symlink():
@@ -275,8 +283,12 @@ def inventory(data_root: Path) -> list[tuple[str, str]]:
                 fail(f"unsupported channel security material entry: {entry}")
             if entry.name not in expected_names:
                 fail(f"unsupported channel security material file: {entry}")
-    agent_root = data_root / "agents"
-    if agent_root.exists() or agent_root.is_symlink():
+    agent_roots = [data_root / "agents"]
+    if snapshot_format >= 3:
+        agent_roots.append(data_root / "gateway-data/agents")
+    for agent_root in agent_roots:
+        if not agent_root.exists() and not agent_root.is_symlink():
+            continue
         if agent_root.is_symlink() or not agent_root.is_dir():
             fail(f"unsupported agents state root: {agent_root}")
         for directory in sorted(agent_root.iterdir()):
@@ -393,7 +405,7 @@ def read_manifest(snapshot: Path, operation: str | None = None,
     if path.is_symlink() or not path.is_file():
         fail(f"snapshot manifest missing or invalid: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("format") != FORMAT:
+    if type(manifest.get("format")) is not int or manifest["format"] not in (2, FORMAT):
         fail("unsupported snapshot format")
     for field, expected in (("operationId", operation), ("sourceRelease", source), ("targetRelease", target)):
         if expected is not None and manifest.get(field) != expected:
@@ -423,8 +435,12 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
     if not isinstance(directories, list):
         fail("snapshot directory metadata inventory is missing")
     directory_entries: dict[str, dict] = {}
+    snapshot_format = manifest["format"]
+    agent_prefix = r"(?:gateway-data/)?" if snapshot_format >= 3 else ""
     allowed_directories = {"agents"}
-    for file_rel, _kind in fixed_inventory():
+    if snapshot_format >= 3:
+        allowed_directories.add("gateway-data/agents")
+    for file_rel, _kind in fixed_inventory(snapshot_format):
         parts = Path(file_rel).parts
         allowed_directories.update(Path(*parts[:depth]).as_posix() for depth in range(1, len(parts)))
     for item in directories:
@@ -435,7 +451,7 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
                 or rel.startswith("/") or ".." in Path(rel).parts):
             fail("snapshot contains an invalid or duplicate directory metadata path")
         if rel != "." and rel not in allowed_directories \
-                and not re.fullmatch(r"agents/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", rel):
+                and not re.fullmatch(agent_prefix + r"agents/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", rel):
             fail(f"snapshot directory metadata is outside the supported inventory: {rel}")
         for field in ("mode", "uid", "gid"):
             if type(item.get(field)) is not int or item[field] < 0:
@@ -444,8 +460,8 @@ def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
     if "." not in directory_entries:
         fail("snapshot directory metadata omits the application data root")
     seen: dict[str, dict] = {}
-    fixed = dict(fixed_inventory())
-    dynamic_agent = re.compile(r"agents/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/agent\.db\Z")
+    fixed = dict(fixed_inventory(snapshot_format))
+    dynamic_agent = re.compile(agent_prefix + r"agents/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/agent\.db\Z")
     dynamic_key = re.compile(r"credentialsHost/vault/vault-keys/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.key\Z")
     for item in manifest["entries"]:
         if not isinstance(item, dict):
@@ -507,7 +523,7 @@ def restore(args: argparse.Namespace) -> None:
     if os.name == "nt":
         # Windows is used for pure unit tests; the Linux root helper is the
         # production caller and uses the dirfd-pinned implementation.
-        current = inventory(root)
+        current = inventory(root, manifest["format"])
         for rel, kind in current:
             if rel not in saved or not saved[rel].get("present"):
                 path = root / rel
@@ -550,7 +566,9 @@ def restore(args: argparse.Namespace) -> None:
     restore_succeeded = False
     try:
         supported_directories = {"agents", "credentialsHost/vault/vault-keys"}
-        for rel, _kind in fixed_inventory():
+        if manifest["format"] >= 3:
+            supported_directories.add("gateway-data/agents")
+        for rel, _kind in fixed_inventory(manifest["format"]):
             parent = Path(rel).parent
             while parent != Path("."):
                 supported_directories.add(parent.as_posix())
@@ -565,7 +583,7 @@ def restore(args: argparse.Namespace) -> None:
         lock.acquire([item["path"] for item in manifest["directories"]], directory_paths=True)
         for directory in manifest["directories"]:
             lock.set_final_metadata(directory["path"], directory["uid"], directory["gid"], directory["mode"])
-        current = inventory(root)
+        current = inventory(root, manifest["format"])
         current_to_lock = []
         for rel, _kind in current:
             path = root / rel
