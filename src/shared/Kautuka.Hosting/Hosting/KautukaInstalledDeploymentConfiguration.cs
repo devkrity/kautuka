@@ -1,14 +1,17 @@
 using System.Text.Json;
 
-namespace Kautuka.Manager.Hosting;
+using Microsoft.Extensions.Configuration;
 
-/// <summary>Release-independent deployment settings shared by both startup paths.</summary>
-internal static class InstalledManagerConfiguration
+namespace Kautuka.Hosting.Hosting;
+
+/// <summary>Release-independent deployment settings shared by host startup and maintenance paths.</summary>
+public static class KautukaInstalledDeploymentConfiguration
 {
-    internal static void Add(ConfigurationManager configuration,
+    public static void Add(ConfigurationManager configuration,
         string settingsPath = "/etc/kautuka/manager.json",
         string contractPath = "/etc/kautuka/service-scope.json")
     {
+        ArgumentNullException.ThrowIfNull(configuration);
         configuration.AddJsonFile(settingsPath, optional: true, reloadOnChange: false);
         if (!File.Exists(contractPath)) return;
         using JsonDocument contract = JsonDocument.Parse(File.ReadAllText(contractPath));

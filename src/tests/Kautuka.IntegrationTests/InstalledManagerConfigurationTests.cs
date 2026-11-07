@@ -1,4 +1,4 @@
-using Kautuka.Manager.Hosting;
+using Kautuka.Hosting.Hosting;
 
 using Microsoft.Extensions.Configuration;
 
@@ -27,8 +27,8 @@ public sealed class InstalledManagerConfigurationTests
             // Earlier providers cannot stand in for a missing installed file.
             configuration["CoreServices:Enabled"] = "true";
             configuration["ContainerEgress:Enabled"] = "true";
-            if (succeeds) InstalledManagerConfiguration.Add(configuration, settingsPath, contractPath);
-            else Assert.Throws<InvalidOperationException>(() => InstalledManagerConfiguration.Add(configuration, settingsPath, contractPath));
+            if (succeeds) KautukaInstalledDeploymentConfiguration.Add(configuration, settingsPath, contractPath);
+            else Assert.Throws<InvalidOperationException>(() => KautukaInstalledDeploymentConfiguration.Add(configuration, settingsPath, contractPath));
         }
         finally { Directory.Delete(root, recursive: true); }
     }

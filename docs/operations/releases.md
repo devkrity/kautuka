@@ -147,8 +147,8 @@ signed fixture archives and mocked lifecycle/systemd calls; actual installed
 container handoff remains a separate release gate.
 
 Container deployment settings live in the installer-owned
-`/etc/kautuka/manager.json`, shared by ordinary Manager startup and its fixed
-update-maintenance command. On Linux this file overrides release defaults and
+`/etc/kautuka/manager.json`, shared by host Manager, host UpdateService and the
+fixed update-maintenance command. On Linux this file overrides release defaults and
 normal environment/argument configuration, and is read once without live reload.
 It is optional for legacy host installations; the installer must publish and
 validate container enablement, DNS and core settings before enabling the
@@ -156,8 +156,14 @@ container service contract. Both startup paths reject a container contract with
 a missing installed file or absent/disabled core or egress flags; earlier
 configuration providers cannot stand in for those explicit installed settings.
 Updates preserve it instead of copying deployment
-settings into each release. The maintenance command still forces the production
-mode/state root and adds no environment or argument configuration providers.
+settings into each release. UpdateService loads this configuration before
+constructing release/catalog/artifact HTTP clients, so the installed egress
+selection applies to its fixed Unix proxy. A missing proxy cannot fall back to a
+reachable TCP destination. The maintenance command still forces the production
+mode/state root and adds no environment or argument configuration providers. The
+shared loader, maintenance commands and HTTP no-fallback checks pass 33 focused
+tests. Actual Manager and UpdateService Native AOT publication on Fedora also
+passes, including the Manager maintenance-capability command.
 
 ## Build identity and verification
 

@@ -11,6 +11,9 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 KautukaAspNetCoreStartupPolicy.SanitizeHostingStartupAssemblies();
 
 var builder = WebApplication.CreateSlimBuilder(args);
+// Use the same persisted egress selection as Manager before creating HTTP clients.
+if (OperatingSystem.IsLinux())
+    KautukaInstalledDeploymentConfiguration.Add(builder.Configuration);
 var hostLayout = KautukaHostPathPolicy.Resolve(builder.Configuration);
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);

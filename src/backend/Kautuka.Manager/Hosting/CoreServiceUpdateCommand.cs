@@ -45,7 +45,7 @@ internal static class CoreServiceUpdateCommand
                 configuration.SetBasePath(AppContext.BaseDirectory)
                     .AddJsonFile("appsettings.json", optional: false)
                     .AddJsonFile("appsettings.Production.json", optional: true);
-                InstalledManagerConfiguration.Add(configuration);
+                KautukaInstalledDeploymentConfiguration.Add(configuration);
                 // No environment/command-line configuration providers. Paths
                 // and identity stay those of the fixed production appliance.
                 configuration["Kautuka:Mode"] = "prod";
