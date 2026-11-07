@@ -1,6 +1,6 @@
 # Container deployment and outbound access control
 
-**Status:** Active — revision 6 with architect-review corrections.
+**Status:** Active — implemented on the unmerged feature branch; installed validation is recorded below.
 **Owner:** Kautuka runtime and UpdateService maintainers.
 **Activation condition:** User-authorised replacement design; first demonstrate
 the small rootless egress topology before integrating application deployment.
@@ -1240,5 +1240,31 @@ now prunes the exact rootless Podman storage directory. Workspace copying also
 retains its normal layout when an earlier database capture already created the
 destination. Native regressions cover database/WAL/SHM exclusion, similarly named
 sibling directories and workspaces containing databases. Keeping the runtime
-account when retained files still belong to it is intentional. Cold first boot
-and a repeated installed uninstall with these corrections remain validation work.
+account when retained files still belong to it is intentional. At that checkpoint,
+cold first boot and a repeated installed uninstall were still pending.
+
+The subsequent cold WSL boot completed the real firstboot service in 73.35
+seconds. The observer saw unavailable health and no completion marker during
+activation, followed by healthy endpoints and the completion marker. All eleven
+offline image loads, both host units and the four expected core image IDs were
+verified. Application artifacts came from `ce3821f`; the shared installer included
+the preservation corrections in `941174c`. The test used the existing Windows
+appliance supervisor's residency command when making later standalone WSL calls;
+systemd services alone do not keep an otherwise idle WSL instance resident.
+
+The repeated installed uninstall passed with a workspace database: administrator
+rows, the Gateway key, nested application files and workspace contents survived
+at their original paths; rootless image storage and firstboot files were removed,
+and no runtime-owner processes remained. A final storage audit also identified
+the CredentialsHost vault's separate encryption keyring. Preservation now copies
+the complete authoritative vault, including keys and rotation state, rather than
+only its encrypted database. The native uninstall regression compares the vault
+tree byte-for-byte, including multiple binary keys and its active-key pointer;
+derived transport identities are excluded.
+
+Reports and screenshots remain in the local `artifacts/container-egress` directory.
+The cold boot exercised the staged appliance layout in the Fedora 44 test distro;
+the interactive Windows installer/import flow was not rerun end-to-end. Windows
+launcher/layout tests provide separate coverage. Mac appliance execution remains
+unverified and is not claimed here. No production release or merge was performed,
+and no legacy host-service deployment conversion is included.

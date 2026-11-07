@@ -1656,6 +1656,13 @@ preserve_uninstall_state() {
     capture_preserved_uninstall_state "$internal_state_root" "$preserve_root" 'internal'
     capture_preserved_uninstall_state "$visible_root" "$preserve_root" 'visible'
 
+    # The vault database is unusable without its encryption keyring and rotation
+    # state. Preserve the authoritative vault, excluding transport identities.
+    if [[ -d "$internal_state_root/credentialsHost/vault" ]]; then
+        mkdir -p "$preserve_root/internal/credentialsHost/vault"
+        cp -a "$internal_state_root/credentialsHost/vault/." "$preserve_root/internal/credentialsHost/vault/"
+    fi
+
     # Gateway keys and application state live alongside its databases. Preserve
     # the directory as a unit, not just files matching the database suffixes.
     if [[ -d "$internal_state_root/gateway-data" ]]; then

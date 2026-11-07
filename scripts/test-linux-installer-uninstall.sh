@@ -106,6 +106,14 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   printf visible-runtime > "$visible/.local/share/containers/storage/runtime.db"
   printf sibling > "$internal/.local/share/containers-backup/example.db"
   printf workspace-database > "$visible/workspaces/agents/demo/workspace.db"
+  mkdir -p "$internal/credentialsHost/vault/vault-keys" "$internal/credentialsHost/transport"
+  printf vault-database > "$internal/credentialsHost/vault/kautuka.credentials.db"
+  printf "key-2\n" > "$internal/credentialsHost/vault/vault-keys/active"
+  printf "old-key\\000bytes\\377" > "$internal/credentialsHost/vault/vault-keys/key-1.key"
+  printf "new-key\\000bytes\\376" > "$internal/credentialsHost/vault/vault-keys/key-2.key"
+  printf "rotation-metadata\n" > "$internal/credentialsHost/vault/rotation.json"
+  printf derived-transport > "$internal/credentialsHost/transport/ca.key"
+  cp -a "$internal/credentialsHost/vault" "$test_root/expected-vault"
   output="$(uninstall_release "$install" "$internal" "$visible" test.service kautuka-test false)"
   [[ -f "$internal/kautuka.db" && -f "$visible/workspaces/agents/demo/notes.txt" ]] || {
     echo "Default uninstall did not preserve Kautuka data." >&2
@@ -117,6 +125,8 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   [[ "$(cat "$internal/.local/share/containers-backup/example.db")" == sibling ]]
   [[ "$(cat "$visible/workspaces/agents/demo/workspace.db")" == workspace-database ]]
   [[ ! -e "$visible/workspaces/workspaces" ]]
+  diff -r "$test_root/expected-vault" "$internal/credentialsHost/vault"
+  [[ ! -e "$internal/credentialsHost/vault/vault" && ! -e "$internal/credentialsHost/transport" ]]
   [[ ! -e "$visible/workspaces/agents/demo/.kautuka" ]] || {
     echo "Default uninstall left generated workspace state behind." >&2
     exit 1
