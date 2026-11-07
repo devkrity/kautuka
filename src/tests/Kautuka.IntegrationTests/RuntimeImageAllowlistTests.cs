@@ -92,7 +92,7 @@ public sealed class RuntimeImageAllowlistTests
         string sidecarsJson = File.ReadAllText(Path.Combine(repoRoot, "src", "backend", "Kautuka.Manager", "sidecars.json"));
 
         Assert.Equal(releasedBaseImage, baseEntry.Image);
-        Assert.Null(baseEntry.Archive);
+        Assert.Equal("kautuka-base.tar", baseEntry.Archive);
         Assert.Equal(releasedBaseImage, allowlist.SelectReleasedSandboxImage("localhost/kautuka-base:latest"));
         Assert.DoesNotContain("build-kautuka-base.sh", setupScript, StringComparison.Ordinal);
         Assert.Contains("ARG FEDORA_IMAGE=quay.io/fedora/fedora-minimal:44", dockerfile, StringComparison.Ordinal);
