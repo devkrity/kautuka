@@ -12,6 +12,8 @@ public sealed class ContainerEgressOptions
 
     public IReadOnlyList<string> DnsUpstreams { get; set; } = [];
 
+    public IReadOnlyList<string> ArtifactHosts { get; set; } = [];
+
     public IReadOnlyList<ContainerEgressGrant> Grants { get; set; } = [];
 }
 

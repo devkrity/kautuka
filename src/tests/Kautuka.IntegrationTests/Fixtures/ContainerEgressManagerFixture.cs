@@ -68,6 +68,7 @@ internal static class ContainerEgressManagerFixture
         var options = new ContainerEgressOptions
         {
             Enabled = true,
+            ArtifactHosts = data.TryGetProperty("artifactCertificate", out _) ? ["artifact.kautuka.test"] : [],
             DnsUpstreams = ["10.247.90.20"],
             Grants = [
          new(){Role="agent",UserId="owner",AgentId="alpha",ComponentId="alpha",Destination="rebind.kautuka.test",Port=20101},
@@ -85,6 +86,14 @@ internal static class ContainerEgressManagerFixture
         WorkspaceMcpContainerConnectorDefinition Definition(string suffix) => new("owner::" + suffix, image, suffix == "d" ? "" : "/usr/bin/bash", suffix == "d" ? [] : ["/mcp-fixture.sh"], true, false, null, null, [], 20, 600);
         Apply(1, alpha);
         await runtime.EnsureReadyAsync(ct);
+        if (data.TryGetProperty("artifactCertificate", out _))
+            await HostArtifactManagerFixture.RunAsync(data, runner, runtime, report, ct);
+        if (data.TryGetProperty("hostOnly", out JsonElement hostOnly) && hostOnly.GetBoolean())
+        {
+            report["proofScope"] = "host-artifacts-only";
+            report["passed"] = true;
+            return report;
+        }
         if (data.TryGetProperty("coreCredentialsHost", out _))
             await CoreServiceManagerFixture.RunAsync(data, runner, runtime, allowlist, report, ct);
         if (data.TryGetProperty("coreOnly", out JsonElement coreOnly) && coreOnly.GetBoolean())

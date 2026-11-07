@@ -17,9 +17,10 @@ internal sealed record EnvoyEgressConfiguration(
     string Version, string ClusterDocument, string ListenerDocument, IReadOnlyList<string> ClusterNames)
 {
     internal const string ListenerName = "transparent";
+    internal const string ArtifactListenerName = "host-artifacts";
     private const string metadataNamespace = "kautuka.egress";
 
-    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null)
+    internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
@@ -32,10 +33,15 @@ internal sealed record EnvoyEgressConfiguration(
         if (packages.Length > 0 && (externalSourceAddress is null || packages.Any(route => route.ProxySourceAddress == externalSourceAddress)
             || packages.GroupBy(static route => (route.SourceAddress, route.ProxyAddress)).Any(static group => group.Count() != 1)))
             throw new ArgumentException("Package routes need unambiguous topology and separate outside/core source addresses.", nameof(packageRoutes));
+        string[] artifacts = [.. (artifactHosts ?? []).Select(host => Normalize(new EgressTcpRule("192.0.2.1", host, 443)).Destination)
+            .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+        if (artifacts.Any(host => IPAddress.TryParse(host, out _))) throw new ArgumentException("Artifact hosts must be exact DNS names.", nameof(artifactHosts));
+        if (artifacts.Length > 0 && externalSourceAddress is null) throw new ArgumentException("Artifact routes require the outside source address.", nameof(externalSourceAddress));
         var clusters = new JsonArray();
         var chains = new JsonArray();
         var clusterNames = new List<string>();
         var targets = normalized.Select(rule => (Destination: rule.Destination, Port: rule.Port, Name: "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture)), Bind: externalSourceAddress))
+            .Concat(artifacts.Select(host => (Destination: host, Port: 443, Name: "upstream-" + Hash(host + ":443"), Bind: externalSourceAddress)))
             .Distinct().Concat(packages.Select(route => (Destination: route.BackendAddress, Port: 20101, Name: PackageClusterName(route), Bind: (string?)route.ProxySourceAddress)).Distinct());
         foreach (var target in targets)
         {
@@ -116,9 +122,12 @@ internal sealed record EnvoyEgressConfiguration(
         listener["filter_chains"] = chains;
         listener["filter_chain_matcher"] = SourceMatcher(normalized, packages);
         listener["access_log"] = new JsonArray(AccessLog("listener"));
-        string version = Hash(clusters.ToJsonString() + "\n" + listener.ToJsonString());
+        JsonObject? artifactListener = artifacts.Length == 0 ? null : ArtifactListener(artifacts);
+        string version = Hash(clusters.ToJsonString() + "\n" + listener.ToJsonString() + (artifactListener is null ? "" : "\n" + artifactListener.ToJsonString()));
         SetMarker(listener, version);
-        return new EnvoyEgressConfiguration(version, Envelope(version, clusters), Envelope(version, new JsonArray(listener)), clusterNames);
+        var listeners = new JsonArray(listener);
+        if (artifactListener is not null) { SetMarker(artifactListener, version); listeners.Add((JsonNode)artifactListener); }
+        return new EnvoyEgressConfiguration(version, Envelope(version, clusters), Envelope(version, listeners), clusterNames);
     }
 
     internal bool ClustersAreActive(JsonElement dump)
@@ -144,22 +153,84 @@ internal sealed record EnvoyEgressConfiguration(
 
     internal bool ListenerIsActive(JsonElement dump)
     {
+        using JsonDocument expected = JsonDocument.Parse(ListenerDocument);
+        string[] names = [.. expected.RootElement.GetProperty("resources").EnumerateArray().Select(item => item.GetProperty("name").GetString()!)];
         foreach (JsonElement config in Configurations(dump, "ListenersConfigDump"))
         {
             if (Text(config, "version_info") != Version) continue;
-            foreach (JsonElement item in Items(config, "dynamic_listeners"))
-            {
-                if (Text(item, "name") != ListenerName) continue;
-                if (item.TryGetProperty("warming_state", out JsonElement warming)
-                    && warming.ValueKind == JsonValueKind.Object && warming.EnumerateObject().Any()) return false;
-                // Envoy in-place updates can leave active_state.version_info stale. Inspect the active marker instead.
-                return item.TryGetProperty("active_state", out JsonElement state)
-                    && state.TryGetProperty("listener", out JsonElement listener)
-                    && Text(listener, "name") == ListenerName && HasMarker(listener, Version);
-            }
+            JsonElement[] listeners = Items(config, "dynamic_listeners");
+            if (listeners.Length != names.Length) continue;
+            bool matches = names.All(name => listeners.Any(item => Text(item, "name") == name
+                && !(item.TryGetProperty("warming_state", out JsonElement warming) && warming.ValueKind == JsonValueKind.Object && warming.EnumerateObject().Any())
+                && item.TryGetProperty("active_state", out JsonElement state) && state.TryGetProperty("listener", out JsonElement listener)
+                && Text(listener, "name") == name && HasMarker(listener, Version)));
+            if (matches) return true;
         }
-
         return false;
+    }
+
+    private static JsonObject ArtifactListener(string[] hosts)
+    {
+        var virtualHosts = new JsonArray();
+        foreach (string host in hosts)
+            virtualHosts.Add((JsonNode)new JsonObject
+            {
+                ["name"] = "artifact-" + Hash(host),
+                ["domains"] = new JsonArray(host + ":443"),
+                ["routes"] = new JsonArray(new JsonObject
+                {
+                    ["match"] = new JsonObject
+                    {
+                        ["connect_matcher"] = new JsonObject(),
+                        ["headers"] = new JsonArray(
+                        new JsonObject { ["name"] = ":method", ["string_match"] = new JsonObject { ["exact"] = "CONNECT" } })
+                    },
+                    ["route"] = new JsonObject
+                    {
+                        ["cluster"] = "upstream-" + Hash(host + ":443"),
+                        ["timeout"] = "0s",
+                        ["upgrade_configs"] = new JsonArray(new JsonObject { ["upgrade_type"] = "CONNECT", ["connect_config"] = new JsonObject() })
+                    },
+                }),
+            });
+        virtualHosts.Add((JsonNode)new JsonObject
+        {
+            ["name"] = "deny",
+            ["domains"] = new JsonArray("*"),
+            ["routes"] = new JsonArray(
+            new JsonObject { ["match"] = new JsonObject { ["prefix"] = "/" }, ["direct_response"] = new JsonObject { ["status"] = 403 } },
+            new JsonObject { ["match"] = new JsonObject { ["connect_matcher"] = new JsonObject() }, ["direct_response"] = new JsonObject { ["status"] = 403 } })
+        });
+        JsonObject log = AccessLog("host-artifact");
+        log["typed_config"]!["log_format"]!["json_format"]!["authority"] = "%REQ(:AUTHORITY)%";
+        log["typed_config"]!["log_format"]!["json_format"]!["status"] = "%RESPONSE_CODE%";
+        return new JsonObject
+        {
+            ["@type"] = "type.googleapis.com/envoy.config.listener.v3.Listener",
+            ["name"] = ArtifactListenerName,
+            ["address"] = new JsonObject { ["pipe"] = new JsonObject { ["path"] = "/host-artifacts/connect.sock", ["mode"] = 432 } },
+            ["filter_chains"] = new JsonArray(new JsonObject
+            {
+                ["filters"] = new JsonArray(new JsonObject
+                {
+                    ["name"] = "envoy.filters.network.http_connection_manager",
+                    ["typed_config"] = new JsonObject
+                    {
+                        ["@type"] = "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
+                        ["stat_prefix"] = "host_artifacts",
+                        ["codec_type"] = "HTTP1",
+                        ["route_config"] = new JsonObject { ["name"] = "host_artifacts", ["virtual_hosts"] = virtualHosts },
+                        ["http_filters"] = new JsonArray(new JsonObject
+                        {
+                            ["name"] = "envoy.filters.http.router",
+                            ["typed_config"] = new JsonObject
+                            { ["@type"] = "type.googleapis.com/envoy.extensions.filters.http.router.v3.Router" }
+                        }),
+                        ["access_log"] = new JsonArray(log),
+                    },
+                })
+            }),
+        };
     }
 
     private static string PackageClusterName(EgressPackageRoute route) => "package-" + Hash(route.BackendAddress + ":20101@" + route.ProxySourceAddress);

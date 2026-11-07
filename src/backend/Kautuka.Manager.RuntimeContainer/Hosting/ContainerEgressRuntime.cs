@@ -28,6 +28,8 @@ public sealed class ContainerEgressRuntime(
     private readonly HashSet<string> retiring = new(StringComparer.Ordinal);
     private readonly HashSet<string> pendingHelpers = new(StringComparer.Ordinal);
     private readonly string configurationRoot = Path.Combine(stateRoot, "egress", "config");
+    private readonly string artifactSocketRoot = Path.Combine(stateRoot, "egress", "host");
+    public string ArtifactSocketPath => Path.Combine(artifactSocketRoot, "connect.sock");
     private EnvoyEgressConfiguration? active;
     private string? helperImage;
     private string? infraId;
@@ -286,6 +288,7 @@ public sealed class ContainerEgressRuntime(
         string dns = await RequireCachedImageAsync("egress-dns", cancellationToken).ConfigureAwait(false);
         Directory.CreateDirectory(configurationRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        if (options.ArtifactHosts.Count > 0) await PrepareArtifactSocketDirectoryAsync(cancellationToken).ConfigureAwait(false);
         ScopeNetwork outside = await EnsureNetworkAsync(outsideName, "outside", isPrivate: false, cancellationToken).ConfigureAwait(false);
         outsideDefaultGateway = outside.NativeGateway ?? throw new InvalidOperationException("The outside network has no native gateway.");
         await LoadPrivateTopologyAsync(cancellationToken).ConfigureAwait(false);
@@ -373,6 +376,18 @@ public sealed class ContainerEgressRuntime(
         return entry.Image;
     }
 
+    private async Task PrepareArtifactSocketDirectoryAsync(CancellationToken ct)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Artifact socket permissions require Linux.");
+        Directory.CreateDirectory(artifactSocketRoot);
+        // Only this owned directory: never recursively change runtime storage ownership.
+        await RunAsync(["unshare", "chown", "0:0", artifactSocketRoot], ct).ConfigureAwait(false);
+        File.SetUnixFileMode(artifactSocketRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+            | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.SetGroup);
+        string ownership = (await RunAsync(["unshare", "stat", "--format=%u:%g", artifactSocketRoot], ct).ConfigureAwait(false)).StdOut.Trim();
+        if (ownership != "0:0") throw new InvalidOperationException("Cannot confirm host artifact socket directory mapping.");
+    }
+
     private async Task EnsureServiceAsync(string name, string image, bool isDns, CancellationToken cancellationToken, bool requireRunning = false)
     {
         if (await ExistsAsync(["container", "exists", name], cancellationToken).ConfigureAwait(false))
@@ -386,6 +401,20 @@ public sealed class ContainerEgressRuntime(
             JsonElement host = container.GetProperty("HostConfig");
             JsonElement config = container.GetProperty("Config");
             JsonElement binds = host.GetProperty("Binds");
+            bool artifactMount = !isDns && options.ArtifactHosts.Count > 0;
+            string[] expectedBinds = artifactMount ? [configurationRoot + ":/egress:ro", artifactSocketRoot + ":/host-artifacts:rw"] : [configurationRoot + ":/egress:ro"];
+            JsonElement mounts = container.GetProperty("Mounts");
+            bool mountsMatch = mounts.ValueKind == JsonValueKind.Array && mounts.GetArrayLength() == expectedBinds.Length
+                && expectedBinds.All(expected =>
+                {
+                    string[] parts = expected.Split(':');
+                    return mounts.EnumerateArray().Any(mount => mount.GetProperty("Type").GetString() == "bind"
+                        && mount.GetProperty("Source").GetString() == parts[0] && mount.GetProperty("Destination").GetString() == parts[1]
+                        && mount.GetProperty("RW").GetBoolean() == (parts[2] == "rw"));
+                });
+            string[] groups = host.TryGetProperty("GroupAdd", out JsonElement groupAdd) && groupAdd.ValueKind == JsonValueKind.Array
+                ? [.. groupAdd.EnumerateArray().Select(item => item.GetString()!)] : [];
+
             if (container.GetProperty("Config").GetProperty("Labels").GetProperty(ownerLabel).GetString() != "true"
                 || container.GetProperty("Pod").GetString() != podId || container.GetProperty("Image").GetString() != imageId
                 || !JsonElement.DeepEquals(config.GetProperty("Entrypoint"), expectedEntrypoint)
@@ -396,8 +425,10 @@ public sealed class ContainerEgressRuntime(
                 || !host.GetProperty("SecurityOpt").EnumerateArray().Any(static item => item.GetString() == "no-new-privileges")
                 || !CapabilitiesMatch(container.GetProperty("BoundingCaps"), isDns)
                 || !CapabilitiesMatch(container.GetProperty("EffectiveCaps"), isDns)
-                || binds.ValueKind != JsonValueKind.Array || binds.GetArrayLength() != 1
-                || !(binds[0].GetString()?.StartsWith(configurationRoot + ":/egress:ro", StringComparison.Ordinal) ?? false))
+                || binds.ValueKind != JsonValueKind.Array || binds.GetArrayLength() != expectedBinds.Length
+                || !expectedBinds.All(expected => binds.EnumerateArray().Any(bind => bind.GetString() == expected || (bind.GetString()?.StartsWith(expected + ",", StringComparison.Ordinal) ?? false)))
+                || !mountsMatch
+                || !(artifactMount ? groups.SequenceEqual(new[] { "0" }) : groups.Length == 0))
                 throw new InvalidOperationException("Existing egress service does not match its managed pod, image and security specification.");
             bool running = container.GetProperty("State").GetProperty("Running").GetBoolean();
             if (requireRunning && !running) throw new InvalidOperationException("Egress changed during adoption; recovery must be retried before startup.");
@@ -411,6 +442,7 @@ public sealed class ContainerEgressRuntime(
             "--label", "kautuka.managed=manager", "--label", ownerLabel + "=true", "--read-only", "--cap-drop=ALL",
             "--security-opt=no-new-privileges", "--user", "65532:65532", "--volume", configurationRoot + ":/egress:ro" };
         if (isDns) args.Add("--cap-add=NET_BIND_SERVICE");
+        else if (options.ArtifactHosts.Count > 0) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
         args.Add(image);
         args.AddRange(isDns ? ["-conf", "/egress/Corefile"] : ["-c", "/egress/bootstrap.json", "--concurrency", "1"]);
         _ = await RunAsync(args, cancellationToken).ConfigureAwait(false);
@@ -679,7 +711,7 @@ public sealed class ContainerEgressRuntime(
                 .Select(host => new EgressTcpRule(package.Container.Address, host, 443)));
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
-        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes);
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts);
     }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)
@@ -691,11 +723,19 @@ public sealed class ContainerEgressRuntime(
         var activeClusters = new JsonArray();
         foreach (JsonNode? item in clusters["dynamic_active_clusters"]?.AsArray() ?? [])
             activeClusters.Add((JsonNode)item!["cluster"]!.DeepClone());
-        JsonNode listener = listeners["dynamic_listeners"]!.AsArray().Single(item => item!["name"]!.GetValue<string>() == EnvoyEgressConfiguration.ListenerName)!["active_state"]!["listener"]!.DeepClone();
+        var activeListeners = new JsonArray();
+        foreach (JsonNode? item in listeners["dynamic_listeners"]?.AsArray() ?? [])
+        {
+            string name = item!["name"]!.GetValue<string>();
+            if (name is not (EnvoyEgressConfiguration.ListenerName or EnvoyEgressConfiguration.ArtifactListenerName))
+                throw new InvalidOperationException("The managed proxy has an unrecognized listener.");
+            activeListeners.Add(item["active_state"]!["listener"]!.DeepClone());
+        }
+        JsonNode listener = activeListeners.Single(item => item!["name"]!.GetValue<string>() == EnvoyEgressConfiguration.ListenerName)!;
         string version = listener["metadata"]!["filter_metadata"]!["kautuka.egress"]!["policy_version"]!.GetValue<string>();
         if (!IsId(version)) throw new InvalidOperationException("The active proxy has no recognized policy marker.");
         string clusterDocument = new JsonObject { ["version_info"] = version, ["resources"] = activeClusters }.ToJsonString();
-        string listenerDocument = new JsonObject { ["version_info"] = version, ["resources"] = new JsonArray(listener) }.ToJsonString();
+        string listenerDocument = new JsonObject { ["version_info"] = version, ["resources"] = activeListeners }.ToJsonString();
         return new EnvoyEgressConfiguration(version, clusterDocument, listenerDocument,
             [.. activeClusters.Select(item => item!["name"]!.GetValue<string>())]);
     }

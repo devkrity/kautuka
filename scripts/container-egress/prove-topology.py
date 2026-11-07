@@ -20,6 +20,7 @@ import signal
 import stat
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import uuid
@@ -35,6 +36,7 @@ parser.add_argument('--policy-fixture', required=True, type=pathlib.Path, help='
 parser.add_argument('--manager-smoke', type=pathlib.Path, help='Optional linux-x64 Native AOT Manager fixture executable')
 parser.add_argument('--core-build-root', type=pathlib.Path, help='Optional isolated native application-service build snapshot')
 parser.add_argument('--core-only', action='store_true', help='Run only core-service Manager acceptance, omitting workload regressions')
+parser.add_argument('--host-only', action='store_true', help='Run only native host artifact acceptance, omitting core services and workload regressions')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -52,6 +54,7 @@ if options.core_build_root is not None:
         parser.error('core test needs a Manager smoke binary and offline core-base.oci')
     for service in ('CredentialsHost','ChannelHost','Gateway','WebHost'):
         if not (core_root/'publish'/service/('Kautuka.'+service)).is_file(): parser.error('missing core native binary '+service)
+if options.host_only and (options.manager_smoke is None or options.core_only): parser.error('--host-only needs a Manager fixture and cannot combine with --core-only')
 if options.core_only and options.core_build_root is None: parser.error('--core-only requires --core-build-root')
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
@@ -121,12 +124,19 @@ try:
         network_names.append(names[role])
     archive = root/'home'/'tools.tar'
     files = set()
-    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl','/usr/bin/bash','/usr/bin/sh','/usr/bin/tail','/usr/bin/cat'):
+    for binary in ('/usr/sbin/ip','/usr/sbin/nft','/usr/bin/sleep','/usr/bin/curl','/usr/bin/openssl','/usr/bin/bash','/usr/bin/sh','/usr/bin/tail','/usr/bin/cat','/usr/bin/python3'):
         files.add(binary)
         for line in command(['ldd',binary]).splitlines():
             files.update(token for token in line.split() if token.startswith('/'))
+    stdlib = pathlib.Path(sysconfig.get_path('stdlib'))
+    python_files = [path for path in stdlib.rglob('*') if path.is_file() and not any(part in ('site-packages','__pycache__','test','tests','idlelib','tkinter','ensurepip') for part in path.relative_to(stdlib).parts)]
+    for module in python_files:
+        if module.suffix == '.so':
+            for line in command(['ldd',str(module)]).splitlines():
+                files.update(token for token in line.split() if token.startswith('/'))
     with tarfile.open(archive,'w',dereference=True) as tar:
         for file in sorted(files): tar.add(file,arcname=file.lstrip('/'),recursive=False)
+        for file in python_files: tar.add(file,arcname=str(file).lstrip('/'),recursive=False)
     archive.chmod(0o644)
     tools = podman('import','--quiet',str(archive))
     pod = prefix+'-egress'
@@ -189,7 +199,7 @@ try:
     fixture.mkdir(mode=0o755)
     command(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes',
              '-keyout',str(fixture/'key.pem'),'-out',str(fixture/'cert.pem'),'-days','1',
-             '-subj','/CN=allowed.kautuka.test','-addext','subjectAltName=DNS:allowed.kautuka.test,DNS:denied.kautuka.test'])
+             '-subj','/CN=allowed.kautuka.test','-addext','subjectAltName=DNS:allowed.kautuka.test,DNS:denied.kautuka.test,DNS:artifact.kautuka.test'])
     (fixture/'key.pem').chmod(0o644)
     (fixture/'cert.pem').chmod(0o644)
     sink = prefix+'-sink'
@@ -392,7 +402,7 @@ table ip6 kautuka_no_ipv6 {
     resolvers=[line.split()[1] for line in pathlib.Path('/etc/resolv.conf').read_text().splitlines() if line.startswith('nameserver ') and ':' not in line]
     if not resolvers: raise RuntimeError('fixture needs an IPv4 recursive DNS upstream')
     dns_hosts=fixture/'dns-hosts'
-    dns_hosts.write_text('10.247.90.10 allowed.kautuka.test denied.kautuka.test\n')
+    dns_hosts.write_text('10.247.90.10 allowed.kautuka.test denied.kautuka.test\n10.247.90.11 artifact.kautuka.test\n')
     os.chown(dns_hosts,user.pw_uid,user.pw_gid)
     (fixture/'ExternalCorefile').write_text('.:53 {\n hosts /fixture/dns-hosts {\n reload 1s\n fallthrough\n }\n forward . '+resolvers[0]+'\n log\n errors\n}\n')
     external_dns = prefix+'-external-dns'
@@ -550,13 +560,32 @@ while True:
                 core_image='localhost/kautuka-core-'+service.lower()+':'+prefix
                 podman('build','--pull=never','--network=none','-t',core_image,'-f',str(recipe),str(context),timeout=180)
                 core_images['core'+service]=core_image
+        artifact_server = fixture/'artifact-server.py'
+        artifact_server.write_text("""import http.server,ssl
+class Handler(http.server.BaseHTTPRequestHandler):
+ def do_GET(self):
+  if self.path.startswith('/redirect-'):
+   host='artifact.kautuka.test' if self.path=='/redirect-allowed' else 'denied.kautuka.test'
+   self.send_response(302);self.send_header('Location','https://'+host+'/artifact');self.end_headers()
+  else:
+   self.send_response(200);self.end_headers();self.wfile.write(b'artifact-ok')
+server=http.server.HTTPServer(('0.0.0.0',443),Handler)
+context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain('/fixture/cert.pem','/fixture/key.pem')
+server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_forever()
+""")
+        artifact_server.chmod(0o644)
+        artifact_sink=prefix+'-artifact-sink'
+        podman('run','-d','--name',artifact_sink,'--network',names['outside']+':ip=10.247.90.11',
+            '--cap-drop=ALL','--security-opt=no-new-privileges','--user','65532:65532','--sysctl','net.ipv4.ip_unprivileged_port_start=0',
+            '--read-only','--volume',str(fixture)+':/fixture:ro',tools,'/usr/bin/python3','-I','/fixture/artifact-server.py')
+        containers.append(artifact_sink)
         binary=root/'home'/'manager-smoke'
         shutil.copyfile(options.manager_smoke,binary);binary.chmod(0o755)
         native_input=root/'home'/'manager-input.json'
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
-            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, **core_images}))
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, 'hostOnly':options.host_only, 'artifactCertificate':str(fixture/'cert.pem'), **core_images}))
         native_input.chmod(0o644)
         p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
@@ -574,13 +603,13 @@ while True:
         if p.returncode: raise RuntimeError('Native Manager lifecycle failed: '+p.stdout[-3000:]+' '+p.stderr[-8000:])
         report['managerRuntime']=json.loads(p.stdout.strip().splitlines()[-1])
         workspace_file=root/'home'/'managed'/'alpha'/'native-fixture.txt'
-        if not options.core_only:
+        if not (options.core_only or options.host_only):
             if not workspace_file.is_file() or workspace_file.stat().st_uid!=user.pw_uid: raise RuntimeError('sandbox file is not owned by the runtime host account')
             report['sandboxFileOwnedByRuntime']=True
         report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
         report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
-    report['scope'] = 'rootless-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
+    report['scope'] = 'rootless-host-artifacts-only' if options.host_only else 'rootless-host-and-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
 except Exception as error:
     report['error'] = str(error)

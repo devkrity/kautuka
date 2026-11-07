@@ -183,6 +183,33 @@ public sealed class EnvoyEgressConfigurationTests
         Assert.False(ClustersActive(config, dump));
     }
 
+    [Fact]
+    public void HostArtifactsRequireBothListenerMarkersAndAnOutsideBoundExactAuthority()
+    {
+        EnvoyEgressConfiguration config = EnvoyEgressConfiguration.Compile([], "10.90.0.2", artifactHosts: ["ARTIFACT.EXAMPLE.", "artifact.example"]);
+        JsonArray listeners = JsonNode.Parse(config.ListenerDocument)!["resources"]!.AsArray();
+        Assert.Equal(2, listeners.Count);
+        JsonNode host = listeners.Single(listener => listener!["name"]!.GetValue<string>() == EnvoyEgressConfiguration.ArtifactListenerName)!;
+        Assert.Equal("/host-artifacts/connect.sock", host["address"]!["pipe"]!["path"]!.GetValue<string>());
+        Assert.Equal(432, host["address"]!["pipe"]!["mode"]!.GetValue<int>());
+        JsonArray routes = host["filter_chains"]![0]!["filters"]![0]!["typed_config"]!["route_config"]!["virtual_hosts"]!.AsArray();
+        Assert.Equal("artifact.example:443", routes[0]!["domains"]![0]!.GetValue<string>());
+        Assert.Equal("CONNECT", routes[0]!["routes"]![0]!["match"]!["headers"]![0]!["string_match"]!["exact"]!.GetValue<string>());
+        Assert.NotNull(routes[0]!["routes"]![0]!["route"]!["upgrade_configs"]![0]!["connect_config"]);
+        JsonNode cluster = JsonNode.Parse(config.ClusterDocument)!["resources"]![0]!;
+        Assert.Equal("10.90.0.2", cluster["upstream_bind_config"]!["source_address"]!["address"]!.GetValue<string>());
+        JsonObject dump = Dump(config);
+        Assert.True(ListenerActive(config, dump));
+        JsonNode activeHost = dump["configs"]![1]!["dynamic_listeners"]![1]!;
+        activeHost["active_state"]!["listener"]!["metadata"]!["filter_metadata"]!["kautuka.egress"]!["policy_version"] = "stale";
+        Assert.False(ListenerActive(config, dump));
+        activeHost["active_state"]!["listener"]!["metadata"]!["filter_metadata"]!["kautuka.egress"]!["policy_version"] = config.Version;
+        activeHost["warming_state"] = new JsonObject { ["version_info"] = config.Version };
+        Assert.False(ListenerActive(config, dump));
+        Assert.Throws<ArgumentException>(() => EnvoyEgressConfiguration.Compile([], artifactHosts: ["artifact.example"]));
+        Assert.Throws<ArgumentException>(() => EnvoyEgressConfiguration.Compile([], "10.90.0.2", artifactHosts: ["*.example"]));
+    }
+
     private static JsonElement Choices(JsonElement matcher)
         => matcher.GetProperty("matcher_tree").GetProperty("exact_match_map").GetProperty("map");
 
@@ -200,11 +227,11 @@ public sealed class EnvoyEgressConfigurationTests
             {
                 ["@type"] = "type.googleapis.com/envoy.admin.v3.ListenersConfigDump",
                 ["version_info"] = config.Version,
-                ["dynamic_listeners"] = new JsonArray(new JsonObject
+                ["dynamic_listeners"] = new JsonArray([.. JsonNode.Parse(config.ListenerDocument)!["resources"]!.AsArray().Select(listener => (JsonNode)new JsonObject
                 {
-                    ["name"] = EnvoyEgressConfiguration.ListenerName,
-                    ["active_state"] = new JsonObject { ["listener"] = JsonNode.Parse(config.ListenerDocument)!["resources"]![0]!.DeepClone() },
-                }),
+                    ["name"] = listener!["name"]!.DeepClone(),
+                    ["active_state"] = new JsonObject { ["listener"] = listener.DeepClone() },
+                })]),
             }),
     };
 

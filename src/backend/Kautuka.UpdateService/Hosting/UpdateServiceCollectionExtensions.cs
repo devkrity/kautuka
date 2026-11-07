@@ -1,3 +1,4 @@
+using Kautuka.Hosting.Hosting;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Discovery;
 using Kautuka.UpdateService.State;
@@ -17,7 +18,8 @@ public static class UpdateServiceCollectionExtensions
             .ValidateOnStart();
         services.AddSingleton<IValidateOptions<UpdateOptions>, UpdateOptionsValidation>();
 
-        services.AddHttpClient("kautuka.updateservice.github");
+        services.AddHttpClient("kautuka.updateservice.github").ConfigurePrimaryHttpMessageHandler(sp =>
+            KautukaArtifactHttpTransport.CreateForConfiguration(sp.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>()));
         services.AddSingleton<IUpdateRuntimePolicyStore, UpdateRuntimePolicyStore>();
         services.AddSingleton<IUpdateStateStore, JsonUpdateStateStore>();
         services.AddSingleton<IHostedCatalogStateStore, JsonHostedCatalogStateStore>();

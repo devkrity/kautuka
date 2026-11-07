@@ -661,3 +661,39 @@ All 65 runtime/shared/fixture inputs match the final native build snapshot by
 normalized-text SHA-256. The architect's final source review found no remaining
 blocker. Container-release acquisition, installer activation, full frontend image
 packaging, updater lifecycle operations and installed-system recovery remain open.
+
+Host artifact transport is now being integrated through a second stock Envoy
+listener on a pathname Unix socket. Its exact hostname:443 CONNECT routes use
+fixed outside-bound clusters; it does not implement dynamic forwarding or TLS
+interception. Both listener markers participate in the existing CDS/LDS
+publication transaction. The socket directory is owned by the rootless runtime
+mapping, mode 2770; only Envoy mounts it read-write and receives mapped group 0.
+The socket is mode 0660. Application/workload containers do not receive this mount.
+This follows the [Envoy 1.40.2 CONNECT termination example](https://raw.githubusercontent.com/envoyproxy/envoy/v1.40.2/configs/terminate_http1_connect.yaml).
+
+The host .NET handler uses an explicit fixed proxy and a Unix-only connection
+callback, with no loopback bypass, environment proxy selection or TCP fallback.
+The updater selects it when ContainerEgress:Enabled is true or an explicit
+ArtifactSocketPath is configured. Unconfigured legacy host-service deployment
+retains its current transport during this staged migration. The final appliance
+installer must select managed egress for both host processes and provision the
+initial authority policy and cached images before downloads depend on Envoy.
+An explicitly selected but unavailable socket fails closed. Signed manifests,
+digests and release verification remain responsible for artifact authenticity.
+This shared host socket authorizes the trusted runtime owner; it does not identify
+individual host processes. Installed UpdateService group/traversal access and
+application-managed OCI acquisition are still pending integration and proof.
+
+`artifacts/container-egress/runtime-proof-fa640b24.json` passed with no cleanup
+errors. This is explicitly a host-artifact-only native proof. The actual typed
+client completed end-to-end TLS to the controlled fixture server, followed an
+allowed redirect, and received explicit proxy 403 denials for the forbidden
+redirect authority and port; plain HTTP was also denied. It verified socket
+mode 0660 and mapped UID/GID 65532:0, failed closed during an Envoy outage, then
+succeeded with the same client after socket recreation. The earlier diagnostic
+run stopped in the fixture's certificate-only PEM loader and is not passing TLS
+evidence. All 67 runtime/shared/fixture source inputs match the AOT build snapshot
+by normalized-text SHA-256. Focused Windows checks passed 23 transport/compiler
+tests and 70 updater/source-policy tests. The architect cleared the corrections.
+A full native regression with the host listener enabled is running separately;
+this focused result does not claim core-service or workload regression coverage.
