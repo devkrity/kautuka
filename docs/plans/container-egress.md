@@ -1118,3 +1118,14 @@ synthetic authenticated API fixtures, including Allow and audit rendering.
 Installed authentication, live approval through that UI, final update recovery,
 uninstall and platform packaging remain completion gates. These local browser
 checks do not substitute for that installed end-to-end verification.
+
+The expanded Native AOT Manager proof on Fedora 44/rootless Podman now passes
+with four private networks: core, two agent scopes and one management scope.
+The same connector receives different policies in the two live agent scopes;
+a fifth network is explicitly refused without broader fallback. The shipped
+default limit is therefore four. The proof also verifies attributed denial,
+persisted approval, accepted Allow followed by a successful explicit retry,
+accepted block followed by denial, owner filtering, restart deduplication and
+validated desired-state replay freshness. Its disposable runtime cleanup passed.
+The audit/UI checkpoint `9aa5382` passed full push checks: 2,612 backend tests
+passed, six skipped, zero failed; 549 frontend tests passed. It remains unmerged.

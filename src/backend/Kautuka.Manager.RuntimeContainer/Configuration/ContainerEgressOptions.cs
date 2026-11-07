@@ -7,8 +7,8 @@ public sealed class ContainerEgressOptions
 
     public bool Enabled { get; set; }
 
-    // The two-private-network topology is measured. Raise the shipped limit only with evidence.
-    public int MaxPrivateNetworks { get; set; } = 2;
+    // Core plus two agent scopes and one management scope are measured on rootless Podman.
+    public int MaxPrivateNetworks { get; set; } = 4;
 
     public IReadOnlyList<string> DnsUpstreams { get; set; } = [];
 
