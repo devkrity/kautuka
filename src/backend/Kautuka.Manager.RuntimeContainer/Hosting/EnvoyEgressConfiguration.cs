@@ -93,6 +93,7 @@ internal sealed record EnvoyEgressConfiguration(
                         ["@type"] = "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
                         ["stat_prefix"] = "egress",
                         ["cluster"] = name,
+                        ["access_log_options"] = new JsonObject { ["flush_access_log_on_connected"] = true },
                         ["access_log"] = new JsonArray(AccessLog("proxy")),
                     },
                 }),
@@ -218,6 +219,7 @@ internal sealed record EnvoyEgressConfiguration(
                     {
                         ["@type"] = "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
                         ["stat_prefix"] = "host_artifacts",
+                        ["access_log_options"] = new JsonObject { ["flush_access_log_on_new_request"] = true },
                         ["codec_type"] = "HTTP1",
                         ["route_config"] = new JsonObject { ["name"] = "host_artifacts", ["virtual_hosts"] = virtualHosts },
                         ["http_filters"] = new JsonArray(new JsonObject
@@ -376,11 +378,11 @@ internal sealed record EnvoyEgressConfiguration(
     {
         JsonObject log = JsonNode.Parse("""
         {
-          "name": "envoy.access_loggers.stdout",
+          "name": "envoy.access_loggers.stderr",
           "typed_config": {
-            "@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog",
+            "@type": "type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StderrAccessLog",
             "log_format": { "json_format": {
-              "timestamp": "%START_TIME%", "source": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
+              "timestamp": "%START_TIME%", "event_type": "%ACCESS_LOG_TYPE%", "source": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
               "source_address": "%DOWNSTREAM_REMOTE_ADDRESS%", "destination": "%DOWNSTREAM_LOCAL_ADDRESS%",
               "sni": "%REQUESTED_SERVER_NAME%", "upstream_cluster": "%UPSTREAM_CLUSTER%", "details": "%CONNECTION_TERMINATION_DETAILS%",
               "bytes_received": "%BYTES_RECEIVED%", "bytes_sent": "%BYTES_SENT%", "duration_ms": "%DURATION%"

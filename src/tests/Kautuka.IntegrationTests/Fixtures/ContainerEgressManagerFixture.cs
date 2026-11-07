@@ -31,6 +31,7 @@ internal static class ContainerEgressManagerFixture
             throw new InvalidOperationException("The Manager fixture must run as its disposable rootless test account.");
         var report = new JsonObject();
         var trace = new List<string[]>();
+        var acquisitionAllocations = new Dictionary<string, string>(StringComparer.Ordinal);
         var native = new PodmanCommandRunner();
         await CheckClientPublicationAsync(data, native, report, ct);
         await ImageArchiveManagerFixture.RunAsync(data, native, report, ct);
@@ -56,6 +57,15 @@ internal static class ContainerEgressManagerFixture
             if (actual[0] == "stop" && actual.Contains("kautuka-egress-envoy")) failAdmin = false;
             long started = Stopwatch.GetTimestamp();
             PodmanCommandResult result = await native.RunAsync(actual, timeout, token, environment);
+            if (actual[0] == "inspect" && actual.Count == 2 && result.ExitCode == 0)
+            {
+                using JsonDocument inspected = JsonDocument.Parse(result.StdOut);
+                JsonElement container = inspected.RootElement[0];
+                JsonElement labels = container.GetProperty("Config").GetProperty("Labels");
+                if (labels.ValueKind == JsonValueKind.Object && labels.TryGetProperty("kautuka.egress.component", out JsonElement component) && component.GetString() == "image-acquisition")
+                    acquisitionAllocations[container.GetProperty("Id").GetString()!] = container.GetProperty("NetworkSettings").GetProperty("Networks")
+                        .GetProperty("kautuka-core").GetProperty("IPAddress").GetString()!;
+            }
             TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
             if (elapsed.TotalSeconds >= 5 || result.ExitCode != 0)
             {
@@ -76,6 +86,8 @@ internal static class ContainerEgressManagerFixture
                 new("core-gateway", data.GetProperty("coreGateway").GetString()!, null),
                 new("core-channelhost", data.GetProperty("coreChannelHost").GetString()!, null),
                 new("core-webhost", data.GetProperty("coreWebHost").GetString()!, null)]);
+        if (data.TryGetProperty("acquisitionHelper", out JsonElement acquisitionHelper))
+            allowlist = new RuntimeImageAllowlist(1, [.. allowlist.Images, new("image-acquisition", acquisitionHelper.GetString()!, null)]);
         // This fixture starts with native cached images. Bind their actual immutable IDs explicitly;
         // the deliberately absent archive names cannot serve as a cold-bootstrap fallback.
         var boundImages = new List<RuntimeImageEntry>();
@@ -104,6 +116,9 @@ internal static class ContainerEgressManagerFixture
          new(){UserId="owner",AgentId="alpha",ComponentId="owner::a",Destination="allowed.kautuka.test",Port=8443},
          new(){UserId="owner",AgentId="beta",ComponentId="owner::c",Destination="allowed.kautuka.test",Port=8443}]
         };
+        if (data.TryGetProperty("acquisitionSource", out _)) options.Grants = [.. options.Grants,
+            new() { ScopeType = "core", Role = "materializer", ComponentId = "image-acquisition", Destination = "quay.io", Port = 443 },
+            new() { ScopeType = "core", Role = "materializer", ComponentId = "image-acquisition", Destination = "cdn01.quay.io", Port = 443 }];
         using var runtime = new ContainerEgressRuntime(runner, options, allowlist, stateRoot);
         recoveryRuntime = runtime;
         var store = new WorkspaceDesiredStateStore();
@@ -117,9 +132,69 @@ internal static class ContainerEgressManagerFixture
         await runtime.EnsureReadyAsync(ct);
         if (data.TryGetProperty("artifactCertificate", out _))
             await HostArtifactManagerFixture.RunAsync(data, runner, runtime, report, ct);
+        if (data.TryGetProperty("acquisitionSource", out JsonElement acquisitionSource))
+        {
+            string sourceReference = acquisitionSource.GetString()!;
+            if ((await native.RunAsync(["image", "exists", sourceReference], 15, ct)).ExitCode != 1)
+                throw new InvalidOperationException("Acquisition fixture image must be genuinely absent.");
+            ResolvedRuntimeImage acquired = await runtime.ResolveRuntimeImageAsync(sourceReference, ct);
+            int helperCreates = trace.Count(args => args[0] == "create" && args.Contains("kautuka.egress.component=image-acquisition"));
+            if (helperCreates != 2 || acquired.SourceReference != sourceReference || !RuntimeImageEntry.IsLocalId(acquired.LocalImageId))
+                throw new InvalidOperationException("Native registry acquisition did not use exactly two restricted helpers.");
+            ResolvedRuntimeImage cached = await runtime.ResolveRuntimeImageAsync(sourceReference, ct);
+            if (cached != acquired || helperCreates != trace.Count(args => args[0] == "create" && args.Contains("kautuka.egress.component=image-acquisition")))
+                throw new InvalidOperationException("Acquired image cache repeated a network operation.");
+            if ((await native.RunAsync(["rmi", acquired.LocalImageId], 30, ct)).ExitCode != 0)
+                throw new InvalidOperationException("Acquisition fixture could not remove its exact unused image.");
+            if (await runtime.ResolveRuntimeImageAsync(sourceReference, ct) != acquired)
+                throw new InvalidOperationException("Acquired archive could not restore its immutable image.");
+            bool denied = false;
+            try { await runtime.ResolveRuntimeImageAsync(sourceReference.Replace("quay.io/", "denied.kautuka.test/", StringComparison.Ordinal), ct); }
+            catch (InvalidOperationException) { denied = true; }
+            if (!denied || helperCreates != trace.Count(args => args[0] == "create" && args.Contains("kautuka.egress.component=image-acquisition")))
+                throw new InvalidOperationException("Unapproved registry started an acquisition helper.");
+            report["nativeRegistryAcquisitionThroughPrivateNetwork"] = true;
+            report["registrySourceManifestConfigBindingVerified"] = true;
+            report["registryCacheRestoresWithoutNetwork"] = true;
+            report["unapprovedRegistryDeniedBeforeHelper"] = true;
+            var registryEvents = new JsonArray();
+            bool hostRequestStart = false;
+            string expectedCluster = "upstream-" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("quay.io:443")));
+            for (int attempt = 0; attempt < 20 && (registryEvents.Count == 0 || !hostRequestStart); attempt++)
+            {
+                PodmanCommandResult logs = await native.RunAsync(["logs", "kautuka-egress-envoy"], 10, ct);
+                registryEvents.Clear();
+                foreach (string line in (logs.StdOut + "\n" + logs.StdErr).Split('\n'))
+                {
+                    if (!line.StartsWith('{')) continue;
+                    using JsonDocument entry = JsonDocument.Parse(line);
+                    JsonElement record = entry.RootElement;
+                    if (record.TryGetProperty("phase", out JsonElement phase) && phase.GetString() == "host-artifact"
+                        && record.GetProperty("event_type").GetString() == "DownstreamStart") hostRequestStart = true;
+                    if (record.TryGetProperty("sni", out JsonElement sni) && sni.GetString() == "quay.io"
+                        && record.GetProperty("event_type").GetString() == "TcpUpstreamConnected"
+                        && record.GetProperty("upstream_cluster").GetString() == expectedCluster
+                        && acquisitionAllocations.Values.Contains(record.GetProperty("source").GetString()!, StringComparer.Ordinal))
+                        registryEvents.Add(JsonNode.Parse(line));
+                }
+                if (registryEvents.Count == 0 || !hostRequestStart) await Task.Delay(250, ct);
+            }
+            if (registryEvents.Count == 0 || !hostRequestStart || acquisitionAllocations.Count != 2)
+            {
+                PodmanCommandResult stats = await native.RunAsync(["run", "--rm", "--pull=never", "--pod", "kautuka-egress", "--user", "65533:65533",
+                    "--cap-drop=ALL", "--read-only", "--security-opt=no-new-privileges", "--entrypoint", "/usr/bin/curl", data.GetProperty("helper").GetString()!,
+                    "--silent", "--show-error", "--max-time", "2", "http://127.0.0.1:9901/stats?filter=filesystem"], 10, ct);
+                throw new InvalidOperationException("Actual helper source attribution or host request-start auditing was not observed. Allocations="
+                    + acquisitionAllocations.Count + "; registry events=" + registryEvents.Count + "; host start=" + hostRequestStart + "; logger stats=" + stats.StdOut);
+            }
+            report["registryConnectedAuditEvents"] = registryEvents;
+            report["registryHelperAllocations"] = new JsonArray([.. acquisitionAllocations.Select(pair => (JsonNode)new JsonObject { ["id"] = pair.Key, ["address"] = pair.Value })]);
+            report["hostRequestStartAuditObserved"] = true;
+            await Console.Error.WriteLineAsync("fixture: restricted registry image acquisition and cache restoration passed");
+        }
         if (data.TryGetProperty("hostOnly", out JsonElement hostOnly) && hostOnly.GetBoolean())
         {
-            report["proofScope"] = "host-artifacts-only";
+            report["proofScope"] = data.TryGetProperty("acquisitionSource", out _) ? "host-artifacts-and-registry-acquisition-only" : "host-artifacts-only";
             report["passed"] = true;
             return report;
         }

@@ -61,7 +61,8 @@ for (const filePath of documentationFiles) {
 const graph = new Map();
 for (const filePath of allCheckedFiles) {
   const text = fs.readFileSync(filePath, 'utf8');
-  for (const reference of text.matchAll(/\bdocs\/[A-Za-z0-9._/-]+\.md\b/gu)) {
+  const repositoryReferences = text.replace(/\bhttps?:\/\/[^\s<>()]+/gu, '');
+  for (const reference of repositoryReferences.matchAll(/\bdocs\/[A-Za-z0-9._/-]+\.md\b/gu)) {
     const target = path.resolve(repoRoot, reference[0]);
     if (!fs.existsSync(target)) {
       failures.push(`${slash(path.relative(repoRoot, filePath))}: stale repository documentation reference '${reference[0]}'.`);

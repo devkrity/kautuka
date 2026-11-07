@@ -738,3 +738,57 @@ final combined runtime regression is being rebuilt after the legacy-entry-point
 correction. Producer checks pass for OCI/Docker wrappers, wrong platform,
 changed config blobs, ambiguous multi-image archives, traversal, signed binding
 preservation/tamper rejection and mocked native archive staging.
+
+The final archive checkpoint's combined native report
+`artifacts/container-egress/runtime-proof-bb4da811.json` passed with clean teardown:
+cold archive identity/tamper checks, host transport, four core services, source
+recovery, package service and Node/Python/uv/binary isolated/sandbox execution.
+The preceding `runtime-proof-13185720.json` passed the archive, host and core
+checks but timed out at the first sandbox's native `create` operation (30 seconds).
+The passing rerun used the same deadline. Process observation showed the create
+parent waiting for a child amid approximately 43% global WSL I/O pressure;
+this does not establish the cause. The intermittent creation delay remains open.
+Checkpoint `a4f7832` passed normal push checks: 2,486 backend tests, five skips,
+540 frontend tests, zero build warnings/errors and 30 existing lint warnings.
+
+Managed registry acquisition now has a bounded native implementation alongside
+the existing runtime, using the same ephemeral materializer lifecycle in the
+private core network. Its fixed system identity is `image-acquisition`; the
+exact registry endpoint must have an explicit grant before a helper starts.
+Skopeo itself must already be a verified cached release asset. Two fixed helper
+commands retrieve the pinned raw manifest, then copy the selected platform with
+`--preserve-digests`. Manager verifies the original index membership, preserved
+manifest, config digest and platform before native loading and immutable-ID
+inspection. Converted manifests are rejected. No engine socket, container-store
+mount, implicit pull or TLS interception is involved. Source and archive files
+remain in a private cache for offline restoration. Ambiguous helper retirement
+preserves staging rather than deleting a potentially mounted directory.
+
+This uses [stock Skopeo inspection](https://raw.githubusercontent.com/containers/skopeo/main/docs/skopeo-inspect.1.md)
+and [preserved-digest copying](https://raw.githubusercontent.com/containers/skopeo/main/docs/skopeo-copy.1.md).
+The native proof uses an explicitly pinned public Quay image; initial helper
+acquisition into the development fixture cache was manual setup, not evidence of
+application-managed bootstrap. Consumer wiring, release helper publication,
+private-registry credentials, cache/stale-staging capacity management and installed
+deployment remain unfinished. Cold network acquisition belongs in background
+preparation; tool calls must use ready images within their existing deadline.
+
+Focused native report `artifacts/container-egress/runtime-proof-c4ce72c9.json`
+passed with clean teardown. It verifies real registry acquisition, source/config
+binding, cache restoration without another helper, pre-helper denial of an
+unapproved registry, and observed proxy events correlated with both helpers'
+recorded immutable IDs and source addresses. All 70 runtime/shared/fixture inputs
+match the Native AOT snapshot. The focused Windows group passed 39 tests.
+This report does not repeat the core/workload coverage of `bb4da811`.
+
+The stricter audit test exposed absent stdout access events in the managed
+Envoy/journald path. `0df10e54` proved acquisition functionality only; `8aef936a`
+and `a22c7143` correctly failed the added audit assertion. Logger counters reported
+successful writes and zero buffered bytes, but that did not prove their delivery.
+The tested configuration now uses stock `StderrAccessLog`, TCP connected events
+and HTTP request-start events while retaining completion events and recording
+`event_type`. The final syscall trace confirms JSON writes to a duplicate of the
+stderr pipe; those records appear in `podman logs` and satisfy source attribution.
+The missing-stdout root cause is not established. A host request-start record
+means receipt, not admission; actual TLS success and explicit proxy-403 tests
+establish outcomes. Persistent audit delivery/storage and UI are still pending.

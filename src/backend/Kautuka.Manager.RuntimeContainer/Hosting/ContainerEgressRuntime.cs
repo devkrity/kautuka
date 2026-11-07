@@ -12,7 +12,7 @@ using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 /// <summary>Manager-owned native networks, egress pod and serialized file-policy publication.</summary>
-public sealed class ContainerEgressRuntime(
+public sealed partial class ContainerEgressRuntime(
     PodmanCommandRunner runner, ContainerEgressOptions options, RuntimeImageAllowlist allowlist, string stateRoot,
     PodmanImageArchiveStore? archives = null) : IDisposable
 {
@@ -47,6 +47,7 @@ public sealed class ContainerEgressRuntime(
     public void Dispose()
     {
         gate.Dispose();
+        imageAcquisitionGate.Dispose();
         GC.SuppressFinalize(this);
     }
 

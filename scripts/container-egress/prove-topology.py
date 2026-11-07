@@ -37,6 +37,7 @@ parser.add_argument('--manager-smoke', type=pathlib.Path, help='Optional linux-x
 parser.add_argument('--core-build-root', type=pathlib.Path, help='Optional isolated native application-service build snapshot')
 parser.add_argument('--core-only', action='store_true', help='Run only core-service Manager acceptance, omitting workload regressions')
 parser.add_argument('--host-only', action='store_true', help='Run only native host artifact acceptance, omitting core services and workload regressions')
+parser.add_argument('--acquisition-source', help='Optional pinned public registry fixture to acquire through the native private network')
 parser.add_argument('--report', required=True, type=pathlib.Path, help='New output JSON file')
 options = parser.parse_args()
 if sys.platform != 'linux' or os.geteuid() != 0:
@@ -55,6 +56,7 @@ if options.core_build_root is not None:
     for service in ('CredentialsHost','ChannelHost','Gateway','WebHost'):
         if not (core_root/'publish'/service/('Kautuka.'+service)).is_file(): parser.error('missing core native binary '+service)
 if options.host_only and (options.manager_smoke is None or options.core_only): parser.error('--host-only needs a Manager fixture and cannot combine with --core-only')
+if options.acquisition_source and (options.manager_smoke is None or not (options.image_cache/'skopeo.oci').is_file()): parser.error('acquisition proof requires Manager fixture and offline skopeo.oci')
 if options.core_only and options.core_build_root is None: parser.error('--core-only requires --core-build-root')
 resource.setrlimit(resource.RLIMIT_CORE,(0,0))
 report_stream = options.report.open('x', encoding='utf-8')
@@ -558,6 +560,19 @@ while True:
             'sha256':archive_hash,'platform':archive_info['Os']+'/'+archive_info['Architecture'],'localImageId':archive_config}
         report['archiveProofInput']=archive_proof
         podman('rmi',archive_info['Id'])
+        acquisition_images={}
+        if options.acquisition_source:
+            acquisition_archive=root/'home'/'skopeo.oci'
+            shutil.copyfile(options.image_cache/'skopeo.oci',acquisition_archive)
+            os.chown(acquisition_archive,user.pw_uid,user.pw_gid)
+            with tarfile.open(acquisition_archive) as source:
+                index=json.load(source.extractfile('index.json'))
+                manifest=json.load(source.extractfile('blobs/sha256/'+index['manifests'][0]['digest'].split(':')[1]))
+                config_id=manifest['config']['digest']
+            podman('load','-i',str(acquisition_archive))
+            acquisition_image='localhost/kautuka-acquisition-fixture:'+prefix
+            podman('tag',config_id,acquisition_image)
+            acquisition_images={'acquisitionHelper':acquisition_image,'acquisitionSource':options.acquisition_source}
         core_images={}
         if options.core_build_root is not None:
             base_archive=root/'home'/'core-base.oci'
@@ -604,7 +619,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_f
         native_input.write_text(json.dumps({'stateRoot':str(root/'home'/'managed'),'disposableUser':prefix,'connector':mcp_image,'helper':helper_image,
             'envoy':json.loads(podman('image','inspect',envoy_image))[0]['RepoDigests'][0],
             'dns':json.loads(podman('image','inspect',dns_image))[0]['RepoDigests'][0],
-            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, 'hostOnly':options.host_only, 'artifactCertificate':str(fixture/'cert.pem'), 'archiveProof':archive_proof, **core_images}))
+            'pkgs':managed_images['pkgs'], 'sandbox':managed_images['sandbox'], 'dnsHosts':str(dns_hosts), 'coreOnly':options.core_only, 'hostOnly':options.host_only, 'artifactCertificate':str(fixture/'cert.pem'), 'archiveProof':archive_proof, **core_images, **acquisition_images}))
         native_input.chmod(0o644)
         p=subprocess.run(base+[str(binary),str(native_input)],capture_output=True,text=True,cwd='/var/tmp',timeout=780)
         report['managerRuntimeProcess']={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr[-8000:]}
@@ -619,6 +634,11 @@ server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_f
             if name and name not in network_names: network_names.append(name)
         observed=root/'home'/'managed'/'egress'/'config'/'unconfirmed-admin-dump.json'
         if observed.exists(): report['managerUnconfirmedDump']=json.loads(observed.read_text())
+        report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
+        proxy_info=json.loads(podman('inspect','kautuka-egress-envoy'))[0]
+        proxy_pid=proxy_info['State']['Pid']
+        report['managerEnvoyLogging']={'logConfig':proxy_info['HostConfig'].get('LogConfig'),
+            'stdio':{str(fd):os.readlink('/proc/'+str(proxy_pid)+'/fd/'+str(fd)) for fd in (1,2)} if proxy_pid else {}}
         if p.returncode: raise RuntimeError('Native Manager lifecycle failed: '+p.stdout[-3000:]+' '+p.stderr[-8000:])
         report['managerRuntime']=json.loads(p.stdout.strip().splitlines()[-1])
         workspace_file=root/'home'/'managed'/'alpha'/'native-fixture.txt'
@@ -628,7 +648,7 @@ server.socket=context.wrap_socket(server.socket,server_side=True);server.serve_f
         report['managerEnvoyLogs']=logs('kautuka-egress-envoy')
         report['managerDnsLogs']=logs('kautuka-egress-dns')
     report['limitations'] = ['WSL Fedora 44 only; native Linux and Mac not yet validated.', 'UDP namespace probes use ordinary sockets after root enters the network namespace and drops to the runtime UID; they do not establish container privilege confinement.', 'IPv6 absence is a disabled-client address/route check, not an observed IPv6 firewall-hit test.', 'Fixture DNS; no recursive DNS or installed application/update proof.']
-    report['scope'] = 'rootless-host-artifacts-only' if options.host_only else 'rootless-host-and-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
+    report['scope'] = ('rootless-host-artifacts-and-registry-acquisition-only' if options.acquisition_source else 'rootless-host-artifacts-only') if options.host_only else 'rootless-host-and-core-services-only' if options.core_only else 'rootless-compiled-file-xds-admission-mixed-source-policy-and-native-staged-start'
     report['passed'] = True
 except Exception as error:
     report['error'] = str(error)
