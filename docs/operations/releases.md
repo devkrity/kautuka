@@ -94,6 +94,15 @@ Before switching release pointers, the root helper writes an operation-bound jou
 
 After a committed update, built-in connector bootstrap waits until the maintenance fence is removed before contacting Manager. During a user-initiated update, the initiating browser shows restart progress instead of a transient updater socket error for up to 12 minutes; unrelated failures and an outage that outlasts that window remain visible.
 
+The container socket layout assigns the five Unix-socket directories to the
+single runtime owner/group at mode 2750. Core containers receive only their
+specified socket mounts; the host Manager and UpdateService use their own
+existing endpoints. The shared database writer lock stays root-owned at 0644,
+and recreating tmpfiles entries preserves its inode. Legacy host installations
+retain their dedicated client groups. Actual Fedora tmpfiles checks verify that
+a different UID can bind each container-layout socket and that a held writer
+lease survives recreation. Container activation must select this layout.
+
 The Linux installer recognizes the complete eleven-role offline appliance
 inventory and validates every archive before the first Podman operation. It
 streams missing archives from its root-private extraction to the dedicated

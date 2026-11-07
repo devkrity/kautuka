@@ -1068,10 +1068,27 @@ grant_socket_group_membership() {
 # units, whose RuntimeDirectory lands under /run/user/<uid>, and that directory is mode
 # 0700 so the system-scope services could never traverse into it.
 install_socket_runtime_dirs() {
-    local service_user="$1"
+    local service_user="$1" layout="${2:-host}" service_group="${3:-$1}"
     local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'
+    [[ "$layout" == host || "$layout" == containers ]] || fail 'unsupported socket deployment layout'
 
     install -d -m 0755 /usr/lib/tmpfiles.d
+    if [[ "$layout" == containers ]]; then
+        id "$service_user" >/dev/null 2>&1 || fail 'container runtime socket owner does not exist'
+        getent group "$service_group" >/dev/null 2>&1 || fail 'container runtime socket group does not exist'
+        {
+            printf '%s\n' '# Managed by the Kautuka installer; containers receive only their declared socket mounts.' \
+                'd /run/kautuka 0755 root root -' \
+                'f /run/kautuka-db-writer.lock 0644 root root -'
+            local service
+            for service in manager updateservice gateway credentialshost channelhost; do
+                printf 'd /run/kautuka/%s 2750 %s %s -\n' "$service" "$service_user" "$service_group"
+            done
+        } > "$tmpfiles_path"
+        chmod 0644 "$tmpfiles_path"
+        systemd-tmpfiles --create "$tmpfiles_path"
+        return
+    fi
 
     # A clean Linux host does not have these groups pre-created by the WSL image builder.
     # Granting membership first creates the dedicated client groups before tmpfiles checks.
