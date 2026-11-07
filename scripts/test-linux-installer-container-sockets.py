@@ -11,6 +11,7 @@ import unittest
 
 SOURCE = Path(__file__).with_name('kautuka-install-linux.sh.in').read_text()
 FUNCTION = 'install_socket_runtime_dirs() {' + SOURCE.split('install_socket_runtime_dirs() {', 1)[1].split('\ninstall_apply_release_helper() {', 1)[0]
+ROOTLESS = 'ensure_rootless_podman_ready() {' + SOURCE.split('ensure_rootless_podman_ready() {', 1)[1].split('\nensure_service_account() {', 1)[0]
 
 @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root and systemd-tmpfiles required')
 class ContainerSocketsTests(unittest.TestCase):
@@ -64,5 +65,26 @@ class ContainerSocketsTests(unittest.TestCase):
         result = self.run_helper('unknown')
         self.assertNotEqual(0, result.returncode)
         self.assertFalse((self.root / 'tmpfiles.d').exists())
+
+    def test_failed_rootless_info_keeps_container_home_root_owned(self):
+        home = self.root / 'home'; home.mkdir(mode=0o750)
+        os.chown(home, 0, self.account.pw_gid)
+        runtime = self.root / 'runtime'; runtime.mkdir(mode=0o700)
+        script = self.root / 'rootless.sh'
+        script.write_text('''set -euo pipefail
+fail() { echo "$*" >&2; exit 1; }
+ensure_subid_entry() { :; }
+ensure_rootless_idmap_helpers() { :; }
+validate_linger_enabled() { :; }
+install_user_manager_restart_dropin() { :; }
+loginctl() { :; }
+systemctl() { :; }
+run_as_service_user() { return 72; }
+''' + ROOTLESS + '\nensure_rootless_podman_ready nobody ' + self.group + ' "' + str(home) + '" "' + str(runtime) + '" containers\n')
+        result = subprocess.run(['bash', str(script)], capture_output=True, text=True)
+        self.assertEqual(72, result.returncode, result.stderr)
+        self.assertEqual(0, home.stat().st_uid)
+        self.assertEqual(0o750, home.stat().st_mode & 0o777)
+        self.assertEqual(self.account.pw_uid, (home / '.config/containers/storage.conf').stat().st_uid)
 
 if __name__ == '__main__': unittest.main()

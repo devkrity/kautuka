@@ -94,6 +94,44 @@ Before switching release pointers, the root helper writes an operation-bound jou
 
 After a committed update, built-in connector bootstrap waits until the maintenance fence is removed before contacting Manager. During a user-initiated update, the initiating browser shows restart progress instead of a transient updater socket error for up to 12 minutes; unrelated failures and an outage that outlasts that window remain visible.
 
+The Linux installer selects an eleven-role container payload after signature
+verification and the existing installation/update lock, before the legacy
+host-service installation path. Its fresh path keeps the state/cache parent
+root-owned, gives the runtime account only its writable subdirectories, stages
+offline images, provisions the disjoint Channel material, and installs only
+Manager and UpdateService as application host units. The six immutable payload
+roots remain for the updater's existing release-pointer contract. It seeds exact
+core-service grants matching each service identity, takes IPv4 DNS upstreams from
+the host resolver without a public-resolver fallback, and disables host OTLP
+endpoints. A valid supplied deployment file is preserved and made readable as
+root:kautuka 0640.
+
+Preparation validates configuration, payloads and material before publishing
+current links and the container contract. Ordinary errors before activation
+remove only this attempt's prepared versions, links, material and unit files;
+immutable caches and the independent root repair helpers may remain. The
+container rootless-storage path never changes ownership of the state parent,
+including on a failed Podman-info call. Once activation can create application
+state, failure preserves it for diagnosis and retry through the installed user
+target. `--skip-enable` prepares the files without leaving the boot target enabled.
+Readiness requires four owned running core images, the Gateway's runtime health
+and the configured WebHost publication. The local TLS availability probe does not
+verify certificates; CoreServiceSupervisor separately validates the configured
+certificate and container specification. First-admin setup uses the token under
+`gateway-data`, without moving it back to the host-service data root.
+
+Private-mount preparation checks cover early and late failures followed by a
+successful retry, two host units, matching grants, preserved supplied policy and
+existing-deployment refusal. These checks use fixture identity, systemd, Podman
+and Channel material; no application container is started by that fixture. Six
+installer trust, image, upgrade, readiness and unresolved-update regressions and
+three actual socket/rootless-ownership checks pass. Real installed normal
+activation, existing-install conversion/repair, WSL rootfs activation, container
+uninstall preservation and enforcing-SELinux validation remain unfinished. The
+fresh path deliberately refuses existing deployment pointers, units/contracts,
+containers and populated application state rather than altering them through
+the old host-service path.
+
 The container socket layout assigns the five Unix-socket directories to the
 single runtime owner/group at mode 2750. Core containers receive only their
 specified socket mounts; the host Manager and UpdateService use their own

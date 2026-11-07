@@ -530,9 +530,11 @@ ensure_rootless_podman_ready() {
     local service_group="$2"
     local service_home="$3"
     local xdg_runtime_dir="$4"
+    local layout="${5:-host}"
     local graph_root="$service_home/.local/share/containers/storage"
     local run_root="$xdg_runtime_dir/containers"
     local storage_conf_path="$service_home/.config/containers/storage.conf"
+    [[ "$layout" == host || "$layout" == containers ]] || fail 'unsupported rootless home layout'
 
     ensure_subid_entry /etc/subuid "$service_user"
     ensure_subid_entry /etc/subgid "$service_user"
@@ -543,7 +545,13 @@ ensure_rootless_podman_ready() {
         "$service_home/.config/containers" \
         "$service_home/.local/share/containers" \
         "$graph_root"
-    chown "$service_user:$service_group" "$service_home"
+    if [[ "$layout" == host ]]; then
+        chown "$service_user:$service_group" "$service_home"
+    else
+        # The managed cache needs immutable ancestry even when Podman info fails.
+        [[ ! -L "$service_home" && "$(stat -c '%u' "$service_home")" == 0 ]] \
+            || fail 'container runtime home must remain root-owned'
+    fi
     chown -R "$service_user:$service_group" "$service_home/.config"
     # Rootless Podman stores subordinate-UID ownership inside its image layers.
     # Reinstall may repair the storage directory owners, but must never recurse
@@ -773,6 +781,7 @@ install_host_service_user() {
     local service_group="$7"
     local visible_root="$8"
     local unit_dir="$9"
+    local payload_mode="${10:-install}"
 
     [[ -d "$source_root" ]] || return 1
 
@@ -789,12 +798,18 @@ install_host_service_user() {
     local unit_after="network.target"
     local no_new_privileges="NoNewPrivileges=true"
 
-    rm -rf "$version_root"
-    mkdir -p "$version_root" "$log_dir"
-    copy_runtime_payload "$source_root" "$version_root"
-    chmod +x "$version_root/$executable_name"
-    ln -sfn "$version_root" "$next_link"
-    mv -Tf "$next_link" "$current_link"
+    [[ "$payload_mode" == install || "$payload_mode" == unit-only ]] || fail 'unsupported host payload installation mode'
+    mkdir -p "$log_dir"
+    if [[ "$payload_mode" == install ]]; then
+        rm -rf "$version_root"
+        mkdir -p "$version_root"
+        copy_runtime_payload "$source_root" "$version_root"
+        chmod +x "$version_root/$executable_name"
+        ln -sfn "$version_root" "$next_link"
+        mv -Tf "$next_link" "$current_link"
+    else
+        [[ -x "$version_root/$executable_name" && ! -L "$version_root" ]] || fail 'prepared host payload is missing'
+    fi
 
     case "$service_key" in
         webhost)
@@ -847,7 +862,12 @@ EOF
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
-    chown -R "$service_user:$service_group" "$log_dir" "$unit_dir"
+    if [[ "$payload_mode" == install ]]; then
+        chown -R "$service_user:$service_group" "$log_dir" "$unit_dir"
+    else
+        chown "$service_user:$service_group" "$log_dir" "$unit_dir" "$unit_path"
+        chown -h "$service_user:$service_group" "$wants_path"
+    fi
     chmod 0644 "$unit_path"
     printf '%s\n' "$unit_name"
 }
@@ -2478,7 +2498,7 @@ PY
 
 confirm_first_admin_setup() {
     local url="$1"
-    local token_file='/var/lib/kautuka/setup-token'
+    local token_file="${2:-/var/lib/kautuka/setup-token}"
     local setup_token=''
     local acknowledgment=''
 
@@ -2500,7 +2520,7 @@ confirm_first_admin_setup() {
         echo 'The administrator account controls Kautuka configuration and access. The token is deleted after successful use.'
         echo 'Copy the token now. Do not share it or include it in support logs.'
         printf 'Setup token: %s\n' "$setup_token"
-        echo 'Recovery command if you close this terminal: sudo cat /var/lib/kautuka/setup-token'
+        printf 'Recovery command if you close this terminal: sudo cat %s\n' "$token_file"
     } > /dev/tty
 
     while true; do
@@ -2519,6 +2539,309 @@ confirm_first_admin_setup() {
 resolve_web_ui_port() {
     printf '20229\n'
 }
+
+write_container_deployment_configuration() {
+    python3 - "$1" "$2" <<'PY'
+import grp, ipaddress, json, os, pathlib, sys, tempfile, urllib.parse
+payload, group = pathlib.Path(sys.argv[1]), sys.argv[2]
+path = pathlib.Path('/etc/kautuka/manager.json')
+if path.exists() or path.is_symlink():
+    info = path.lstat()
+    if path.is_symlink() or info.st_uid != 0 or info.st_mode & 0o022:
+        raise SystemExit('installed deployment settings must be root-owned and non-writable')
+    settings = json.loads(path.read_text())
+    if settings.get('CoreServices', {}).get('Enabled') is not True or settings.get('ContainerEgress', {}).get('Enabled') is not True:
+        raise SystemExit('installed deployment settings must explicitly enable core and egress')
+    upstreams = settings.get('ContainerEgress', {}).get('DnsUpstreams')
+    if not isinstance(upstreams, list) or not upstreams:
+        raise SystemExit('installed deployment settings require explicit IPv4 DNS upstreams')
+    for value in upstreams:
+        address = ipaddress.ip_address(value)
+        if address.version != 4 or address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise SystemExit('installed deployment DNS upstreams must be non-loopback IPv4 addresses')
+    otlp = settings.get('Kautuka', {}).get('Telemetry', {}).get('Otlp', {})
+    if any(otlp.get(key) != '' for key in ('LogsEndpoint', 'MetricsEndpoint', 'TracesEndpoint')):
+        raise SystemExit('container deployment must explicitly disable host OTLP endpoints until managed telemetry is configured')
+    os.chown(path, 0, grp.getgrnam(group).gr_gid)
+    os.chmod(path, 0o640)
+else:
+    upstreams = []
+    for name in ('/etc/resolv.conf', '/run/systemd/resolve/resolv.conf'):
+        resolver = pathlib.Path(name)
+        if not resolver.is_file(): continue
+        for line in resolver.read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 2 or fields[0] != 'nameserver': continue
+            try: address = ipaddress.ip_address(fields[1])
+            except ValueError: continue
+            if address.version == 4 and not (address.is_loopback or address.is_unspecified or address.is_multicast) and str(address) not in upstreams:
+                upstreams.append(str(address))
+    if not upstreams:
+        raise SystemExit('configure explicit IPv4 DNS upstreams in /etc/kautuka/manager.json before installation')
+    artifacts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com', 'kautuka.store']
+    gateway = ['accounts.google.com', 'oauth2.googleapis.com', 'www.googleapis.com', 'openidconnect.googleapis.com', 'login.microsoftonline.com', 'graph.microsoft.com']
+    production = payload / 'services/gateway/appsettings.Production.json'
+    if production.is_file():
+        host = urllib.parse.urlsplit(json.loads(production.read_text()).get('Kautuka', {}).get('ConnectorAuth', {}).get('Host', '')).hostname
+        if host: gateway.append(host)
+    channel = ['slack.com', 'api.telegram.org', 'wss-primary.slack.com', 'wss-backup.slack.com', 'files.slack.com']
+    grants = [dict(ScopeType='core', UserId='system', AgentId=component, Role='core', ComponentId=component, Destination=host, Port=443)
+              for component, hosts in (('gateway', gateway), ('channelhost', channel)) for host in hosts]
+    settings = {'CoreServices': {'Enabled': True, 'WorkspaceRoot': '/var/lib/kautuka/workspaces', 'ConfigurationRoot': '/var/lib/kautuka/manager/core-config'},
+                'ContainerEgress': {'Enabled': True, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
+                'Kautuka': {'Telemetry': {'Otlp': {'LogsEndpoint': '', 'MetricsEndpoint': '', 'TracesEndpoint': ''}}}}
+    descriptor, temporary = tempfile.mkstemp(prefix='.manager-', dir=path.parent)
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            json.dump(settings, stream, indent=2); stream.write('\n'); stream.flush()
+            os.fchown(stream.fileno(), 0, grp.getgrnam(group).gr_gid)
+            os.fchmod(stream.fileno(), 0o640); os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory)
+        finally: os.close(directory)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+PY
+}
+
+install_fresh_container_appliance() (
+    local payload="$1" service path
+    [[ "$service_user" == kautuka && "$service_group" == kautuka \
+        && "$internal_state_root" == /var/lib/kautuka && "$visible_root" == /var/lib/kautuka \
+        && "$install_root" == /opt/kautuka/manager ]] || fail 'container appliances require the fixed dedicated runtime layout'
+    for service in manager updateservice gateway channelhost credentialshost webhost; do
+        path="/opt/kautuka/$service/current"
+        [[ ! -e "$path" && ! -L "$path" ]] || fail 'existing deployments require the update/recovery handoff; fresh installation will not replace them'
+        [[ ! -e "/opt/kautuka/$service/versions/$version" && ! -L "/opt/kautuka/$service/versions/$version" ]] \
+            || fail 'prepared version already exists; preserve it for installer recovery'
+        for path in "/etc/systemd/system/kautuka-$service.service" "$internal_state_root/.config/systemd/user/kautuka-$service.service"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || fail 'existing service units require the lifecycle/recovery handoff'
+        done
+    done
+    for path in /etc/kautuka/service-scope.json "$internal_state_root/.config/systemd/user/kautuka.target" \
+        "$internal_state_root/.config/systemd/user/default.target.wants/kautuka.target"; do
+        [[ ! -e "$path" && ! -L "$path" ]] || fail 'existing deployment contract or target requires the lifecycle/recovery handoff'
+    done
+    python3 - "$internal_state_root" <<'PY'
+import pathlib, stat, sys
+root = pathlib.Path(sys.argv[1])
+if root.is_symlink(): raise SystemExit('state root cannot be a symlink')
+for parent in (pathlib.Path('/var/lib'), root, pathlib.Path('/opt'), pathlib.Path('/opt/kautuka')):
+    if parent.exists() or parent.is_symlink():
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise SystemExit('fresh container installation requires root-owned, non-writable ancestry')
+for service in ('manager', 'updateservice', 'gateway', 'channelhost', 'credentialshost', 'webhost'):
+    for parent in (pathlib.Path('/opt/kautuka') / service, pathlib.Path('/opt/kautuka') / service / 'versions'):
+        if parent.exists() or parent.is_symlink():
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise SystemExit('installed version ancestry must be root-owned and non-writable')
+for name in ('manager', 'updateService', 'gateway', 'gateway-data', 'credentialsHost', 'channelHost', 'agents', 'security'):
+    path = root / name
+    if path.is_symlink() or (path.exists() and (not path.is_dir() or any(entry.is_file() or entry.is_symlink() for entry in path.rglob('*')))):
+        raise SystemExit('existing application state requires migration/recovery; no files were changed')
+for name in ('kautuka.db', 'kautuka-usage.db', 'channel-outbox.db', 'channel-conversations.db', 'kautuka.key', 'gateway-auth.key'):
+    if (root / name).exists() or (root / name).is_symlink():
+        raise SystemExit('existing Gateway state requires migration/recovery; no files were changed')
+PY
+    local activation_started=false config_existed=false
+    [[ ! -e /etc/kautuka/manager.json ]] || config_existed=true
+    # Until activation, all artifacts below were absent at preflight. Ordinary
+    # setup failure removes only this attempt's prepared version roots, links,
+    # keys and unit files; immutable caches and the root repair tools may remain.
+    cleanup_fresh_container_preparation() {
+        local status=$?
+        if [[ "$status" != 0 && "$activation_started" == false ]]; then
+            python3 - "$version" "$internal_state_root" "$config_existed" <<'PY'
+import pathlib, re, shutil, sys
+version, state, config_existed = sys.argv[1:]
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]*', version) or '..' in version: raise SystemExit('unsafe cleanup version')
+state = pathlib.Path(state)
+if str(state) != '/var/lib/kautuka' or state.is_symlink(): raise SystemExit('unsafe cleanup state root')
+versions = [pathlib.Path('/opt/kautuka') / service / 'versions' / version
+            for service in ('manager', 'updateservice', 'gateway', 'channelhost', 'credentialshost', 'webhost')]
+for path in versions:
+    if path.exists() and (path.is_symlink() or path.resolve() != path): raise SystemExit('unsafe prepared version path; retained')
+for path in versions:
+    for name in ('current', 'current.next'):
+        link = path.parent.parent / name
+        if link.is_symlink() and link.readlink() == path: link.unlink()
+    if path.exists(): shutil.rmtree(path)
+units = state / '.config/systemd/user'
+if units.exists() and units.resolve() != units: raise SystemExit('unsafe prepared unit path; retained')
+for relative in ('kautuka-manager.service', 'kautuka-updateservice.service', 'kautuka.target',
+                 'kautuka.target.wants/kautuka-updateservice.service', 'default.target.wants/kautuka.target'):
+    path = units / relative
+    if path.is_file() or path.is_symlink(): path.unlink()
+channel = state / 'security/channel'
+if channel.exists():
+    if channel.is_symlink() or channel.resolve() != channel: raise SystemExit('unsafe prepared security path; retained')
+    shutil.rmtree(channel)
+policy = state / 'updateService/update-runtime-policy.json'
+if policy.is_file(): policy.unlink()
+contract = pathlib.Path('/etc/kautuka/service-scope.json')
+if contract.is_file(): contract.unlink()
+if config_existed == 'false':
+    config = pathlib.Path('/etc/kautuka/manager.json')
+    if config.is_file(): config.unlink()
+PY
+        fi
+        exit "$status"
+    }
+    trap cleanup_fresh_container_preparation EXIT
+    ensure_selinux_runtime_exec_policy
+    # Creating the account must not give it ownership of the cache's parent.
+    [[ -d "$internal_state_root" ]] || install -d -o root -g root -m 0755 "$internal_state_root"
+    ensure_service_account "$service_user" "$service_group" "$internal_state_root"
+    local service_home xdg_runtime_dir unit_dir content="$payload/bin"
+    service_home="$(get_service_user_home "$service_user")"
+    [[ "$service_home" == "$internal_state_root" ]] || fail 'container runtime account has a different home directory'
+    xdg_runtime_dir="$(resolve_user_runtime_dir "$service_user")"
+    unit_dir="$service_home/.config/systemd/user"
+    install -d -o root -g "$service_group" -m 0750 "$internal_state_root"
+    for path in manager updateService credentialsHost channelHost gateway-data workspaces agents logs .cache .aspnet; do
+        [[ ! -L "$internal_state_root/$path" ]] || fail 'container state directory cannot be a symlink'
+        install -d -o "$service_user" -g "$service_group" -m 0700 "$internal_state_root/$path"
+    done
+    ensure_dotnet_host_libraries
+    ensure_rootless_podman_ready "$service_user" "$service_group" "$service_home" "$xdg_runtime_dir" containers
+    local existing_containers
+    existing_containers="$(run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman ps --all --format '{{.ID}}')" \
+        || fail 'could not inspect the dedicated runtime before fresh installation'
+    [[ -z "$existing_containers" ]] || fail 'existing containers require the lifecycle/recovery handoff; no containers were changed'
+    install_apply_release_helper "$payload"
+    install -d -o "$service_user" -g "$service_group" -m 0700 "$internal_state_root/manager/core-config" "$unit_dir" "$unit_dir/kautuka.target.wants"
+    install -d -o root -g root -m 0755 /var/lib/kautuka-recovery
+    /usr/bin/python3 /usr/local/lib/kautuka/runtime-images.py "$payload"
+    prepare_install_images "$content" "$service_user" "$service_home" "$xdg_runtime_dir"
+    install_socket_runtime_dirs "$service_user" containers "$service_group"
+    install -d -o root -g "$service_group" -m 0750 /etc/kautuka
+    write_container_deployment_configuration "$payload" "$service_group"
+    # Preserve the six payload roots expected by the updater; four have no host unit.
+    for service in manager updateservice gateway channelhost credentialshost webhost; do
+        local source="$payload/services/$service" destination="/opt/kautuka/$service/versions/$version"
+        [[ "$service" != manager ]] || source="$content"
+        [[ ! -e "$destination" && ! -L "$destination" ]] || fail "version directory already exists: $destination"
+        mkdir -p "$destination"
+        copy_runtime_payload "$source" "$destination"
+        chmod +x "$destination/kautuka-$service"
+        chown -R root:root "/opt/kautuka/$service"
+        chmod -R go-w "/opt/kautuka/$service"
+    done
+    [[ "$(run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" "/opt/kautuka/manager/versions/$version/kautuka-manager" --update-core-capabilities)" == core-service-update-v1 ]] \
+        || fail 'Manager lacks container update lifecycle support'
+    local channel_root="$internal_state_root/security/channel"
+    install -d -o root -g root -m 0711 "$internal_state_root/security" "$channel_root"
+    Kautuka__Mode=prod "/opt/kautuka/channelhost/versions/$version/kautuka-channelhost" --provision-channel-security \
+        "$channel_root/gateway-private" "$channel_root/gateway-trust" \
+        "$channel_root/channel-private" "$channel_root/channel-trust" "$channel_root/offline-authority"
+    for path in gateway-private gateway-trust channel-private channel-trust; do
+        chown -R "$service_user:$service_group" "$channel_root/$path"
+        chmod 0700 "$channel_root/$path"
+        find "$channel_root/$path" -type f -exec chmod 0600 {} +
+    done
+    chown -R root:root "$channel_root/offline-authority"
+    chmod 0700 "$channel_root/offline-authority"
+    find "$channel_root/offline-authority" -type f -exec chmod 0600 {} +
+    write_initial_update_runtime_policy "$internal_state_root" "$release_channel" "$service_user" "$service_group"
+    if [[ -n "$manifest_url" ]]; then
+        local source_manifest="$manifest_url"
+        [[ "$github_release_candidate" != true ]] || source_manifest=''
+        write_update_source_document "$source_manifest" "$service_user" "$service_group"
+    fi
+    write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
+    write_manager_user_unit "$unit_dir/kautuka-manager.service" /opt/kautuka/manager "$visible_root"
+    install_host_service_user updateservice UpdateService kautuka-updateservice "$payload/services/updateservice" "$version" \
+        "$service_user" "$service_group" "$visible_root" "$unit_dir" unit-only >/dev/null
+    chown "$service_user:$service_group" "$unit_dir" "$unit_dir/kautuka.target.wants" "$unit_dir/kautuka-manager.service" "$unit_dir/kautuka-updateservice.service"
+    # All configuration, payload and material validation precedes publication.
+    for service in manager updateservice gateway channelhost credentialshost webhost; do
+        ln -s "/opt/kautuka/$service/versions/$version" "/opt/kautuka/$service/current"
+    done
+    cat > /etc/kautuka/service-scope.json <<'EOF'
+{"schemaVersion":2,"username":"kautuka","target":"kautuka.target","applicationServices":"containers","userUnits":["kautuka-manager.service","kautuka-updateservice.service"],"systemUnits":[]}
+EOF
+    chown root:root /etc/kautuka/service-scope.json
+    chmod 0644 /etc/kautuka/service-scope.json
+    sync -f /etc/kautuka/service-scope.json
+    # Enabling the target permits application processes to create durable state;
+    # errors after this point preserve that state and can retry via systemd.
+    activation_started=true
+    install_user_target_unit "$unit_dir" 'kautuka-manager.service kautuka-updateservice.service'
+    systemctl daemon-reload
+    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" daemon-reload
+    if [[ "$skip_enable" == true ]]; then
+        rm -f -- "$unit_dir/default.target.wants/kautuka.target"
+        echo "Installed container appliance $version; host units are written but not started."
+        return
+    fi
+    systemctl enable kautuka-update-recovery.service
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" systemctl --user enable kautuka.target kautuka-manager.service kautuka-updateservice.service
+    # Manager publishes its CA first. Its core worker waits for UpdateService's publication.
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" systemctl --user start kautuka-manager.service
+    local attempt
+    for ((attempt=0; attempt<30; attempt++)); do
+        [[ ! -f "$internal_state_root/manager/.ca.cer" || ! -f "$internal_state_root/manager/.manager-updateservice-client.pfx" ]] || break
+        sleep 1
+    done
+    [[ -f "$internal_state_root/manager/.ca.cer" && -f "$internal_state_root/manager/.manager-updateservice-client.pfx" ]] \
+        || fail 'Manager did not publish the UpdateService bootstrap identity'
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" systemctl --user start kautuka-updateservice.service
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" systemctl --user start kautuka.target
+    local web_address web_port web_scheme web_probe observed
+    web_probe="$(python3 - /etc/kautuka/manager.json <<'PY'
+import ipaddress, json, sys
+settings = json.load(open(sys.argv[1])).get('CoreServices', {})
+address = ipaddress.IPv4Address(settings.get('WebHostBindAddress', '127.0.0.1'))
+port = settings.get('WebHostPort', 20229)
+if type(port) is not int or not 1 <= port <= 65535: raise SystemExit('invalid WebHost port')
+print('\t'.join((str(address) if not address.is_unspecified else '127.0.0.1', str(port),
+                 'https' if settings.get('WebHostCertificateDirectory') else 'http')))
+PY
+)" || fail 'could not resolve the installed WebHost publication'
+    IFS=$'\t' read -r web_address web_port web_scheme <<< "$web_probe"
+    for ((attempt=0; attempt<120; attempt++)); do
+        observed="$(run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman inspect \
+            kautuka-credentialshost kautuka-channelhost kautuka-gateway kautuka-webhost 2>/dev/null)" || observed='[]'
+        # This local probe checks availability only; the core supervisor owns
+        # certificate/spec validation. No credentials are sent by this request.
+        if curl --noproxy '*' --insecure --fail --silent --max-time 2 "$web_scheme://$web_address:$web_port/" >/dev/null \
+            && curl --noproxy '*' --fail --silent --max-time 2 --unix-socket /run/kautuka/gateway/gateway.sock http://localhost/api/runtime/system-health 2>/dev/null \
+                | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("lifecycle") or {}).get("coreReady") is True and (d.get("workspace") or {}).get("status") == "healthy" else 1)' 2>/dev/null \
+            && printf '%s' "$observed" | python3 -c '
+import json, sys
+images = {entry["id"].removeprefix("core-"): entry["localImageId"].removeprefix("sha256:")
+          for entry in json.load(open(sys.argv[1]))["images"] if entry["id"].startswith("core-")}
+actual = json.load(sys.stdin)
+if len(actual) != 4: raise SystemExit(1)
+seen = set()
+for container in actual:
+    labels = container.get("Config", {}).get("Labels", {})
+    service = labels.get("kautuka.core-service")
+    if service not in images or service in seen or labels.get("kautuka.managed") != "manager" \
+            or container.get("State", {}).get("Status") != "running" \
+            or container.get("Image", "").removeprefix("sha256:") != images[service]: raise SystemExit(1)
+    seen.add(service)
+' "$content/runtime-images.json" 2>/dev/null; then
+            echo "Installed container appliance $version. Web UI: $web_scheme://$web_address:$web_port"
+            local setup_needed
+            setup_needed="$(curl --noproxy '*' --fail --silent --max-time 2 \
+                --unix-socket /run/kautuka/gateway/gateway.sock http://localhost/api/auth/setup/status \
+                | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d.get("needsSetup"); print("true" if v is True else "false" if v is False else "unknown")')" \
+                || fail 'could not read first-run setup status; application state was preserved'
+            [[ "$setup_needed" != unknown ]] || fail 'first-run setup status is incomplete'
+            if [[ "$setup_needed" == true ]]; then
+                confirm_first_admin_setup "$web_scheme://$web_address:$web_port" "$internal_state_root/gateway-data/setup-token" \
+                    || fail 'first-run administrator setup token was not acknowledged'
+            fi
+            return
+        fi
+        sleep 2
+    done
+    fail 'container appliance did not become ready; preserve its state, inspect the two host-service journals, then retry activation with systemctl --user restart kautuka.target as the runtime owner'
+)
 
 main() {
     local artifact=""
@@ -2822,6 +3145,24 @@ PY
     exec 9>/run/kautuka-apply.lock
     flock -n 9 || fail 'another Kautuka update or installation is in progress; retry after it finishes'
     assert_no_unresolved_update
+    extract_release "$artifact" "$tmp_root/extracted"
+    local container_payload
+    container_payload="$(python3 - "$tmp_root/extracted/bin/runtime-images.json" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    print('false')
+else:
+    images = json.loads(path.read_text()).get('images', [])
+    roles = {'core-credentialshost', 'core-channelhost', 'core-gateway', 'core-webhost',
+             'egress-setup', 'egress-envoy', 'egress-dns', 'image-acquisition'}
+    print('true' if any(isinstance(image, dict) and image.get('id') in roles for image in images) else 'false')
+PY
+)" || fail 'could not select the signed deployment layout'
+    if [[ "$container_payload" == true ]]; then
+        install_fresh_container_appliance "$tmp_root/extracted"
+        return
+    fi
     validate_existing_channel_security_inventory "$internal_state_root"
 
     if [[ -L "$install_root/current" && -x "$install_root/current/kautuka-manager" ]]; then
@@ -2871,7 +3212,6 @@ PY
 
     ensure_rootless_podman_ready "$service_user" "$service_group" "$service_home" "$xdg_runtime_dir"
 
-    extract_release "$artifact" "$tmp_root/extracted"
     install_apply_release_helper "$tmp_root/extracted"
 
     if [[ -n "$manifest_url" ]]; then

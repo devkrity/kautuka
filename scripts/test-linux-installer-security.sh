@@ -67,7 +67,14 @@ if PATH="$mock_bin:$PATH" EXPECTED_ATTESTED_INSTALLER_SHA256="$attested_installe
 fi
 [[ ! -e "$tmp/installer-executed" ]] || { echo 'error: substituted installer executed before provenance rejection.' >&2; exit 1; }
 
-printf 'known release archive bytes\n' > "$tmp/kautuka-linux-amd64.tar.gz"
+python3 - "$tmp/kautuka-linux-amd64.tar.gz" <<'PY'
+import io, sys, tarfile
+content = b'{"schemaVersion":1,"images":[]}'
+with tarfile.open(sys.argv[1], 'w:gz') as archive:
+    entry = tarfile.TarInfo('bin/runtime-images.json')
+    entry.size = len(content)
+    archive.addfile(entry, io.BytesIO(content))
+PY
 artifact_hash="$(sha256sum "$tmp/kautuka-linux-amd64.tar.gz" | awk '{print $1}')"
 artifact_size="$(stat -c '%s' "$tmp/kautuka-linux-amd64.tar.gz")"
 tag='v0.1.20-preview.1'
@@ -224,7 +231,7 @@ set -euo pipefail
 printf 'groupadd %s\n' "$*" >> "$MAIN_MUTATION_LOG"
 exit 97
 MOCK_GROUPADD
-for command_name in systemctl loginctl install useradd usermod chown chmod mkdir mv ln; do
+for command_name in systemctl loginctl install useradd usermod chown chmod mv ln; do
   cat > "$main_mock_bin/$command_name" <<'MOCK_MUTATION'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -232,6 +239,27 @@ printf '%s %s\n' "${0##*/}" "$*" >> "$MAIN_MUTATION_LOG"
 exit 98
 MOCK_MUTATION
 done
+real_mkdir_path="$(command -v mkdir)"
+cat > "$main_mock_bin/mkdir" <<'MOCK_MKDIR'
+#!/usr/bin/env bash
+set -euo pipefail
+for path in "$@"; do
+  case "$path" in
+    -p|--parents) ;;
+    "$MAIN_ALLOWED_TMP_ROOT"/*) ;;
+    *) printf 'mkdir %s\n' "$*" >> "$MAIN_MUTATION_LOG"; exit 98 ;;
+  esac
+done
+exec "$REAL_MKDIR_PATH" "$@"
+MOCK_MKDIR
+real_tar_path="$(command -v tar)"
+cat > "$main_mock_bin/tar" <<'MOCK_TAR'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 4 && "$1" == -xzf && "$3" == -C ]]
+[[ "$2" == "$MAIN_ALLOWED_TMP_ROOT"/* && "$4" == "$MAIN_ALLOWED_TMP_ROOT"/* ]]
+exec "$REAL_TAR_PATH" "$@"
+MOCK_TAR
 real_rm_path="$(command -v rm)"
 cat > "$main_mock_bin/rm" <<'MOCK_RM'
 #!/usr/bin/env bash
@@ -245,7 +273,7 @@ for path in "$@"; do
 done
 exec "$REAL_RM_PATH" "$@"
 MOCK_RM
-for command_name in tar runuser podman sudo; do
+for command_name in runuser podman sudo; do
   cat > "$main_mock_bin/$command_name" <<'MOCK_FORBIDDEN'
 #!/usr/bin/env bash
 printf 'unexpected %s invocation\n' "${0##*/}" >&2
@@ -281,6 +309,8 @@ run_generated_main_with_installer() {
     "MAIN_ALLOWED_TMP_ROOT=$tmp/main-installer-tmp" \
     "TMPDIR=$tmp/main-installer-tmp" \
     "REAL_RM_PATH=$real_rm_path" \
+    "REAL_MKDIR_PATH=$real_mkdir_path" \
+    "REAL_TAR_PATH=$real_tar_path" \
     bash -c 'set -euo pipefail; source "$GENERATED_INSTALLER"; require_root() { return 0; }; main "$@"' \
     kautuka-installer-test-run \
     --service-user "kautuka-installer-test-$$" \
