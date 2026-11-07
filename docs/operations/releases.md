@@ -102,7 +102,9 @@ files under root-owned, non-writable ancestry. The helper flushes new files and
 directory entries and retains source-release archives. It rejects a legacy
 service-writable data parent; installer conversion must establish this layout
 before enabling container mode. Archive validation does not replace release
-signature verification or runtime config-ID/platform checks.
+signature verification or runtime config-ID/platform checks. Staging-space checks
+include the additional immutable image cache on the data filesystem and
+format-3 Gateway/agent databases when sizing recovery snapshots.
 
 The Fedora update transaction regression covers archive retention across target
 staging, invalid cohort recovery and interrupted-update source recovery. It uses

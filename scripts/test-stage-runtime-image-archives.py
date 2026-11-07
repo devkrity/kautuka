@@ -115,4 +115,35 @@ class ServiceScopeTests(unittest.TestCase):
                     self.assertEqual(result.returncode == 0, expected is not None, result.stderr)
                     if expected: self.assertEqual(expected, result.stdout.strip())
 
+@unittest.skipUnless(os.name == 'posix', 'Linux staging filesystem checks')
+class SpaceBudgetTests(unittest.TestCase):
+    def test_container_cache_and_moved_databases_are_budgeted_on_their_filesystems(self):
+        import io
+        import tarfile
+        space = HELPER.split('check_staging_space() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        recovery = Path(__file__).with_name('kautuka-update-recovery.py')
+        with tempfile.TemporaryDirectory(prefix='kautuka-space-') as directory:
+            root = Path(directory)
+            data = root / 'data'; (data / 'gateway-data/agents/test').mkdir(parents=True)
+            for name, size in [('gateway-data/kautuka.db', 10 * 1024 * 1024), ('gateway-data/agents/test/agent.db', 5 * 1024 * 1024)]:
+                with (data / name).open('wb') as stream: stream.truncate(size)
+            archive = root / 'payload.tar.gz'
+            with tarfile.open(archive, 'w:gz') as stream:
+                member = tarfile.TarInfo('./oci-images/test.oci'); member.size = 4096
+                stream.addfile(member, io.BytesIO(b'x' * 4096))
+            # Distinct fixture devices exercise the same filesystem aggregation
+            # used on installations with separate data or backup mounts.
+            prefix = """import os,sys,types
+original_stat=os.stat
+budget={sys.argv[2]: (3, int(sys.argv[7])), sys.argv[3]: (4, int(sys.argv[8])), '/var/tmp': (1, 2**30), '/opt/kautuka': (2, 2**30)}
+os.stat=lambda path,*a,**k: types.SimpleNamespace(st_dev=budget[path][0]) if path in budget else original_stat(path,*a,**k)
+os.statvfs=lambda path: types.SimpleNamespace(f_bavail=budget[path][1], f_frsize=1)
+sys.argv=sys.argv[:7]
+"""
+            for cache_free, backup_free, succeeds in [(2**30, 2**30, True), (256*1024*1024+1024, 2**30, False), (2**30, 270*1024*1024, False)]:
+                with self.subTest(cache_free=cache_free, backup_free=backup_free):
+                    result = subprocess.run(['python3', '-c', prefix + space, str(archive), str(data), str(root/'backups'), str(recovery), '', 'containers', str(cache_free), str(backup_free)], capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                    if not succeeds: self.assertIn('insufficient free space', result.stderr)
+
 if __name__ == '__main__': unittest.main()

@@ -1000,25 +1000,32 @@ cleanup_staging() {
 check_staging_space() {
     local test_free_bytes=''
     if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
-    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" <<'PY'
+    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "$application_services" <<'PY'
 import glob, importlib.util, os, sys, tarfile
-archive, data_root, backup_root, recovery_path, test_free_bytes = sys.argv[1:]
+archive, data_root, backup_root, recovery_path, test_free_bytes, application_services = sys.argv[1:]
 with tarfile.open(archive, 'r:gz') as bundle:
-    payload = sum(item.size for item in bundle if item.isfile())
+    files = [item for item in bundle if item.isfile()]
+    payload = sum(item.size for item in files)
+    image_payload = sum(item.size for item in files if item.name.removeprefix('./').startswith('oci-images/'))
 if payload <= 0:
     raise SystemExit('error: signed update archive contains no files')
 spec = importlib.util.spec_from_file_location('kautuka_recovery', recovery_path)
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
 database_paths = [os.path.join(data_root, name) for name in recovery.DATABASES]
-database_paths.extend(glob.glob(os.path.join(data_root, 'agents', '*', 'agent.db')))
+database_paths.extend(os.path.join(data_root, 'gateway-data', name) for name in recovery.GATEWAY_DATABASES)
+for agent_root in ('agents', 'gateway-data/agents'):
+    database_paths.extend(glob.glob(os.path.join(data_root, agent_root, '*', 'agent.db')))
 databases = []
 for path in database_paths:
     for suffix in ('', '-wal', '-shm'):
         try: databases.append(os.stat(path + suffix, follow_symlinks=False).st_size)
         except FileNotFoundError: pass
 needs = {}
-for path, amount in (('/var/tmp', payload), ('/opt/kautuka', payload), (backup_root, 2 * sum(databases))):
+allocations = [('/var/tmp', payload), ('/opt/kautuka', payload), (backup_root, 2 * sum(databases))]
+if application_services == 'containers':
+    allocations.append((data_root, image_payload))
+for path, amount in allocations:
     stat = os.stat(path)
     entry = needs.setdefault(stat.st_dev, [path, 256 * 1024 * 1024])
     entry[1] += amount
