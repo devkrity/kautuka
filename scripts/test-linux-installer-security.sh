@@ -313,7 +313,7 @@ run_generated_main_with_installer() {
     "REAL_TAR_PATH=$real_tar_path" \
     bash -c 'set -euo pipefail; source "$GENERATED_INSTALLER"; require_root() { return 0; }; main "$@"' \
     kautuka-installer-test-run \
-    --service-user "kautuka-installer-test-$$" \
+    --service-user "${MAIN_SERVICE_USER:-kautuka-installer-test-$$}" \
     "$@")
   "${runner_command[@]}"
 }
@@ -550,4 +550,44 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
   exit 1
 fi
 
-echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'
+# The authenticated container layout must also cross verification before its
+# first persistent operation. This fixture stops at that operation; it does not
+# claim to contain runnable application images.
+python3 - "$tmp/container-appliance.tar.gz" <<'PY'
+import hashlib, io, json, sys, tarfile
+roles = ('kautuka-base','openobserve','git-pkgs-proxy','core-credentialshost','core-channelhost',
+         'core-gateway','core-webhost','egress-setup','egress-envoy','egress-dns','image-acquisition')
+entries = []
+with tarfile.open(sys.argv[1], 'w:gz') as archive:
+    for role in roles:
+        data = ('fixture archive ' + role).encode()
+        digest = hashlib.sha256(data).hexdigest(); name = f'{role}-{digest}.oci'
+        member = tarfile.TarInfo('oci-images/' + name); member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+        entries.append(dict(id=role,image='ghcr.io/devkrity/fixture@sha256:'+'a'*64,archive=name,
+                            archiveSha256=digest,localImageId='sha256:'+'b'*64,platform='linux/amd64'))
+    data = json.dumps(dict(schemaVersion=1,images=entries)).encode()
+    member = tarfile.TarInfo('bin/runtime-images.json'); member.size = len(data)
+    archive.addfile(member, io.BytesIO(data))
+PY
+artifact_hash="$(sha256sum "$tmp/container-appliance.tar.gz" | awk '{print $1}')"
+artifact_size="$(stat -c '%s' "$tmp/container-appliance.tar.gz")"
+write_manifest "$tmp/container-manifest.json"
+openssl dgst -sha256 -sign "$tmp/private.pem" -out "$tmp/container-signature.der" "$tmp/container-manifest.json"
+base64 -w0 "$tmp/container-signature.der" > "$tmp/container-signature.sig"
+printf 'invalid signature\n' > "$tmp/container-invalid.sig"
+MAIN_SERVICE_USER=kautuka expect_main_rejected_before_account_mutation \
+  invalid-container-signature "$tmp/container-manifest.json" "$tmp/container-invalid.sig" "$tmp/container-appliance.tar.gz"
+: > "$tmp/main-mutations.log"
+set +e
+MAIN_SERVICE_USER=kautuka run_generated_main "$tmp/container-manifest.json" "$tmp/container-signature.sig" "$tmp/container-appliance.tar.gz" >"$tmp/container-valid.log" 2>&1
+container_status=$?
+set -e
+[[ "$container_status" == 98 && "$(wc -l < "$tmp/main-mutations.log")" == 1 \
+    && "$(head -n 1 "$tmp/main-mutations.log")" == 'install -d -o root -g root -m 0755 /var/lib/kautuka' ]] || {
+  echo 'error: signed container payload did not reach its authenticated first persistent boundary.' >&2
+  cat "$tmp/container-valid.log" >&2
+  exit 1
+}
+
+echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches; authenticated host/container layouts reached their mocked first persistent boundaries.'
