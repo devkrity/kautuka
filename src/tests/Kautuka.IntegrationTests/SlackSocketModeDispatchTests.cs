@@ -86,7 +86,7 @@ public sealed class SlackSocketModeDispatchTests
     [Fact]
     public async Task SocketFailureBackoffResetsAfterConnectionAndCleanServerDisconnect()
     {
-        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(2500));
+        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(10));
         List<int> backoffAttempts = [];
         AdvancingTimeProvider clock = new();
         using DispatchFixture fixture = new(paired: true,
@@ -96,7 +96,8 @@ public sealed class SlackSocketModeDispatchTests
             retryDelay: attempt =>
             {
                 backoffAttempts.Add(attempt);
-                return TimeSpan.FromSeconds(1);
+                if (backoffAttempts.Count == 2) cancellation.Cancel();
+                return TimeSpan.Zero;
             },
             connectionTimeProvider: clock);
         fixture.Http.ConnectionOpenResponses.Enqueue("{\"ok\":false,\"error\":\"temporarily_unavailable\"}");

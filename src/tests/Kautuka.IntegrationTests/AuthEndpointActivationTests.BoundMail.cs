@@ -84,6 +84,7 @@ public sealed partial class AuthEndpointActivationTests
         fixture.AddMailConnector("kautuka-google-mail");
         string bearer = await fixture.LoginAsBootstrapAdminAsync();
         using HttpResponseMessage started = await PostExternalAsync(fixture, "/api/connectors/kautuka-google-mail/oauth/bound-begin", new { }, applianceOrigin, bearer);
+        Assert.Equal(HttpStatusCode.OK, started.StatusCode);
         string cookie = started.Headers.GetValues("Set-Cookie").Single(value => value.StartsWith("kautuka_bound_mail_", StringComparison.Ordinal)).Split(';')[0];
         using JsonDocument payload = JsonDocument.Parse(await started.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         string state = payload.RootElement.GetProperty("state").GetString()!, tab = payload.RootElement.GetProperty("tabHandle").GetString()!;
