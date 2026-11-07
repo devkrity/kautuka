@@ -304,10 +304,20 @@ else:
     with open(path) as stream:
         document = json.load(stream)
     mode = document.get('applicationServices', 'host')
-    if document.get('schemaVersion') != 1 or mode not in ('host', 'containers'):
+    schema = document.get('schemaVersion')
+    if schema not in (1, 2) or mode not in ('host', 'containers'):
         raise SystemExit('error: unsupported application service layout')
-    if mode == 'containers' and (document.get('username') != 'kautuka' or document.get('scope') != 'user'):
-        raise SystemExit('error: container services require the dedicated kautuka user runtime')
+    if mode == 'containers':
+        expected = {'kautuka-manager.service', 'kautuka-updateservice.service'}
+        valid_scope = document.get('scope') == 'user' if schema == 1 else (
+            document.get('target') == 'kautuka.target'
+            and isinstance(document.get('userUnits'), list)
+            and len(document['userUnits']) == 2
+            and all(isinstance(unit, str) for unit in document['userUnits'])
+            and set(document['userUnits']) == expected
+            and document.get('systemUnits') == [])
+        if document.get('username') != 'kautuka' or not valid_scope:
+            raise SystemExit('error: container services require the dedicated kautuka user runtime')
     print(mode)
 PY
 )"

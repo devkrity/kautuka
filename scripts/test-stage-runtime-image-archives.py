@@ -91,4 +91,28 @@ class OfflineStageTests(unittest.TestCase):
         self.stage(False)
         self.assertFalse((self.state / 'oci-images').exists())
 
+@unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root-owned contract checks')
+class ServiceScopeTests(unittest.TestCase):
+    def test_installer_schema_and_container_layout(self):
+        scope = HELPER.split("application_services=", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        with tempfile.TemporaryDirectory(prefix='kautuka-scope-') as directory:
+            root = Path(directory)
+            path = root / 'service-scope.json'
+            code = scope.replace("'/etc/kautuka/service-scope.json'", repr(str(path))).replace("'/etc/kautuka'", repr(str(root)))
+            cases = [
+                ({'schemaVersion': 2, 'username': 'kautuka'}, 'host'),
+                ({'schemaVersion': 1, 'username': 'kautuka', 'scope': 'user', 'applicationServices': 'containers'}, 'containers'),
+                ({'schemaVersion': 2, 'username': 'kautuka', 'target': 'kautuka.target',
+                  'userUnits': ['kautuka-manager.service', 'kautuka-updateservice.service'], 'systemUnits': [],
+                  'applicationServices': 'containers'}, 'containers'),
+                ({'schemaVersion': 2, 'username': 'kautuka', 'applicationServices': 'containers'}, None),
+                ({'schemaVersion': 99}, None),
+            ]
+            for document, expected in cases:
+                with self.subTest(document=document):
+                    path.write_text(json.dumps(document))
+                    result = subprocess.run(['python3', '-c', code], capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, expected is not None, result.stderr)
+                    if expected: self.assertEqual(expected, result.stdout.strip())
+
 if __name__ == '__main__': unittest.main()
