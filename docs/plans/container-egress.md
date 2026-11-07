@@ -1068,3 +1068,12 @@ released the original lock inode; no lock file or fence was deleted. Applying
 the same narrow helper fix allowed the existing source-runtime resume command
 to complete and WebHost health returned 200. Automatic journal completion and
 the intended source-to-target/recovery measurements remain separate gates.
+
+The first full push validation passed 546 frontend tests and the production UI
+build, but failed two auth integration tests (2593 backend passed, five skipped).
+The authentication fixture had allowed the asynchronous built-in bundle importer
+to replace its seeded connectors and publish unrelated desired state when real
+local bundle assets were present. The fixture now excludes only that importer;
+production registration and dedicated bootstrap tests are unchanged. The three
+affected management/mail checks pass with the real bundle assets still present.
+The complete hook run must pass before the checkpoint is reported as pushed.

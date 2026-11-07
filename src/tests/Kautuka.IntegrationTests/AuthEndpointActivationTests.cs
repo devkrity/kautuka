@@ -901,6 +901,15 @@ public sealed partial class AuthEndpointActivationTests
             builder.WebHost.UseTestServer();
             GatewayAppBootstrap.ConfigureServices(builder);
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+            // This fixture seeds its own connectors. Repository bundle imports
+            // run asynchronously and can replace them or publish unrelated
+            // desired state while an authentication request is in flight.
+            foreach (ServiceDescriptor descriptor in builder.Services.Where(descriptor =>
+                descriptor.ServiceType == typeof(IHostedService)
+                && descriptor.ImplementationType == typeof(Kautuka.Gateway.Domain.Connectors.BuiltInMcpPackageBootstrapService)).ToArray())
+            {
+                builder.Services.Remove(descriptor);
+            }
             builder.Services.AddSingleton(new CredentialResolverService(
                 new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())));
             var channelHost = new FakeChannelHostGrpcService();
