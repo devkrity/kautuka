@@ -56,6 +56,8 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   set -euo pipefail
   source "$1/scripts/kautuka-install-linux.sh.in"
   test_root="$2"
+  guard_uninstall_transaction() { :; }
+  uninstall_container_layout() { printf "false\n"; }
 
   best_effort_remove_tree() {
     case "$1" in
@@ -90,6 +92,10 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   }
 
   mkdir -p "$internal" "$visible/workspaces/agents/demo/.kautuka"
+  mkdir -p "$internal/gateway-data/nested"
+  printf key > "$internal/gateway-data/gateway-auth.key"
+  printf registry > "$internal/gateway-data/kautuka.db"
+  printf content > "$internal/gateway-data/nested/application-state"
   printf state > "$internal/kautuka.db"
   printf workspace > "$visible/workspaces/agents/demo/notes.txt"
   output="$(uninstall_release "$install" "$internal" "$visible" test.service kautuka-test false)"
@@ -97,6 +103,8 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
     echo "Default uninstall did not preserve Kautuka data." >&2
     exit 1
   }
+  [[ "$(cat "$internal/gateway-data/gateway-auth.key")" == key && "$(cat "$internal/gateway-data/nested/application-state")" == content ]]
+  [[ "$(cat "$internal/gateway-data/kautuka.db")" == registry && ! -e "$internal/gateway-data/gateway-data" ]]
   [[ ! -e "$visible/workspaces/agents/demo/.kautuka" ]] || {
     echo "Default uninstall left generated workspace state behind." >&2
     exit 1

@@ -1129,3 +1129,27 @@ accepted block followed by denial, owner filtering, restart deduplication and
 validated desired-state replay freshness. Its disposable runtime cleanup passed.
 The audit/UI checkpoint `9aa5382` passed full push checks: 2,612 backend tests
 passed, six skipped, zero failed; 549 frontend tests passed. It remains unmerged.
+
+Container uninstall now holds the existing apply lease, refuses unresolved
+updates and inconsistent deployment contracts before teardown, and stops the
+two host controllers before retiring containers. It validates the dedicated
+owner's entire cohort, confirms Envoy stopped first, and removes exact owned
+container and pod IDs. Foreign objects or failed retirement retain storage,
+accounts and recovery tools. No image acquisition or bootstrap occurs. The
+exclusive database-writer lease covers subsequent data preservation/deletion.
+Ordinary uninstall preserves the complete `gateway-data` directory, including
+keys and nested state, alongside the existing databases and workspaces.
+
+Six focused uninstall tests and the existing uninstall shell suite pass on
+Fedora. A real disposable rootless Podman 5.8.9/Netavark cohort also passes:
+foreign-container refusal makes no container mutations, then the exact owned
+Envoy/DNS/workload/infra/pod cohort is retired. Its account, subordinate-ID
+entries and matching processes are absent after cleanup. The installed appliance
+was not uninstalled by this proof.
+
+The retained installed recovery operation subsequently completed through the
+normal recovery checks after a controlled diagnostic replacement of Manager
+with the current Native AOT binary. The journal reached `completed` and the
+maintenance fence cleared. The snapshot/journal were not manually edited. This
+is evidence for the freshness fix, not the final signed-release update proof;
+the original binary remains in the disposable diagnostic backup.

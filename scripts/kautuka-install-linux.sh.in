@@ -1654,6 +1654,17 @@ preserve_uninstall_state() {
     capture_preserved_uninstall_state "$internal_state_root" "$preserve_root" 'internal'
     capture_preserved_uninstall_state "$visible_root" "$preserve_root" 'visible'
 
+    # Gateway keys and application state live alongside its databases. Preserve
+    # the directory as a unit, not just files matching the database suffixes.
+    if [[ -d "$internal_state_root/gateway-data" ]]; then
+        mkdir -p "$preserve_root/internal/gateway-data"
+        cp -a "$internal_state_root/gateway-data/." "$preserve_root/internal/gateway-data/"
+    fi
+    if [[ "$visible_root" != "$internal_state_root" && -d "$visible_root/gateway-data" ]]; then
+        mkdir -p "$preserve_root/visible/gateway-data"
+        cp -a "$visible_root/gateway-data/." "$preserve_root/visible/gateway-data/"
+    fi
+
     if [[ -d "$visible_root/workspaces" ]]; then
         mkdir -p "$preserve_root/visible"
         cp -a "$visible_root/workspaces" "$preserve_root/visible/workspaces"
@@ -2116,7 +2127,107 @@ remove_service_account_if_safe() {
     fi
 }
 
-uninstall_release() {
+guard_uninstall_transaction() {
+    exec 9>/run/kautuka-apply.lock
+    flock -n 9 || fail 'another installation or update is active; uninstall stopped'
+    assert_no_unresolved_update
+}
+
+uninstall_container_layout() {
+    python3 - <<'PY'
+import json, pathlib
+def read(path):
+    file = pathlib.Path(path)
+    if file.is_symlink(): raise SystemExit('uninstall configuration must not be a symlink')
+    try:
+        with file.open() as stream: value = json.load(stream)
+    except FileNotFoundError: return None
+    if not isinstance(value, dict): raise SystemExit('invalid uninstall configuration')
+    return value
+contract = read('/etc/kautuka/service-scope.json')
+settings = read('/etc/kautuka/manager.json')
+inventory = read('/opt/kautuka/manager/current/runtime-images.json')
+value = contract.get('applicationServices') if contract else None
+if value not in (None, 'host', 'containers'):
+    raise SystemExit('unsupported application service layout')
+flags = [(settings or {}).get(section, {}).get('Enabled') for section in ('CoreServices','ContainerEgress')]
+core_images = any(item.get('id', '').startswith('core-') for item in (inventory or {}).get('images', []))
+if value == 'containers':
+    if settings is None or flags != [True, True]:
+        raise SystemExit('container deployment settings are missing or inconsistent; uninstall stopped')
+elif any(flag is True for flag in flags) or core_images:
+    raise SystemExit('container installation lacks its deployment contract; uninstall stopped')
+print('true' if value == 'containers' else 'false')
+PY
+}
+
+retire_uninstall_containers() {
+    local service_user="$1" service_home="$2" runtime="$3"
+    # Stop controllers, but retain user@/DBus/storage until native retirement is
+    # confirmed. Child commands must not inherit either installer lease.
+    run_as_service_user "$service_user" "$service_home" "$runtime" systemctl --user stop kautuka-updateservice.service kautuka-manager.service 8>&- 9>&- \
+        || fail 'could not stop container lifecycle controllers; uninstall stopped'
+    python3 - "$service_user" "$service_home" "$runtime" 8>&- 9>&- <<'PY' || fail 'owned container retirement failed; storage and accounts retained'
+import json, os, re, subprocess, sys
+user, home, runtime = sys.argv[1:]
+os.chdir(home)
+command = ['runuser','-u',user,'--','env',f'HOME={home}',f'XDG_RUNTIME_DIR={runtime}',
+           f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus','podman']
+def run(*args, allowed=(0,)):
+    result = subprocess.run(command + list(args), capture_output=True, text=True, timeout=60)
+    if result.returncode not in allowed:
+        raise RuntimeError(f'Podman {args[0]} failed ({result.returncode}); uninstall stopped')
+    return result
+def identity(value):
+    if not isinstance(value,str) or not re.fullmatch('[0-9a-f]{64}',value):
+        raise RuntimeError('invalid immutable container identity')
+    return value
+def owned(labels):
+    return isinstance(labels,dict) and labels.get('kautuka.managed') == 'manager'
+pod_ids = run('pod','ps','--no-trunc','--format','{{.ID}}').stdout.split()
+pods = []
+infra = set()
+for pid in pod_ids:
+    pod = json.loads(run('pod','inspect',identity(pid)).stdout)[0]
+    if pod.get('Id') != pid or not owned(pod.get('Labels')) or pod.get('Labels',{}).get('kautuka.egress') != 'true':
+        raise RuntimeError('foreign pod in runtime account; uninstall stopped')
+    infra.add(identity(pod['InfraContainerID']))
+    pods.append(pid)
+ids = run('ps','--all','--no-trunc','--format','{{.ID}}').stdout.split()
+containers = []
+for cid in ids:
+    item = json.loads(run('inspect',identity(cid)).stdout)[0]
+    if item.get('Id') != cid or (cid not in infra and not owned(item.get('Config',{}).get('Labels'))):
+        raise RuntimeError('foreign container in runtime account; uninstall stopped')
+    containers.append(item)
+# Validate the entire cohort before touching any container. Never use names for
+# removal, global prune/reset, or a forced pod removal containing unknown IDs.
+proxies = [item for item in containers if item.get('Name','').lstrip('/') == 'kautuka-egress-envoy']
+for item in proxies:
+    cid = item['Id']
+    run('stop','--time','15',cid)
+    observed = json.loads(run('inspect',cid).stdout)[0]
+    if observed['Id'] != cid or observed['State']['Running']:
+        raise RuntimeError('proxy shutdown could not be confirmed')
+for item in containers:
+    cid = item['Id']
+    if cid in infra: continue
+    run('rm','--force',cid,allowed=(0,1))
+    if run('container','exists',cid,allowed=(0,1)).returncode != 1:
+        raise RuntimeError('owned container remains after retirement')
+for pid in pods:
+    pod = json.loads(run('pod','inspect',pid).stdout)[0]
+    if any(item['Id'] not in infra for item in pod.get('Containers',[])):
+        raise RuntimeError('pod acquired an unexpected member; uninstall stopped')
+    run('pod','rm','--force',pid)
+    if run('pod','exists',pid,allowed=(0,1)).returncode != 1:
+        raise RuntimeError('owned pod remains after retirement')
+if run('ps','--all','--no-trunc','--format','{{.ID}}').stdout.strip():
+    raise RuntimeError('containers remain; runtime storage must not be deleted')
+PY
+}
+
+uninstall_release() (
     local install_root="$1"
     local internal_state_root="$2"
     local visible_root="$3"
@@ -2125,6 +2236,16 @@ uninstall_release() {
     local delete_data="$6"
     local service_group="$service_user"
     local preserved_state_root=''
+    guard_uninstall_transaction
+    local container_layout='false'
+    container_layout="$(uninstall_container_layout)" || fail 'could not determine installed service layout'
+    if [[ "$container_layout" == true ]]; then
+        id "$service_user" >/dev/null 2>&1 || fail 'runtime account is missing; cannot confirm container retirement'
+        retire_uninstall_containers "$service_user" "$(get_service_user_home "$service_user")" "$(resolve_user_runtime_dir "$service_user")"
+        [[ -f /run/kautuka-db-writer.lock && ! -L /run/kautuka-db-writer.lock ]] || fail 'database writer lease is missing'
+        exec 8</run/kautuka-db-writer.lock
+        flock -x -w 30 8 || fail 'database writers remain; uninstall stopped'
+    fi
 
     local service_units=(
         "$unit_name"
@@ -2135,6 +2256,7 @@ uninstall_release() {
         'kautuka-webhost.service'
         'kautuka-activate.service'
         'kautuka-activate.path'
+        'kautuka-update-recovery.service'
         'kautuka.target'
     )
 
@@ -2176,10 +2298,14 @@ uninstall_release() {
 
     local privileged_helper_paths=(
         '/usr/local/lib/kautuka/restart-system-units'
+        '/usr/local/lib/kautuka/apply-release'
+        '/usr/local/lib/kautuka/update-recovery.py'
+        '/usr/local/lib/kautuka/runtime-images.py'
     )
 
     local sudoers_paths=(
         '/etc/sudoers.d/kautuka-updateservice'
+        '/etc/sudoers.d/kautuka-apply-release'
     )
 
     local unit=''
@@ -2263,6 +2389,7 @@ uninstall_release() {
         if [[ -n "$service_uid" ]]; then
             best_effort_systemctl stop "user@${service_uid}.service"
             best_effort_remove_file "/etc/systemd/system/user@${service_uid}.service.d/20-kautuka-restart.conf"
+            best_effort_remove_file "/etc/systemd/system/user@${service_uid}.service.d/10-kautuka-recovery.conf"
             best_effort_remove_dir_if_empty "/etc/systemd/system/user@${service_uid}.service.d"
         fi
     fi
@@ -2298,7 +2425,7 @@ uninstall_release() {
             echo "Preserved Kautuka databases and agent workspace files under: $internal_state_root and $visible_root"
         fi
     fi
-}
+)
 
 wait_for_web_ui() {
     local service_user="${1:-kautuka}"
