@@ -1116,7 +1116,25 @@ install_socket_runtime_dirs() {
 }
 
 install_apply_release_helper() {
-    local extracted_root="$1"
+    local extracted_root="$1" offline_support='false'
+    if [[ -f "$extracted_root/bin/runtime-images.json" ]]; then
+        offline_support="$(python3 - "$extracted_root/bin/runtime-images.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream: inventory = json.load(stream)
+images = inventory.get('images')
+if inventory.get('schemaVersion') != 1 or not isinstance(images, list):
+    raise SystemExit('invalid runtime image inventory')
+roles = {'core-credentialshost', 'core-channelhost', 'core-gateway', 'core-webhost',
+         'egress-setup', 'egress-envoy', 'egress-dns', 'image-acquisition'}
+print('true' if any(isinstance(image, dict) and image.get('id') in roles for image in images) else 'false')
+PY
+)" || fail 'could not validate offline image support requirements'
+    fi
+    if [[ "$offline_support" == true ]]; then
+        [[ -f "$extracted_root/bin/kautuka-runtime-images" && ! -L "$extracted_root/bin/kautuka-runtime-images" \
+            && "$(sed -n '2p' "$extracted_root/bin/kautuka-runtime-images")" == '# Kautuka-Offline-Images-Protocol: 1' ]] \
+            || fail 'signed appliance package lacks compatible offline image staging support'
+    fi
     mkdir -p /usr/local/lib/kautuka /etc/sudoers.d
     if [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-apply-release" /usr/local/lib/kautuka/apply-release
@@ -1124,6 +1142,13 @@ install_apply_release_helper() {
     fi
     if [[ -f "$extracted_root/bin/kautuka-update-recovery" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-update-recovery" /usr/local/lib/kautuka/update-recovery.py
+    fi
+    if [[ -f "$extracted_root/bin/kautuka-runtime-images" && ! -L "$extracted_root/bin/kautuka-runtime-images" ]]; then
+        install -o root -g root -m 0755 "$extracted_root/bin/kautuka-runtime-images" /usr/local/lib/kautuka/runtime-images.py
+    fi
+    if [[ "$offline_support" == true ]]; then
+        [[ "$(/usr/bin/python3 /usr/local/lib/kautuka/runtime-images.py --capabilities)" == offline-image-stage-v1 ]] \
+            || fail 'installed offline image staging support is incompatible'
     fi
     [[ -x /usr/local/lib/kautuka/apply-release && -x /usr/local/lib/kautuka/update-recovery.py ]] \
         || fail 'this signed Linux package lacks safe update recovery support; refusing to install an update-capable appliance'

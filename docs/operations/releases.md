@@ -110,6 +110,16 @@ roles. The separate producer proof covers actual new core/bootstrap images.
 This image preparation step does not itself establish the permanent recovery
 cache or enable the container service layout.
 
+The installer and apply helper share one fixed root-owned archive staging utility,
+`/usr/local/lib/kautuka/runtime-images.py` (`offline-image-stage-v1`). It accepts a
+verified payload directory and keeps the cache destination fixed. Container
+packages must include protocol-1 support; the installer checks this before
+replacing helper files and verifies the installed capability. The apply helper
+rejects a missing/incompatible utility and never replaces it during target
+staging, preserving source recovery support. The same filesystem tests exercise
+the utility bytes, and the signed transaction fixture exercises its installed
+copy, including missing-utility refusal before activation.
+
 For container deployments, the root apply helper stages the eleven offline image
 roles before installing the target Manager. Archive names include their signed
 SHA-256 and existing files must match that digest. The shared cache is

@@ -25,6 +25,7 @@ touch /etc/kautuka/.allow-recovery-test
 chmod 600 /etc/kautuka/.allow-recovery-test
 install -m 0755 "$script_dir/kautuka-apply-release.sh" /usr/local/lib/kautuka/apply-release
 install -m 0755 "$script_dir/kautuka-update-recovery.py" /usr/local/lib/kautuka/update-recovery.py
+install -m 0755 "$script_dir/kautuka-runtime-images.py" /usr/local/lib/kautuka/runtime-images.py
 openssl ecparam -name prime256v1 -genkey -noout -out "$temp_dir/private.pem"
 openssl ec -in "$temp_dir/private.pem" -pubout -out /etc/kautuka/manifest-public-key.pem 2>/dev/null
 chmod 644 /etc/kautuka/manifest-public-key.pem
@@ -97,6 +98,7 @@ make_signed_release() {
     if [[ -f "$temp_dir/core-manager" ]]; then cp "$temp_dir/core-manager" "$payload/bin/kautuka-manager"; fi
     if [[ "$protocol" == current ]]; then
         cp "$script_dir/kautuka-apply-release.sh" "$payload/bin/kautuka-apply-release"
+        cp "$script_dir/kautuka-runtime-images.py" "$payload/bin/kautuka-runtime-images"
     else
         printf '#!/usr/bin/env bash\n# Kautuka-Apply-Protocol: 4\nprintf "%%s\\n" safe-state-recovery-v2\n' > "$payload/bin/kautuka-apply-release"
         chmod 755 "$payload/bin/kautuka-apply-release"
@@ -449,6 +451,14 @@ chown 992:992 /run/user/992
 printf '%s\n' '{"schemaVersion":2,"username":"kautuka","target":"kautuka.target","userUnits":["kautuka-manager.service","kautuka-updateservice.service"],"systemUnits":[],"applicationServices":"containers"}' > /etc/kautuka/service-scope.json
 run_helper --capabilities | grep -Fxq container-core-update-v1
 make_signed_release 1.0.6
+mv /usr/local/lib/kautuka/runtime-images.py /usr/local/lib/kautuka/runtime-images.saved
+set +e
+run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.6 >"$temp_dir/missing-offline-utility.log" 2>&1
+missing_utility_status=$?
+set -e
+mv /usr/local/lib/kautuka/runtime-images.saved /usr/local/lib/kautuka/runtime-images.py
+[[ $missing_utility_status -ne 0 && ! -e /var/lib/kautuka-recovery/maintenance.json ]]
+[[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.3 ]]
 touch /etc/kautuka/.core-deny-stop
 set +e
 run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz --version 1.0.6 >"$temp_dir/core-stop-failure.log" 2>&1

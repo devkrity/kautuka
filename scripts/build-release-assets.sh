@@ -965,6 +965,7 @@ fi
 
 cp "$source_root/scripts/kautuka-apply-release.sh" "$stage_dir/bin/kautuka-apply-release"
 cp "$source_root/scripts/kautuka-update-recovery.py" "$stage_dir/bin/kautuka-update-recovery"
+cp "$source_root/scripts/kautuka-runtime-images.py" "$stage_dir/bin/kautuka-runtime-images"
 chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/bin/kautuka-apply-release" \
   "$stage_dir/bin/kautuka-update-recovery" \
@@ -1538,6 +1539,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   elif [[ -f "$manager_extract_dir/bin/kautuka-update-recovery" ]]; then
     sudo install -m 0755 "$manager_extract_dir/bin/kautuka-update-recovery" "$rootfs_dir/usr/local/lib/kautuka/update-recovery.py"
   fi
+  sudo install -o root -g root -m 0755 "$manager_extract_dir/bin/kautuka-runtime-images" "$rootfs_dir/usr/local/lib/kautuka/runtime-images.py"
   sudo install -m 0644 "$source_root/scripts/kautuka-update-recovery.service" "$rootfs_dir/etc/systemd/system/kautuka-update-recovery.service"
   sudo ln -sfn ../kautuka-update-recovery.service "$rootfs_dir/etc/systemd/system/multi-user.target.wants/kautuka-update-recovery.service"
   recovery_user_uid="$(rootfs_uid kautuka)"

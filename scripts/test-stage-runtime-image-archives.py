@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the apply helper's actual offline staging code in private directories."""
+"""Exercise the shared offline staging utility in private directories."""
 import hashlib
 import json
 import os
@@ -9,8 +9,7 @@ import tempfile
 import unittest
 
 HELPER = Path(__file__).with_name('kautuka-apply-release.sh').read_text()
-START = HELPER.index("    python3 - \"$1/bin/runtime-images.json\" \"$1/oci-images\" <<'PY'\n")
-CODE = HELPER[START:].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+CODE = Path(__file__).with_name('kautuka-runtime-images.py').read_text()
 ROLES = ('kautuka-base', 'openobserve', 'git-pkgs-proxy', 'core-credentialshost',
          'core-channelhost', 'core-gateway', 'core-webhost', 'egress-setup',
          'egress-envoy', 'egress-dns', 'image-acquisition')
@@ -22,7 +21,10 @@ class OfflineStageTests(unittest.TestCase):
         self.root = Path(self.scratch.name)
         self.source = self.root / 'source'; self.source.mkdir()
         self.state = self.root / 'state'; self.state.mkdir(mode=0o755)
-        self.inventory = self.root / 'inventory.json'
+        (self.root / 'bin').mkdir()
+        self.inventory = self.root / 'bin/runtime-images.json'
+        self.source.rename(self.root / 'oci-images')
+        self.source = self.root / 'oci-images'
         self.entries = []
         for role in ROLES:
             data = ('archive ' + role).encode()
@@ -42,7 +44,7 @@ class OfflineStageTests(unittest.TestCase):
         self.scratch.cleanup()
 
     def stage(self, success=True):
-        result = subprocess.run(['python3', '-c', self.code, str(self.inventory), str(self.source)], capture_output=True, text=True)
+        result = subprocess.run(['python3', '-c', self.code, str(self.root)], capture_output=True, text=True)
         self.assertEqual(result.returncode == 0, success, result.stderr)
         return result
 

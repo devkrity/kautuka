@@ -71,4 +71,19 @@ if run_prepare "$test_root/missing.log"; then
     echo 'Incomplete offline inventory was accepted or fell back to registry pulls' >&2; exit 1
 fi
 [[ ! -s "$test_root/missing.log" ]]
+for utility_case in missing incompatible; do
+    if [[ "$utility_case" == incompatible ]]; then
+        printf '#!/usr/bin/python3\n# incompatible utility\n' > "$test_root/payload/bin/kautuka-runtime-images"
+    fi
+    : > "$test_root/helper-install.log"
+    if MOCK_LOG="$test_root/helper-install.log" KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+        source "$1/scripts/kautuka-install-linux.sh.in"
+        mkdir() { printf "mutation\n" >> "$MOCK_LOG"; return 99; }
+        install() { printf "mutation\n" >> "$MOCK_LOG"; return 99; }
+        install_apply_release_helper "$2"
+    ' _ "$repo_root" "$test_root/payload"; then
+        echo 'Missing/incompatible package utility was accepted' >&2; exit 1
+    fi
+    [[ ! -s "$test_root/helper-install.log" ]]
+done
 echo 'PASS offline installer cold/cache preparation, exact image verification, tamper and incomplete-inventory denial'
