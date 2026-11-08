@@ -11,6 +11,33 @@ namespace Kautuka.IntegrationTests;
 public sealed class ProviderNetworkAccessCheckTests
 {
     [Fact]
+    public void LegacyLanAllowRequiresAdministratorReapproval()
+    {
+        NetworkAccessPolicyResponse policy = Active();
+        var rule = new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.168.1.20", Port = 11434, Allowed = true };
+        policy.Rules.Add(rule);
+        Assert.Equal(new GatewayProviderNetworkBlock("192.168.1.20", 11434), ProviderNetworkAccessCheck.Evaluate(policy, rule.Destination, rule.Port)?.NetworkBlock);
+        rule.AllowPrivateNetwork = true;
+        Assert.Null(ProviderNetworkAccessCheck.Evaluate(policy, rule.Destination, rule.Port));
+    }
+
+    [Theory]
+    [InlineData("169.254.169.254")]
+    [InlineData("100.100.100.200")]
+    [InlineData("168.63.129.16")]
+    [InlineData("metadata.google.internal")]
+    public void ProtectedProviderEndpointNeverOffersAllow(string address)
+    {
+        NetworkAccessPolicyResponse policy = Active();
+        policy.Rules.Add(new NetworkAccessRuleMessage { Identity = Gateway(), Destination = address, Port = 80, Allowed = true, AllowPrivateNetwork = true });
+        GatewayProviderTestResult? result = ProviderNetworkAccessCheck.Evaluate(policy, address, 80);
+        Assert.NotNull(result);
+        Assert.False(result.Success);
+        Assert.Null(result.NetworkBlock);
+        Assert.Contains("cannot be allowed", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ProviderResponseSerializesStructuredBlockWithAotContext()
     {
         var response = new GatewayProviderTestResponse(false, "blocked", new GatewayProviderNetworkBlock("192.0.2.4", 11434));
@@ -62,7 +89,7 @@ public sealed class ProviderNetworkAccessCheckTests
         NetworkAccessIdentityMessage other = Gateway(); other.ComponentId = "channelhost";
         policy.Rules.Add(new NetworkAccessRuleMessage { Identity = other, Destination = "api.openai.com", Port = 443, Allowed = true });
         Assert.NotNull(ProviderNetworkAccessCheck.Evaluate(policy, "api.openai.com", 443));
-        policy.Rules.Add(new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.0.2.3", Port = 443, Allowed = true });
+        policy.Rules.Add(new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.0.2.3", Port = 443, Allowed = true, AllowPrivateNetwork = true });
         Assert.Null(ProviderNetworkAccessCheck.Evaluate(policy, "api.openai.com", 443));
     }
 
@@ -81,7 +108,7 @@ public sealed class ProviderNetworkAccessCheckTests
     {
         NetworkAccessPolicyResponse first = Active(); first.NextOffset = 50;
         NetworkAccessPolicyResponse last = Active();
-        last.Rules.Add(new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.0.2.4", Port = 11434, Allowed = true });
+        last.Rules.Add(new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.0.2.4", Port = 11434, Allowed = true, AllowPrivateNetwork = true });
         int reads = 0;
         GatewayProviderTestResult? result = await ProviderNetworkAccessCheck.CheckAsync((request, _) =>
         {

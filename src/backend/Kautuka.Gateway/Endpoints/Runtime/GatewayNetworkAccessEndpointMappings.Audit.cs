@@ -29,8 +29,9 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                     Before = before ?? 0,
                     Limit = limit ?? 50,
                 }, ct).ConfigureAwait(false);
+                Func<NetworkAccessIdentityMessage, NetworkAccessIdentityDto> describe = CreateIdentityDescriber(user, context.RequestServices);
                 var response = new NetworkAuditPageDto([.. page.Events.Select(item => new NetworkAuditEventDto(item.Sequence, item.Id,
-                    item.StartedAtUtc, item.ObservedAtUtc, item.Identity is null ? null : Identity(item.Identity),
+                    item.StartedAtUtc, item.ObservedAtUtc, item.Identity is null ? null : describe(item.Identity),
                     string.IsNullOrEmpty(item.ContainerId) ? null : item.ContainerId, item.SourceAddress, item.Destination, item.Port,
                     item.Outcome, item.Connected, item.Closed, item.BytesSent, item.BytesReceived, item.DurationMilliseconds))],
                     page.NextBefore, page.CoverageGaps, page.UnattributedConnections, string.IsNullOrEmpty(page.LastError) ? null : page.LastError);

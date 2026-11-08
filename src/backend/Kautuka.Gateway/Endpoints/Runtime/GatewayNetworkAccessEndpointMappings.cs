@@ -6,8 +6,9 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Kautuka.Gateway.Endpoints.Runtime;
 
-internal sealed record NetworkAccessIdentityDto(string ScopeType, string UserId, string AgentId, string Role, string ComponentId);
-internal sealed record NetworkAccessRuleDto(string Id, NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, string? UpdatedAtUtc);
+internal sealed record NetworkAccessIdentityDto(string ScopeType, string UserId, string AgentId, string Role, string ComponentId,
+    string? DisplayName = null, string? AgentName = null, string? UserName = null);
+internal sealed record NetworkAccessRuleDto(string Id, NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, string? UpdatedAtUtc, bool AllowPrivateNetwork = false);
 internal sealed record NetworkAccessRequestDto(string Id, NetworkAccessIdentityDto Identity, string Destination, int Port,
     string CreatedAtUtc, string LastSeenAtUtc, long Attempts, string Status);
 internal sealed record NetworkAccessViewDto(bool Enabled, long Revision, long ActiveRevision, string? ActiveVersion,
@@ -34,7 +35,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                 SummaryOnly = summary ?? false,
                 ExpectedRevision = revision ?? 0,
                 EnforceRevision = revision.HasValue,
-            }, ct)).ConfigureAwait(false);
+            }, ct), CreateIdentityDescriber(user, context.RequestServices)).ConfigureAwait(false);
         });
         app.MapPut("/api/network-access/rules", async (NetworkAccessRuleChangeDto request, HttpContext context,
             IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager, CancellationToken ct) =>
@@ -62,7 +63,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                     Port = request.Port,
                     Allowed = request.Allowed,
                 },
-            }, ct)).ConfigureAwait(false);
+            }, ct), CreateIdentityDescriber(user, context.RequestServices)).ConfigureAwait(false);
         });
         app.MapPost("/api/network-access/requests/{requestId}/decision", async (string requestId, NetworkAccessDecisionDto request,
             HttpContext context, IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager, CancellationToken ct) =>
@@ -74,7 +75,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                 RequestId = requestId,
                 Allowed = request.Allowed,
                 ExpectedRevision = request.ExpectedRevision,
-            }, ct)).ConfigureAwait(false);
+            }, ct), CreateIdentityDescriber(user, context.RequestServices)).ConfigureAwait(false);
         });
         return app;
     }
@@ -82,9 +83,9 @@ internal static partial class GatewayNetworkAccessEndpointMappings
     private static NetworkAccessActorMessage Actor(GatewayUser user)
         => new() { UserId = user.Id, IsAdmin = string.Equals(user.Role, "admin", StringComparison.OrdinalIgnoreCase) };
 
-    private static async Task<IResult> NetworkResultAsync(Func<Task<NetworkAccessPolicyResponse>> call)
+    private static async Task<IResult> NetworkResultAsync(Func<Task<NetworkAccessPolicyResponse>> call, Func<NetworkAccessIdentityMessage, NetworkAccessIdentityDto> describe)
     {
-        try { return Results.Json(View(await call().ConfigureAwait(false)), KautukaJsonContext.Default.NetworkAccessViewDto); }
+        try { return Results.Json(View(await call().ConfigureAwait(false), describe), KautukaJsonContext.Default.NetworkAccessViewDto); }
         catch (RpcException ex)
         {
             int status = ex.StatusCode switch
@@ -103,16 +104,16 @@ internal static partial class GatewayNetworkAccessEndpointMappings
     private static NetworkAccessIdentityDto Identity(NetworkAccessIdentityMessage value)
         => new(value.ScopeType, value.UserId, value.AgentId, value.Role, value.ComponentId);
 
-    private static NetworkAccessRuleDto Rule(NetworkAccessRuleMessage value)
-        => new(value.Id, Identity(value.Identity), value.Destination, value.Port, value.Allowed,
-            string.IsNullOrEmpty(value.UpdatedAtUtc) ? null : value.UpdatedAtUtc);
+    private static NetworkAccessRuleDto Rule(NetworkAccessRuleMessage value, Func<NetworkAccessIdentityMessage, NetworkAccessIdentityDto> describe)
+        => new(value.Id, describe(value.Identity), value.Destination, value.Port, value.Allowed,
+            string.IsNullOrEmpty(value.UpdatedAtUtc) ? null : value.UpdatedAtUtc, value.AllowPrivateNetwork);
 
-    private static NetworkAccessViewDto View(NetworkAccessPolicyResponse value)
+    private static NetworkAccessViewDto View(NetworkAccessPolicyResponse value, Func<NetworkAccessIdentityMessage, NetworkAccessIdentityDto> describe)
         => new(value.Enabled, value.Revision, value.ActiveRevision, string.IsNullOrEmpty(value.ActiveVersion) ? null : value.ActiveVersion,
             value.ActivationState, string.IsNullOrEmpty(value.LastError) ? null : value.LastError,
-            [.. value.Rules.Select(Rule)],
-            [.. value.Requests.Select(request => new NetworkAccessRequestDto(request.Id, Identity(request.Identity), request.Destination,
+            [.. value.Rules.Select(rule => Rule(rule, describe))],
+            [.. value.Requests.Select(request => new NetworkAccessRequestDto(request.Id, describe(request.Identity), request.Destination,
                 request.Port, request.CreatedAtUtc, request.LastSeenAtUtc, request.Attempts, request.Status))],
-            [.. value.Sources.Select(Identity)], [.. value.Defaults.Select(Rule)], value.NextOffset,
+            [.. value.Sources.Select(describe)], [.. value.Defaults.Select(rule => Rule(rule, describe))], value.NextOffset,
             value.RuleCount, value.RequestCount, value.SourceCount, value.DefaultCount, value.PendingRequestCount, value.RequestCapacityReached);
 }

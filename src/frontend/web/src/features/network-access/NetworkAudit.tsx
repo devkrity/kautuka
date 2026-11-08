@@ -1,6 +1,7 @@
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { identityLabel, useNetworkAudit } from './networkAccess';
+import { NetworkSource } from './NetworkSource';
 
 const outcomeLabel = (outcome: string) =>
   outcome === 'denied'
@@ -11,7 +12,7 @@ const outcomeLabel = (outcome: string) =>
         ? 'Connection ended'
         : 'Diagnostic';
 
-export function NetworkAudit() {
+export function NetworkAudit({ search = '' }: { search?: string }) {
   const query = useNetworkAudit();
   const latest = query.data?.pages[0];
   const rows = new Map<string, NonNullable<typeof latest>['events'][number]>();
@@ -48,25 +49,33 @@ export function NetworkAudit() {
       {latest && rows.size === 0 && (
         <p className="text-sm text-muted-foreground">No connection records yet.</p>
       )}
-      {[...rows.values()].map((event) => (
-        <article key={event.id} className="rounded-xl border border-border p-3 space-y-1">
-          <p className="font-medium break-all">
-            {outcomeLabel(event.outcome)} · {event.destination}
-            {event.port > 0 ? `:${event.port}` : ''}
-          </p>
-          <p className="text-sm text-muted-foreground break-all">
-            {event.identity ? identityLabel(event.identity) : 'Unattributed source'}
-          </p>
-          <p className="text-sm text-muted-foreground">
-            {new Date(event.observedAtUtc).toLocaleString()} ·{' '}
-            {event.bytesReceived.toLocaleString()} bytes from component ·{' '}
-            {event.bytesSent.toLocaleString()} bytes to component
-            {event.durationMilliseconds > 0
-              ? ` · ${event.durationMilliseconds.toLocaleString()} ms`
-              : ''}
-          </p>
-        </article>
-      ))}
+      {[...rows.values()]
+        .filter((event) =>
+          `${event.destination} ${event.port} ${event.identity ? identityLabel(event.identity) : ''} ${outcomeLabel(event.outcome)}`
+            .toLowerCase()
+            .includes(search.toLowerCase())
+        )
+        .map((event) => (
+          <article key={event.id} className="rounded-xl border border-border p-3 space-y-1">
+            <p className="font-medium break-all">
+              {outcomeLabel(event.outcome)} · {event.destination}
+              {event.port > 0 ? `:${event.port}` : ''}
+            </p>
+            {event.identity ? (
+              <NetworkSource identity={event.identity} />
+            ) : (
+              <p className="text-sm text-muted-foreground">Unattributed source</p>
+            )}
+            <p className="text-sm text-muted-foreground">
+              {new Date(event.observedAtUtc).toLocaleString()} ·{' '}
+              {event.bytesReceived.toLocaleString()} bytes from component ·{' '}
+              {event.bytesSent.toLocaleString()} bytes to component
+              {event.durationMilliseconds > 0
+                ? ` · ${event.durationMilliseconds.toLocaleString()} ms`
+                : ''}
+            </p>
+          </article>
+        ))}
       {query.hasNextPage && (
         <Button
           variant="outline"

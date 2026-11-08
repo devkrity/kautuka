@@ -310,7 +310,8 @@ public sealed partial class ContainerEgressRuntime(
         if (options.MaxPrivateNetworks < 2) throw new InvalidOperationException("Egress needs capacity for core and a workload scope.");
         networks.Clear();
         if (options.DnsUpstreams.Count == 0 || options.DnsUpstreams.Any(static value =>
-            !IPAddress.TryParse(value, out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(ip)))
+            !IPAddress.TryParse(value, out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(ip)
+            || NetworkDestinationPolicy.IsMetadata(value) || value == NetworkDestinationPolicy.PrivateSourceAddress))
         {
             throw new InvalidOperationException("Configure explicit non-loopback IPv4 DNS upstreams for the appliance resolver.");
         }
@@ -422,6 +423,7 @@ public sealed partial class ContainerEgressRuntime(
     private async Task EnsureServiceAsync(string name, ResolvedRuntimeImage resolved, bool isDns, CancellationToken cancellationToken, bool requireRunning = false)
     {
         string image = resolved.LocalImageId;
+        string serviceUser = isDns ? "65534:65534" : "65532:65532";
         if (await ExistsAsync(["container", "exists", name], cancellationToken).ConfigureAwait(false))
         {
             using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", name], cancellationToken).ConfigureAwait(false)).StdOut);
@@ -432,6 +434,7 @@ public sealed partial class ContainerEgressRuntime(
             string[] expectedArguments = isDns ? ["-conf", "/egress/Corefile"] : ["-c", "/egress/bootstrap.json", "--concurrency", "1"];
             JsonElement host = container.GetProperty("HostConfig");
             JsonElement config = container.GetProperty("Config");
+            bool legacyDnsUser = isDns && config.GetProperty("User").GetString() == "65532:65532";
             JsonElement binds = host.GetProperty("Binds");
             bool artifactMount = !isDns && (options.ArtifactHosts.Count > 0 || TelemetryEnabled);
             string[] expectedBinds = artifactMount ? [configurationRoot + ":/egress:ro", artifactSocketRoot + ":/host-artifacts:rw"] : [configurationRoot + ":/egress:ro"];
@@ -451,7 +454,7 @@ public sealed partial class ContainerEgressRuntime(
                 || container.GetProperty("Pod").GetString() != podId || container.GetProperty("Image").GetString() != imageId
                 || !JsonElement.DeepEquals(config.GetProperty("Entrypoint"), expectedEntrypoint)
                 || !config.GetProperty("Cmd").EnumerateArray().Select(static argument => argument.GetString()).SequenceEqual(expectedArguments)
-                || config.GetProperty("User").GetString() != "65532:65532" || !host.GetProperty("ReadonlyRootfs").GetBoolean()
+                || (!legacyDnsUser && config.GetProperty("User").GetString() != serviceUser) || !host.GetProperty("ReadonlyRootfs").GetBoolean()
                 || host.GetProperty("Privileged").GetBoolean()
                 || host.GetProperty("RestartPolicy").GetProperty("Name").GetString() is not ("no" or "")
                 || !host.GetProperty("SecurityOpt").EnumerateArray().Any(static item => item.GetString() == "no-new-privileges")
@@ -463,6 +466,14 @@ public sealed partial class ContainerEgressRuntime(
                 || !(artifactMount ? groups.SequenceEqual(new[] { "0" }) : groups.Length == 0))
                 throw new InvalidOperationException("Existing egress service does not match its managed pod, image and security specification.");
             bool running = container.GetProperty("State").GetProperty("Running").GetBoolean();
+            if (legacyDnsUser)
+            {
+                string legacyId = container.GetProperty("Id").GetString()!;
+                if (running) _ = await RunAsync(["stop", "--time", "5", legacyId], cancellationToken).ConfigureAwait(false);
+                _ = await RunAsync(["rm", legacyId], cancellationToken).ConfigureAwait(false);
+                await EnsureServiceAsync(name, resolved, isDns, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             if (!isDns && (!host.TryGetProperty("LogConfig", out JsonElement log)
                 || log.GetProperty("Type").GetString() != "k8s-file"
                 || !string.Equals(log.GetProperty("Size").GetString(), "16MB", StringComparison.OrdinalIgnoreCase)))
@@ -485,7 +496,7 @@ public sealed partial class ContainerEgressRuntime(
 
         var args = new List<string> { "run", "--detach", "--pull=never", "--restart=no", "--name", name, "--pod", podName,
             "--label", "kautuka.managed=manager", "--label", ownerLabel + "=true", "--read-only", "--cap-drop=ALL",
-            "--security-opt=no-new-privileges", "--user", "65532:65532", "--volume", configurationRoot + ":/egress:ro" };
+            "--security-opt=no-new-privileges", "--user", serviceUser, "--volume", configurationRoot + ":/egress:ro" };
         if (isDns) args.Add("--cap-add=NET_BIND_SERVICE");
         else
         {
@@ -576,6 +587,7 @@ public sealed partial class ContainerEgressRuntime(
 
     private async Task ApplyBoundaryAsync(CancellationToken cancellationToken)
     {
+        await EnsurePrivateSourceAsync(cancellationToken).ConfigureAwait(false);
         string subnets = string.Join(", ", networks.Values.Select(static network => network.Subnet));
         string addresses = string.Join(", ", networks.Values.Select(static network => network.Gateway));
         PodmanCommandResult tables = await HelperAsync("/usr/sbin/nft", ["-j", "list", "tables"], cancellationToken, networkAdmin: true).ConfigureAwait(false);
@@ -590,55 +602,10 @@ public sealed partial class ContainerEgressRuntime(
             }
         }
 
-        text.AppendLine("""
-            table ip kautuka_egress {
-             chain capture_tcp { type nat hook prerouting priority dstnat; policy accept;
-            """);
-        if (networks.Count > 0)
-        {
-            text.Append(CultureInfo.InvariantCulture, $"\n ip saddr {{ {subnets} }} ip daddr {{ {addresses} }} tcp dport 53 return\n");
-            text.Append(CultureInfo.InvariantCulture, $" ip saddr {{ {subnets} }} meta l4proto tcp redirect to :15001\n");
-        }
-
-        text.AppendLine("""
-             }
-             chain forward { type filter hook forward priority filter; policy drop; }
-             chain input { type filter hook input priority filter; policy drop;
-              iifname "lo" accept
-              ct state established,related accept
-            """);
-        if (networks.Count > 0)
-        {
-            text.Append(CultureInfo.InvariantCulture, $"\n ip saddr {{ {subnets} }} tcp dport 15001 accept\n");
-            text.Append(CultureInfo.InvariantCulture, $" ip saddr {{ {subnets} }} ip daddr {{ {addresses} }} udp dport 53 accept\n");
-            text.Append(CultureInfo.InvariantCulture, $" ip saddr {{ {subnets} }} ip daddr {{ {addresses} }} tcp dport 53 accept\n");
-        }
-
-        text.AppendLine("""
-             }
-             chain output { type filter hook output priority filter; policy accept;
-              ct state established,related ct direction reply accept
-              ip daddr 127.0.0.1 udp dport 53 accept
-              ip daddr 127.0.0.1 tcp dport 53 accept
-              meta skuid 65533 ip daddr 127.0.0.1 tcp dport 9901 accept
-              ip daddr 127.0.0.0/8 counter reject
-            """);
         Source? package = sources.Values.SingleOrDefault(static source => source.Authorized && source.Identity.Role == "package");
         Source? telemetry = TelemetryEnabled ? sources.Values.SingleOrDefault(static source => source.Authorized && IsTelemetrySource(source.Identity)) : null;
-        if (telemetry is not null)
-            text.Append(CultureInfo.InvariantCulture, $" meta skuid 65532 ip saddr {networks[coreName].Gateway} ip daddr {telemetry.Container.Address} tcp dport 5080 counter accept\n");
-        if (package is not null)
-            text.Append(CultureInfo.InvariantCulture, $" meta skuid 65532 ip saddr {networks[coreName].Gateway} ip daddr {package.Container.Address} tcp dport 20101 counter accept\n");
-        if (networks.Count > 0) text.Append(CultureInfo.InvariantCulture, $" ip daddr {{ {subnets} }} counter reject\n");
-        text.AppendLine("""
-             }
-            }
-            table ip6 kautuka_egress {
-             chain input { type filter hook input priority filter; policy drop; }
-             chain forward { type filter hook forward priority filter; policy drop; }
-             chain output { type filter hook output priority filter; policy drop; }
-            }
-            """);
+        text.Append(NetworkDestinationPolicy.RenderBoundary(subnets, addresses, networks.GetValueOrDefault(coreName)?.Gateway,
+            outsideSourceAddress, options.DnsUpstreams, package?.Container.Address, telemetry?.Container.Address));
         await WriteAsync("boundary.nft", text.ToString() + "\n", cancellationToken).ConfigureAwait(false);
         _ = await HelperAsync("/usr/sbin/nft", ["-f", "/egress/boundary.nft"], cancellationToken, networkAdmin: true).ConfigureAwait(false);
         PodmanCommandResult routes = await HelperAsync("/usr/sbin/ip", ["-j", "-4", "route", "show", "default"], cancellationToken).ConfigureAwait(false);
@@ -797,7 +764,7 @@ public sealed partial class ContainerEgressRuntime(
         IEnumerable<EgressTcpRule> rules = authorized.SelectMany(source => grants
             .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
                 && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
-            .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port)));
+            .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port, grant.AllowPrivateNetwork)));
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
         Source? collector = TelemetryEnabled ? authorized.SingleOrDefault(static source => IsTelemetrySource(source.Identity)) : null;
@@ -807,7 +774,7 @@ public sealed partial class ContainerEgressRuntime(
         string allocationVersion = networkAudit.RecordAllocations(sources.Values.Select(source => new NetworkAccessAllocation(
             source.Container.Address, source.Container.Id, new NetworkAccessIdentity(source.Identity.Scope.Kind, source.Identity.Scope.UserId,
                 source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId))));
-        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled);
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled, NetworkDestinationPolicy.PrivateSourceAddress);
     }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)

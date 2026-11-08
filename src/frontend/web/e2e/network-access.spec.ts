@@ -3,13 +3,38 @@ import { expect, test } from '@playwright/test';
 for (const width of [1280, 390]) {
   test(`network policy and approval controls work at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
-    const identity = { scopeType: 'agent', userId: 'owner', agentId: 'agent-1', role: 'connector', componentId: 'mail' };
+    const identity = {
+      scopeType: 'agent',
+      userId: 'owner',
+      agentId: 'agent-1',
+      role: 'connector',
+      componentId: 'mail',
+      displayName: 'Microsoft mail',
+      agentName: 'Travel planner',
+      userName: 'Amshu',
+    };
     const state = {
-      enabled: true, revision: 7, activeRevision: 7, activeVersion: 'accepted', activationState: 'active', lastError: null,
-      rules: [], defaults: [], sources: [identity], requests: [{
-        id: 'request-1', identity, destination: 'graph.microsoft.com', port: 443, attempts: 3, status: 'pending',
-        createdAtUtc: '2026-11-07T00:00:00Z', lastSeenAtUtc: '2026-11-07T00:01:00Z',
-      }],
+      enabled: true,
+      revision: 7,
+      activeRevision: 7,
+      activeVersion: 'accepted',
+      activationState: 'active',
+      lastError: null,
+      rules: [],
+      defaults: [],
+      sources: [identity],
+      requests: [
+        {
+          id: 'request-1',
+          identity,
+          destination: 'graph.microsoft.com',
+          port: 443,
+          attempts: 3,
+          status: 'pending',
+          createdAtUtc: '2026-11-07T00:00:00Z',
+          lastSeenAtUtc: '2026-11-07T00:01:00Z',
+        },
+      ],
     };
     const decisions: unknown[] = [];
     await page.route('**/api/**', async (route) => {
@@ -17,35 +42,80 @@ for (const width of [1280, 390]) {
       const path = new URL(request.url()).pathname;
       const json = (body: unknown) => route.fulfill({ json: body });
       if (path === '/api/auth/setup/status') return json({ needsSetup: false });
-      if (path === '/api/auth/refresh') return json({ accessToken: 'synthetic-browser-token', tokenType: 'Bearer', expiresInSeconds: 3600 });
-      if (path === '/api/auth/me') return json({ id: 'owner', role: 'admin', username: 'owner', isActive: true });
-      if (path === '/api/settings/providers') return json({ providers: [{ id: 'synthetic', type: 'openai' }] });
-      if (path === '/api/runtime/execution-readiness') return json({ ready: true, code: 'READY', message: 'Ready', dependencies: [] });
+      if (path === '/api/auth/refresh')
+        return json({
+          accessToken: 'synthetic-browser-token',
+          tokenType: 'Bearer',
+          expiresInSeconds: 3600,
+        });
+      if (path === '/api/auth/me')
+        return json({ id: 'owner', role: 'admin', username: 'owner', isActive: true });
+      if (path === '/api/settings/providers')
+        return json({ providers: [{ id: 'synthetic', type: 'openai' }] });
+      if (path === '/api/runtime/execution-readiness')
+        return json({ ready: true, code: 'READY', message: 'Ready', dependencies: [] });
       if (path === '/api/network-access/requests/request-1/decision') {
         decisions.push(request.postDataJSON());
-        state.revision = 8; state.activeRevision = 8; state.requests[0]!.status = 'allowed';
+        state.revision = 8;
+        state.activeRevision = 8;
+        state.requests[0]!.status = 'allowed';
         return json(state);
       }
       if (path === '/api/network-access') return json(state);
-      if (path === '/api/network-access/audit') return json({
-        events: [{ sequence: 1, id: 'audit-1', startedAtUtc: '2026-11-07T00:00:00Z', observedAtUtc: '2026-11-07T00:01:00Z',
-          identity, containerId: 'fixture-container', sourceAddress: '10.89.1.10:50000', destination: 'graph.microsoft.com', port: 443,
-          outcome: 'denied', connected: false, closed: true, bytesSent: 0, bytesReceived: 0, durationMilliseconds: 0 }],
-        nextBefore: 0, coverageGaps: 1, unattributedConnections: 0, lastError: null,
-      });
+      if (path === '/api/network-access/audit')
+        return json({
+          events: [
+            {
+              sequence: 1,
+              id: 'audit-1',
+              startedAtUtc: '2026-11-07T00:00:00Z',
+              observedAtUtc: '2026-11-07T00:01:00Z',
+              identity,
+              containerId: 'fixture-container',
+              sourceAddress: '10.89.1.10:50000',
+              destination: 'graph.microsoft.com',
+              port: 443,
+              outcome: 'denied',
+              connected: false,
+              closed: true,
+              bytesSent: 0,
+              bytesReceived: 0,
+              durationMilliseconds: 0,
+            },
+          ],
+          nextBefore: 0,
+          coverageGaps: 1,
+          unattributedConnections: 0,
+          lastError: null,
+        });
       return json({});
     });
     await page.goto('/network-access');
     await expect(page.getByRole('heading', { name: 'Network access', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Keep blocked', exact: true })).toBeVisible();
+    await expect(page.getByText('Microsoft mail', { exact: true })).toBeVisible();
+    await expect(page.getByText('Travel planner · Amshu', { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: `artifacts/network-access-requests-${width}.png`,
+      fullPage: true,
+    });
     await page.getByRole('button', { name: 'Allow', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Allow this destination?' })).toBeVisible();
+    expect(decisions).toHaveLength(0);
+    await page.screenshot({ path: `artifacts/network-access-review-${width}.png`, fullPage: true });
+    await page.getByRole('button', { name: 'Confirm allow', exact: true }).click();
     await expect(page.getByText('No pending network approvals.')).toBeVisible();
     expect(decisions).toEqual([{ allowed: true, expectedRevision: 7 }]);
+    await page.getByRole('tab', { name: 'Permissions' }).click();
+    await page.getByRole('button', { name: 'Add rule' }).click();
     await expect(page.getByLabel('Hostname or IPv4 address')).toBeVisible();
+    await page.getByRole('tab', { name: 'Activity' }).click();
     await expect(page.getByRole('heading', { name: 'Connection audit' })).toBeVisible();
     await expect(page.getByText('Blocked · graph.microsoft.com:443')).toBeVisible();
     await expect(page.getByText(/Some connection records are missing/)).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
     await page.screenshot({ path: `artifacts/network-access-${width}.png`, fullPage: true });
   });
 }

@@ -34,4 +34,7 @@ public sealed class ContainerEgressGrant
     public string Destination { get; set; } = string.Empty;
 
     public int Port { get; set; }
+
+    // Root-owned bootstrap configuration or a persisted administrator decision only.
+    public bool AllowPrivateNetwork { get; set; }
 }

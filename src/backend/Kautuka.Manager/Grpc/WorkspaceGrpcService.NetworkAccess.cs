@@ -66,6 +66,7 @@ public sealed partial class WorkspaceGrpcService
         => NetworkCallAsync(() =>
         {
             NetworkAccessRuleMessage rule = request.Rule ?? throw new ArgumentException("A network rule is required.");
+            if (rule.AllowPrivateNetwork) throw new ArgumentException("Private-network entitlement is read-only and cannot be supplied by a client.");
             return NetworkRuntime.SetNetworkAccessRuleAsync(Actor(request.Actor), Identity(rule.Identity), rule.Destination,
                 rule.Port, rule.Allowed, request.ExpectedRevision, context.CancellationToken);
         });
@@ -124,6 +125,7 @@ public sealed partial class WorkspaceGrpcService
             Port = rule.Port,
             Allowed = rule.Allowed,
             UpdatedAtUtc = rule.UpdatedAt.ToString("O", CultureInfo.InvariantCulture),
+            AllowPrivateNetwork = rule.AllowPrivateNetwork,
         }));
         response.Requests.AddRange(view.Policy.Requests.OrderBy(item => item.Status == "pending" ? 0 : 1)
             .ThenBy(item => item.CreatedAt).ThenBy(item => item.Id, StringComparer.Ordinal)
@@ -145,6 +147,7 @@ public sealed partial class WorkspaceGrpcService
             Destination = grant.Destination,
             Port = grant.Port,
             Allowed = true,
+            AllowPrivateNetwork = grant.AllowPrivateNetwork,
         }));
         if (response.CalculateSize() > 2 * 1024 * 1024)
             throw new RpcException(new Status(StatusCode.ResourceExhausted, "Network policy page exceeds its supported response size."));

@@ -13,6 +13,19 @@ namespace Kautuka.IntegrationTests;
 public sealed partial class WorkspaceGrpcServiceTests
 {
     [Fact]
+    public async Task ClientCannotForgePrivateNetworkEntitlement()
+    {
+        var service = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
+            new StubRuntimeHealthProbe(true), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
+        RpcException error = await Assert.ThrowsAsync<RpcException>(() => service.SetNetworkAccessRule(new()
+        {
+            Actor = new() { UserId = "owner" },
+            Rule = new() { AllowPrivateNetwork = true, Destination = "10.0.0.1", Port = 443, Allowed = true },
+        }, TestServerCallContext.Instance));
+        Assert.Equal(StatusCode.InvalidArgument, error.StatusCode);
+    }
+
+    [Fact]
     public async Task NetworkPolicyPagesAreOwnerFilteredRevisionBoundAndIncludeSummaryCounts()
     {
         string root = Path.Combine(Path.GetTempPath(), "kautuka-network-rpc-" + Guid.NewGuid().ToString("N"));

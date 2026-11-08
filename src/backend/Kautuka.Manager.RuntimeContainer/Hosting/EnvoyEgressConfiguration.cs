@@ -8,7 +8,7 @@ using System.Text.Json.Nodes;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
-internal sealed record EgressTcpRule(string SourceAddress, string Destination, int Port);
+internal sealed record EgressTcpRule(string SourceAddress, string Destination, int Port, bool AllowPrivateNetwork = false);
 internal sealed record EgressTelemetryRoute(string SourceAddress, string ProxyAddress);
 internal sealed record EgressTelemetryTarget(string BackendAddress, string ProxySourceAddress, IReadOnlyList<EgressTelemetryRoute> Routes);
 
@@ -24,13 +24,19 @@ internal sealed record EnvoyEgressConfiguration(
     private const string metadataNamespace = "kautuka.egress";
 
     internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null,
-        string? allocationVersion = null, EgressTelemetryTarget? telemetry = null, bool telemetryEnabled = false)
+        string? allocationVersion = null, EgressTelemetryTarget? telemetry = null, bool telemetryEnabled = false, string? privateSourceAddress = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
             .OrderBy(static rule => rule.Destination, StringComparer.Ordinal).ThenBy(static rule => rule.Port)
             .ThenBy(static rule => rule.SourceAddress, StringComparer.Ordinal)];
         if (externalSourceAddress is not null) externalSourceAddress = NormalizeAddress(externalSourceAddress);
+        if (privateSourceAddress is not null) privateSourceAddress = NormalizeAddress(privateSourceAddress);
+        if (normalized.Any(rule => rule.AllowPrivateNetwork) && (privateSourceAddress is null || privateSourceAddress == externalSourceAddress))
+            throw new ArgumentException("Administrator private grants require a separate upstream source address.", nameof(privateSourceAddress));
+        if (normalized.Any(rule => NetworkDestinationPolicy.IsMetadata(rule.Destination)
+            || rule.Destination == NetworkDestinationPolicy.PlatformControlAddress || rule.Destination == NetworkDestinationPolicy.PrivateSourceAddress))
+            throw new ArgumentException("Metadata, platform control and reserved proxy endpoints cannot be granted.", nameof(rules));
         EgressPackageRoute[] packages = [.. (packageRoutes ?? []).Select(static route => new EgressPackageRoute(
             NormalizeAddress(route.SourceAddress), NormalizeAddress(route.ProxyAddress), NormalizeAddress(route.BackendAddress), NormalizeAddress(route.ProxySourceAddress)))
             .Distinct().OrderBy(static route => route.SourceAddress, StringComparer.Ordinal).ThenBy(static route => route.ProxyAddress, StringComparer.Ordinal)];
@@ -52,7 +58,7 @@ internal sealed record EnvoyEgressConfiguration(
         var clusters = new JsonArray();
         var chains = new JsonArray();
         var clusterNames = new List<string>();
-        var targets = normalized.Select(rule => (Destination: rule.Destination, Port: rule.Port, Name: "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture)), Bind: externalSourceAddress))
+        var targets = normalized.Select(rule => (Destination: rule.Destination, Port: rule.Port, Name: RuleClusterName(rule), Bind: rule.AllowPrivateNetwork ? privateSourceAddress : externalSourceAddress))
             .Concat(artifacts.Select(host => (Destination: host, Port: 443, Name: "upstream-" + Hash(host + ":443"), Bind: externalSourceAddress)))
             .Distinct().Concat(packages.Select(route => (Destination: route.BackendAddress, Port: 20101, Name: PackageClusterName(route), Bind: (string?)route.ProxySourceAddress)).Distinct())
             .Concat(telemetry is null ? [] : new[] { (Destination: telemetry.BackendAddress, Port: 5080, Name: TelemetryClusterName(telemetry), Bind: (string?)telemetry.ProxySourceAddress) });
@@ -295,7 +301,7 @@ internal sealed record EnvoyEgressConfiguration(
                 var addresses = new JsonObject();
                 foreach (EgressTcpRule rule in rules.Where(rule => rule.SourceAddress == source && rule.Port == port))
                 {
-                    string chain = "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture));
+                    string chain = RuleClusterName(rule);
                     (IPAddress.TryParse(rule.Destination, out _) ? addresses : names)[rule.Destination] = ChainAction(chain);
                 }
 
@@ -388,6 +394,9 @@ internal sealed record EnvoyEgressConfiguration(
 
     private static bool IsUnicastV4(IPAddress address)
         => address.AddressFamily == AddressFamily.InterNetwork && address.GetAddressBytes()[0] is > 0 and < 224;
+
+    private static string RuleClusterName(EgressTcpRule rule)
+        => "upstream-" + Hash(rule.Destination + ":" + rule.Port.ToString(CultureInfo.InvariantCulture) + (rule.AllowPrivateNetwork ? ":private" : string.Empty));
 
     private static string Hash(string text) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 

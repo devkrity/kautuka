@@ -11,7 +11,10 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 public sealed record NetworkAccessActor(string UserId, bool IsAdmin);
 public sealed record NetworkAccessIdentity(string ScopeType, string UserId, string AgentId, string Role, string ComponentId);
-public sealed record NetworkAccessRule(string Id, NetworkAccessIdentity Identity, string Destination, int Port, bool Allowed, DateTimeOffset UpdatedAt);
+public sealed record NetworkAccessRule(string Id, NetworkAccessIdentity Identity, string Destination, int Port, bool Allowed, DateTimeOffset UpdatedAt)
+{
+    public bool AllowPrivateNetwork { get; init; }
+}
 public sealed record NetworkAccessRequest(string Id, NetworkAccessIdentity Identity, string Destination, int Port,
     DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, long Attempts, string Status);
 public sealed record NetworkAccessPolicyState(int SchemaVersion, long Revision, IReadOnlyList<NetworkAccessRule> Rules, IReadOnlyList<NetworkAccessRequest> Requests)
@@ -68,12 +71,23 @@ public sealed class NetworkAccessPolicyStore
         ValidateIdentity(identity);
         if (!CanAccess(actor, identity)) throw new UnauthorizedAccessException("This network scope belongs to another owner or requires an administrator.");
         EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", destination, port));
+        if (allowed && NetworkDestinationPolicy.IsMetadata(normalized.Destination))
+            throw new UnauthorizedAccessException("Cloud metadata and container credential endpoints cannot be allowed, including by administrators.");
+        if (allowed && normalized.Destination == NetworkDestinationPolicy.PrivateSourceAddress)
+            throw new UnauthorizedAccessException("The reserved proxy source address cannot be used as a destination.");
+        if (allowed && normalized.Destination == NetworkDestinationPolicy.PlatformControlAddress)
+            throw new UnauthorizedAccessException("Cloud platform control endpoints cannot be granted. Only the configured resolver may use their DNS service.");
+        if (allowed && !actor.IsAdmin && NetworkDestinationPolicy.IsNonPublic(normalized.Destination))
+            throw new UnauthorizedAccessException("A LAN or special-purpose destination requires an administrator's approval.");
         string id = Key(identity, normalized.Destination, port);
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
             if (current.Revision != expectedRevision) throw new InvalidOperationException("Network policy changed. Refresh before saving the decision.");
-            var rule = new NetworkAccessRule(id, identity, normalized.Destination, port, allowed, DateTimeOffset.UtcNow);
+            var rule = new NetworkAccessRule(id, identity, normalized.Destination, port, allowed, DateTimeOffset.UtcNow)
+            {
+                AllowPrivateNetwork = allowed && actor.IsAdmin,
+            };
             NetworkAccessRule[] rules = [.. current.Rules.Where(item => item.Id != id), rule];
             if (rules.Length > ruleLimit) throw new InvalidOperationException("The network policy rule limit has been reached.");
             Save(current with
@@ -144,10 +158,12 @@ public sealed class NetworkAccessPolicyStore
             var keys = overrides.Select(rule => rule.Id).ToHashSet(StringComparer.Ordinal);
             return [.. bootstrap.Where(grant => !keys.Contains(Key(Identity(grant),
                     EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", grant.Destination, grant.Port)).Destination, grant.Port))),
-                .. overrides.Where(rule => rule.Allowed).Select(rule => new ContainerEgressGrant
+                .. overrides.Where(rule => rule.Allowed && !NetworkDestinationPolicy.IsMetadata(rule.Destination)
+                    && rule.Destination != NetworkDestinationPolicy.PlatformControlAddress && rule.Destination != NetworkDestinationPolicy.PrivateSourceAddress).Select(rule => new ContainerEgressGrant
                 {
                     ScopeType = rule.Identity.ScopeType, UserId = rule.Identity.UserId, AgentId = rule.Identity.AgentId,
                     Role = rule.Identity.Role, ComponentId = rule.Identity.ComponentId, Destination = rule.Destination, Port = rule.Port,
+                    AllowPrivateNetwork = rule.AllowPrivateNetwork,
                 })];
         }
     }

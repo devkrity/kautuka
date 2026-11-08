@@ -8,6 +8,9 @@ const identitySchema = z.object({
   agentId: z.string(),
   role: z.string(),
   componentId: z.string(),
+  displayName: z.string().nullish(),
+  agentName: z.string().nullish(),
+  userName: z.string().nullish(),
 });
 const ruleSchema = z.object({
   id: z.string(),
@@ -15,6 +18,7 @@ const ruleSchema = z.object({
   destination: z.string(),
   port: z.number().int(),
   allowed: z.boolean(),
+  allowPrivateNetwork: z.boolean().default(false),
   updatedAtUtc: z.string().nullable(),
 });
 export const networkAccessSchema = z.object({
@@ -177,7 +181,7 @@ export function useNetworkAccessChange() {
               }
             )
           : await apiClient.put<unknown>('/network-access/rules', {
-              identity: change.identity,
+              identity: policyIdentity(change.identity),
               destination: change.destination,
               port: change.port,
               allowed: change.allowed,
@@ -206,5 +210,38 @@ export const identityKey = (identity: NetworkIdentity): string =>
     identity.role,
     identity.componentId,
   ]);
-export const identityLabel = (identity: NetworkIdentity): string =>
+export const identityDetails = (identity: NetworkIdentity): string =>
   `${identity.role}: ${identity.componentId} · scope ${identity.scopeType}${identity.userId ? ` · user ${identity.userId}` : ''}${identity.agentId ? ` · agent ${identity.agentId}` : ''}`;
+
+export const policyIdentity = (identity: NetworkIdentity): NetworkIdentity => ({
+  scopeType: identity.scopeType,
+  userId: identity.userId,
+  agentId: identity.agentId,
+  role: identity.role,
+  componentId: identity.componentId,
+});
+const coreNames: Record<string, string> = {
+  gateway: 'Gateway',
+  webhost: 'Web interface',
+  channelhost: 'Messaging service',
+  credentialshost: 'Credentials service',
+  'kautuka-openobserve': 'Local telemetry',
+  'kautuka-pkgs-proxy': 'Package downloads',
+  'image-acquisition': 'Container image downloads',
+};
+export const identityName = (identity: NetworkIdentity): string =>
+  identity.displayName ||
+  coreNames[identity.componentId] ||
+  {
+    connector: 'Connector',
+    sandbox: 'Agent sandbox',
+    package: 'Package downloads',
+    skill: 'Skill',
+  }[identity.role] ||
+  'Component';
+export const identityContext = (identity: NetworkIdentity): string =>
+  identity.scopeType === 'core'
+    ? 'Shared Kautuka service'
+    : `${identity.agentName || `Agent ${identity.agentId}`} · ${identity.userName || identity.userId}`;
+export const identityLabel = (identity: NetworkIdentity): string =>
+  `${identityName(identity)} · ${identityContext(identity)}`;

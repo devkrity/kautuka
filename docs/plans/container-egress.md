@@ -1,6 +1,6 @@
 # Container deployment and outbound access control
 
-**Status:** Active — implementation and local acceptance complete on the unmerged feature branch; final evidence is recorded below.
+**Status:** Active — review hardening in progress on the unmerged feature branch. Installed journeys have local evidence; the remaining findings and packaged-platform gates below are still open.
 **Owner:** Kautuka runtime and UpdateService maintainers.
 **Activation condition:** User-authorised replacement design; first demonstrate
 the small rootless egress topology before integrating application deployment.
@@ -13,6 +13,60 @@ its NFQUEUE implementation is not a dependency. This document describes intended
 behavior, not an assertion that main already implements it.
 
 ## Outcome and boundaries
+
+### Review checkpoint — 8 November 2026
+
+Keep the existing Podman/Linux/Envoy foundation. Review findings are implementation,
+operational-default and usability work, not a reason to replace the enforcement design.
+
+- **Permission boundary:** users may approve public destinations for their own
+  workload identities. LAN/special-purpose unicast access requires an administrator.
+  Metadata/container-credential endpoints are never approvable. The actual resolved
+  upstream address is enforced natively, including after DNS changes. Administrative
+  private-network entitlement is server-derived; older rules without it remain
+  public-only until administrator reapproval. Provider setup must explain that case.
+  Explicitly configured DNS services co-located on a metadata/platform IP may be
+  queried only by the trusted CoreDNS UID on TCP/UDP53; this does not authorize
+  application, Envoy or metadata API access. The user approved this narrow exception.
+- **UI:** requests, permissions and activity are separate views. Authorized catalog
+  names identify components and agents; raw identities remain available in details.
+  Allow requires review of the exact destination and scope. Core-service approvals
+  describe their shared scope, including remote HTTP connectors called by Gateway.
+  Name enrichment does not expand catalog visibility or affect authoritative IDs.
+- **Audit remains open:** the bounded 512-line poll can permanently miss denials
+  and their approval requests. Gap reporting is not recovery. Consume unread native
+  log records from a durable cursor in bounded batches before claiming reliable
+  request discovery under bursts or Manager outages. Rotation/retention limits
+  must remain explicit.
+- **Capacity remains open:** the default four private networks include core and
+  management, leaving only two user-agent networks when both are present. Increase
+  the supported default only with a measured attachment/routing/configuration test.
+- **Networking remains open:** document/configure the native IPAM pool and overlap
+  checks, define refresh of automatically selected host DNS upstreams, and validate
+  registry authentication and separate layer-download hosts. Approval of a registry
+  hostname must not silently authorize arbitrary redirect destinations.
+- **Collector defaults remain open:** replace the shared public bootstrap password
+  with per-install credentials and explicitly disable vendor phone-home reporting.
+  OpenObserve's upstream default is enabled unless `ZO_TELEMETRY=false`; this is
+  separate from local Kautuka OTLP collection. A configured reporting default is not
+  evidence that traffic escaped the mandatory outbound policy.
+- **Base-image alignment:** the actual core runtime is the digest-pinned Azure Linux
+  distroless base in `src/images/runtime-release-inputs.json`, paired with the Azure
+  Linux .NET 10 AOT SDK. Record this choice explicitly; do not describe core services
+  as Fedora images. Fedora 44 is the test appliance OS.
+
+Healthy policy changes and attachment of a new agent network must preserve existing
+application, Envoy and DNS processes. Image/security-configuration changes may
+replace the affected container. Developer-selected service rebuilds intentionally
+restart Manager briefly to reload its image inventory; that is a separate lifecycle
+operation and may interrupt active tool calls. No automatic whole-stack restart is
+an acceptable substitute for an ordinary policy/network attachment update.
+
+The installed approval, signed-update/recovery and data-preserving uninstall
+journeys already demonstrated below retain their evidence. Final packaged-build
+checks must use the final source on each currently supported platform: Linux and
+Windows/WSL. Mac execution remains a future support claim. Legacy deployment
+migration is excluded from this work.
 
 Scope correction: legacy host-service-to-container deployment migration is out
 of scope and is not a completion gate. Support fresh containerised installations

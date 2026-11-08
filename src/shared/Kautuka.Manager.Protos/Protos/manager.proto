@@ -38,6 +38,7 @@ message NetworkAccessRuleMessage {
   string id = 1; NetworkAccessIdentityMessage identity = 2;
   string destination = 3; int32 port = 4; bool allowed = 5;
   string updated_at_utc = 6;
+  bool allow_private_network = 7; // Read-only: derived from the authenticated administrator decision.
 }
 message NetworkAccessRequestMessage {
   string id = 1; NetworkAccessIdentityMessage identity = 2;

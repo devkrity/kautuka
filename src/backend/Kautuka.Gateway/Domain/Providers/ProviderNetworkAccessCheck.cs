@@ -57,10 +57,14 @@ internal static class ProviderNetworkAccessCheck
     {
         if (!policy.Enabled || policy.ActivationState != "active" || policy.Revision != policy.ActiveRevision
             || string.IsNullOrEmpty(policy.ActiveVersion) || !policy.Sources.Any(IsGateway)) return null;
+        if (KautukaNetworkDestinationPolicy.IsMetadata(destination) || destination == KautukaNetworkDestinationPolicy.PlatformControlAddress
+            || destination == KautukaNetworkDestinationPolicy.PrivateSourceAddress)
+            return new(false, "This is a protected metadata, platform-control or reserved proxy address. It cannot be allowed for a provider, including by an administrator. Use the provider's normal service endpoint.");
         var overrides = policy.Rules.Where(rule => IsGateway(rule.Identity) && rule.Port == port).ToArray();
         var effective = policy.Defaults.Where(rule => IsGateway(rule.Identity) && rule.Port == port
             && !overrides.Any(other => string.Equals(other.Destination, rule.Destination, StringComparison.OrdinalIgnoreCase)))
-            .Concat(overrides.Where(static rule => rule.Allowed)).ToArray();
+            .Concat(overrides.Where(static rule => rule.Allowed))
+            .Where(rule => !KautukaNetworkDestinationPolicy.IsNonPublic(rule.Destination) || rule.AllowPrivateNetwork).ToArray();
         if (effective.Any(rule => string.Equals(rule.Destination, destination, StringComparison.OrdinalIgnoreCase))) return null;
         // TLS hostname matching can fall back to a permitted original IP. Do not
         // diagnose a deny without knowing which address the HTTP client will use.
