@@ -22,7 +22,7 @@ public sealed partial class McpbImageMaterializer(
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
-    private const string materializationRecipeVersion = "mcpb-materializer-v8";
+    private const string materializationRecipeVersion = "mcpb-materializer-v9";
     private static readonly SemaphoreSlim imageBuildGate = new(1, 1);
     private const string pipTrustedHostShellInit =
         "pip_trusted=\"\"; if [ -n \"${PIP_TRUSTED_HOST:-}\" ]; then pip_trusted=\"--trusted-host $PIP_TRUSTED_HOST\"; fi; ";
@@ -458,9 +458,24 @@ public sealed partial class McpbImageMaterializer(
 
         if (string.Equals(serverType, "uv", StringComparison.OrdinalIgnoreCase))
         {
-            string uvSync = forSandboxArtifact
-                ? "if [ -f pyproject.toml ]; then uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\"; elif [ -f requirements.txt ]; then uv pip install --python .venv/bin/python --index-url \"$UV_INDEX_URL\" -r requirements.txt; fi"
-                : "if [ -f pyproject.toml ]; then uv sync --no-dev --index-url \"$UV_INDEX_URL\"; elif [ -f requirements.txt ]; then uv pip install --system --index-url \"$UV_INDEX_URL\" -r requirements.txt; fi";
+            string unlockedSync = forSandboxArtifact
+                ? "uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\""
+                : "uv sync --no-dev --index-url \"$UV_INDEX_URL\"";
+            string requirementsInstall = forSandboxArtifact
+                ? "uv pip install --python .venv/bin/python --index-url \"$UV_INDEX_URL\" -r requirements.txt"
+                : "uv pip install --system --index-url \"$UV_INDEX_URL\" -r requirements.txt";
+            // Frozen sync follows absolute artifact URLs from uv.lock. Export
+            // pinned hashes, then fetch those packages through the proxy instead.
+            string uvSync = "if [ -f pyproject.toml ] && [ -f uv.lock ]; then "
+                + "uv_env=\"${UV_PROJECT_ENVIRONMENT:-.venv}\"; "
+                + "uv_requirements=\"${TMPDIR:-/tmp}/kautuka-uv-locked-requirements.txt\"; uv_project=\"${TMPDIR:-/tmp}/kautuka-uv-project.txt\"; "
+                + "if [ ! -x \"$uv_env/bin/python\" ]; then uv venv --python python3 \"$uv_env\"; fi; "
+                + "uv export --frozen --no-dev --no-emit-project --output-file \"$uv_requirements\" >/dev/null; "
+                + "uv pip sync --require-hashes --python \"$uv_env/bin/python\" --index-url \"$UV_INDEX_URL\" \"$uv_requirements\"; "
+                + "uv export --frozen --no-dev --only-emit-project --no-editable --no-header --no-annotate --output-file \"$uv_project\" >/dev/null; "
+                + "if [ -s \"$uv_project\" ]; then uv pip install --python \"$uv_env/bin/python\" --no-deps --index-url \"$UV_INDEX_URL\" .; fi; "
+                + "elif [ -f pyproject.toml ]; then " + unlockedSync + "; "
+                + "elif [ -f requirements.txt ]; then " + requirementsInstall + "; fi";
             return string.Concat(
                 "set -eu; ",
                 "if [ -z \"${PIP_INDEX_URL:-}\" ] || [ -z \"${UV_INDEX_URL:-}\" ]; then echo 'PIP_INDEX_URL and UV_INDEX_URL are required' >&2; exit 1; fi; ",

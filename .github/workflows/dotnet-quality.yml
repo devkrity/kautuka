@@ -155,6 +155,9 @@ jobs:
       - name: Test release build SDK matches global.json
         run: node ./scripts/test-release-build-sdk.mjs
 
+      - name: Test web-tools MCPB bundles retain uv.lock
+        run: node ./scripts/test-web-tools-mcpb-lock.mjs
+
       - name: Audit pinned Linux release-builder npm tools
         run: npm audit --prefix src/images/release-builder/npm-tools --audit-level=low
 

@@ -8,9 +8,7 @@ Python 3.14 is selected by minor version in `.python-version`; the supported
 range is declared in both `pyproject.toml` and `manifest.json`. Runtime
 dependency versions are pinned in `pyproject.toml`, and `uv.lock` locks the
 resolved runtime and development dependency graph used by repository CI and
-development. The MCPB bundle excludes `uv.lock`; its runtime resolves the
-pinned project dependencies when the bundle is materialized, then launches
-through the standard MCPB `uv` runtime layout.
+development. The MCPB bundle includes `uv.lock` so its runtime has the resolved dependency graph available when the bundle is materialized, then launches through the standard MCPB `uv` runtime layout.
 
 The default fetch profile is `browser_http`: a browser-like HTTP client profile built on `httpx` with richer navigation headers and HTTP/2 enabled. `fetchMode: "http"` remains a compatibility alias for the same profile.
 

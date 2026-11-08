@@ -261,12 +261,13 @@ public sealed class ConnectorValidationEndpointTests
     }
 
     [Fact]
-    public void ProbeTimeoutIsCappedAtThirtySeconds()
+    public void ProbeTimeoutHonorsManagerBound()
     {
         Assert.Equal(30, McpConnectorTestService.ClampProbeTimeoutSeconds(null));
-        Assert.Equal(30, McpConnectorTestService.ClampProbeTimeoutSeconds(int.MaxValue));
+        Assert.Equal(600, McpConnectorTestService.ClampProbeTimeoutSeconds(int.MaxValue));
         Assert.Equal(5, McpConnectorTestService.ClampProbeTimeoutSeconds(1));
         Assert.Equal(15, McpConnectorTestService.ClampProbeTimeoutSeconds(15));
+        Assert.Equal(60, McpConnectorTestService.ClampProbeTimeoutSeconds(60));
     }
 
     [Fact]
@@ -1392,6 +1393,60 @@ public sealed class ConnectorValidationEndpointTests
         Assert.Equal("http://kautuka-pkgs-proxy:20101/pypi/simple/", environment["UV_DEFAULT_INDEX"]);
         Assert.Equal("http://kautuka-pkgs-proxy:20101/pypi/simple/", environment["PIP_INDEX_URL"]);
         Assert.Equal("kautuka-pkgs-proxy", environment["PIP_TRUSTED_HOST"]);
+    }
+
+    [Fact]
+    public async Task ContainerProbeReadinessTimeoutHonorsManagerBound()
+    {
+        var manager = new FakeManagerGrpcService();
+        await using var fixture = await ConnectorApiFixture.CreateAsync(
+            captureConnectorTests: false,
+            managerGrpcService: manager);
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+
+        int probeIndex = 0;
+        foreach ((string transport, int? requestedTimeout) in new (string, int?)[]
+        {
+            ("container", 60),
+            ("local", 60),
+            ("container", null),
+            ("local", int.MaxValue),
+        })
+        {
+            object probe = transport == "container"
+                ? new
+                {
+                    id = $"timeout-probe-{probeIndex++}",
+                    transport,
+                    containerImage = "quay.io/fedora/fedora-minimal:44",
+                    containerCommand = "uv",
+                    readinessTimeoutSeconds = requestedTimeout,
+                }
+                : new
+                {
+                    id = $"timeout-probe-{probeIndex++}",
+                    transport,
+                    localCommand = "npx",
+                    localArgs = new[] { "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
+                    readinessTimeoutSeconds = requestedTimeout,
+                };
+
+            using JsonDocument response = await fixture.SendJsonAsync(
+                HttpMethod.Post,
+                "/api/connectors/test",
+                probe,
+                accessToken).ConfigureAwait(true);
+
+            Assert.True(response.RootElement.GetProperty("success").GetBoolean());
+        }
+
+        Assert.Collection(
+            manager.ContainerProbeRequests.Where(static request => request.ConnectorId.StartsWith("timeout-probe-", StringComparison.Ordinal)),
+            request => Assert.Equal(60, request.TimeoutSeconds),
+            request => Assert.Equal(60, request.TimeoutSeconds),
+            request => Assert.Equal(30, request.TimeoutSeconds),
+            request => Assert.Equal(600, request.TimeoutSeconds));
+
     }
 
     [Fact]

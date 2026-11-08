@@ -232,7 +232,7 @@ internal sealed class McpConnectorTestService(
     }
 
     internal static int ClampProbeTimeoutSeconds(int? requested)
-        => requested.HasValue ? Math.Clamp(requested.Value, 5, 30) : 30;
+        => requested.HasValue ? Math.Clamp(requested.Value, 5, 600) : 30;
 
     private static Dictionary<string, string> ReadTestEnv(GatewayConnectorTestRequest request)
     {

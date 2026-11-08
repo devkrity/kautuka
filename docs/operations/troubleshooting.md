@@ -164,6 +164,17 @@ Manager runs on the host. The corresponding archive lives beneath the configured
 host state root's `gateway-data/mcpb-bundles` directory. Do not copy archives into a
 new host `/data` directory to work around that mismatch.
 
+For a UV bundle, retain `uv.lock` in the archive. Manager exports its locked
+requirements and synchronizes them with hash checks through the configured package
+proxy; direct frozen synchronization can follow origin URLs from the lock instead.
+Bundles without a lock retain their existing installation behavior. Cold image
+preparation is shared and serialized, so it can delay other uncached connectors.
+
+Connection testing honors an explicitly configured readiness timeout, bounded to
+5–600 seconds, with a 30-second default. Its Manager RPC adds the existing
+15-second envelope. This setup budget includes cold materialization; it does not
+increase the production agent/tool-call deadline.
+
 ### Repeated capability drift
 
 Podman can expand `--cap-drop ALL` into individual capability names in `HostConfig.CapDrop`. Manager checks the resolved `EffectiveCaps` and `BoundingCaps` sets when supplied; both must be empty. Empty sets may serialize as `null` or `[]`. A nonempty set or added capability remains drift. Checking only for the literal `ALL` caused healthy agent containers to be recreated on each reconciliation pass.
