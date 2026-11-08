@@ -9,13 +9,15 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const markerPath = '/etc/kautuka-dev.json';
 
 export function parseOptions(args, defaultDistro = 'KautukaDev') {
-  const options = { distro: defaultDistro, port: 20229, skipBuild: false, stop: false, help: false };
+  const options = { distro: defaultDistro, port: 20229, skipBuild: false, stop: false, help: false, service: null, action: null };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--distro': options.distro = args[++i]; break;
       case '--port': options.port = Number(args[++i]); break;
       case '--skip-build': options.skipBuild = true; break;
       case '--stop': options.stop = true; break;
+      case '--service': options.service = args[++i]; break;
+      case '--action': options.action = args[++i]; break;
       case '--help': case '-h': options.help = true; break;
       default: throw new Error(`Unknown option: ${args[i]}. Use --help.`);
     }
@@ -24,6 +26,11 @@ export function parseOptions(args, defaultDistro = 'KautukaDev') {
     throw new Error('The distro must be named KautukaDev or KautukaDev-<name>. Existing application/test/Podman distros cannot be adopted.');
   }
   if (!Number.isInteger(options.port) || options.port < 1024 || options.port > 65535) throw new Error('Invalid --port.');
+  if (options.service !== null && !['frontend', 'webhost', 'gateway', 'channelhost', 'credentialshost', 'manager', 'updateservice'].includes(options.service)) throw new Error('Invalid --service. Choose frontend, webhost, gateway, channelhost, credentialshost, manager or updateservice.');
+  if (options.action !== null && !['start', 'restart', 'rebuild'].includes(options.action)) throw new Error('Invalid --action. Choose start, restart or rebuild.');
+  if (options.action && !options.service) throw new Error('--action requires --service.');
+  if (options.service && (options.stop || options.skipBuild)) throw new Error('--service cannot be combined with --stop or --skip-build. Use --action start, restart or rebuild.');
+  if (options.service && !options.action) options.action = 'restart';
   return options;
 }
 
@@ -62,8 +69,9 @@ export async function requireFreePort(port) {
   }
 }
 
-async function stageAssets() {
-  await execute(process.execPath, ['node_modules/vite/bin/vite.js', 'build'], { cwd: path.join(repo, 'src/frontend/web') });
+async function stageAssets({ web = true, bundles = true } = {}) {
+  if (web) await execute(process.execPath, ['node_modules/vite/bin/vite.js', 'build'], { cwd: path.join(repo, 'src/frontend/web') });
+  if (!bundles) return;
   const bundle = path.join(repo, 'artifacts/mcpb/kautuka-web-tools-dev.mcpb');
   const newestInput = directory => {
     let newest = statSync(directory).mtimeMs;
@@ -85,7 +93,7 @@ export async function launchDevelopmentAppliance(args) {
   const identity = workspaceIdentity(realpathSync(repo));
   const options = parseOptions(args, 'KautukaDev-' + identity.slice(0, 8));
   if (options.help) {
-    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--skip-build] [--stop]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\n--skip-build starts the last successful AOT build. Ctrl+C stops only this development stack.');
+    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--skip-build] [--stop]\n       npm run launch -- --service <name> [--action start|restart|rebuild]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\n--skip-build starts the last successful AOT build. Ctrl+C stops only this development stack.\n--service targets an initialized development stack; default action is restart.\nServices: frontend, webhost, gateway, channelhost, credentialshost, manager, updateservice.\nfrontend rebuild replaces only static assets; core service rebuild publishes only that service with Native AOT.\nCore actions briefly restart Manager and may interrupt active tool calls; other core containers remain running.\nManager/UpdateService support start/restart; rebuild them with a normal full launch.');
     return;
   }
   if (process.platform !== 'win32') throw new Error('The isolated development launcher currently requires Windows WSL. Use the Native AOT Linux appliance for Linux testing; host-process/JIT fallback is not supported.');
@@ -93,7 +101,7 @@ export async function launchDevelopmentAppliance(args) {
   console.log(`[launch-kautuka] Development distro: ${options.distro}`);
   const distros = (await execute('wsl.exe', ['--list', '--quiet'], { capture: true })).split(/\r?\n/).map(v => v.trim());
   if (!distros.includes(options.distro)) {
-    if (options.stop || options.skipBuild) throw new Error('No development distro/build exists. Run npm run launch first.');
+    if (options.stop || options.skipBuild || options.service) throw new Error('No development distro/build exists. Run npm run launch first.');
     await requireFreePort(options.port);
     console.log(`[launch-kautuka] Creating dedicated Fedora 44 WSL distro ${options.distro}...`);
     await execute('wsl.exe', ['--install', '--distribution', 'FedoraLinux-44', '--name', options.distro, '--vhd-size', '64GB', '--no-launch']);
@@ -104,8 +112,14 @@ export async function launchDevelopmentAppliance(args) {
   assertOwnership(await execute('wsl.exe', [...wsl, 'cat', markerPath], { capture: true }), identity);
   const linuxRepo = (await execute('wsl.exe', [...wsl, 'wslpath', '-a', repo], { capture: true })).trim();
   const driver = `${linuxRepo}/scripts/dev-appliance.py`;
-  const common = ['python3', driver, '--repo', linuxRepo, '--workspace-id', identity, '--port', String(options.port)];
+  const common = ['python3', '-B', driver, '--repo', linuxRepo, '--workspace-id', identity, '--port', String(options.port)];
   if (options.stop) { await execute('wsl.exe', [...wsl, ...common, 'stop']); return; }
+  if (options.service) {
+    if (options.action === 'rebuild' && ['frontend', 'webhost'].includes(options.service)) await stageAssets({ bundles: false });
+    console.log(`[launch-kautuka] ${options.action} ${options.service}; retaining application data and other core containers.`);
+    await execute('wsl.exe', [...wsl, ...common, '--service', options.service, '--service-action', options.action, 'service']);
+    return;
+  }
   common.push('--session', randomUUID());
   await requireFreePort(options.port);
   if (!options.skipBuild) {

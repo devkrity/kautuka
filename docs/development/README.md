@@ -105,6 +105,40 @@ stop it from another terminal with `npm run launch -- --stop`. Use
 `--distro KautukaDev-<name>` for another isolated checkout. The launcher does not
 unregister distros, prune storage or reset application data.
 
+### Operate on one service
+
+Leave the main launcher running and use a second terminal:
+
+```powershell
+# Restart the existing WebHost container without rebuilding.
+npm run launch -- --service webhost
+
+# Build frontend assets and replace only WebHost's image; retain its native executable.
+npm run launch -- --service frontend --action rebuild
+
+# Publish Gateway with Native AOT, build its image and replace only Gateway.
+npm run launch -- --service gateway --action rebuild
+
+# Recover a stopped core service in an otherwise running stack.
+npm run launch -- --service channelhost --action start
+```
+
+The fixed service names are `frontend` (WebHost assets), `webhost`, `gateway`,
+`channelhost`, `credentialshost`, `manager`, and `updateservice`. The default
+action is `restart`; `start` reuses the installed build, while `rebuild` builds
+only the selected core service. Manager and UpdateService support `start` and
+`restart`; use a normal full launch to rebuild these host services. Pass the
+same `--distro` when using a named development instance. Service commands use
+the instance's existing port and do not start a second foreground launcher.
+
+Core service operations briefly restart Manager so it can load the updated
+image inventory and use its normal reconciliation and network admission path.
+The other core containers and Envoy/DNS stay running. Active tool calls may be
+interrupted by the Manager restart. Application data is retained. Core service
+commands require an initialized running stack; start the full stack normally
+first if it is stopped. Shared-code changes may require rebuilding more than
+one service; a normal full launch remains available for those changes.
+
 The isolated container launcher currently targets Windows WSL; it must not run
 the appliance installer on an arbitrary existing Linux desktop. For Linux
 testing use the Native AOT appliance deployment in a dedicated environment.

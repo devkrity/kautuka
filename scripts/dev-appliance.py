@@ -346,9 +346,20 @@ def main():
     parser.add_argument('--workspace-id', required=True)
     parser.add_argument('--port', type=int, default=20229)
     parser.add_argument('--session', default='')
-    parser.add_argument('action', choices=['build', 'run', 'stop'])
+    parser.add_argument('--service')
+    parser.add_argument('--service-action', choices=['start', 'restart', 'rebuild'], default='restart')
+    parser.add_argument('action', choices=['build', 'run', 'stop', 'service'])
     args = parser.parse_args()
     ownership(args.workspace_id)
+    if args.action == 'service':
+        CACHE.mkdir(mode=0o700, exist_ok=True)
+        # The foreground launch holds launch.lock for its lifetime. Service
+        # builds have their own lease; activation also serializes with shutdown.
+        with (CACHE / 'service.lock').open('a') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            module(args.repo.resolve(strict=True), 'dev-appliance-service').operate(
+                args.repo.resolve(strict=True), args.workspace_id, args.service, args.service_action)
+        return
     if args.action == 'stop': stop(args.session); return
     CACHE.mkdir(mode=0o700, exist_ok=True)
     with (CACHE / 'launch.lock').open('a') as lease:

@@ -11,12 +11,20 @@ test('development launcher cannot target production, acceptance or Podman distro
 });
 
 test('default launch is isolated and skip-build does not select host mode', () => {
-  assert.deepEqual(parseOptions([]), { distro: 'KautukaDev', port: 20229, skipBuild: false, stop: false, help: false });
+  assert.deepEqual(parseOptions([]), { distro: 'KautukaDev', port: 20229, skipBuild: false, stop: false, help: false, service: null, action: null });
   assert.equal(parseOptions(['--skip-build']).skipBuild, true);
   assert.equal(parseOptions([], 'KautukaDev-0123abcd').distro, 'KautukaDev-0123abcd');
   assert.throws(() => parseOptions(['--unknown']), /Unknown option/);
   assert.throws(() => parseOptions(['--host']), /Unknown option/);
   for (const port of ['0', '22', '65536', 'NaN']) assert.throws(() => parseOptions(['--port', port]), /Invalid --port/);
+});
+
+test('individual service actions are explicit and cannot select arbitrary containers or stack modes', () => {
+  assert.equal(parseOptions(['--service', 'webhost']).action, 'restart');
+  assert.equal(parseOptions(['--service', 'frontend', '--action', 'rebuild']).service, 'frontend');
+  for (const args of [['--service', 'egress-envoy'], ['--service'], ['--action', 'restart'], ['--service', 'gateway', '--action', 'delete'], ['--service', 'gateway', '--stop'], ['--service', 'gateway', '--skip-build']]) {
+    assert.throws(() => parseOptions(args));
+  }
 });
 
 test('an existing unmarked distro or different checkout is never adopted', () => {
