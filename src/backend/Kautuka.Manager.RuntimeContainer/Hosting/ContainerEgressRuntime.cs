@@ -788,7 +788,7 @@ public sealed partial class ContainerEgressRuntime(
         Source? package = authorized.SingleOrDefault(static source => source.Identity.Role == "package");
         policySources = [.. authorized.Select(source => new NetworkAccessIdentity(source.Identity.Scope.Kind,
             source.Identity.Scope.UserId, source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId)).Distinct()];
-        policyDefaults = [.. options.Grants, .. package is null ? Array.Empty<ContainerEgressGrant>() : packageUpstreams.Select(host => new ContainerEgressGrant
+        policyDefaults = [.. options.Grants, .. HostedProviderDefaults(), .. package is null ? Array.Empty<ContainerEgressGrant>() : packageUpstreams.Select(host => new ContainerEgressGrant
         {
             ScopeType = package.Identity.Scope.Kind, UserId = package.Identity.Scope.UserId, AgentId = package.Identity.Scope.AgentId,
             Role = package.Identity.Role, ComponentId = package.Identity.ComponentId, Destination = host, Port = 443,

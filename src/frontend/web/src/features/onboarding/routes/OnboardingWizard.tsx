@@ -185,7 +185,9 @@ class WizardErrorBoundary extends React.Component<
 
 export const OnboardingWizard: React.FC = () => {
   const [manualBrainSelection, setManualBrainSelection] = React.useState(false);
-  const [recommendationsBackStage, setRecommendationsBackStage] = React.useState<string>(WIZARD_STAGES.setup);
+  const [recommendationsBackStage, setRecommendationsBackStage] = React.useState<string>(
+    WIZARD_STAGES.setup
+  );
   const {
     stage,
     goNext,
@@ -206,6 +208,8 @@ export const OnboardingWizard: React.FC = () => {
     setProviderForm,
     saveSetup,
     providerValidation,
+    allowProviderAndRetry,
+    canAllowProviderNetwork,
     saving,
     error,
     modelForm,
@@ -225,9 +229,19 @@ export const OnboardingWizard: React.FC = () => {
   const verbosityOptions = personaDefinitions.verbosity_levels.length
     ? personaDefinitions.verbosity_levels
     : ['concise'];
-  const styleOptions = personaDefinitions.styles.length ? personaDefinitions.styles : ['professional'];
+  const styleOptions = personaDefinitions.styles.length
+    ? personaDefinitions.styles
+    : ['professional'];
   const toneOptions = personaDefinitions.tones.length ? personaDefinitions.tones : ['neutral'];
-  const requiresApiKey = ['openai', 'azure-openai', 'gemini', 'google', 'anthropic', 'groq', 'openrouter'].includes(providerForm.type);
+  const requiresApiKey = [
+    'openai',
+    'azure-openai',
+    'gemini',
+    'google',
+    'anthropic',
+    'groq',
+    'openrouter',
+  ].includes(providerForm.type);
   const requiresBaseUrl = ['azure-openai', 'ollama'].includes(providerForm.type);
 
   const applyAgentPreset = (presetId: string | null) => {
@@ -265,7 +279,8 @@ export const OnboardingWizard: React.FC = () => {
     setProviderForm((prev) => ({
       ...prev,
       type: preset.providerType,
-      base_url: preset.providerType === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
+      base_url:
+        preset.providerType === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
     }));
     setModelForm((prev) => ({
       ...prev,
@@ -372,11 +387,16 @@ export const OnboardingWizard: React.FC = () => {
                 helperName={agentForm.name}
                 onHelperNameChange={(value) => setAgentForm((prev) => ({ ...prev, name: value }))}
                 systemPrompt={agentForm.systemPrompt}
-                onSystemPromptChange={(value) => setAgentForm((prev) => ({ ...prev, systemPrompt: value }))}
+                onSystemPromptChange={(value) =>
+                  setAgentForm((prev) => ({ ...prev, systemPrompt: value }))
+                }
                 verbosityOptions={verbosityOptions}
                 verbosity={agentForm.persona.verbosity}
                 onVerbosityChange={(value) =>
-                  setAgentForm((prev) => ({ ...prev, persona: { ...prev.persona, verbosity: value } }))
+                  setAgentForm((prev) => ({
+                    ...prev,
+                    persona: { ...prev.persona, verbosity: value },
+                  }))
                 }
                 styleOptions={styleOptions}
                 style={agentForm.persona.style}
@@ -399,11 +419,14 @@ export const OnboardingWizard: React.FC = () => {
                   setProviderForm((prev) => ({
                     ...prev,
                     type: value,
-                    base_url: value === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
+                    base_url:
+                      value === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
                   }));
                 }}
                 providerBaseUrl={providerForm.base_url}
-                onProviderBaseUrlChange={(value) => setProviderForm((prev) => ({ ...prev, base_url: value }))}
+                onProviderBaseUrlChange={(value) =>
+                  setProviderForm((prev) => ({ ...prev, base_url: value }))
+                }
                 providerApiCredential={providerForm.apiCredential}
                 onProviderApiCredentialChange={(value) =>
                   setProviderForm((prev) => ({ ...prev, apiCredential: value }))
@@ -417,6 +440,8 @@ export const OnboardingWizard: React.FC = () => {
                 requiresBaseUrl={requiresBaseUrl}
                 providerValidationMessage={providerValidation?.message ?? null}
                 providerValidationSuccess={providerValidation?.success ?? false}
+                providerNetworkBlock={providerValidation?.networkBlock}
+                onAllowProviderNetwork={canAllowProviderNetwork ? allowProviderAndRetry : undefined}
                 runtimeNote="Your AI model can run locally or in the cloud, but Kautuka runs here and performs tool work here."
                 relationshipNote="You can change the brain later, and one provider can serve more than one agent."
                 saving={saving}

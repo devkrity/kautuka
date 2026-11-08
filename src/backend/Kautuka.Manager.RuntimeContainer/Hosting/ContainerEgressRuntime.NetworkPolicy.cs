@@ -12,7 +12,19 @@ public sealed partial class ContainerEgressRuntime
     private long activePolicyRevision = -1;
     private string? policyActivationError;
     private NetworkAccessIdentity[] policySources = [];
-    private ContainerEgressGrant[] policyDefaults = [.. options.Grants];
+    private ContainerEgressGrant[] policyDefaults = [.. options.Grants, .. HostedProviderDefaults()];
+    private static readonly string[] hostedProviderHosts = ["api.openai.com", "api.anthropic.com", "api.groq.com",
+        "api.mistral.ai", "openrouter.ai", "generativelanguage.googleapis.com"];
+
+    // Only the fixed hosted-provider endpoints shipped in AiProviderCatalog.
+    // The integration contract test cross-checks that catalog; custom/tenant URLs
+    // and local providers still require an explicit administrator decision.
+    internal static IReadOnlyList<ContainerEgressGrant> HostedProviderDefaults()
+        => [.. hostedProviderHosts.Select(static host => new ContainerEgressGrant
+            {
+                ScopeType = "core", UserId = "system", AgentId = "gateway", Role = "core",
+                ComponentId = "gateway", Destination = host, Port = 443,
+            })];
 
     public NetworkAccessPolicyView GetNetworkAccessPolicy(NetworkAccessActor actor)
     {

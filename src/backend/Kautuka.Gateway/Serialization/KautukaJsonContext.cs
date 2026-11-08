@@ -322,6 +322,7 @@ namespace Kautuka.Gateway.Serialization;
 [JsonSerializable(typeof(GatewayMemoryFactPayload[]))]
 [JsonSerializable(typeof(GatewayChatRunResponse))]
 [JsonSerializable(typeof(GatewayProviderTestResponse))]
+[JsonSerializable(typeof(GatewayProviderNetworkBlock))]
 [JsonSerializable(typeof(CredentialCollectionResponse))]
 [JsonSerializable(typeof(CredentialUpdateResponse))]
 [JsonSerializable(typeof(SetCredentialsRequest))]

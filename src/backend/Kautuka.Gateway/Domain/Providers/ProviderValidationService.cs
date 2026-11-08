@@ -11,17 +11,20 @@ internal sealed class ProviderValidationService : IProviderValidationService
     private readonly KautukaAiClientFactory aiClientFactory;
     private readonly IProviderTypeCatalog providerTypeCatalog;
     private readonly ILogger<ProviderValidationService> logger;
+    private readonly IManagerGrpcService? manager;
 
     public ProviderValidationService(
         IGatewayCatalogStore catalog,
         KautukaAiClientFactory aiClientFactory,
         IProviderTypeCatalog providerTypeCatalog,
-        ILogger<ProviderValidationService> logger)
+        ILogger<ProviderValidationService> logger,
+        IManagerGrpcService? manager = null)
     {
         this.catalog = catalog;
         this.aiClientFactory = aiClientFactory;
         this.providerTypeCatalog = providerTypeCatalog;
         this.logger = logger;
+        this.manager = manager;
     }
 
     public async Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
@@ -33,6 +36,8 @@ internal sealed class ProviderValidationService : IProviderValidationService
 
         try
         {
+            GatewayProviderTestResult? blocked = manager is null ? null : await ProviderNetworkAccessCheck.CheckAsync(manager.GetNetworkAccessPolicyAsync, settings, cancellationToken).ConfigureAwait(false);
+            if (blocked is not null) return blocked;
             return await ValidateProviderConnectivityAsync(providerId, providerType, settings, cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)

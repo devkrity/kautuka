@@ -952,7 +952,8 @@ internal sealed record GatewayChatRunResponse(
 
 internal sealed record GatewayProviderTestResponse(
     bool Success,
-    string Message);
+    string Message,
+    GatewayProviderNetworkBlock? NetworkBlock = null);
 
 internal sealed record CredentialCollectionResponse(
     string Scope,

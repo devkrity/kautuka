@@ -6,20 +6,20 @@
 import { apiClient } from '@/lib/apiClient';
 import type {
   AdvancedSettingsEntry,
-    AgentPersonaProfile,
-    AgentSettingsEntry,
-    KautukaInfrastructureSettingsEntry,
-    DiscoveredModelEntry,
-    MemorySettingsEntry,
-    ModelEntry,
-    OrganizationSettingsEntry,
-    PersonaDefinitions,
-    AgentToolPolicyProjection,
-    ProviderEntry,
-    ProviderPathPolicySettingsEntry,
-    SystemRuntimeLimitsSettings,
-    SystemSettingsEntry,
-    UserSettingsEntry,
+  AgentPersonaProfile,
+  AgentSettingsEntry,
+  KautukaInfrastructureSettingsEntry,
+  DiscoveredModelEntry,
+  MemorySettingsEntry,
+  ModelEntry,
+  OrganizationSettingsEntry,
+  PersonaDefinitions,
+  AgentToolPolicyProjection,
+  ProviderEntry,
+  ProviderPathPolicySettingsEntry,
+  SystemRuntimeLimitsSettings,
+  SystemSettingsEntry,
+  UserSettingsEntry,
 } from '../types/settingsTypes';
 
 interface SystemSettingsResponse {
@@ -87,6 +87,7 @@ interface ProbeModelCandidateResponse {
 interface ProviderTestResponse {
   success?: boolean;
   message?: string;
+  networkBlock?: { destination: string; port: number } | null;
 }
 
 interface PersonaDefinitionsResponse {
@@ -120,8 +121,7 @@ export interface CatalogRecommendationsResponse {
 export const settingsAdmin = {
   // System
   getSystemSettings: () => apiClient.get<SystemSettingsResponse>('/settings/system'),
-  getRuntimeLimits: () =>
-    apiClient.get<SystemRuntimeLimitsSettings>('/settings/runtime-limits'),
+  getRuntimeLimits: () => apiClient.get<SystemRuntimeLimitsSettings>('/settings/runtime-limits'),
   saveSystemSettings: (body: Record<string, unknown>) =>
     apiClient.put<SystemSettingsResponse>('/settings/system', body),
   getAdvancedSettings: () => apiClient.get<AdvancedSettingsEntry>('/settings/advanced'),

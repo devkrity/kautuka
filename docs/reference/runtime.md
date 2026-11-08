@@ -45,6 +45,20 @@ Accepting connector desired state does not build connector images. Manager mater
 
 Gateway registrations currently expose Ollama, Gemini, OpenAI, OpenAI Compatible (Responses), Azure OpenAI, Foundry, Anthropic, Groq, Mistral, and OpenRouter. The provider type catalog controls default URLs and credential requirements. Provider credentials are resolved separately from catalog configuration.
 
+Managed outbound policy includes Gateway-only HTTPS port 443 defaults for the fixed
+OpenAI, Anthropic, Groq, Mistral, OpenRouter and Gemini API hosts. An explicit
+administrator block overrides a default. Custom URLs, Azure/Foundry tenant endpoints
+and local Ollama addresses require an explicit grant. First-run setup reports a
+confirmed policy block beside the provider settings; administrators can allow that
+exact endpoint and retry setup after policy activation. Changing the address clears
+the old approval action. A connection or credential error is not labelled as a
+policy block without confirmation from the active policy.
+
+Ollama must listen on an address reachable from the Linux appliance and its
+containers. `localhost` in a provider URL refers to Gateway's own container, rather
+than Windows, macOS or the Linux host; setup explains this separately and does not
+offer a misleading allow action for loopback.
+
 Ollama runs through OllamaSharp against the native `/api/chat` endpoint (not the OpenAI `/v1` shim) so thinking maps to MEAI `TextReasoningContent` and tool results serialize under OllamaSharp’s AOT JSON context. Gemini uses `Google.GenAI` against the Gemini Developer API (not `/v1beta/openai/`) so thought signatures stay on MEAI `IChatClient` for tool follow-up turns. Saved OpenAI-compat Gemini base URLs are ignored. Google.GenAI has no parallel-tool FunctionCallingConfig flag (only AUTO/ANY/NONE); when `AllowMultipleToolCalls` is on, Gateway appends one system-context sentence so Gemini will emit independent calls in one turn. The Developer API rejects blob `displayName`; Gateway strips MEAI `DataContent.Name` / `HostedFileContent.Name` on the Gemini chat client so image parts keep bytes and mime type. Before MAF session serialize, Gateway clears ephemeral `AgentRequestMessageSourceAttribution` tags that are missing from MAF’s source-gen context under Native AOT.
 
 ## Configuration

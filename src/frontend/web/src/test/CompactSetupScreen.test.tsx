@@ -23,6 +23,7 @@ const brainPresets = [
 
 describe('CompactSetupScreen', () => {
   it('shows agent controls before AI brain presets and supporting notes', () => {
+    const allowNetwork = vi.fn();
     render(
       <CompactSetupScreen
         helperName="Desk Assistant"
@@ -55,6 +56,8 @@ describe('CompactSetupScreen', () => {
         requiresBaseUrl={false}
         providerValidationMessage={null}
         providerValidationSuccess={false}
+        providerNetworkBlock={{ destination: 'api.example.com', port: 443 }}
+        onAllowProviderNetwork={allowNetwork}
         runtimeNote="Your AI model can run locally or in the cloud, but Kautuka runs here and performs tool work here."
         relationshipNote="You can change the brain later, and one provider can serve more than one agent."
         saving={false}
@@ -70,14 +73,24 @@ describe('CompactSetupScreen', () => {
       )
     ).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Desk Assistant')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('Tell the helper what it should focus on first.')).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText('Tell the helper what it should focus on first.')
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Gemini \+ Gemini Flash/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Ollama \+ Gemma4/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open Gemini API key page' })).toBeInTheDocument();
     expect(screen.getByDisplayValue('Desk Assistant')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Review documents')).toBeInTheDocument();
-    expect(screen.getByText('You can change the brain later, and one provider can serve more than one agent.')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'You can change the brain later, and one provider can serve more than one agent.'
+      )
+    ).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Paste your provider key')).toBeInTheDocument();
+    expect(allowNetwork).not.toHaveBeenCalled();
+    expect(screen.getByText(/Permission is limited/)).toHaveTextContent('api.example.com:443');
+    fireEvent.click(screen.getByRole('button', { name: 'Allow this endpoint and retry setup' }));
+    expect(allowNetwork).toHaveBeenCalledOnce();
   });
 
   it('shows manual brain controls when manual mode is enabled', () => {

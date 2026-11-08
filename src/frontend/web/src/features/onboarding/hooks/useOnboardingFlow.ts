@@ -1,22 +1,27 @@
 import { useCurrentUser } from '@/features/auth';
 import {
-    apiError,
-    normalizePersonaDefinitions,
-    normalizePersonaProfile,
-    settingsAdmin,
-    type AgentSettingsEntry,
-    type DiscoveredModelEntry,
-    type ModelEntry,
-    type PersonaDefinitions,
-    type ProviderEntry,
+  apiError,
+  normalizePersonaDefinitions,
+  normalizePersonaProfile,
+  settingsAdmin,
+  type AgentSettingsEntry,
+  type DiscoveredModelEntry,
+  type ModelEntry,
+  type PersonaDefinitions,
+  type ProviderEntry,
 } from '@/features/settings';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { isAxiosError } from 'axios';
 import {
-    getGeneratedModelId,
-    getGeneratedProviderId,
-    getRecommendedProviderModel,
+  allowProviderNetworkAccess,
+  type ProviderNetworkBlock,
+} from '../utils/providerNetworkAccess';
+import {
+  getGeneratedModelId,
+  getGeneratedProviderId,
+  getRecommendedProviderModel,
 } from '../utils/wizardNaming';
 import { createOnboardingHandoffState } from '../utils/onboardingHandoff';
 import { useSettingsStatus } from './useSettingsStatus';
@@ -26,6 +31,7 @@ const DEFAULT_HTTP_TIMEOUT_SECONDS = '30';
 type ProviderTestResult = {
   success: boolean;
   message: string;
+  networkBlock?: ProviderNetworkBlock | null;
 };
 
 type ProviderFormState = {
@@ -101,6 +107,8 @@ export function useOnboardingFlow() {
     apiCredential: '',
     http_timeout_seconds: DEFAULT_HTTP_TIMEOUT_SECONDS,
   }));
+  const currentProviderForm = useRef(providerForm);
+  currentProviderForm.current = providerForm;
   const [modelForm, setModelForm] = useState<ModelFormState>(() => ({
     id: '',
     providerId: '',
@@ -142,13 +150,10 @@ export function useOnboardingFlow() {
   const [existingProviders, setExistingProviders] = useState<ProviderEntry[]>([]);
   const [existingModels, setExistingModels] = useState<ModelEntry[]>([]);
   const canImportConnectors =
-    !!currentUser
-    && (currentUser.role === 'admin' || Boolean(currentUser.canImportConnectors));
+    !!currentUser && (currentUser.role === 'admin' || Boolean(currentUser.canImportConnectors));
   const canImportSkills =
-    !!currentUser
-    && (currentUser.role === 'admin' || Boolean(currentUser.canImportSkills));
-  const canUseCatalogRecommendations =
-    canImportConnectors || canImportSkills;
+    !!currentUser && (currentUser.role === 'admin' || Boolean(currentUser.canImportSkills));
+  const canUseCatalogRecommendations = canImportConnectors || canImportSkills;
 
   useEffect(() => {
     const detectExisting = async () => {
@@ -187,7 +192,9 @@ export function useOnboardingFlow() {
       type: provider.type,
       base_url: (provider.settings.base_url as string) ?? '',
       apiCredential: (provider.settings.api_key as string) ?? '',
-      http_timeout_seconds: String(provider.settings.http_timeout_seconds ?? DEFAULT_HTTP_TIMEOUT_SECONDS),
+      http_timeout_seconds: String(
+        provider.settings.http_timeout_seconds ?? DEFAULT_HTTP_TIMEOUT_SECONDS
+      ),
     });
     if (model) {
       setModelForm({
@@ -249,6 +256,10 @@ export function useOnboardingFlow() {
   useEffect(() => {
     setConfirmedModelWarningKey(null);
   }, [providerForm.type, modelForm.modelName]);
+
+  useEffect(() => {
+    setProviderValidation(null);
+  }, [providerForm.type, providerForm.base_url, providerForm.apiCredential]);
 
   const discoverModelNames = async (providerId: string, currentModelName?: string) => {
     if (!providerId) {
@@ -412,6 +423,7 @@ export function useOnboardingFlow() {
           default_model: providerModel,
         },
       });
+      if (currentProviderForm.current !== providerForm) return;
 
       const validation: ProviderTestResult = {
         success: Boolean(providerTest.data.success),
@@ -419,6 +431,7 @@ export function useOnboardingFlow() {
           typeof providerTest.data.message === 'string'
             ? providerTest.data.message
             : 'Provider validation failed.',
+        networkBlock: providerTest.data.networkBlock,
       };
 
       setProviderValidation(validation);
@@ -467,7 +480,9 @@ export function useOnboardingFlow() {
       if (warningMessage && confirmedModelWarningKey !== candidateKey) {
         setModelCapabilities(probedCapabilities);
         setConfirmedModelWarningKey(candidateKey);
-        setError(`${warningMessage}. Continue again to use this starter model, or choose another provider.`);
+        setError(
+          `${warningMessage}. Continue again to use this starter model, or choose another provider.`
+        );
         return;
       }
 
@@ -528,8 +543,36 @@ export function useOnboardingFlow() {
       await queryClient.refetchQueries({ queryKey: ['system-setup-status'] });
       goNext(WIZARD_STAGES.recommendations);
     } catch (err) {
+      if (currentProviderForm.current !== providerForm) return;
+      const body = isAxiosError<ProviderTestResult>(err) ? err.response?.data : undefined;
+      if (body?.networkBlock && typeof body.message === 'string') {
+        setProviderValidation({
+          success: false,
+          message: body.message,
+          networkBlock: body.networkBlock,
+        });
+        setError(null);
+      } else {
+        setError(apiError(err));
+        setProviderValidation(null);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const allowProviderAndRetry = async () => {
+    const block = providerValidation?.networkBlock;
+    if (!block || saving || currentUser?.role !== 'admin') return;
+    setSaving(true);
+    setError(null);
+    try {
+      await allowProviderNetworkAccess(block);
+      await queryClient.invalidateQueries({ queryKey: ['network-access'] });
+      if (currentProviderForm.current !== providerForm) return;
+      await saveSetup();
+    } catch (err) {
       setError(apiError(err));
-      setProviderValidation(null);
     } finally {
       setSaving(false);
     }
@@ -545,7 +588,9 @@ export function useOnboardingFlow() {
     const trimmedChatId = telegramChatId.trim();
 
     if (!trimmedAccessCode || !trimmedChatId) {
-      setError('Enter both the Telegram bot access code and private chat ID, or skip this step for now.');
+      setError(
+        'Enter both the Telegram bot access code and private chat ID, or skip this step for now.'
+      );
       return;
     }
 
@@ -609,6 +654,8 @@ export function useOnboardingFlow() {
     setProviderForm,
     saveSetup,
     providerValidation,
+    allowProviderAndRetry,
+    canAllowProviderNetwork: currentUser?.role === 'admin',
     generatedProviderId:
       providerForm.id.trim() ||
       getGeneratedProviderId(

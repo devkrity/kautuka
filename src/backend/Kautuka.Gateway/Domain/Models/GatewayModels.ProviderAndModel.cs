@@ -10,7 +10,8 @@ internal static class GatewayOwnershipScopes
 
 internal sealed record GatewayProvider(string Id, string Name, string Type, JsonObject Settings, string CreatedAt);
 
-internal sealed record GatewayProviderTestResult(bool Success, string Message);
+internal sealed record GatewayProviderNetworkBlock(string Destination, int Port, string? RequestId = null);
+internal sealed record GatewayProviderTestResult(bool Success, string Message, GatewayProviderNetworkBlock? NetworkBlock = null);
 
 internal sealed record GatewayModel(
     string Id,

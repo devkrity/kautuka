@@ -78,6 +78,10 @@ vi.mock('@/features/settings', () => ({
 
 import { useOnboardingFlow } from '@/features/onboarding/hooks/useOnboardingFlow';
 
+vi.mock('@/features/onboarding/utils/providerNetworkAccess', () => ({
+  allowProviderNetworkAccess: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('useOnboardingFlow existing setup detection', () => {
   let currentRoute = '';
 
@@ -193,6 +197,110 @@ describe('useOnboardingFlow existing setup detection', () => {
       ...overrides,
     };
   }
+
+  it('shows an actionable policy denial returned as HTTP 400 without saving setup', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    testProviderMock.mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        data: {
+          success: false,
+          message: 'Blocked by network policy.',
+          networkBlock: { destination: '192.168.1.4', port: 11434 },
+        },
+      },
+    });
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () =>
+      result.current.setProviderForm((prev) => ({
+        ...prev,
+        type: 'ollama',
+        base_url: 'http://192.168.1.4:11434',
+      }))
+    );
+    await act(async () => result.current.saveSetup());
+    expect(result.current.providerValidation?.message).toBe('Blocked by network policy.');
+    expect(result.current.providerValidation?.networkBlock).toEqual({
+      destination: '192.168.1.4',
+      port: 11434,
+    });
+    expect(saveProviderMock).not.toHaveBeenCalled();
+    expect(result.current.canAllowProviderNetwork).toBe(true);
+    testProviderMock.mockResolvedValue({ data: { success: true, message: 'Connected' } });
+    await act(async () => result.current.allowProviderAndRetry());
+    expect(testProviderMock).toHaveBeenCalledTimes(2);
+    expect(saveAgentMock).toHaveBeenCalledOnce();
+  });
+
+  it('clears a stale endpoint approval when the service address changes', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    testProviderMock.mockResolvedValue({
+      data: {
+        success: false,
+        message: 'Blocked',
+        networkBlock: { destination: '192.168.1.4', port: 11434 },
+      },
+    });
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () =>
+      result.current.setProviderForm((prev) => ({
+        ...prev,
+        type: 'ollama',
+        base_url: 'http://192.168.1.4:11434',
+      }))
+    );
+    await act(async () => result.current.saveSetup());
+    expect(result.current.providerValidation?.networkBlock).toBeTruthy();
+    await act(async () =>
+      result.current.setProviderForm((prev) => ({ ...prev, base_url: 'http://192.168.1.5:11434' }))
+    );
+    expect(result.current.providerValidation).toBeNull();
+  });
+
+  it('discards a policy block that arrives after the service address changed', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    let rejectTest!: (error: unknown) => void;
+    testProviderMock.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectTest = reject;
+        })
+    );
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () =>
+      result.current.setProviderForm((prev) => ({
+        ...prev,
+        type: 'ollama',
+        base_url: 'http://192.168.1.4:11434',
+      }))
+    );
+    let pending!: Promise<void>;
+    act(() => {
+      pending = result.current.saveSetup();
+    });
+    await act(async () =>
+      result.current.setProviderForm((prev) => ({ ...prev, base_url: 'http://192.168.1.5:11434' }))
+    );
+    await act(async () => {
+      rejectTest({
+        isAxiosError: true,
+        response: {
+          data: {
+            success: false,
+            message: 'Blocked',
+            networkBlock: { destination: '192.168.1.4', port: 11434 },
+          },
+        },
+      });
+      await pending;
+    });
+    expect(result.current.providerValidation).toBeNull();
+    expect(result.current.saving).toBe(false);
+    expect(saveProviderMock).not.toHaveBeenCalled();
+  });
 
   it('treats a configured agent as existing setup', async () => {
     listAgentsMock.mockResolvedValue({

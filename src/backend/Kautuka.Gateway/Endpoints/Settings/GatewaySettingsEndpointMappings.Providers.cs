@@ -72,7 +72,7 @@ internal static partial class GatewaySettingsEndpointMappings
 
             GatewayProviderTestResult result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false);
             return Results.Json(
-                new GatewayProviderTestResponse(result.Success, result.Message),
+                new GatewayProviderTestResponse(result.Success, result.Message, result.NetworkBlock),
                 KautukaJsonContext.Default.GatewayProviderTestResponse,
                 statusCode: result.Success ? StatusCodes.Status200OK : StatusCodes.Status400BadRequest);
         })

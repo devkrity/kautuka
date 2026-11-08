@@ -47,6 +47,8 @@ type CompactSetupScreenProps = {
   requiresBaseUrl: boolean;
   providerValidationMessage?: string | null;
   providerValidationSuccess?: boolean;
+  providerNetworkBlock?: { destination: string; port: number } | null;
+  onAllowProviderNetwork?: () => void;
   runtimeNote: string;
   relationshipNote: string;
   saving: boolean;
@@ -85,6 +87,8 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
   requiresBaseUrl,
   providerValidationMessage,
   providerValidationSuccess,
+  providerNetworkBlock,
+  onAllowProviderNetwork,
   runtimeNote,
   relationshipNote,
   saving,
@@ -169,7 +173,9 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
         <div className="flex flex-col gap-2 border-b border-border pb-4 md:flex-row md:items-start md:justify-between">
           <div>
             <div className="text-sm font-medium text-foreground">AI brain</div>
-            <p className="text-sm text-muted-foreground">Choose a ready-made brain or set it up manually.</p>
+            <p className="text-sm text-muted-foreground">
+              Choose a ready-made brain or set it up manually.
+            </p>
           </div>
           <div className="text-xs text-muted-foreground">{runtimeNote}</div>
         </div>
@@ -225,7 +231,10 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
                 <>
                   <div>
                     <Label className="mb-2 block">Provider</Label>
-                    <Select value={providerType} onChange={(event) => onProviderTypeChange(event.target.value)}>
+                    <Select
+                      value={providerType}
+                      onChange={(event) => onProviderTypeChange(event.target.value)}
+                    >
                       <option value="gemini">Google Gemini</option>
                       <option value="ollama">Ollama</option>
                       <option value="openrouter">OpenRouter</option>
@@ -237,7 +246,10 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
 
                   <div>
                     <Label className="mb-2 block">Model</Label>
-                    <Input value={modelName} onChange={(event) => onModelNameChange(event.target.value)} />
+                    <Input
+                      value={modelName}
+                      onChange={(event) => onModelNameChange(event.target.value)}
+                    />
                   </div>
                 </>
               ) : (
@@ -276,8 +288,20 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
                   <Input
                     value={providerBaseUrl}
                     onChange={(event) => onProviderBaseUrlChange(event.target.value)}
-                    placeholder={providerType === 'ollama' ? 'http://localhost:11434' : 'Enter the provider URL'}
+                    placeholder={
+                      providerType === 'ollama'
+                        ? 'http://localhost:11434'
+                        : 'Enter the provider URL'
+                    }
                   />
+                  {providerType === 'ollama' && (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Use an address reachable from Kautuka’s Linux containers. Localhost refers to
+                      the container itself. For Ollama on your computer, use a reachable host or LAN
+                      address and configure Ollama to listen there. Setup will explain any network
+                      permission needed before continuing.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -287,6 +311,23 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
             <Alert variant={providerValidationSuccess ? 'success' : 'destructive'}>
               {providerValidationMessage}
             </Alert>
+          )}
+          {providerNetworkBlock && (
+            <div className="space-y-2 text-sm">
+              <p>
+                Permission is limited to the AI provider connection from Gateway to{' '}
+                {providerNetworkBlock.destination}:{providerNetworkBlock.port}.
+              </p>
+              {onAllowProviderNetwork ? (
+                <Button type="button" onClick={onAllowProviderNetwork} disabled={saving}>
+                  Allow this endpoint and retry setup
+                </Button>
+              ) : (
+                <p>
+                  Ask an administrator to allow this endpoint in Network access, then retry setup.
+                </p>
+              )}
+            </div>
           )}
         </div>
       </div>
