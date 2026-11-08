@@ -157,7 +157,7 @@ public sealed class NetworkDestinationPolicyTests : IDisposable
         File.WriteAllText(path, legacy);
         var restarted = Store();
         Assert.False(Assert.Single(restarted.Read(new("admin", true)).Rules).AllowPrivateNetwork);
-        Assert.False(Assert.Single(restarted.EffectiveGrants([])).AllowPrivateNetwork);
+        Assert.Empty(restarted.EffectiveGrants([]));
         restarted.SetRule(new("admin", true), identity, "10.0.0.1", 443, true, 1, true);
         Assert.True(Assert.Single(Store().EffectiveGrants([])).AllowPrivateNetwork);
     }
