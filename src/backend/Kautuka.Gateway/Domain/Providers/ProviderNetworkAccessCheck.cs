@@ -13,7 +13,7 @@ internal static class ProviderNetworkAccessCheck
     internal static async Task<GatewayProviderTestResult?> CheckAsync(
         Func<NetworkAccessReadRequest, CancellationToken, Task<NetworkAccessPolicyResponse>> readPolicy, JsonObject settings, CancellationToken ct)
     {
-        if (!Uri.TryCreate(settings["base_url"]?.GetValue<string>(), UriKind.Absolute, out Uri? target)
+        if (!Uri.TryCreate((settings["base_url"] ?? settings["endpoint"])?.GetValue<string>(), UriKind.Absolute, out Uri? target)
             || target.Scheme is not ("http" or "https")) return null;
         try
         {
@@ -61,6 +61,10 @@ internal static class ProviderNetworkAccessCheck
             || destination == KautukaNetworkDestinationPolicy.PrivateSourceAddress)
             return new(false, "This is a protected metadata, platform-control or reserved proxy address. It cannot be allowed for a provider, including by an administrator. Use the provider's normal service endpoint.");
         var overrides = policy.Rules.Where(rule => IsGateway(rule.Identity) && rule.Port == port).ToArray();
+        if (KautukaNetworkDestinationPolicy.IsNonPublic(destination) && overrides.Any(rule => rule.Allowed && !rule.AllowPrivateNetwork
+            && string.Equals(rule.Destination, destination, StringComparison.OrdinalIgnoreCase)))
+            return new(false, $"Network policy blocks Gateway from reaching {destination}:{port}. An Allow rule exists, but it does not include local-network access. An administrator must open Network access > Permissions, edit this rule, select Allow local-network access, and save it. Wait for the policy to become active, then retry your message or provider test.",
+                new GatewayProviderNetworkBlock(destination, port));
         var effective = policy.Defaults.Where(rule => IsGateway(rule.Identity) && rule.Port == port
             && !overrides.Any(other => string.Equals(other.Destination, rule.Destination, StringComparison.OrdinalIgnoreCase)))
             .Concat(overrides.Where(static rule => rule.Allowed))
@@ -69,7 +73,7 @@ internal static class ProviderNetworkAccessCheck
         // TLS hostname matching can fall back to a permitted original IP. Do not
         // diagnose a deny without knowing which address the HTTP client will use.
         if (!IPAddress.TryParse(destination, out _) && effective.Any(rule => IPAddress.TryParse(rule.Destination, out _))) return null;
-        return new(false, $"Network access to {destination}:{port} is blocked for Gateway. Allow this destination, wait for the policy to become active, then retry the provider test.",
+        return new(false, $"Network access to {destination}:{port} is blocked for Gateway. Open Network access > Permissions to review the rule for this destination. LAN access requires an explicit administrator approval. Wait for the policy to become active, then retry your message or provider test.",
             new GatewayProviderNetworkBlock(destination, port));
     }
 

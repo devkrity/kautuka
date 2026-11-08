@@ -16,7 +16,10 @@ public sealed class ProviderNetworkAccessCheckTests
         NetworkAccessPolicyResponse policy = Active();
         var rule = new NetworkAccessRuleMessage { Identity = Gateway(), Destination = "192.168.1.20", Port = 11434, Allowed = true };
         policy.Rules.Add(rule);
-        Assert.Equal(new GatewayProviderNetworkBlock("192.168.1.20", 11434), ProviderNetworkAccessCheck.Evaluate(policy, rule.Destination, rule.Port)?.NetworkBlock);
+        GatewayProviderTestResult blocked = Assert.IsType<GatewayProviderTestResult>(ProviderNetworkAccessCheck.Evaluate(policy, rule.Destination, rule.Port));
+        Assert.Equal(new GatewayProviderNetworkBlock("192.168.1.20", 11434), blocked.NetworkBlock);
+        Assert.Contains("An Allow rule exists", blocked.Message, StringComparison.Ordinal);
+        Assert.Contains("Network access > Permissions", blocked.Message, StringComparison.Ordinal);
         rule.AllowPrivateNetwork = true;
         Assert.Null(ProviderNetworkAccessCheck.Evaluate(policy, rule.Destination, rule.Port));
     }

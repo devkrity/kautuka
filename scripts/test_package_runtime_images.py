@@ -45,6 +45,7 @@ class Engine:
         self.change_export_config = False
         self.drop_release_labels = False
         self.context_files = {}
+        self.recipes = {}
 
     def image(self, name, labels=None):
         config = json.dumps({"os": "linux", "architecture": "amd64", "config": {"Labels": labels or {"fixture": name}},
@@ -66,6 +67,7 @@ class Engine:
             context = Path(args[-1])
             role = context.name
             self.context_files[role] = [p.relative_to(context).as_posix() for p in context.rglob("*") if p.is_file()]
+            self.recipes[role] = (context / "Containerfile").read_text()
             labels = None
             if role in producer.CORES and not self.drop_release_labels:
                 labels = {"org.opencontainers.image.version": "1.2.3", "org.opencontainers.image.revision": "a" * 40}
@@ -84,6 +86,8 @@ class Engine:
                 assert not (root / "backend/obj/host-native.o").exists()
                 output = Path(next(value.removesuffix(":/out:rw") for value in mounts if value.endswith(":/out:rw")))
                 role = args[-1].split("/")[-1]
+                assert '-p:PublishAot=true' in args
+                assert '-p:InvariantGlobalization=false' in args
                 (output / role).mkdir()
                 binary = output / role / ("Kautuka." + producer.CORES[role])
                 binary.write_bytes(b"\x7fELFsynthetic-aot")
@@ -101,6 +105,19 @@ class Engine:
                 write_oci(output / name, config)
             return ""
         raise AssertionError("Unexpected engine command: " + str(args))
+
+
+class NativeCoreGlobalizationTests(unittest.TestCase):
+    def test_all_core_dockerfiles_keep_aot_and_share_globalization_capable_runtime(self):
+        inputs = json.loads((ROOT / "src/images/runtime-release-inputs.json").read_text())
+        self.assertIn("-distroless-extra@sha256:", inputs["coreRuntimeImage"])
+        for role in ("gateway", "webhost", "channel-host", "credentials-host"):
+            recipe = (ROOT / f"src/images/kautuka-{role}/Dockerfile").read_text()
+            with self.subTest(role=role):
+                self.assertIn("ARG AZURELINUX_DISTROLESS_IMAGE=" + inputs["coreRuntimeImage"], recipe)
+                self.assertIn("-p:PublishAot=true", recipe)
+                self.assertIn("-p:InvariantGlobalization=false", recipe)
+                self.assertNotIn("-p:InvariantGlobalization=true", recipe)
 
 
 @unittest.skipUnless(producer.os.name == "posix", "The release image build host is Linux")
@@ -154,6 +171,9 @@ class ProducerTests(unittest.TestCase):
         self.assertIn("wwwroot/index.html", self.engine.context_files["webhost"])
         self.assertIn("built-in-mcpb/kautuka-google-mail.mcpb", self.engine.context_files["gateway"])
         self.assertEqual(4, sum("dotnet" in command for command in self.engine.calls))
+        runtime = json.loads((self.source / "src/images/runtime-release-inputs.json").read_text())["coreRuntimeImage"]
+        for role in producer.CORES:
+            self.assertEqual("FROM " + runtime, self.engine.recipes[role].splitlines()[0])
         self.assertFalse(any(command[0] == "pull" and "kautuka-core-" in command[-1] for command in self.engine.calls))
 
     def test_missing_bundle_fails_before_image_acquisition(self):

@@ -14,6 +14,7 @@ internal enum AgentRuntimeError
     ProviderNotFound,
     ProviderUnavailable,
     ClientCreationFailed,
+    NetworkAccessBlocked,
 }
 
 internal sealed class AgentRuntime(

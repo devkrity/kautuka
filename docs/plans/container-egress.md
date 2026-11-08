@@ -41,6 +41,13 @@ operational-default and usability work, not a reason to replace the enforcement 
   describe their shared outer route. Remote HTTP connectors additionally require
   their own caller/agent/connector permission before every request.
   Name enrichment does not expand catalog visibility or affect authoritative IDs.
+  Manager reports the effective Allow value using the same evaluation as its
+  Envoy configuration; the UI does not derive a second policy or create synthetic
+  approval requests. Explicitly blocked rules stay resolved. Subsequent captured
+  denials may reopen an inadequate Allow. Chat checks
+  the accepted provider policy before provider initialization and explains an
+  incomplete LAN permission instead of reporting a generic send error. Exceptions
+  after a run starts must publish a durable terminal error, without replaying work.
 - **Approval delivery:** stock Envoy network authorization now records missing
   permissions directly in Manager before Deny; outcome logs do not create requests.
   **Outcome audit remains bounded:** log rotation, downtime and retention can omit
@@ -61,7 +68,11 @@ operational-default and usability work, not a reason to replace the enforcement 
   evidence that traffic escaped the mandatory outbound policy.
 - **Base-image alignment:** the actual core runtime is the digest-pinned Azure Linux
   distroless base in `src/images/runtime-release-inputs.json`, paired with the Azure
-  Linux .NET 10 AOT SDK. Record this choice explicitly; do not describe core services
+  Linux .NET 10 AOT SDK. All four core services use the matching digest-pinned .NET `runtime-deps`
+  distroless-extra image with ICU and time-zone data because chat grounding and
+  locale settings require named cultures. They remain Native AOT, without CoreCLR
+  or JIT. Core service publication must not force invariant globalization.
+  Record this choice explicitly; do not describe core services
   as Fedora images. Fedora 44 is the test appliance OS.
 
 Healthy policy changes and attachment of a new agent network must preserve existing

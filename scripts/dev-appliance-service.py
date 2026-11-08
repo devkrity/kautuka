@@ -123,6 +123,7 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
         base = inputs['coreRuntimeImage']; producer.pull(engine, base)
         recipe = 'FROM ' + base + '\nCOPY . /app\nWORKDIR /app\nENTRYPOINT ["/app/Kautuka.WebHost"]\n'
     else:
+        print('[launch-kautuka] Preparing source for Native AOT ' + service + '...', flush=True)
         source = work / 'source'
         files, _, _, _ = driver.inputs(repo)
         for name in files:
@@ -135,12 +136,13 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
         properties = ET.parse(repo / 'src/Directory.Build.props').getroot().find('PropertyGroup')
         project = 'Kautuka.' + CORES[service]
         (driver.CACHE / 'nuget').mkdir(exist_ok=True)
+        print('[launch-kautuka] Publishing Native AOT ' + service + '; this can take several minutes.', flush=True)
         producer.run(engine, 'run', '--rm', '--pull=never', '--volume', str(source / 'src') + ':/src:rw',
                      '--volume', str(context) + ':/out:rw', '--volume', str(driver.CACHE / 'nuget') + ':/nuget:rw',
                      '--env', 'NUGET_PACKAGES=/nuget', '--workdir', '/src', sdk, 'dotnet', 'publish',
                      'backend/' + project + '/' + project + '.csproj', '-c', 'Release', '-r', 'linux-x64',
                      '--self-contained', 'true', '-p:PublishAot=true', '-p:PublishSingleFile=true',
-                     '-p:InvariantGlobalization=true', '-p:KautukaReleaseArtifactBuild=true',
+                     '-p:InvariantGlobalization=false', '-p:KautukaReleaseArtifactBuild=true',
                      '-p:Version=' + properties.findtext('KautukaDevVersion'), '-o', '/out')
         if (context / (project + '.dll')).exists() or (context / 'libcoreclr.so').exists() or (context / project).read_bytes()[:4] != b'\x7fELF':
             raise ValueError('Selected service publication is not Native AOT')
@@ -192,7 +194,7 @@ def operate(repo, identity, service, action):
     if service not in CORES and service not in HOSTS or action not in ('start', 'restart', 'rebuild'):
         raise ValueError('Use a fixed core service, frontend, manager or updateservice and start/restart/rebuild')
     if service in HOSTS and action == 'rebuild':
-        raise ValueError('Host controller rebuild requires npm run launch; individual host actions are start/restart only')
+        raise ValueError('Host controller rebuild requires npm run launch -- --build; individual host actions are start/restart only')
     driver = load_driver(repo)
     driver.ownership(identity)
     record = json.loads((driver.CACHE / 'build.json').read_text())

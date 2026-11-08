@@ -186,7 +186,7 @@ def package(options):
                 "--volume", str(nuget) + ":/nuget:rw", "--env", "NUGET_PACKAGES=/nuget", "--workdir", "/src", sdk,
                 "dotnet", "publish", "backend/Kautuka." + executable + "/Kautuka." + executable + ".csproj",
                 "-c", "Release", "-r", "linux-x64", "--self-contained", "true", "-p:PublishAot=true",
-                "-p:InvariantGlobalization=true", "-p:KautukaReleaseArtifactBuild=true", "-p:PublishSingleFile=true",
+                "-p:InvariantGlobalization=false", "-p:KautukaReleaseArtifactBuild=true", "-p:PublishSingleFile=true",
                 "-p:Version=" + options.version, "-p:InformationalVersion=" + options.version + "+" + options.source_sha[:7],
                 "-p:AssemblyVersion=" + options.numeric_version, "-p:FileVersion=" + options.numeric_version,
                 "-p:SourceRevisionId=" + options.source_sha, "-p:IncludeSourceRevisionInInformationalVersion=false", "-o", "/out/" + role)

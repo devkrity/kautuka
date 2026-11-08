@@ -788,6 +788,60 @@ public sealed class ChannelIngressServiceHardeningTests
         Assert.Equal(0, refreshed.QueueFacts!.TotalCount);
     }
 
+    [Theory]
+    [InlineData("unstarted")]
+    [InlineData("started")]
+    [InlineData("finished")]
+    [InlineData("paused")]
+    public async Task QueuedBrowserStartupFailureTerminatesVisibleRunWithoutRewritingTerminalHistory(string phase)
+    {
+        using var fixture = new ChannelIngressFixture();
+        GatewaySession session = fixture.SessionStore.CreateSession("agent", "agent-1", "user-1");
+        const string runId = "startup-failure";
+        var context = new NaradEventContext("agent-1", session.Id, "user-1", runId, runId);
+        void Append(string type, JsonElement body) => fixture.State.AgentDefinitionStore.AppendNaradAuthorityEvent("agent-1", "agent-1",
+            NaradAuthorityEventDraftFactory.CreateNew(type, body, context));
+        fixture.ChatGateway.BeforeStream = _ =>
+        {
+            if (phase != "unstarted") Append(NaradEventTypes.RunStarted, NaradEventBodies.RunStarted("narad"));
+            if (phase is "finished" or "paused")
+                Append(phase == "finished" ? NaradEventTypes.RunFinished : NaradEventTypes.RunPaused, JsonSerializer.SerializeToElement(new { }, jsonOptions));
+            throw new CultureNotFoundException("Provider startup failed before normal stream exception handling.");
+        };
+        SessionTurnQueueStore queue = fixture.Ingress.PendingTurns;
+        Assert.True(queue.Admit(runId, JsonSerializer.SerializeToElement(new
+        {
+            target_id = "agent-1",
+            session_id = session.Id,
+            user_id = "user-1",
+            message = "hi",
+            source = "narad",
+        }, jsonOptions)));
+        QueuedSessionTurn original = Assert.Single(queue.ListHeads());
+        using var publisher = new RuntimeEventPublisher(fixture.State.AgentDefinitionStore, new RuntimeEventStreamHub());
+        var execution = new SessionTurnExecution(fixture.State, fixture.SessionStore, fixture.ChatGateway, [], publisher);
+        using var worker = new SessionTurnQueueWorker(queue, execution, NullLogger<SessionTurnQueueWorker>.Instance);
+        await worker.StartAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(10));
+            while (queue.HasQueued(session.Id)) await Task.Delay(20, deadline.Token);
+        }
+        finally { await worker.StopAsync(TestContext.Current.CancellationToken); }
+        IReadOnlyList<NaradPersistedEvent> history = fixture.State.AgentDefinitionStore.ListNaradRootHistoryFull("agent-1", runId);
+        Assert.Single(history, item => item.EventType == NaradEventTypes.RunStarted);
+        if (phase is "unstarted" or "started")
+        {
+            Assert.Single(history, item => item.EventType == NaradEventTypes.MessageUserRecorded);
+            Assert.Equal(NaradEventTypes.RunError, history[^1].EventType);
+            Assert.False(execution.IsBusy("agent-1", session.Id));
+        }
+        else Assert.DoesNotContain(history, item => item.EventType == NaradEventTypes.RunError);
+        await execution.FailedAsync(original, TestContext.Current.CancellationToken);
+        Assert.Equal(history.Count, fixture.State.AgentDefinitionStore.ListNaradRootHistoryFull("agent-1", runId).Count);
+    }
+
     [Fact]
     public async Task BrowserAndChannelTurnsShareTheDurableSessionQueueAndApprovalBarrier()
     {
@@ -5101,6 +5155,7 @@ public sealed class ChannelIngressServiceHardeningTests
 
     private sealed class FakeChatGatewayService(IGatewaySessionStore sessionStore) : IChatGatewayService
     {
+        public Action<JsonElement>? BeforeStream { get; set; }
         public bool EmitRunStarted { get; set; }
         public IReadOnlyList<string> LastAssetIds { get; private set; } = [];
         public string LastMessage { get; private set; } = string.Empty;
@@ -5108,6 +5163,7 @@ public sealed class ChannelIngressServiceHardeningTests
 
         public async IAsyncEnumerable<NaradPersistedEvent> StreamChatAsync(JsonElement body, AgentRequestContext? requestContext = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            BeforeStream?.Invoke(body);
             string targetType = GetString(body, "target_type", "targetType", "TargetType") ?? "agent";
             string targetId = GetString(body, "target_id", "targetId", "TargetId") ?? string.Empty;
             string sessionId = GetString(body, "session_id", "sessionId", "SessionId") ?? "session-fake";

@@ -73,19 +73,28 @@ internal sealed class SessionTurnExecution(
     public async Task FailedAsync(QueuedSessionTurn turn, CancellationToken cancellationToken)
     {
         JsonObject payload = JsonNode.Parse(turn.PayloadJson)!.AsObject();
-        // Admission failures need a durable browser-visible outcome too. Never rewrite an existing run.
-        if (publisher is not null && payload["registrationId"] is null
-            && state.AgentDefinitionStore.ListNaradRootHistoryFull(state.AgentDefinitionStore.GetStorageLocatorKey(turn.TargetId), turn.Id).Count == 0)
+        // Failure can occur after RunStarted but before the normal execution error handler.
+        // Complete that root visibly without replaying work or rewriting a terminal/paused run.
+        if (publisher is not null && payload["registrationId"] is null)
         {
-            string owner = payload["ownerUserId"]!.GetValue<string>();
-            var context = new NaradEventContext(turn.TargetId, turn.SessionId, owner, turn.Id, turn.Id);
-            foreach ((string type, JsonElement body) in new (string, JsonElement)[]
+            IReadOnlyList<NaradPersistedEvent> history = state.AgentDefinitionStore.ListNaradRootHistoryFull(
+                state.AgentDefinitionStore.GetStorageLocatorKey(turn.TargetId), turn.Id);
+            NaradPersistedEvent? lifecycle = history.LastOrDefault(item => item.RunId == turn.Id && NaradEventTypes.IsRunLifecycleEventType(item.EventType));
+            if (lifecycle is null || (lifecycle.EventType != NaradEventTypes.RunPaused && !NaradEventTypes.IsRootRunTerminalEventType(lifecycle.EventType)))
             {
+                string owner = payload["ownerUserId"]!.GetValue<string>();
+                var context = new NaradEventContext(turn.TargetId, turn.SessionId, owner, turn.Id, turn.Id);
+                foreach ((string type, JsonElement body) in new (string, JsonElement)[]
+                {
                 (NaradEventTypes.RunStarted, NaradEventBodies.RunStarted("narad")),
                 (NaradEventTypes.MessageUserRecorded, NaradEventBodies.MessageUserRecorded(NaradEventBodies.BuildUserMessageId(turn.Id, turn.Id), payload["message"]?.GetValue<string>() ?? string.Empty)),
                 (NaradEventTypes.RunError, NaradEventBodies.RunError("queued_turn_failed", "This queued message could not be completed. Please check session access and send it again.", null)),
-            })
-                await publisher.PublishAsync(NaradAuthorityEventDraftFactory.CreateNew(type, body, context), context, cancellationToken).ConfigureAwait(false);
+                })
+                {
+                    if (type != NaradEventTypes.RunError && history.Any(item => item.RunId == turn.Id && item.EventType == type)) continue;
+                    await publisher.PublishAsync(NaradAuthorityEventDraftFactory.CreateNew(type, body, context), context, cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
         foreach (ISessionTurnProjection projection in projections)
             await projection.FailedAsync(turn, cancellationToken).ConfigureAwait(false);
