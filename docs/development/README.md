@@ -65,7 +65,51 @@ Open the repository root in VS Code and select **Launch Kautuka**, then press **
 npm run launch
 ```
 
-The launcher builds required native services and starts the local stack. The WebHost is available at `http://localhost:20229`. Use **Launch Gateway** when you need to debug Gateway alone. Stop the launched stack with Ctrl+C in the terminal that owns it.
+On Windows the launcher creates a dedicated **Fedora 44 WSL distro named
+`KautukaDev-<checkout-id>`** on first use. It builds every Kautuka service and
+.NET connector with **Native AOT**,
+starts Manager and UpdateService inside Linux, and lets Manager start the core
+containers, private user-agent networks and Envoy/CoreDNS boundary. Network
+control is enabled. The first run downloads the distro, prerequisites and pinned
+build/runtime images; later runs reuse them. Application data lives inside this
+development distro, separately from Windows host-development data and installed
+or acceptance-test appliances. Existing unmarked distros are never adopted.
+The new distro receives a 64 GB virtual disk limit; physical disk usage grows
+with downloaded images and development data. Building requires at least 12 GiB
+free inside its Linux filesystem.
+
+WebHost is available at `http://localhost:20229`. Stop the previous host-process
+stack before starting this one, or select a different port:
+
+```powershell
+npm run launch -- --port 20239
+```
+
+The initial administrator setup token is kept inside the development distro. Read
+it in your own terminal when the setup page requests it:
+
+```powershell
+wsl -d <distro-name-printed-by-launcher> -u root -- cat /var/lib/kautuka/gateway-data/setup-token
+```
+
+Use `npm run launch -- --skip-build` to start the last successful development
+build without rebuilding assets. Normal launch rebuilds when source or assets
+change. Data, configured providers, network policy, approvals and workspaces are
+retained. These are local Native AOT development images, not signed release
+artifacts; automatic release updates are disabled for this profile. Development
+and release use the same AOT compilation path and core runtime base. There is no
+JIT or `dotnet run` fallback.
+
+Ctrl+C stops only this development stack and preserves its data. You can also
+stop it from another terminal with `npm run launch -- --stop`. Use
+`--distro KautukaDev-<name>` for another isolated checkout. The launcher does not
+unregister distros, prune storage or reset application data.
+
+The isolated container launcher currently targets Windows WSL; it must not run
+the appliance installer on an arbitrary existing Linux desktop. For Linux
+testing use the Native AOT appliance deployment in a dedicated environment.
+The old six-host-process launcher and managed Gateway-only debug configuration
+are removed so they cannot silently exercise a different runtime.
 
 ## Validation commands
 

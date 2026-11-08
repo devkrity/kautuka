@@ -36,7 +36,7 @@ From the repository root, run the setup script to install or verify prerequisite
 ./setup_the_world.sh
 ```
 
-On Windows, run `./setup_the_world.ps1` in PowerShell. Then open the repository in VS Code and press **F5** with **Launch Kautuka**, or run `npm run launch`. See the [developer guide](docs/development/README.md) for version sources, setup options, tests, formatting, and troubleshooting.
+On Windows, run `./setup_the_world.ps1` in PowerShell. Then open the repository in VS Code and press **F5** with **Launch Kautuka**, or run `npm run launch`. The Windows launcher prepares a dedicated Fedora WSL development distro and runs the Native AOT containerised stack with network control enabled. Every Kautuka service and .NET connector is AOT-compiled, including in development. The first launch downloads its prerequisites and images. See the [developer guide](docs/development/README.md) for setup tokens, retained development data, launch options, tests and troubleshooting.
 
 ## Documentation
 

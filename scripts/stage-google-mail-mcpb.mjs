@@ -7,8 +7,9 @@
  *
  * Usage: node scripts/stage-google-mail-mcpb.mjs
  */
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, copyFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -93,6 +94,10 @@ function assertElf(binaryPath) {
   }
 }
 
+if (process.platform !== "linux" || process.arch !== "x64") {
+  throw new Error("Linux x64 Native AOT tooling is required. Run this stager inside the Linux development appliance; Windows cross-publication is not supported.");
+}
+
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const version = manifest.version;
 if (typeof version !== "string" || version.length === 0) {
@@ -100,21 +105,30 @@ if (typeof version !== "string" || version.length === 0) {
 }
 
 const outputFile = path.join(repoRoot, "artifacts", "mcpb", `kautuka-google-mail-${version}.mcpb`);
-if (existsSync(outputFile) && statSync(outputFile).mtimeMs >= newestInputMs()) {
+const cacheMarker = outputFile + ".native-aot.json";
+const sha256 = file => createHash("sha256").update(readFileSync(file)).digest("hex");
+let cached;
+try { cached = JSON.parse(readFileSync(cacheMarker, "utf8")); } catch { /* Older bundles have no AOT provenance. */ }
+if (existsSync(outputFile) && cached?.schemaVersion === 1 && cached?.publication === "linux-x64-native-aot"
+    && cached?.bundleSha256 === sha256(outputFile)
+    && statSync(outputFile).mtimeMs >= Math.max(newestInputMs(), statSync(fileURLToPath(import.meta.url)).mtimeMs,
+      statSync(path.join(repoRoot, "src", "Directory.Build.props")).mtimeMs)) {
   process.stdout.write(`[stage-google-mail] up to date: ${outputFile}\n`);
   process.exit(0);
 }
 
 process.stdout.write("[stage-google-mail] publishing linux-x64 connector...\n");
+rmSync(cacheMarker, { force: true });
+rmSync(publishDir, { recursive: true, force: true });
 await run("dotnet publish", "dotnet", [
   "publish",
   projectPath,
   "-c",
-  "Debug",
+  "Release",
   "-r",
   "linux-x64",
   "--self-contained",
-  "-p:PublishAot=false",
+  "-p:PublishAot=true",
   "-o",
   publishDir,
 ]);
@@ -124,6 +138,9 @@ if (!existsSync(binaryPath)) {
   throw new Error(`Publish did not produce ${binaryPath}.`);
 }
 assertElf(binaryPath);
+if (existsSync(binaryPath + ".dll") || existsSync(path.join(publishDir, "libcoreclr.so"))) {
+  throw new Error("Native AOT publication unexpectedly contains a managed application/runtime payload.");
+}
 
 rmSync(packDir, { recursive: true, force: true });
 mkdirSync(packDir, { recursive: true });
@@ -145,4 +162,5 @@ if (!existsSync(outputFile)) {
   throw new Error(`Failed to create ${outputFile}.`);
 }
 
+writeFileSync(cacheMarker, JSON.stringify({ schemaVersion: 1, publication: "linux-x64-native-aot", bundleSha256: sha256(outputFile) }) + "\n");
 process.stdout.write(`[stage-google-mail] wrote ${outputFile}\n`);

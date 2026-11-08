@@ -126,6 +126,9 @@ jobs:
 
       - name: Test container bootstrap and smoke regressions
         run: |
+          node --test ./scripts/test-launch-kautuka-wsl.mjs
+          node --test ./scripts/test-native-mail-staging.mjs
+          python3 -B ./scripts/test_dev_appliance.py
           sudo python3 -B ./scripts/test-container-uninstall.py
           sudo python3 -B ./scripts/test-wsl-firstboot.py
           python3 -B ./scripts/test-installed-container-smoke.py

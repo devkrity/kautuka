@@ -6,6 +6,8 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('This Windows Native AOT release dry-run requires Windows x64 and the native C++ build tools.');
+
 const root = path.resolve(import.meta.dirname, '..');
 const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
 const tag = 'v0.1.20-preview.1';
@@ -24,7 +26,7 @@ try {
   const project = path.join(root, 'src/backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj');
   execFileSync('dotnet', [
     'publish', project, '--configuration', 'Release', '--output', publishDir,
-    '-p:PublishAot=false', `-p:Version=${identity.version}`,
+    '--runtime', 'win-x64', '--self-contained', 'true', '-p:PublishAot=true', `-p:Version=${identity.version}`,
     `-p:InformationalVersion=${identity.version}+${sourceSha.slice(0, 7)}`,
     '-p:AssemblyVersion=0.1.20.0', '-p:FileVersion=0.1.20.0',
   ], { cwd: root, stdio: 'inherit' });
@@ -35,7 +37,10 @@ try {
   } else {
     execFileSync('pnpm', ['--dir', 'src/frontend/web', 'exec', 'vite', 'build', '--outDir', frontendDist], { cwd: root, stdio: 'inherit', env: frontendEnv });
   }
-  const dllPath = path.join(publishDir, 'Kautuka.UpdateService.dll');
+  const executablePath = path.join(publishDir, 'Kautuka.UpdateService.exe');
+  const executable = await fs.readFile(executablePath);
+  if (executable[0] !== 0x4d || executable[1] !== 0x5a) throw new Error('Native AOT publication did not produce a Windows executable');
+  if ((await fs.readdir(publishDir)).includes('Kautuka.UpdateService.dll')) throw new Error('Unexpected managed UpdateService payload');
   const archiveName = `kautuka-update-service-${identity.version}-win-x64.zip`;
   const archivePath = path.join(directory, archiveName);
   const ps = `$ErrorActionPreference='Stop'; Compress-Archive -Path '${publishDir.replaceAll("'", "''")}\\*' -DestinationPath '${archivePath.replaceAll("'", "''")}'`;
@@ -59,7 +64,7 @@ try {
     path.join(root, 'scripts/verify-release-artifacts.mjs'),
     '--directory', directory, '--version', identity.version, '--channel', identity.channel,
     '--source-sha', identity.source_sha, '--public-key', publicKeyPath,
-    '--dotnet-binary', dllPath, '--expected-files', `${archiveName},${linuxName},${wslName}`,
+    '--dotnet-binary', executablePath, '--expected-files', `${archiveName},${linuxName},${wslName}`,
     '--frontend-bundle', path.join(frontendDist, 'assets'),
     '--container-tag', `ghcr.io/devkrity/kautuka-base:${identity.version}`,
   ], { cwd: root, encoding: 'utf8' });

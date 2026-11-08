@@ -15,7 +15,7 @@ These values are code-owned by `KautukaHostNetworkPolicy`.
 
 Gateway exposes unauthenticated `GET /api/runtime/system-health` so first-boot and the installer can see Manager reachability (`lifecycle.coreReady`, JSON field `workspace`) before any admin exists. The fallback authorization policy still requires a bearer token for every other `/api/runtime/*` route. Authenticated `GET /api/runtime/execution-readiness` is the canonical preflight view for agent execution. It probes Manager reachability, Manager-reported Podman availability, and CredentialsHost in parallel. Manager reachability is the status RPC itself; Podman availability is Manager's last-known sample, kept warm by a background loop rather than a live `podman info` on each status or chat call. Desired-state reconciliation is not a dependency outage. Podman failures are returned as the distinct `container_runtime` dependency. New runs and approved continuations fail before runtime construction when a required dependency is unavailable; terminal deny, cancel, and stop decisions bypass the execution preflight.
 
-## Container network
+## Legacy shared container network
 
 Manager creates the `kautuka-sandbox` Podman network before reconcile. Agent sandboxes, connector containers (including Isolated / OwnContext), and sidecars all run with `--network kautuka-sandbox`. Sidecars publish `--network-alias` names used as package-proxy hostnames (`kautuka-pkgs-proxy`). Isolation remains a private container plus optional read-only agent-file mounts; it is not `--network none`. MCPB materialization installs npm/pip/uv packages the same way: `podman build` only lays down OS packages and the checksummed Node tarball; language-package install runs as `podman run --network kautuka-sandbox` with Gateway index environment, then `podman commit`. Install CLIs pin `--registry` / `--index-url` so a bundle `.npmrc` or `pip.conf` cannot retarget public indexes. Runtime `npx`/`npm`/`uv`/`uvx` connector launches pin those same flags from Gateway index environment. Gateway strips `PIP_EXTRA_INDEX_URL`, `UV_EXTRA_INDEX_URL`, and `UV_INDEX`, and skill exec cannot overlay package-index keys. `uv` may still download a managed CPython from GitHub when a bundle requires a Python the Fedora image does not ship; that is an interpreter bootstrap, not an npm/PyPI package. The agent sandbox image follows that split for the `uv` wheel: Dockerfile `podman build` does not `pip install`; Manager then installs `uv==0.11.19` on `kautuka-sandbox` through `kautuka-pkgs-proxy` and stamps `USER node`. Rootless `podman build --network` cannot join that network, so a build-time `RUN npm/pip/uv` would hit public indexes. Missing sandbox network or missing index URLs fail closed; `ManagerProxy:Mode=upstream` and public hosts (`registry.npmjs.org`, `pypi.org`) are refused. Gateway connector tests do not `GET` the public npm registry from the host. RPM/microdnf and `nodejs.org` tarball fetches stay out of pkgs-proxy. Host/dev pnpm, NuGet, and OCI pulls are not pkgs-proxy traffic.
 
@@ -56,13 +56,16 @@ Runtime platform configuration is stored in SQLite normalized tables. Host boots
 Fresh empty stores receive the current embedded baseline. Non-empty stores must match the current schema exactly and fail otherwise. Removed fields/tables are not maintained for backward compatibility unless an explicit future decision says otherwise.
 
 
-### Opt-in revision 6 integration
+### Container deployment and development launch
 
-The `enhancement/network-access-control-v6` implementation has an opt-in
-`ContainerEgress:Enabled` path described in [the deployment plan](../plans/container-egress.md).
-The default runtime above remains in place while service deployment and updates
-are being migrated. Do not treat the flag as an installation-wide completed
-rollout.
+The container deployment enables `CoreServices:Enabled` and
+`ContainerEgress:Enabled` in `/etc/kautuka/manager.json`, as described in
+[the deployment plan](../plans/container-egress.md). The earlier shared-network
+section records the retained legacy implementation. Current installations and
+the development launcher use the private networks below.
+The Windows `npm run launch` path uses a dedicated Fedora WSL development distro
+with the container deployment enabled. It compiles the services and .NET
+connector bundles with Native AOT; it has no host-process/JIT fallback.
 
 The enabled path uses private core and user-agent networks, native client routes,
 and one Envoy/CoreDNS egress pod. Preloaded connector images and sandbox shell
@@ -72,8 +75,8 @@ Sandbox workspace ownership uses native Podman keep-id for the shipped UID 1000.
 Direct core routes are denied; containers on the same network can communicate
 directly. Only outbound traffic is controlled.
 
-Bundle/language materialization and MCP installation inside an AgentSandbox
-remain blocked until their install containers use the same path. Service
-containerisation, verified container updates and the audit/approval UI are still
-required work on this branch. There is no fallback to the legacy network when
-enabled execution cannot be prepared.
+Bundle/language materialization and MCP installation use the same managed scope
+path. Core service containers, verified container updates and the audit/approval
+UI are implemented. There is no fallback to the legacy network when enabled
+execution cannot be prepared. Local development and production both use Native
+AOT builds. Development retains data between rebuilds.
