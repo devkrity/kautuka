@@ -25,6 +25,10 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
         => Call("GetNetworkAccessPolicy", () => client.GetNetworkAccessPolicyAsync(request,
             headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(30), cancellationToken: cancellationToken).ResponseAsync);
 
+    public Task<RemoteConnectorNetworkResponse> CheckRemoteConnectorNetworkAsync(RemoteConnectorNetworkRequest request, CancellationToken cancellationToken = default)
+        => Call("CheckRemoteConnectorNetwork", () => client.CheckRemoteConnectorNetworkAsync(request,
+            headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(10), cancellationToken: cancellationToken).ResponseAsync);
+
     public Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default)
         => Call("SetNetworkAccessRule", () => client.SetNetworkAccessRuleAsync(request,
             headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(40), cancellationToken: cancellationToken).ResponseAsync);

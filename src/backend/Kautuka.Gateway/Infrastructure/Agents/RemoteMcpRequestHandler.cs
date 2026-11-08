@@ -2,6 +2,7 @@ using System.Text;
 
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Manager.Protos;
 
 namespace Kautuka.Gateway.Infrastructure.Agents;
 
@@ -19,7 +20,11 @@ internal sealed record RemoteMcpRequestContext(
     string? CredentialNamespace = null,
     string? ProtocolVersion = null,
     bool PreferIpv4 = false,
-    bool RequiresCredentialReentry = false);
+    bool RequiresCredentialReentry = false,
+    Func<Uri, string?, CancellationToken, Task<RemoteConnectorNetworkResponse>>? CheckNetwork = null,
+    string? PinnedIpv4 = null,
+    bool LegacyAllowPrivateDestination = false,
+    RemoteMcpNetworkRouteState? NetworkRouteState = null);
 
 internal sealed class RemoteMcpConfigurationException : HttpRequestException
 {
@@ -31,6 +36,10 @@ internal sealed class RemoteMcpConfigurationException : HttpRequestException
 internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, HttpMessageHandler innerHandler) : DelegatingHandler(innerHandler)
 {
     private readonly RemoteMcpOperationLease? lease = context.CreateLease?.Invoke();
+    private readonly RemoteMcpNetworkRouteState networkRouteState = context.NetworkRouteState ?? new(context.LegacyAllowPrivateDestination);
+
+    protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+        => SendAsync(request, cancellationToken).ConfigureAwait(false).GetAwaiter().GetResult();
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -46,6 +55,8 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
             || !string.Equals(destination.IdnHost, context.Endpoint.IdnHost, StringComparison.OrdinalIgnoreCase)
             || destination.Port != context.Endpoint.Port)
             throw new HttpRequestException("Remote MCP destination is outside the authorized origin.");
+
+        await CheckNetworkAsync(destination, cancellationToken).ConfigureAwait(false);
 
         RemoteMcpConfigurationValidator.Validate("http", context.Credentials, context.Headers);
         var needed = context.Headers.Where(h => h.CredentialKey is not null).Select(h => h.CredentialKey!).ToHashSet(StringComparer.Ordinal);
@@ -137,6 +148,45 @@ internal sealed class RemoteMcpRequestHandler(RemoteMcpRequestContext context, H
         {
             foreach (string name in injected) request.Headers.Remove(name);
         }
+    }
+
+    private async Task CheckNetworkAsync(Uri destination, CancellationToken cancellationToken)
+    {
+        if (context.CheckNetwork is null)
+            throw new RemoteMcpConfigurationException("Remote MCP network authorization is unavailable. No request was sent.");
+
+        RemoteConnectorNetworkResponse response;
+        try
+        {
+            response = await context.CheckNetwork(destination, context.PinnedIpv4, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception exception)
+        {
+            throw new RemoteMcpConfigurationException("Remote MCP network authorization is unavailable. No request was sent.", exception);
+        }
+
+        if (!response.Enabled)
+        {
+            if (string.Equals(response.Decision, "allowed", StringComparison.Ordinal))
+            {
+                string? legacyFailure = ProbeNetworkPolicy.GetDestinationFailure(context.Endpoint.AbsoluteUri, context.LegacyAllowPrivateDestination);
+                if (legacyFailure is not null) throw new RemoteMcpConfigurationException(legacyFailure);
+                networkRouteState.Accept(response);
+                return;
+            }
+            throw new RemoteMcpConfigurationException("Remote MCP network authorization is unavailable. No request was sent.");
+        }
+
+        if (!string.Equals(response.Decision, "allowed", StringComparison.Ordinal))
+        {
+            string message = string.IsNullOrWhiteSpace(response.Message)
+                ? "Remote MCP network access is not authorized. No request was sent."
+                : response.Message;
+            throw new RemoteMcpConfigurationException(message);
+        }
+
+        networkRouteState.Accept(response);
     }
 
     private bool HasConfiguredCredential(IReadOnlyDictionary<string, string> resolved)

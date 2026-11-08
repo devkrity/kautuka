@@ -86,10 +86,12 @@ public sealed class NetworkAccessIdentityNamesTests
     private static GatewayMcpServer Connector(string owner) => new("connector", "Mail tools", "", "", null,
         "container", null, null, null, [], null, null, null, null, null, null, null, true, false, "", "", "user", owner);
 
-    [Fact]
-    public void OwnNamesSerializeThroughExistingAotAuditContextWithoutChangingIdentity()
+    [Theory]
+    [InlineData("connector")]
+    [InlineData("remote-connector")]
+    public void OwnNamesSerializeThroughExistingAotAuditContextWithoutChangingIdentity(string role)
     {
-        NetworkAccessIdentityMessage scoped = identity.Clone(); scoped.ComponentId = "owner::connector";
+        NetworkAccessIdentityMessage scoped = identity.Clone(); scoped.ComponentId = "owner::connector"; scoped.Role = role;
         NetworkAccessIdentityDto result = GatewayNetworkAccessEndpointMappings.DescribeIdentity(scoped, caller, Agent("owner"), Connector("owner"), caller);
         var page = new NetworkAuditPageDto([new(1, "event", "", "", result, "container", "", "example.com", 443,
             "denied", false, true, 0, 0, 0)], 0, 0, 0, null);

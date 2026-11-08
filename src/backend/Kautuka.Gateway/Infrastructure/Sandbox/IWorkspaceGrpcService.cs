@@ -19,6 +19,8 @@ internal interface IManagerGrpcService
         => Task.FromException<NetworkAuditResponse>(new NotSupportedException());
     Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
         => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
+    Task<RemoteConnectorNetworkResponse> CheckRemoteConnectorNetworkAsync(RemoteConnectorNetworkRequest request, CancellationToken cancellationToken = default)
+        => Task.FromException<RemoteConnectorNetworkResponse>(new NotSupportedException());
     Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default)
         => Task.FromException<NetworkAccessPolicyResponse>(new NotSupportedException());
     Task<NetworkAccessPolicyResponse> DecideNetworkAccessRequestAsync(NetworkAccessDecisionRequest request, CancellationToken cancellationToken = default)

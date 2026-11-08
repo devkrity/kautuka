@@ -347,7 +347,25 @@ describe('NetworkAccessPage', () => {
     );
   });
 
-  it('explains that Gateway permission is shared with remote HTTP connectors', async () => {
+  it('labels remote management requests as connector setup with friendly names', async () => {
+    const data = fixture();
+    data.requests[0].identity = {
+      scopeType: 'management',
+      userId: 'owner',
+      agentId: 'management',
+      role: 'remote-connector',
+      componentId: 'owner::mail',
+      displayName: 'Mail tools',
+      userName: 'alice',
+    };
+    mockView(data);
+    renderPage();
+    expect(await screen.findByText('Mail tools')).toBeInTheDocument();
+    expect(screen.getByText('Connector setup · alice')).toBeInTheDocument();
+    expect(screen.queryByText('Agent management · alice')).not.toBeInTheDocument();
+  });
+
+  it('explains shared Gateway scope and separate remote connector permission', async () => {
     const data = fixture();
     data.requests[0].identity = {
       scopeType: 'core',
@@ -362,6 +380,9 @@ describe('NetworkAccessPage', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Allow' }));
     expect(screen.getByText(/This is a shared service permission/)).toHaveTextContent(
       'not a per-agent grant'
+    );
+    expect(screen.getByText(/This is a shared service permission/)).toHaveTextContent(
+      'also need permission for their caller and connector'
     );
     expect(post).not.toHaveBeenCalled();
   });

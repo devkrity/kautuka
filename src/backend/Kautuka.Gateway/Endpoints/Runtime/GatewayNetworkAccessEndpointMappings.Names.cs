@@ -35,7 +35,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                 .Take(2).ToArray();
             if (matches.Length == 1) agent = matches[0];
         }
-        if (value.Role is "connector" or "materializer") catalog?.TryGetMcpServer(ConnectorCatalogId(value), out connector);
+        if (value.Role is "connector" or "materializer" or "remote-connector") catalog?.TryGetMcpServer(ConnectorCatalogId(value), out connector);
         if (GatewayOwnershipAccess.IsAdmin(caller) || value.UserId == caller.Id) users?.TryGetUserById(value.UserId, out owner);
         return DescribeIdentity(value, caller, agent, connector, owner);
     }
@@ -51,7 +51,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
         string? displayName = value.Role switch
         {
             "materializer" when value.ScopeType == "core" && value.ComponentId == "image-acquisition" => "Container image downloads",
-            "connector" or "materializer" => connectorName,
+            "connector" or "materializer" or "remote-connector" => connectorName,
             "agent" => agentName,
             "core" when value.ScopeType == "core" => value.ComponentId switch
             {

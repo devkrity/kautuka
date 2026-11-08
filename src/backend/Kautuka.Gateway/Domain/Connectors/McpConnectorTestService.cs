@@ -52,10 +52,6 @@ internal sealed class McpConnectorTestService(
         if (!Uri.TryCreate(httpUrl, UriKind.Absolute, out Uri? uri))
             return new McpConnectorTestResult(false, "Connector destination is invalid.");
 
-        string? policyFailure = ProbeNetworkPolicy.GetDestinationFailure(httpUrl, request.AllowPrivateDestination);
-        if (policyFailure is not null)
-            return new McpConnectorTestResult(false, policyFailure);
-
         try
         {
             var transportOptions = new HttpClientTransportOptions { Endpoint = uri, Name = "probe" };

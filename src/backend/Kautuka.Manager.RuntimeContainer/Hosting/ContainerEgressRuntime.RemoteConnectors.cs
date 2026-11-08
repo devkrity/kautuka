@@ -9,7 +9,7 @@ using Kautuka.Manager.RuntimeContainer.Configuration;
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal sealed record RemoteConnectorPermission(NetworkAccessIdentity Identity, string Destination, int Port, bool AllowPrivateNetwork);
-public sealed record RemoteConnectorNetworkDecision(bool Enabled, string Decision, string Message, string RouteBinding = "");
+public sealed record RemoteConnectorNetworkDecision(bool Enabled, string Decision, string Message, string RouteBinding = "", bool AllowPrivateNetwork = false);
 
 public sealed partial class ContainerEgressRuntime
 {
@@ -57,16 +57,20 @@ public sealed partial class ContainerEgressRuntime
             || !identity.ComponentId.StartsWith(actor.UserId + "::", StringComparison.Ordinal))
             throw new UnauthorizedAccessException("A remote connector must use the authenticated caller's own scoped identity.");
         if (scheme is not ("http" or "https")) throw new ArgumentException("Remote connectors require HTTP or HTTPS.");
+        if (port is < 1 or > 65535 || string.IsNullOrWhiteSpace(hostname) || hostname.Length > 253 || hostname.Any(char.IsControl))
+            throw new ArgumentException("A bounded endpoint hostname and valid port are required.");
+        // Preserve legacy SSRF/address-family validation in Gateway when NAC is off.
+        if (!Enabled) return new(false, "allowed", "Network access control is disabled.");
         string host = EnvoyEgressConfiguration.Normalize(new("192.0.2.1", hostname, port)).Destination;
         bool literal = IPAddress.TryParse(host, out IPAddress? hostIp);
         IPAddress? pin = null;
         if (!string.IsNullOrEmpty(pinnedIpv4) && (!IPAddress.TryParse(pinnedIpv4, out pin) || pin.AddressFamily != AddressFamily.InterNetwork))
             throw new ArgumentException("A transport pin must be an IPv4 address.");
-        if (scheme == "http" && !literal && pin is null) throw new ArgumentException("An HTTP hostname requires a transport-pinned IPv4 address.");
         if (literal && pin is not null && !hostIp!.Equals(pin)) throw new ArgumentException("A literal endpoint cannot use a different transport address.");
         if (ProtectedRemoteAddress(host) || (pin is not null && ProtectedRemoteAddress(pin.ToString())))
             return new(Enabled, "blocked", "Cloud metadata and platform control destinations cannot be approved.");
-        if (!Enabled) return new(false, "allowed", "Network access control is disabled.");
+        if (scheme == "http" && !literal && pin is null)
+            return new(true, "pin_required", "An HTTP hostname requires a transport-pinned IPv4 address before authorization.");
 
         EgressAuthorizationState? state = Volatile.Read(ref authorization);
         if (!Volatile.Read(ref ready) || recoveryRequiresProxyStop || state?.Current is not { } current
@@ -88,6 +92,8 @@ public sealed partial class ContainerEgressRuntime
             networkPolicy.ObserveDenied(identity, host, port, DateTimeOffset.UtcNow);
             return new(true, "missing_permission", "Network access needs approval for this connector and caller. Approve it in Network access, then retry.");
         }
+        if (pin is not null && NetworkDestinationPolicy.IsNonPublic(pin.ToString()) && !permission.AllowPrivateNetwork)
+            return new(true, "private_route_conflict", "The selected destination is on a local or special-purpose network. An administrator must explicitly approve local-network access for this connector and Gateway.");
         if (route is null)
             return new(true, "outer_route_required", scheme == "http" && !literal
                 ? $"The connector is approved, but plain HTTP needs an administrator-approved Gateway IP route to {pin}:{port}. The hostname rule cannot route traffic without TLS SNI."
@@ -99,7 +105,7 @@ public sealed partial class ContainerEgressRuntime
         string binding = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0',
             identity.ScopeType, identity.UserId, identity.AgentId, identity.ComponentId, host, port.ToString(CultureInfo.InvariantCulture),
             source, gatewayAllocation, route.Destination, route.AllowPrivateNetwork ? "private" : "public"))));
-        return new(true, "allowed", string.Empty, binding);
+        return new(true, "allowed", string.Empty, binding, permission.AllowPrivateNetwork);
     }
 
     private static bool RepresentsDesiredRemotePolicy(EgressAuthorizationState state, long revision)

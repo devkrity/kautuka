@@ -4,6 +4,7 @@ using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Manager.Protos;
 
 namespace Kautuka.IntegrationTests;
 
@@ -228,6 +229,98 @@ public sealed class RemoteMcpRequestHandlerTests
         Assert.Contains("[redacted]", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void NetworkDenialRunsBeforeCredentialResolutionAndSynchronousSendCannotBypassIt()
+    {
+        int resolutions = 0;
+        var inner = new RecordingHandler();
+        var context = CreateContext((_, _) =>
+        {
+            resolutions++;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+        }) with
+        {
+            CheckNetwork = (_, _, _) => Task.FromResult(new RemoteConnectorNetworkResponse
+            {
+                Enabled = true,
+                Decision = "blocked",
+                Message = "This connector is blocked by network policy.",
+            }),
+        };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var request = new HttpRequestMessage(HttpMethod.Get, context.Endpoint);
+        RemoteMcpConfigurationException error = Assert.Throws<RemoteMcpConfigurationException>(
+            () => client.Send(request, TestContext.Current.CancellationToken));
+        Assert.Contains("blocked by network policy", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, resolutions);
+        Assert.Equal(0, inner.Sends);
+    }
+
+    [Fact]
+    public async Task RouteBindingChangeBlocksPooledSendAfterPrivateToPublicDowngrade()
+    {
+        int checks = 0;
+        int resolutions = 0;
+        var inner = new RecordingHandler();
+        var context = CreateContext((_, _) =>
+        {
+            resolutions++;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+        }) with
+        {
+            CheckNetwork = (_, _, _) => Task.FromResult(new RemoteConnectorNetworkResponse
+            {
+                Enabled = true,
+                Decision = "allowed",
+                RouteBinding = Interlocked.Increment(ref checks) == 1 ? "private-route-binding" : "public-route-binding",
+                AllowPrivateNetwork = checks == 1,
+            }),
+        };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using HttpResponseMessage first = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
+        RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
+            () => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
+        Assert.Contains("permissions changed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, resolutions);
+        Assert.Equal(1, inner.Sends);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task AuthorizationModeChangeBlocksPooledSend(bool initiallyEnabled, bool subsequentlyEnabled)
+    {
+        int checks = 0;
+        int resolutions = 0;
+        var inner = new RecordingHandler();
+        var context = CreateContext((_, _) =>
+        {
+            resolutions++;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
+        }) with
+        {
+            CheckNetwork = (_, _, _) =>
+            {
+                bool enabled = Interlocked.Increment(ref checks) == 1 ? initiallyEnabled : subsequentlyEnabled;
+                return Task.FromResult(new RemoteConnectorNetworkResponse
+                {
+                    Enabled = enabled,
+                    Decision = "allowed",
+                    RouteBinding = enabled ? "stable-route-binding" : string.Empty,
+                });
+            },
+        };
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+
+        using HttpResponseMessage first = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
+        RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
+            () => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
+
+        Assert.Contains("mode changed", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, resolutions);
+        Assert.Equal(1, inner.Sends);
+    }
+
     private sealed class EchoHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -281,7 +374,14 @@ public sealed class RemoteMcpRequestHandlerTests
 
     private static RemoteMcpRequestContext CreateContext(Func<IReadOnlyList<string>, CancellationToken, Task<IReadOnlyDictionary<string, string>>> resolve)
         => new(new Uri("https://example.com/mcp"), "one", "user", false,
-            [new("api-key", "API key", false)], [new("X-Mode", "free"), new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")], resolve, CredentialNamespace: "namespace-one");
+            [new("api-key", "API key", false)], [new("X-Mode", "free"), new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")], resolve,
+            CredentialNamespace: "namespace-one",
+            CheckNetwork: (_, _, _) => Task.FromResult(new RemoteConnectorNetworkResponse
+            {
+                Enabled = true,
+                Decision = "allowed",
+                RouteBinding = "test-route-binding",
+            }));
 
     private sealed class RecordingHandler : HttpMessageHandler
     {

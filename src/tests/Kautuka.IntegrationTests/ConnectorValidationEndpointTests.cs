@@ -185,6 +185,15 @@ public sealed class ConnectorValidationEndpointTests
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
         Assert.Null(captured.TestEnv);
         Assert.NotNull(captured.RemoteContext);
+        Assert.NotNull(captured.RemoteContext.CheckNetwork);
+        _ = await captured.RemoteContext.CheckNetwork(captured.RemoteContext.Endpoint, null, TestContext.Current.CancellationToken);
+        RemoteConnectorNetworkRequest networkRequest = Assert.IsType<FakeManagerGrpcService>(fixture.Manager).LastRemoteConnectorNetworkRequest!;
+        Assert.Equal(fixture.AdminUserId(), networkRequest.Actor.UserId);
+        Assert.Equal(networkRequest.Actor.UserId, networkRequest.Identity.UserId);
+        Assert.Equal("management", networkRequest.Identity.ScopeType);
+        Assert.Equal("management", networkRequest.Identity.AgentId);
+        Assert.Equal("remote-connector", networkRequest.Identity.Role);
+        Assert.Equal(fixture.AdminUserId() + "::homeassistant-mcp", networkRequest.Identity.ComponentId);
         string key = fixture.RemoteCredentialKey("homeassistant-mcp", "https://ha.example.com/api/mcp", "MCP_AUTH_TOKEN");
         IReadOnlyDictionary<string, string> resolved = await captured.RemoteContext.Resolve([key], TestContext.Current.CancellationToken);
         Assert.Equal("saved-token", resolved[key]);
@@ -889,6 +898,14 @@ public sealed class ConnectorValidationEndpointTests
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequest();
         Assert.Null(captured.TestEnv);
         Assert.NotNull(captured.RemoteContext);
+        Assert.NotNull(captured.RemoteContext.CheckNetwork);
+        _ = await captured.RemoteContext.CheckNetwork(captured.RemoteContext.Endpoint, null, TestContext.Current.CancellationToken);
+        RemoteConnectorNetworkRequest networkRequest = Assert.IsType<FakeManagerGrpcService>(fixture.Manager).LastRemoteConnectorNetworkRequest!;
+        Assert.Equal("management", networkRequest.Identity.ScopeType);
+        Assert.Equal(networkRequest.Actor.UserId, networkRequest.Identity.UserId);
+        Assert.Equal("management", networkRequest.Identity.AgentId);
+        Assert.Equal("remote-connector", networkRequest.Identity.Role);
+        Assert.Equal(fixture.AdminUserId() + "::new-draft", networkRequest.Identity.ComponentId);
         string storageKey = ConnectorCredentialKeys.BuildRemoteCredentialKey(captured.RemoteContext.CredentialNamespace!, captured.RemoteContext.Endpoint, "key");
         IReadOnlyDictionary<string, string> resolved = await captured.RemoteContext.Resolve([storageKey], TestContext.Current.CancellationToken);
         Assert.Equal("synthetic-secret", resolved[storageKey]);
@@ -1785,6 +1802,7 @@ public sealed class ConnectorValidationEndpointTests
         public HttpClient Client { get; }
         public ConcurrentQueue<string> AuditMessages { get; }
         public FakeCredentialsServiceClient Credentials { get; }
+        public IManagerGrpcService Manager => app.Services.GetRequiredService<IManagerGrpcService>();
 
         public string ConnectorUpdatedAt(string id) => app.Services.GetRequiredService<GatewayState>().McpServers[id].UpdatedAt;
         public void MarkConnectorLegacy(string id)
@@ -2177,6 +2195,13 @@ public sealed class ConnectorValidationEndpointTests
         WorkspaceMcpProbeResponse? containerProbeResponse = null) : IManagerGrpcService
     {
         public ConcurrentQueue<WorkspaceMcpContainerProbeRequest> ContainerProbeRequests { get; } = new();
+        public RemoteConnectorNetworkRequest? LastRemoteConnectorNetworkRequest { get; private set; }
+
+        public Task<RemoteConnectorNetworkResponse> CheckRemoteConnectorNetworkAsync(RemoteConnectorNetworkRequest request, CancellationToken cancellationToken = default)
+        {
+            LastRemoteConnectorNetworkRequest = request;
+            return Task.FromResult(new RemoteConnectorNetworkResponse { Enabled = false, Decision = "allowed" });
+        }
 
         public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new WorkspaceBoolResponse { Ok = true });

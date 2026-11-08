@@ -49,6 +49,45 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
     }
 
     [Fact]
+    public void CanonicalManagementIdentityPassesActualManagerValidation()
+    {
+        NetworkAccessIdentity management = subject with { ScopeType = "management", AgentId = "management" };
+        using var fixture = new Fixture([Grant(management)], [new(source, host, 443)]);
+        RemoteConnectorNetworkDecision allowed = fixture.Runtime.CheckRemoteConnectorNetwork(new("owner", false), management, "https", host, 443);
+        Assert.Equal("allowed", allowed.Decision);
+        Assert.Throws<ArgumentException>(() => fixture.Runtime.CheckRemoteConnectorNetwork(new("owner", false), management with { AgentId = "" }, "https", host, 443));
+    }
+
+    [Fact]
+    public void PublicLogicalHostnameCannotUseANonpublicTransportPin()
+    {
+        using var fixture = new Fixture([Grant(subject)], [new(source, host, 443)]);
+        RemoteConnectorNetworkDecision denied = fixture.Check("https", "192.168.1.12");
+        Assert.Equal("private_route_conflict", denied.Decision);
+        Assert.False(denied.AllowPrivateNetwork);
+        Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+        using var privateApproved = new Fixture([Grant(subject, true)], [new(source, host, 443, true)]);
+        RemoteConnectorNetworkDecision allowed = privateApproved.Check("https", "192.168.1.12");
+        Assert.Equal("allowed", allowed.Decision);
+        Assert.True(allowed.AllowPrivateNetwork);
+    }
+
+    [Theory]
+    [InlineData("mcp.example.com")]
+    [InlineData("2606:4700:4700::1111")]
+    [InlineData("127.0.0.1")]
+    public void DisabledModeLeavesLegacyAddressValidationToGateway(string endpointHost)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-remote-disabled-" + Guid.NewGuid().ToString("N"));
+        using var runtime = new ContainerEgressRuntime(new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Disabled mode must not start Podman.")),
+            new ContainerEgressOptions(), RuntimeImageAllowlist.Empty, root);
+        RemoteConnectorNetworkDecision decision = runtime.CheckRemoteConnectorNetwork(new("owner", false), subject, "http", endpointHost, 443);
+        Assert.False(decision.Enabled);
+        Assert.Equal("allowed", decision.Decision);
+        Assert.False(Directory.Exists(root));
+    }
+
+    [Fact]
     public void ExplicitLogicalBlockDoesNotCreateAnApproval()
     {
         using var fixture = new Fixture([], [new(source, host, 443)], store => store.SetRule(new("owner", false), subject, host, 443, false, 0));
@@ -92,7 +131,7 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
     public void PlainHttpHostnameRequiresItsPinnedLiteralOuterRoute()
     {
         using var fixture = new Fixture([Grant(subject)], [new(source, host, 443)]);
-        Assert.Throws<ArgumentException>(() => fixture.Check("http"));
+        Assert.Equal("pin_required", fixture.Check("http").Decision);
         Assert.Equal("outer_route_required", fixture.Check("http", "93.184.216.34").Decision);
         fixture.Accept([new(source, "93.184.216.34", 443)]);
         Assert.Equal("allowed", fixture.Check("http", "93.184.216.34").Decision);

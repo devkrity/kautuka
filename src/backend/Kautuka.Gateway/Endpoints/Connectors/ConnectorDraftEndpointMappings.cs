@@ -64,10 +64,6 @@ internal static class ConnectorDraftEndpointMappings
             bool personalCandidate = !canManage && existing is not null;
             if (!Authorized(user, existing, candidate, body.CredentialScope, personalCandidate)) return Forbidden();
             if (body.CredentialScope == "system" && personal) return Forbidden();
-            string? destinationFailure = !GatewayOwnershipAccess.IsAdmin(user) && (existing is null || existing.Scope == GatewayOwnershipScopes.User || personal)
-                ? ProbeNetworkPolicy.GetDestinationFailure(effectiveEndpoint.AbsoluteUri, allowPrivate: false)
-                : null;
-            if (destinationFailure is not null) return BadRequest(destinationFailure);
             string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, candidate.Scope);
             if (body.CredentialScope == "system" && (existing is not null ? existing.Scope != GatewayOwnershipScopes.System : scope != GatewayOwnershipScopes.System)) return Forbidden();
             bool changedDestination = existing is not null && !string.Equals(baseEndpoint?.AbsoluteUri, effectiveEndpoint.AbsoluteUri, StringComparison.Ordinal);
@@ -121,7 +117,7 @@ internal static class ConnectorDraftEndpointMappings
             catch (InvalidOperationException ex) { return BadRequest(ex.Message); }
         });
 
-        app.MapPost("/api/connectors/drafts/{draftId}/test", async (string draftId, HttpContext context, IGatewayAuthGuard auth, IGatewayCatalogStore catalog, CredentialResolverService resolver, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, IMcpConnectorTestService testService, CancellationToken ct) =>
+        app.MapPost("/api/connectors/drafts/{draftId}/test", async (string draftId, HttpContext context, IGatewayAuthGuard auth, IGatewayCatalogStore catalog, CredentialResolverService resolver, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, IManagerGrpcService manager, IMcpConnectorTestService testService, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null) return Results.Unauthorized();
             try
@@ -167,7 +163,10 @@ internal static class ConnectorDraftEndpointMappings
                         lease.ScheduleExpiry(DateTimeOffset.FromUnixTimeSeconds(draft.ExpiresAtUnixSeconds));
                         return lease;
                     }, draft.CredentialNamespace, candidate.McpProtocolVersion,
-                    PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase));
+                    PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
+                    CheckNetwork: RemoteMcpNetworkAuthorization.CreateCheck(manager, user.Id, GatewayOwnershipAccess.IsAdmin(user),
+                        RemoteMcpNetworkAuthorization.CreateIdentity("management", user.Id, RemoteMcpNetworkAuthorization.ManagementAgentId, draft.ConnectorId)),
+                    LegacyAllowPrivateDestination: allowPrivate);
                 McpConnectorTestResult result = await testService.TestAsync(new GatewayConnectorTestRequest
                 {
                     Id = draft.ConnectorId,

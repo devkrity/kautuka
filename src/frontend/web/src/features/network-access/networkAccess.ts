@@ -250,6 +250,7 @@ export const identityName = (identity: NetworkIdentity): string =>
   coreNames[identity.componentId] ||
   {
     connector: 'Connector',
+    'remote-connector': 'Remote connector',
     sandbox: 'Agent sandbox',
     package: 'Package downloads',
     skill: 'Skill',
@@ -258,6 +259,8 @@ export const identityName = (identity: NetworkIdentity): string =>
 export const identityContext = (identity: NetworkIdentity): string =>
   identity.scopeType === 'core'
     ? 'Shared Kautuka service'
-    : `${identity.agentName || `Agent ${identity.agentId}`} · ${identity.userName || identity.userId}`;
+    : identity.scopeType === 'management'
+      ? `Connector setup · ${identity.userName || identity.userId}`
+      : `${identity.agentName || `Agent ${identity.agentId}`} · ${identity.userName || identity.userId}`;
 export const identityLabel = (identity: NetworkIdentity): string =>
   `${identityName(identity)} · ${identityContext(identity)}`;

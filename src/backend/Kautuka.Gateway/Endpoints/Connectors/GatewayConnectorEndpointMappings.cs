@@ -10,7 +10,7 @@ internal static class GatewayConnectorEndpointMappings
 {
     public static WebApplication MapGatewayConnectorEndpoints(this WebApplication app)
     {
-        app.MapPost("/api/connectors/test", async (IMcpConnectorTestService testService, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, IGatewayCatalogStore catalog, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        app.MapPost("/api/connectors/test", async (IMcpConnectorTestService testService, IManagerGrpcService manager, RemoteMcpCredentialRevisionTracker revisions, IGatewayUserStore users, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, IGatewayCatalogStore catalog, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
@@ -43,11 +43,6 @@ internal static class GatewayConnectorEndpointMappings
             else if (!CanImportConnectors(user))
             {
                 return Results.Json(new GatewayErrorResponse("Forbidden."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
-            }
-            else if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase)
-                && ProbeNetworkPolicy.GetDestinationFailure(request.HttpUrl, GatewayOwnershipAccess.IsAdmin(user)) is string destinationFailure)
-            {
-                return Results.Json(new GatewayErrorResponse(destinationFailure), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
             else if (IsUntrustedBundlePath(user, database, request.BundlePath))
             {
@@ -122,7 +117,10 @@ internal static class GatewayConnectorEndpointMappings
                         (keys, token) => credentialResolver.ResolveRemoteAsync(saved?.CredentialAssociationId, saved?.Id ?? string.Empty, saved?.CredentialNamespace, user.Id, keys, includeSystem, token), RevalidateAsync,
                         () => revisions.Acquire(saved?.Id ?? revisionKey, user.Id, agentId: null, includeSystem), saved?.CredentialNamespace, request.McpProtocolVersion,
                         PreferIpv4: endpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
-                        RequiresCredentialReentry: saved?.RequiresCredentialReentry == true),
+                        RequiresCredentialReentry: saved?.RequiresCredentialReentry == true,
+                        CheckNetwork: RemoteMcpNetworkAuthorization.CreateCheck(manager, user.Id, GatewayOwnershipAccess.IsAdmin(user),
+                            RemoteMcpNetworkAuthorization.CreateIdentity("management", user.Id, RemoteMcpNetworkAuthorization.ManagementAgentId, saved?.Id ?? request.Id ?? "connector-test")),
+                        LegacyAllowPrivateDestination: allowPrivate),
                 };
             }
             else

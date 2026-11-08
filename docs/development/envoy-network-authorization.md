@@ -168,16 +168,34 @@ fallback for HTTPS hostnames.
 
 An allowed response carries an opaque binding to the exact subject, destination,
 Gateway source/container allocation, selected route and private privilege.
-Gateway integration must bind its transport to the first successful value and
-reject a later mismatch before resolving credentials or sending a pooled
-request. An unrelated policy generation does not change this binding.
+Gateway binds its transport to the first successful value and rejects a later
+mismatch before resolving authentication credentials or sending a pooled request.
+An unrelated policy generation does not change this binding. A transport also
+binds its initial enabled/disabled NAC mode; a mode change requires reconnecting.
 
-The Manager boundary has focused regression coverage. Gateway request-handler
-integration, including initialization, discovery, invocation, connection tests,
-immutable HTTP transport pins and pooled downgrade rejection, remains a separate
-checkpoint. This is trusted Gateway application authorization, not a separate
-packet identity for each remote connector. Existing active streaming responses
-are outside the per-send revocation boundary.
+The Gateway handler checks every synchronous or asynchronous send, covering
+initialization, discovery and invocation through the shared HTTP transport.
+Saved and draft connection tests use the explicit management identity; agent
+calls use their canonical workspace identity. Authentication credentials are
+resolved only after permission succeeds. Endpoint-override ownership checks
+remain independent. In disabled mode the legacy SSRF/address-family behavior
+remains authoritative; enabled HTTP hostname calls first obtain an immutable
+IPv4 pin. Redirects remain disabled and all received 3xx responses are rejected.
+
+The Native AOT rootless fixture ran the actual Gateway factory, handler and MCP
+SDK inside a registered core source, calling the actual Manager RPC over a
+restricted HTTP/2 Unix socket. Missing permission caused zero credential
+resolution and zero sink traffic. Logical LAN approval alone still required the
+shared Gateway route; after explicit core approval an ordinary caller completed
+MCP initialization and tools/list with its expected credential header. Another
+agent was denied; management identity passed actual validation; revocation
+stopped the pooled client's next request without new sink traffic. The fixture
+did not exercise tools/call, full application startup or production mTLS. Unit
+and endpoint tests cover the shared send path and all three identity builders.
+
+This is trusted Gateway application authorization, not a separate packet identity
+for each remote connector. Existing active streaming responses remain outside
+the per-send revocation boundary.
 
 
 ## Collector credentials and exporter transport

@@ -74,24 +74,40 @@ internal static class ProbeNetworkPolicy
             UseProxy = false,
             UseCookies = false,
             AllowAutoRedirect = false,
-            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4, cancellationToken),
+            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4, null, null, null, cancellationToken),
         };
 
-    public static SocketsHttpHandler CreateRuntimeHandler(bool allowPrivate, bool preferIpv4 = false)
+    public static SocketsHttpHandler CreateRuntimeHandler(bool allowPrivate, bool preferIpv4 = false,
+        Uri? pinnedEndpoint = null, IPAddress? pinnedIpv4 = null, Func<bool>? allowPrivateResolver = null)
         => new()
         {
             UseProxy = false,
             UseCookies = false,
             AllowAutoRedirect = false,
-            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4, cancellationToken),
+            ConnectCallback = (context, cancellationToken) => ConnectAsync(context, allowPrivate, preferIpv4,
+                pinnedEndpoint, pinnedIpv4, allowPrivateResolver, cancellationToken),
         };
 
     private static async ValueTask<Stream> ConnectAsync(
         SocketsHttpConnectionContext context,
         bool allowPrivate,
         bool preferIpv4,
+        Uri? pinnedEndpoint,
+        IPAddress? pinnedIpv4,
+        Func<bool>? allowPrivateResolver,
         CancellationToken cancellationToken)
     {
+        bool mayUsePrivate = allowPrivateResolver?.Invoke() ?? allowPrivate;
+        if (pinnedIpv4 is not null)
+        {
+            if (pinnedIpv4.AddressFamily != AddressFamily.InterNetwork || pinnedEndpoint is null
+                || context.DnsEndPoint.Port != pinnedEndpoint.Port
+                || !context.DnsEndPoint.Host.Equals(pinnedEndpoint.IdnHost, StringComparison.OrdinalIgnoreCase)
+                || SelectAddress([pinnedIpv4], mayUsePrivate, preferIpv4: true) is null)
+                throw new HttpRequestException("The remote MCP destination changed after its IPv4 route was authorized.");
+            return await ConnectSocketAsync(pinnedIpv4, context.DnsEndPoint.Port, cancellationToken).ConfigureAwait(false);
+        }
+
         IPAddress[] addresses;
         try
         {
@@ -102,17 +118,22 @@ internal static class ProbeNetworkPolicy
             throw new HttpRequestException("The remote MCP address could not be found.", ex);
         }
 
-        IPAddress? chosen = SelectAddress(addresses, allowPrivate, preferIpv4);
+        IPAddress? chosen = SelectAddress(addresses, mayUsePrivate, preferIpv4);
 
         if (chosen is null)
         {
             throw new HttpRequestException("This destination isn't allowed by connector network policy.");
         }
 
-        Socket? socket = new(chosen.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        return await ConnectSocketAsync(chosen, context.DnsEndPoint.Port, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<Stream> ConnectSocketAsync(IPAddress address, int port, CancellationToken cancellationToken)
+    {
+        Socket? socket = new(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            await socket.ConnectAsync(new IPEndPoint(chosen, context.DnsEndPoint.Port), cancellationToken).ConfigureAwait(false);
+            await socket.ConnectAsync(new IPEndPoint(address, port), cancellationToken).ConfigureAwait(false);
             Stream stream = new NetworkStream(socket, ownsSocket: true);
             socket = null;
             return stream;

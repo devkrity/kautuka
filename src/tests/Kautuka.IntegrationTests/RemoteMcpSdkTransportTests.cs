@@ -9,6 +9,8 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 
+using Kautuka.Manager.Protos;
+
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -22,7 +24,8 @@ public sealed class RemoteMcpSdkTransportTests
     public async Task SdkInitializeDiscoveryInvocationAndTerminationUsePrivatePerSendInjectionAndScreening(string? protocolVersion)
     {
         const string secret = "synthetic-sdk-credential";
-        var requests = new ConcurrentQueue<(string Method, string? Authorization)>();
+        var requests = new ConcurrentQueue<(string Method, string? Authorization, string Host)>();
+        var networkChecks = new ConcurrentQueue<string?>();
         var cookies = new ConcurrentQueue<string>();
         string? initializedVersion = null;
         var builder = WebApplication.CreateSlimBuilder();
@@ -30,7 +33,7 @@ public sealed class RemoteMcpSdkTransportTests
         await using WebApplication app = builder.Build();
         app.MapMethods("/mcp", ["GET", "POST", "DELETE"], async (HttpContext http) =>
         {
-            requests.Enqueue((http.Request.Method, http.Request.Headers.Authorization));
+            requests.Enqueue((http.Request.Method, http.Request.Headers.Authorization, http.Request.Host.ToString()));
             cookies.Enqueue(http.Request.Headers.Cookie.ToString());
             if (http.Request.Method == "DELETE") { http.Response.StatusCode = 204; return; }
             if (http.Request.Method == "GET") { http.Response.StatusCode = 405; return; }
@@ -69,7 +72,8 @@ public sealed class RemoteMcpSdkTransportTests
         });
         await app.StartAsync(TestContext.Current.CancellationToken);
         string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
-        var endpoint = new Uri(address + "/mcp");
+        int port = new Uri(address).Port;
+        var endpoint = new Uri($"http://localhost:{port}/mcp");
         int resolutions = 0;
         var context = new RemoteMcpRequestContext(endpoint, "fixture", "owner", false,
             [new RemoteMcpCredential("key", "API key", true)],
@@ -78,7 +82,21 @@ public sealed class RemoteMcpSdkTransportTests
             {
                 Interlocked.Increment(ref resolutions);
                 return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [Assert.Single(keys)] = secret });
-            }, CredentialNamespace: "fixture-incarnation", ProtocolVersion: protocolVersion);
+            }, CredentialNamespace: "fixture-incarnation", ProtocolVersion: protocolVersion,
+            CheckNetwork: (_, pinnedIpv4, _) =>
+            {
+                networkChecks.Enqueue(pinnedIpv4);
+                if (pinnedIpv4 is null)
+                    return Task.FromResult(new RemoteConnectorNetworkResponse { Enabled = true, Decision = "pin_required" });
+                Assert.True(IPAddress.TryParse(pinnedIpv4, out IPAddress? address) && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                return Task.FromResult(new RemoteConnectorNetworkResponse
+                {
+                    Enabled = true,
+                    Decision = "allowed",
+                    RouteBinding = "sdk-http-pinned-route",
+                    AllowPrivateNetwork = true,
+                });
+            });
         await using (McpClient client = await new McpHttpClientFactory().CreateAsync(new HttpClientTransportOptions { Endpoint = endpoint }, true, context, TestContext.Current.CancellationToken))
         {
             IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: TestContext.Current.CancellationToken);
@@ -89,8 +107,13 @@ public sealed class RemoteMcpSdkTransportTests
         Assert.True(requests.Count >= 4);
         Assert.Contains(requests, request => request.Method == "DELETE");
         Assert.All(requests, request => Assert.Equal("Bearer " + secret, request.Authorization));
+        Assert.All(requests, request => Assert.StartsWith("localhost:", request.Host, StringComparison.Ordinal));
         Assert.All(cookies, cookie => Assert.Empty(cookie));
         Assert.Equal(requests.Count, resolutions);
+        Assert.Equal(requests.Count + 1, networkChecks.Count);
+        Assert.Null(networkChecks.First());
+        Assert.All(networkChecks.Skip(1), pin => Assert.True(IPAddress.TryParse(pin, out IPAddress? address)
+            && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork));
         if (protocolVersion is not null) Assert.Equal(protocolVersion, initializedVersion);
         await app.StopAsync(TestContext.Current.CancellationToken);
     }

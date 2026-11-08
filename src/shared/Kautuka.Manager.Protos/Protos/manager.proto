@@ -41,7 +41,7 @@ message RemoteConnectorNetworkRequest {
   string scheme = 3; string hostname = 4; int32 port = 5; string pinned_ipv4 = 6;
 }
 message RemoteConnectorNetworkResponse {
-  bool enabled = 1; string decision = 2; string message = 3; string route_binding = 4;
+  bool enabled = 1; string decision = 2; string message = 3; string route_binding = 4; bool allow_private_network = 5;
 }
 message NetworkAccessRuleMessage {
   string id = 1; NetworkAccessIdentityMessage identity = 2;

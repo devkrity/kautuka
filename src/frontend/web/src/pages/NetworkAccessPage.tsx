@@ -371,7 +371,8 @@ export function NetworkAccessPage() {
                           {request.identity.scopeType === 'core' && (
                             <p className="text-sm">
                               This is a shared service permission. Calls made through that service
-                              share its access; this is not a per-agent grant.
+                              share its access; this is not a per-agent grant. Remote HTTP connectors
+                              also need permission for their caller and connector.
                             </p>
                           )}
                           <p className="text-sm text-muted-foreground">
@@ -493,8 +494,9 @@ export function NetworkAccessPage() {
                       Control future connections for a specific component and destination.
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Container connectors have scoped permissions. Remote HTTP connectors share
-                      Gateway's permissions.
+                      Container and remote HTTP connectors have scoped permissions. Remote HTTP
+                      calls also need a compatible shared Gateway route; a connector approval
+                      does not grant Gateway local-network access.
                     </p>
                   </div>
                   <Button onClick={() => edit()} disabled={busy}>

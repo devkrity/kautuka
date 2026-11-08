@@ -995,10 +995,19 @@ public sealed class McpAgentToolProviderTests
         var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
         var revisions = new RemoteMcpCredentialRevisionTracker();
         var factory = new CapturingMcpHttpClientFactory();
-        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(), new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance, credentialRevisions: revisions);
-        _ = await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), CancellationToken.None);
+        var manager = new CapturingWorkspaceGrpcService();
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, manager, new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance, credentialRevisions: revisions);
+        AgentToolContext toolContext = CreateContainerToolContext(agent, "user-1");
+        _ = await provider.BuildToolsAsync(toolContext, CancellationToken.None);
         RemoteMcpRequestContext captured = Assert.IsType<RemoteMcpRequestContext>(factory.LastContext);
         Assert.NotNull(captured.Revalidate);
+        Assert.NotNull(captured.CheckNetwork);
+        _ = await captured.CheckNetwork(captured.Endpoint, null, CancellationToken.None);
+        Assert.Equal("user-1", manager.LastRemoteConnectorNetworkRequest!.Actor.UserId);
+        Assert.Equal("agent", manager.LastRemoteConnectorNetworkRequest.Identity.ScopeType);
+        Assert.Equal(toolContext.WorkspaceBinding.ScopeId, manager.LastRemoteConnectorNetworkRequest.Identity.AgentId);
+        Assert.Equal("remote-connector", manager.LastRemoteConnectorNetworkRequest.Identity.Role);
+        Assert.Equal("user-1::remote", manager.LastRemoteConnectorNetworkRequest.Identity.ComponentId);
         await captured.Revalidate(CancellationToken.None);
         revisions.BeginChange("remote", "user:user-1");
         await Assert.ThrowsAnyAsync<Exception>(() => captured.Revalidate(CancellationToken.None));
@@ -1637,6 +1646,7 @@ public sealed class McpAgentToolProviderTests
 
     private sealed class CapturingWorkspaceGrpcService : IManagerGrpcService
     {
+        public RemoteConnectorNetworkRequest? LastRemoteConnectorNetworkRequest { get; private set; }
         public bool ListToolsWasCalled { get; private set; }
         public int ListToolsCallCount { get; private set; }
         public bool SucceedListTools { get; init; }
@@ -1647,6 +1657,12 @@ public sealed class McpAgentToolProviderTests
         public TaskCompletionSource ListToolsStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource ListToolsRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public WorkspaceMcpContainerCallRequest? LastListToolsRequest { get; private set; }
+
+        public Task<RemoteConnectorNetworkResponse> CheckRemoteConnectorNetworkAsync(RemoteConnectorNetworkRequest request, CancellationToken cancellationToken = default)
+        {
+            LastRemoteConnectorNetworkRequest = request;
+            return Task.FromResult(new RemoteConnectorNetworkResponse { Enabled = false, Decision = "allowed" });
+        }
 
         public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();

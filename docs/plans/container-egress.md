@@ -38,7 +38,8 @@ operational-default and usability work, not a reason to replace the enforcement 
 - **UI:** requests, permissions and activity are separate views. Authorized catalog
   names identify components and agents; raw identities remain available in details.
   Allow requires review of the exact destination and scope. Core-service approvals
-  describe their shared scope, including remote HTTP connectors called by Gateway.
+  describe their shared outer route. Remote HTTP connectors additionally require
+  their own caller/agent/connector permission before every request.
   Name enrichment does not expand catalog visibility or affect authoritative IDs.
 - **Approval delivery:** stock Envoy network authorization now records missing
   permissions directly in Manager before Deny; outcome logs do not create requests.
@@ -1451,3 +1452,60 @@ rollback cannot be confirmed, the Network access page reports that DNS needs
 attention; an administrator can inspect the detailed error. Explicit
 `DnsUpstreams` remain authoritative when `FollowHostDns` is false. A legacy
 unmarked DNS configuration is not automatically converted to host-follow mode.
+
+
+## Bounded review correction acceptance, 9 November 2026
+
+The review corrections retain the Podman/Envoy/Linux design. Prepared UV launches
+use their installed environment without synchronization; interactive connection
+tests fit the 280/295/300-second inner/Manager/WebHost budget. Direct denials
+create the first durable request before returning; repeated pending observations
+are cheap, bounded and independent of outcome-log ingestion. Operational auth
+faults are distinct from policy denials. Accepted/candidate source ownership,
+allocation and exact route privileges remain generation-bound.
+
+Remote HTTP MCP requests now check the existing scoped policy before resolving
+authentication credentials or sending. Public logical grants contribute only a
+public Gateway route union; private access requires both explicit logical and
+core approval. Pooled transports retain route and NAC-mode bindings. Setup tests
+use canonical management identities; the UI uses connector names and setup labels.
+HTTP hostname pins require a compatible literal Gateway route; HTTPS private
+hostnames require a compatible explicit core hostname route. Active streaming
+responses are not cancelled by the per-send check.
+
+Collector vendor telemetry is disabled, root credentials are private per install,
+and applications receive ingestion-only authorization through a read-only file.
+Manager and UpdateService share the fixed host socket/auth-file configuration.
+Both synchronous and asynchronous exporter sends enforce it. Data-preserving
+uninstall retains the credential tree with collector metadata; automatic
+migration/reinstall over retained application state remains unsupported.
+
+Observed rootless Native AOT evidence includes 500 pending retries plus 500
+allowed connections without rewriting durable policy, and 390 continuous
+connections during an 81.5-second scope/rule mutation. The actual Gateway HTTP
+factory/handler and MCP SDK completed initialization/tools-list after logical
+and core approval; missing permission caused no credential lookup or sink
+traffic, another agent was denied, and revocation stopped the next pooled send.
+This SDK fixture used real Manager HTTP/2 UDS RPC, not production mTLS, and did
+not call tools/call or launch the complete application.
+
+CoreDNS/nftables tests exercised post-acknowledgement failure, failed rollback
+acknowledgement, reconciliation and fresh-process recovery without restarting
+Envoy/DNS. A rejected pool-overlapping resolver no longer poisons a later
+boundary update. Controlled resolver inputs exercised the live transition;
+host-file/systemd discovery was tested separately.
+
+The explicit-pool uninterrupted capacity attempt failed after 17 agents when
+a Podman inspection exceeded ten seconds. Its separately recorded continuation
+reached 20 agents plus core and management, rejected a 23rd private scope, and
+passed approved/denied traffic checks. A fresh Manager recovered the retained
+22-scope topology in 299.6 seconds with about 47 preparation-helper creations.
+It then refused an injected unknown inspection without disrupting an existing
+allowed flow or changing Envoy/DNS PIDs. This was a fresh Manager against a
+running pod, not a host reboot or cold pod start. These loaded-host timings are
+material availability observations, not performance guarantees.
+
+The actual Manager and UpdateService executables also published as Native AOT
+ELF binaries with the pinned 10.0.403 SDK. No production deployment or merge was
+performed. Physical LAN, separate bare-metal Linux, future Mac deployment and
+every abrupt-power-loss boundary were not established by these fixtures.

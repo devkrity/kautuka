@@ -16,7 +16,7 @@ public sealed partial class WorkspaceGrpcService
         {
             RemoteConnectorNetworkDecision decision = NetworkRuntime.CheckRemoteConnectorNetwork(Actor(request.Actor), Identity(request.Identity),
                 request.Scheme, request.Hostname, request.Port, request.PinnedIpv4);
-            return Task.FromResult(new RemoteConnectorNetworkResponse { Enabled = decision.Enabled, Decision = decision.Decision, Message = decision.Message, RouteBinding = decision.RouteBinding });
+            return Task.FromResult(new RemoteConnectorNetworkResponse { Enabled = decision.Enabled, Decision = decision.Decision, Message = decision.Message, RouteBinding = decision.RouteBinding, AllowPrivateNetwork = decision.AllowPrivateNetwork });
         }
         catch (UnauthorizedAccessException) { throw new RpcException(new Status(StatusCode.PermissionDenied, "The remote connector scope is not accessible to this caller.")); }
         catch (ArgumentException ex) { throw new RpcException(new Status(StatusCode.InvalidArgument, ex.Message)); }

@@ -205,7 +205,11 @@ internal sealed partial class McpAgentToolProvider
             (keys, token) => credentialResolver.ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId ?? string.Empty, keys, includeSystem, token), RevalidateAsync,
             () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion,
             PreferIpv4: approvedEndpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
-            RequiresCredentialReentry: serverDef.RequiresCredentialReentry);
+            RequiresCredentialReentry: serverDef.RequiresCredentialReentry,
+            CheckNetwork: RemoteMcpNetworkAuthorization.CreateCheck(workspaceGrpcService, userId ?? string.Empty,
+                IsAdminUser(userId ?? string.Empty), RemoteMcpNetworkAuthorization.CreateIdentity("agent", userId ?? string.Empty,
+                    toolContext.WorkspaceBinding.ScopeId, serverDef.Id)),
+            LegacyAllowPrivateDestination: allowPrivateDestination);
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 
