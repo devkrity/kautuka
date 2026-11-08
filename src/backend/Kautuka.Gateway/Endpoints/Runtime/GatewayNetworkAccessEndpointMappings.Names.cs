@@ -50,6 +50,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
         string? userName = owner?.Id == value.UserId && (admin || owner.Id == caller.Id) ? owner.Username : null;
         string? displayName = value.Role switch
         {
+            "materializer" when value.ScopeType == "core" && value.ComponentId == "image-acquisition" => "Container image downloads",
             "connector" or "materializer" => connectorName,
             "agent" => agentName,
             "core" when value.ScopeType == "core" => value.ComponentId switch

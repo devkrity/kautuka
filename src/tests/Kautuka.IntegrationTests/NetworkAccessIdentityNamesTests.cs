@@ -144,5 +144,14 @@ public sealed class NetworkAccessIdentityNamesTests
         Assert.Null(result.AgentName);
         result = GatewayNetworkAccessEndpointMappings.DescribeIdentity(new() { ScopeType = "core", UserId = "system", Role = "core", ComponentId = "gateway" }, admin, null, null, null);
         Assert.Equal("Gateway", result.DisplayName);
+        result = GatewayNetworkAccessEndpointMappings.DescribeIdentity(new()
+        {
+            ScopeType = "core",
+            UserId = "system",
+            AgentId = "management",
+            Role = "materializer",
+            ComponentId = "image-acquisition",
+        }, admin, null, null, null);
+        Assert.Equal("Container image downloads", result.DisplayName);
     }
 }

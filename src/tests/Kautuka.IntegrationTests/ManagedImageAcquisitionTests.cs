@@ -3,8 +3,10 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 
 namespace Kautuka.IntegrationTests;
 
-public sealed class ManagedImageAcquisitionTests
+public sealed class ManagedImageAcquisitionTests : IDisposable
 {
+    private readonly string root = Path.Combine(Path.GetTempPath(), "managed-image-acquisition-" + Guid.NewGuid().ToString("N"));
+    public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
     private static readonly string source = "quay.io/example/connector@sha256:" + new string('a', 64);
     private static readonly string config = "sha256:" + new string('b', 64);
 
@@ -27,7 +29,7 @@ public sealed class ManagedImageAcquisitionTests
             return new PodmanCommandResult(0, args[1] == "inspect"
                 ? "[{\"Id\":\"" + config[7..] + "\",\"Os\":\"linux\",\"Architecture\":\"" + architecture + "\"}]" : "", "");
         });
-        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
         Task<ResolvedRuntimeImage> pending = runtime.ResolveRuntimeImageAsync(source, TestContext.Current.CancellationToken);
         try
         {
@@ -59,7 +61,7 @@ public sealed class ManagedImageAcquisitionTests
         RuntimeImageAllowlist inventory = signedArchive
             ? new(1, [new("fixture", source, "missing.oci", new string('0', 64), "linux/amd64", config)])
             : RuntimeImageAllowlist.Empty;
-        using var runtime = new ContainerEgressRuntime(runner, options, inventory, Path.GetTempPath());
+        using var runtime = new ContainerEgressRuntime(runner, options, inventory, root);
         InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.ResolveCachedRuntimeImageAsync(source, TestContext.Current.CancellationToken));
         Assert.Contains("background preparation", error.Message, StringComparison.Ordinal);
         Assert.Single(calls);
@@ -75,7 +77,7 @@ public sealed class ManagedImageAcquisitionTests
             calls.Add([.. args]);
             return Task.FromResult(new PodmanCommandResult(1, "", ""));
         });
-        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
         await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.ResolveRuntimeImageAsync(source, TestContext.Current.CancellationToken));
         Assert.Single(calls);
         Assert.Equal(new[] { "image", "exists", source }, calls[0]);
@@ -94,7 +96,7 @@ public sealed class ManagedImageAcquisitionTests
             return Task.FromResult(new PodmanCommandResult(0, args[1] == "inspect"
                 ? "[{\"Id\":\"" + config[7..] + "\",\"Os\":\"linux\",\"Architecture\":\"" + (wrongPlatform ? "unsupported" : platform) + "\"}]" : "", ""));
         });
-        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
         if (wrongPlatform) await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.ResolveRuntimeImageAsync(source, TestContext.Current.CancellationToken));
         else
         {
@@ -115,7 +117,7 @@ public sealed class ManagedImageAcquisitionTests
             calls++;
             return Task.FromResult(new PodmanCommandResult(124, "", "timeout", ProcessTerminationReason.TimedOut));
         });
-        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, Path.GetTempPath());
+        using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
         await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.ResolveRuntimeImageAsync(source, TestContext.Current.CancellationToken));
         Assert.Equal(1, calls);
     }

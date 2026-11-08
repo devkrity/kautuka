@@ -75,6 +75,17 @@ supervisor. The standalone update verification command also hosts it for its
 verification lifetime while normal Manager is stopped. The stop-only maintenance
 command does not start the endpoint or bootstrap networking.
 
+Container image acquisition checks the effective persisted policy, including UI
+decisions and explicit Blocks, before starting its restricted helper. A missing
+registry grant creates a durable core-scoped request labelled **Container image
+downloads**. Approving a registry does not implicitly approve a redirected blob
+host. Those destinations receive their own direct authorization requests. Helper
+failure diagnostics show at most five pending endpoints observed for acquisition
+during that attempt, without reading Envoy logs or claiming every helper failure
+is a network-policy failure. The acquisition gate serializes downloads, but a
+late check from a previous helper can overlap this diagnostic time window.
+No registry or redirect failure permits a direct host pull.
+
 ## Validation boundaries
 
 The integration tests cover generated filter ordering and delayed TCP connection

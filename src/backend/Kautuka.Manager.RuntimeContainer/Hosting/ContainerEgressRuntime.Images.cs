@@ -58,9 +58,7 @@ public sealed partial class ContainerEgressRuntime
             if (!allowPreparation)
                 throw new InvalidOperationException("The runtime image is not ready; background preparation must finish before execution.");
             Uri registry = new("https://" + sourceReference[..sourceReference.IndexOf('/', StringComparison.Ordinal)]);
-            if (!options.Grants.Any(grant => grant.ScopeType == "core" && grant.UserId == "system" && grant.AgentId == "management"
-                && grant.Role == "materializer" && grant.ComponentId == "image-acquisition" && grant.Destination == registry.Host && grant.Port == registry.Port))
-                throw new InvalidOperationException("Registry acquisition is blocked until its exact registry endpoint is approved.");
+            RequireRegistryApproval(registry.Host, registry.Port);
             await EnsureReadyAsync(ct).ConfigureAwait(false);
             ResolvedRuntimeImage helper = await RequireCachedImageAsync("image-acquisition", ct).ConfigureAwait(false);
             if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Image acquisition requires the Linux appliance.");
@@ -102,6 +100,7 @@ public sealed partial class ContainerEgressRuntime
         string name = "kautuka-image-acquisition-" + Guid.NewGuid().ToString("N");
         PreparedPodmanContainer? prepared = null;
         Exception? failure = null;
+        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
         try
         {
             prepared = await PrepareAndAuthorizeAsync(acquisitionIdentity, name, (network, dns) =>
@@ -121,7 +120,7 @@ public sealed partial class ContainerEgressRuntime
             PodmanCommandResult waited = await runner.RunAsync(["wait", prepared.Id], metadata ? 60 : 600, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             if (waited.ExitCode != 0 || !int.TryParse(waited.StdOut.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int exit) || exit != 0)
-                throw new InvalidOperationException("The restricted image acquisition helper failed; no direct pull is permitted.");
+                throw new InvalidOperationException(DescribeImageAcquisitionFailure(startedAt));
         }
         catch (Exception error) { failure = error; throw; }
         finally
@@ -131,6 +130,41 @@ public sealed partial class ContainerEgressRuntime
                 await RetireImageHelperAsync(prepared.Id, failure).ConfigureAwait(false);
                 confirmRetired();
             }
+        }
+    }
+
+    private static NetworkAccessIdentity AcquisitionPolicyIdentity => new(acquisitionIdentity.Scope.Kind,
+        acquisitionIdentity.Scope.UserId, acquisitionIdentity.Scope.AgentId, acquisitionIdentity.Role, acquisitionIdentity.ComponentId);
+
+    internal void RequireRegistryApproval(string host, int port)
+    {
+        EgressTcpRule target = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", host, port));
+        if (NetworkDestinationPolicy.IsMetadata(target.Destination) || target.Destination == NetworkDestinationPolicy.PlatformControlAddress
+            || target.Destination == NetworkDestinationPolicy.PrivateSourceAddress)
+            throw new InvalidOperationException("Protected metadata, platform-control and reserved proxy destinations cannot be used as image registries.");
+        NetworkAccessIdentity identity = AcquisitionPolicyIdentity;
+        if (networkPolicy.EffectiveGrants(options.Grants).Any(grant => NetworkAccessPolicyStore.Identity(grant) == identity
+            && grant.Port == target.Port && string.Equals(grant.Destination.TrimEnd('.'), target.Destination, StringComparison.OrdinalIgnoreCase)
+            && (grant.AllowPrivateNetwork || !NetworkDestinationPolicy.IsNonPublic(target.Destination)))) return;
+        networkPolicy.ObserveDenied(identity, target.Destination, target.Port, DateTimeOffset.UtcNow);
+        throw new InvalidOperationException($"Network policy blocks container image downloads from {target.Destination}:{target.Port}. Review this endpoint in Network access, then retry the download.");
+    }
+
+    internal string DescribeImageAcquisitionFailure(DateTimeOffset startedAt)
+    {
+        const string failure = "The restricted image acquisition helper failed; no direct pull is permitted.";
+        try
+        {
+            string[] requested = [.. networkPolicy.Read(new("system", true)).Requests
+                .Where(request => request.Identity == AcquisitionPolicyIdentity && request.Status == "pending" && request.LastSeenAt >= startedAt)
+                .OrderBy(request => request.Destination, StringComparer.Ordinal).ThenBy(request => request.Port)
+                .Take(5).Select(request => request.Destination + ":" + request.Port.ToString(CultureInfo.InvariantCulture))];
+            return requested.Length == 0 ? failure : failure + " Network permissions requested during this attempt: "
+                + string.Join(", ", requested) + ". Review Network access before retrying; other acquisition errors may also apply.";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return failure; // Diagnostics must not hide the original helper failure.
         }
     }
 
