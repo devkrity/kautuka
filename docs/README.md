@@ -31,6 +31,7 @@ Read these in order:
 20. [Maintainer process](operations/maintainers.md) — issue triage, dependency updates, and release handling.
 21. [Support policy](../SUPPORT.md) — supported Stable baseline and best-effort Preview policy.
 22. [Remote MCP configuration](operations/remote-mcp-configuration-spec.md) — connector setup, credential handling, transport security, and acceptance requirements.
+23. [Envoy network authorization](development/envoy-network-authorization.md) — direct approval delivery, preserved routing boundaries and validation limits.
 
 ## Authority map
 

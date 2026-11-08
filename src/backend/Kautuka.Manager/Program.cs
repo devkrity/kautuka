@@ -86,6 +86,7 @@ builder.Services.AddOptions<ManagerContainerStartupOptions>()
     .Bind(builder.Configuration.GetSection(ManagerContainerStartupOptions.Section));
 builder.Services.AddHttpClient("manager.sidecars");
 builder.Services.AddSingleton<IHostedService, WorkspaceSidecarAssetStagingService>();
+builder.Services.AddHostedService<EnvoyAuthorizationHost>();
 builder.Services.AddHostedService<NetworkAuditWorker>();
 builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSupervisorWorker(
     sp.GetRequiredService<WorkspaceDesiredStateStore>(),

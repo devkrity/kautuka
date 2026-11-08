@@ -18,7 +18,7 @@ internal sealed record NetworkAuditState(int SchemaVersion, long Sequence, long 
 {
     public string? LastLogLineId { get; init; }
 }
-internal sealed record NetworkAuditBatch(IReadOnlyList<NetworkDeniedObservation> Denials, int ParsedLines, bool Changed, string? LastLineId);
+internal sealed record NetworkAuditBatch(int ParsedLines, bool Changed, string? LastLineId);
 
 /// <summary>Bounded observations of stock proxy logs. It is independent of admission and never resumes a tool.</summary>
 internal sealed class NetworkAccessAuditStore(string root)
@@ -94,7 +94,6 @@ internal sealed class NetworkAccessAuditStore(string root)
             var events = current.Events.ToDictionary(item => item.Id, StringComparer.Ordinal);
             var seen = current.ObservedLines.ToHashSet(StringComparer.Ordinal);
             var orderedSeen = current.ObservedLines.ToList();
-            var denials = new List<NetworkDeniedObservation>();
             long sequence = current.Sequence;
             long unattributed = current.UnattributedConnections;
             int parsed = 0;
@@ -145,23 +144,18 @@ internal sealed class NetworkAccessAuditStore(string root)
                         port = authority.Port;
                     }
                     bool denied = Text(value, "filter_chain") == "deny" && phase == "listener"
+                        || Text(value, "response_flags").Split(',').Contains("UAEX", StringComparer.Ordinal)
                         || phase == "host-artifact" && Number(value, "status") == 403;
                     bool connected = phase == "proxy" && Text(value, "event_type") == "TcpUpstreamConnected";
                     bool closed = phase == "listener" || Text(value, "event_type") is "TcpConnectionEnd" or "DownstreamEnd";
                     string outcome = denied ? "denied" : connected ? "connected" : closed ? "closed" : "diagnostic";
                     DateTimeOffset startedAt = DateTimeOffset.TryParse(Text(value, "timestamp"), CultureInfo.InvariantCulture,
                         DateTimeStyles.AssumeUniversal, out DateTimeOffset time) ? time : observedAt;
-                    bool validDestination = false;
                     try
                     {
                         destination = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", destination, port)).Destination;
-                        validDestination = true;
                     }
                     catch (ArgumentException) { destination = destination.Length > 253 ? destination[..253] : destination; }
-                    if (denied && phase == "listener" && correlated && validDestination && allocation is not null)
-                        denials.Add(new(allocation.Identity, destination, port, observedAt, id));
-                    // Replay still supplies the denial to the idempotent policy
-                    // writer if audit persistence succeeded before a crash.
                     if (!seen.Add(rawId)) continue;
                     orderedSeen.Add(rawId);
                     events.TryGetValue(id, out NetworkAuditEvent? prior);
@@ -186,7 +180,7 @@ internal sealed class NetworkAccessAuditStore(string root)
                     UnattributedConnections = unattributed,
                     CoverageGaps = checked(current.CoverageGaps + (coverageGap ? 1 : 0))
                 });
-            return new(denials, parsed, changed, lastLineId);
+            return new(parsed, changed, lastLineId);
         }
     }
 

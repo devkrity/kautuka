@@ -7,6 +7,7 @@ using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Endpoints.Runtime;
+using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Protos;
 
 using Microsoft.AspNetCore.Builder;
@@ -16,7 +17,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Kautuka.IntegrationTests;
 
-public sealed class GatewayNetworkAccessEndpointTests
+public sealed partial class GatewayNetworkAccessEndpointTests
 {
     [Fact]
     public async Task AuditUsesAuthenticatedOwnerAndBoundedPaging()
@@ -120,7 +121,7 @@ public sealed class GatewayNetworkAccessEndpointTests
         else { Assert.True(manager.Rule!.AllowPrivateNetwork); Assert.False(manager.Rule.Rule.AllowPrivateNetwork); }
     }
 
-    private static async Task<WebApplication> CreateAsync(RecordingManager manager, Guard guard)
+    private static async Task<WebApplication> CreateAsync(IManagerGrpcService manager, Guard guard)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -133,18 +134,18 @@ public sealed class GatewayNetworkAccessEndpointTests
         return app;
     }
 
-    private sealed class Guard(bool authenticated = true, bool admin = false) : IGatewayAuthGuard
+    private sealed class Guard(bool authenticated = true, bool admin = false, string userId = "owner") : IGatewayAuthGuard
     {
         public bool TryAuthorize(HttpContext context, out GatewayUser? user)
         {
-            user = authenticated ? new GatewayUser("owner", "tester", "unused", admin ? "admin" : "user", true, null, null) : null;
+            user = authenticated ? new GatewayUser(userId, "tester", "unused", admin ? "admin" : "user", true, null, null) : null;
             return authenticated;
         }
         public IResult? RequireAuthenticated(HttpContext context, out GatewayUser? user) => TryAuthorize(context, out user) ? null : Results.Unauthorized();
         public IResult? RequireAdmin(HttpContext context, out GatewayUser? user) => TryAuthorize(context, out user) && admin ? null : Results.StatusCode(403);
     }
 
-    private sealed class RecordingManager : IManagerGrpcService
+    private sealed class RecordingManager(WorkspaceGrpcService? workspace = null) : IManagerGrpcService
     {
         public NetworkAccessActorMessage? Actor { get; private set; }
         public NetworkAccessDecisionRequest? Decision { get; private set; }
@@ -163,12 +164,17 @@ public sealed class GatewayNetworkAccessEndpointTests
             return Error is { } status ? Task.FromException<NetworkAccessPolicyResponse>(new RpcException(new Status(status, "test response")))
                 : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active" });
         }
-        public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default) => Result(request.Actor);
+        public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
+        {
+            Actor = request.Actor;
+            return workspace is null ? Result(request.Actor) : workspace.GetNetworkAccessPolicy(request, ManagerCallContext.Instance);
+        }
         public Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default) { Rule = request; return Result(request.Actor); }
         public Task<NetworkAccessPolicyResponse> DecideNetworkAccessRequestAsync(NetworkAccessDecisionRequest request, CancellationToken cancellationToken = default)
         {
             Decision = request;
-            return Result(request.Actor);
+            Actor = request.Actor;
+            return workspace is null ? Result(request.Actor) : workspace.DecideNetworkAccessRequest(request, ManagerCallContext.Instance);
         }
         public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<ManagerStatusResponse> GetHostStatusAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default) => throw new NotSupportedException();

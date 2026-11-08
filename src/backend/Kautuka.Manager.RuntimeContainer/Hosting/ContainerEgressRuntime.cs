@@ -363,6 +363,7 @@ public sealed partial class ContainerEgressRuntime(
             await WriteAsync("cds.json", initial.ClusterDocument, cancellationToken).ConfigureAwait(false);
             await WriteAsync("lds.json", initial.ListenerDocument, cancellationToken).ConfigureAwait(false);
             active = null;
+            Volatile.Write(ref authorization, null);
         }
         string desiredDns = ".:53 {\n forward . " + string.Join(' ', options.DnsUpstreams) + "\n log\n errors\n}\n";
         if (!File.Exists(Path.Combine(configurationRoot, "bootstrap.json")))
@@ -432,7 +433,7 @@ public sealed partial class ContainerEgressRuntime(
             bool legacyDnsUser = isDns && config.GetProperty("User").GetString() == "65532:65532";
             JsonElement binds = host.GetProperty("Binds");
             bool artifactMount = !isDns && (options.ArtifactHosts.Count > 0 || TelemetryEnabled);
-            string[] expectedBinds = artifactMount ? [configurationRoot + ":/egress:ro", artifactSocketRoot + ":/host-artifacts:rw"] : [configurationRoot + ":/egress:ro"];
+            string[] expectedBinds = isDns ? [configurationRoot + ":/egress:ro"] : artifactMount ? [configurationRoot + ":/egress:ro", artifactSocketRoot + ":/host-artifacts:rw", Path.GetDirectoryName(AuthorizationSocketPath)! + ":/manager-authorization:ro"] : [configurationRoot + ":/egress:ro", Path.GetDirectoryName(AuthorizationSocketPath)! + ":/manager-authorization:ro"];
             JsonElement mounts = container.GetProperty("Mounts");
             bool mountsMatch = mounts.ValueKind == JsonValueKind.Array && mounts.GetArrayLength() == expectedBinds.Length
                 && expectedBinds.All(expected =>
@@ -458,7 +459,7 @@ public sealed partial class ContainerEgressRuntime(
                 || binds.ValueKind != JsonValueKind.Array || binds.GetArrayLength() != expectedBinds.Length
                 || !expectedBinds.All(expected => binds.EnumerateArray().Any(bind => bind.GetString() == expected || (bind.GetString()?.StartsWith(expected + ",", StringComparison.Ordinal) ?? false)))
                 || !mountsMatch
-                || !(artifactMount ? groups.SequenceEqual(new[] { "0" }) : groups.Length == 0))
+                || !(!isDns ? groups.SequenceEqual(new[] { "0" }) : groups.Length == 0))
                 throw new InvalidOperationException("Existing egress service does not match its managed pod, image and security specification.");
             bool running = container.GetProperty("State").GetProperty("Running").GetBoolean();
             if (legacyDnsUser)
@@ -496,7 +497,8 @@ public sealed partial class ContainerEgressRuntime(
         else
         {
             args.AddRange(["--log-driver=k8s-file", "--log-opt=max-size=16mb"]);
-            if ((options.ArtifactHosts.Count > 0 || TelemetryEnabled)) args.AddRange(["--group-add=0", "--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
+            args.AddRange(["--group-add=0", "--volume", Path.GetDirectoryName(AuthorizationSocketPath)! + ":/manager-authorization:ro"]);
+            if ((options.ArtifactHosts.Count > 0 || TelemetryEnabled)) args.AddRange(["--volume", artifactSocketRoot + ":/host-artifacts:rw"]);
         }
         args.Add(image);
         args.AddRange(isDns ? ["-conf", "/egress/Corefile"] : ["-c", "/egress/bootstrap.json", "--concurrency", "1"]);
@@ -670,6 +672,7 @@ public sealed partial class ContainerEgressRuntime(
 
     private async Task StopProxyAsync(CancellationToken cancellationToken)
     {
+        Volatile.Write(ref authorization, null);
         if (!await ExistsAsync(["container", "exists", "kautuka-egress-envoy"], cancellationToken).ConfigureAwait(false)) return;
         _ = await runner.RunAsync(["stop", "--time", "1", "kautuka-egress-envoy"], 15, cancellationToken).ConfigureAwait(false);
         using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", "kautuka-egress-envoy"], cancellationToken).ConfigureAwait(false)).StdOut);
@@ -687,6 +690,7 @@ public sealed partial class ContainerEgressRuntime(
         {
             ready = false;
             active = null;
+            Volatile.Write(ref authorization, null);
             string? json = await PodmanContainerInspector.ReadAsync(runner, "kautuka-egress-envoy", cancellationToken).ConfigureAwait(false);
             if (json is null) return;
             using JsonDocument document = JsonDocument.Parse(json);
@@ -756,10 +760,10 @@ public sealed partial class ContainerEgressRuntime(
             Role = package.Identity.Role, ComponentId = package.Identity.ComponentId, Destination = host, Port = 443,
         })];
         IReadOnlyList<ContainerEgressGrant> grants = networkPolicy.EffectiveGrants(policyDefaults);
-        IEnumerable<EgressTcpRule> rules = authorized.SelectMany(source => grants
+        EgressTcpRule[] rules = [.. authorized.SelectMany(source => grants
             .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
                 && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
-            .Select(grant => new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port, grant.AllowPrivateNetwork)));
+            .Select(grant => EnvoyEgressConfiguration.Normalize(new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port, grant.AllowPrivateNetwork)))).Distinct().OrderBy(rule => rule.SourceAddress, StringComparer.Ordinal).ThenBy(rule => rule.Destination, StringComparer.Ordinal).ThenBy(rule => rule.Port).ThenBy(rule => rule.AllowPrivateNetwork)];
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
         Source? collector = TelemetryEnabled ? authorized.SingleOrDefault(static source => IsTelemetrySource(source.Identity)) : null;
@@ -769,7 +773,17 @@ public sealed partial class ContainerEgressRuntime(
         string allocationVersion = networkAudit.RecordAllocations(sources.Values.Select(source => new NetworkAccessAllocation(
             source.Container.Address, source.Container.Id, new NetworkAccessIdentity(source.Identity.Scope.Kind, source.Identity.Scope.UserId,
                 source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId))));
-        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled, NetworkDestinationPolicy.PrivateSourceAddress);
+        var identities = authorized.OrderBy(source => source.Container.Address, StringComparer.Ordinal).ToDictionary(source => source.Container.Address,
+            source => new NetworkAccessIdentity(source.Identity.Scope.Kind, source.Identity.Scope.UserId, source.Identity.Scope.AgentId, source.Identity.Role, source.Identity.ComponentId), StringComparer.Ordinal);
+        var generationData = new JsonObject
+        {
+            ["allocation"] = allocationVersion,
+            ["sources"] = new JsonArray([.. identities.Select(pair => (JsonNode)new JsonArray(pair.Key, pair.Value.ScopeType, pair.Value.UserId, pair.Value.AgentId, pair.Value.Role, pair.Value.ComponentId))]),
+            ["rules"] = new JsonArray([.. rules.Select(rule => (JsonNode)new JsonArray(rule.SourceAddress, rule.Destination, rule.Port, rule.AllowPrivateNetwork))])
+        };
+        string generation = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(generationData.ToJsonString())));
+        var snapshot = new EgressAuthorizationSnapshot(generation, identities, rules);
+        return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled, NetworkDestinationPolicy.PrivateSourceAddress, generation) with { AuthorizationSnapshot = snapshot };
     }
 
     private async Task<EnvoyEgressConfiguration> ReadActiveConfigurationAsync(CancellationToken cancellationToken)
@@ -805,6 +819,7 @@ public sealed partial class ContainerEgressRuntime(
         {
             await ActivateAsync(next, previous, cancellationToken).ConfigureAwait(false);
             active = next;
+            Volatile.Write(ref authorization, next.AuthorizationSnapshot);
             Interlocked.Exchange(ref activePolicyRevision, networkPolicy.Revision);
             policyActivationError = null;
         }
@@ -816,6 +831,7 @@ public sealed partial class ContainerEgressRuntime(
                 catch (Exception recoveryError)
                 {
                     ready = false;
+                    Volatile.Write(ref authorization, null);
                     recoveryRequiresProxyStop = true;
                     try { await StopProxyAsync(CancellationToken.None).ConfigureAwait(false); }
                     catch (Exception stopError) { throw new AggregateException("Egress policy activation, recovery and proxy shutdown failed.", activationError, recoveryError, stopError); }

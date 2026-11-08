@@ -19,12 +19,13 @@ internal sealed record EgressPackageRoute(string SourceAddress, string ProxyAddr
 internal sealed record EnvoyEgressConfiguration(
     string Version, string ClusterDocument, string ListenerDocument, IReadOnlyList<string> ClusterNames)
 {
+    internal EgressAuthorizationSnapshot? AuthorizationSnapshot { get; init; }
     internal const string ListenerName = "transparent";
     internal const string ArtifactListenerName = "host-artifacts";
     private const string metadataNamespace = "kautuka.egress";
 
     internal static EnvoyEgressConfiguration Compile(IEnumerable<EgressTcpRule> rules, string? externalSourceAddress = null, IEnumerable<EgressPackageRoute>? packageRoutes = null, IEnumerable<string>? artifactHosts = null,
-        string? allocationVersion = null, EgressTelemetryTarget? telemetry = null, bool telemetryEnabled = false, string? privateSourceAddress = null)
+        string? allocationVersion = null, EgressTelemetryTarget? telemetry = null, bool telemetryEnabled = false, string? privateSourceAddress = null, string? authorizationGeneration = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         EgressTcpRule[] normalized = [.. rules.Select(Normalize).Distinct()
@@ -119,6 +120,30 @@ internal sealed record EnvoyEgressConfiguration(
             });
         }
 
+        if (authorizationGeneration is not null)
+        {
+            const string authCluster = "manager-authorization";
+            const string denyCluster = "authorization-deny-empty";
+            clusters.Add(JsonNode.Parse("""
+                {"@type":"type.googleapis.com/envoy.config.cluster.v3.Cluster","name":"manager-authorization","type":"STATIC","connect_timeout":"2s","http2_protocol_options":{},"load_assignment":{"cluster_name":"manager-authorization","endpoints":[{"lb_endpoints":[{"endpoint":{"address":{"pipe":{"path":"/manager-authorization/check.sock"}}}}]}]}}
+                """)!);
+            clusters.Add(JsonNode.Parse("""
+                {"@type":"type.googleapis.com/envoy.config.cluster.v3.Cluster","name":"authorization-deny-empty","type":"STATIC","connect_timeout":"2s","load_assignment":{"cluster_name":"authorization-deny-empty","endpoints":[]}}
+                """)!);
+            foreach (string name in new[] { authCluster, denyCluster })
+            {
+                clusterNames.Add(name);
+                SetMarker(clusters.OfType<JsonObject>().Single(cluster => cluster["name"]!.GetValue<string>() == name), name);
+            }
+            foreach (JsonObject chain in chains.OfType<JsonObject>().Where(chain => chain["name"]!.GetValue<string>().StartsWith("upstream-", StringComparison.Ordinal)))
+            {
+                chain["filters"]!.AsArray().Insert(0, AuthorizationFilter(authorizationGeneration));
+                JsonNode proxy = chain["filters"]![1]!["typed_config"]!;
+                proxy["upstream_connect_mode"] = "ON_DOWNSTREAM_DATA";
+                proxy["max_early_data_bytes"] = 8192;
+            }
+        }
+
         var listener = JsonNode.Parse("""
             {
               "@type": "type.googleapis.com/envoy.config.listener.v3.Listener",
@@ -136,6 +161,28 @@ internal sealed record EnvoyEgressConfiguration(
               ] }
             }
             """)!.AsObject();
+        if (authorizationGeneration is not null)
+        {
+            listener["continue_on_listener_filters_timeout"] = false;
+            // Unknown destinations may be observed, but an authorization response can never route them.
+            // Server-first protocols cannot trigger this chain and are unsupported.
+            listener["default_filter_chain"] = new JsonObject
+            {
+                ["filters"] = new JsonArray(
+                AuthorizationFilter(authorizationGeneration), new JsonObject
+                {
+                    ["name"] = "envoy.filters.network.tcp_proxy",
+                    ["typed_config"] = new JsonObject
+                    {
+                        ["@type"] = "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy",
+                        ["stat_prefix"] = "deny",
+                        ["cluster"] = "authorization-deny-empty",
+                        ["upstream_connect_mode"] = "ON_DOWNSTREAM_DATA",
+                        ["max_early_data_bytes"] = 8192
+                    }
+                })
+            };
+        }
         JsonObject deny = listener["default_filter_chain"]!.DeepClone().AsObject();
         deny["name"] = "deny";
         chains.Add((JsonNode)deny);
@@ -153,6 +200,24 @@ internal sealed record EnvoyEgressConfiguration(
         if (artifactListener is not null) { SetMarker(artifactListener, version); listeners.Add((JsonNode)artifactListener); }
         return new EnvoyEgressConfiguration(version, Envelope(version, clusters), Envelope(version, listeners), clusterNames);
     }
+
+    private static JsonObject AuthorizationFilter(string generation) => new()
+    {
+        ["name"] = "envoy.filters.network.ext_authz",
+        ["typed_config"] = new JsonObject
+        {
+            ["@type"] = "type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz",
+            ["stat_prefix"] = "network_access",
+            ["failure_mode_allow"] = false,
+            ["include_tls_session"] = true,
+            ["grpc_service"] = new JsonObject
+            {
+                ["envoy_grpc"] = new JsonObject { ["cluster_name"] = "manager-authorization" },
+                ["timeout"] = "2s",
+                ["initial_metadata"] = new JsonArray(new JsonObject { ["key"] = "x-kautuka-nac-generation", ["value"] = generation })
+            }
+        }
+    };
 
     internal bool ClustersAreActive(JsonElement dump)
     {
@@ -439,6 +504,7 @@ internal sealed record EnvoyEgressConfiguration(
               "timestamp": "%START_TIME%", "event_type": "%ACCESS_LOG_TYPE%", "source": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
               "source_address": "%DOWNSTREAM_REMOTE_ADDRESS%", "destination": "%DOWNSTREAM_LOCAL_ADDRESS%",
               "sni": "%REQUESTED_SERVER_NAME%", "upstream_cluster": "%UPSTREAM_CLUSTER%", "details": "%CONNECTION_TERMINATION_DETAILS%",
+              "response_flags": "%RESPONSE_FLAGS%",
               "filter_chain": "%FILTER_CHAIN_NAME%", "stream_id": "%STREAM_ID%", "connection_id": "%CONNECTION_ID%",
               "connection_started": "%START_TIME(%s.%9f)%",
               "bytes_received": "%BYTES_RECEIVED%", "bytes_sent": "%BYTES_SENT%", "duration_ms": "%DURATION%"

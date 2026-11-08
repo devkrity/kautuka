@@ -9,6 +9,21 @@ namespace Kautuka.IntegrationTests;
 public sealed class NetworkAccessAuditStoreTests : IDisposable
 {
     [Fact]
+    public void AuthorizationDenialOnMatchedRouteIsRecordedAsDenied()
+    {
+        var store = new NetworkAccessAuditStore(AuditRoot);
+        string allocation = Allocate(store);
+        string line = Line(allocation, chain: "upstream-allowed");
+        int separator = line.IndexOf(' ', StringComparison.Ordinal);
+        JsonObject record = JsonNode.Parse(line[(separator + 1)..])!.AsObject();
+        record["response_flags"] = "UAEX";
+        store.Observe(envoy, [line[..(separator + 1)] + record.ToJsonString()], false);
+        NetworkAuditEvent entry = Assert.Single(store.Read(alice, 0, 50, null).Events);
+        Assert.Equal("denied", entry.Outcome);
+        Assert.False(entry.Connected);
+    }
+
+    [Fact]
     public void InternalIngestionDoesNotBecomeExternalArtifactAudit()
     {
         var store = new NetworkAccessAuditStore(AuditRoot);
@@ -54,7 +69,7 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
         File.SetLastWriteTimeUtc(stateFile, old);
         await runtime.CollectNetworkAuditAsync(TestContext.Current.CancellationToken);
         Assert.Equal(old, File.GetLastWriteTimeUtc(stateFile));
-        Assert.Equal(1, Assert.Single(runtime.GetNetworkAccessPolicy(alice).Policy.Requests).Attempts);
+        Assert.Empty(runtime.GetNetworkAccessPolicy(alice).Policy.Requests);
         logs = string.Empty; // The same container's native log was rotated/truncated.
         await runtime.CollectNetworkAuditAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, runtime.GetNetworkAudit(alice).CoverageGaps);
@@ -65,7 +80,7 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
         logs = Line(allocation, 1, second: 3) + "\n";
         await runtime.CollectNetworkAuditAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, runtime.GetNetworkAudit(alice).CoverageGaps);
-        Assert.Equal(2, Assert.Single(runtime.GetNetworkAccessPolicy(alice).Policy.Requests).Attempts);
+        Assert.Empty(runtime.GetNetworkAccessPolicy(alice).Policy.Requests);
     }
 
     private readonly string root = Path.Combine(Path.GetTempPath(), "kautuka-audit-tests-" + Guid.NewGuid().ToString("N"));
@@ -75,7 +90,6 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
     private readonly NetworkAccessIdentity identity = new("agent", "alice", "agent-1", "connector", "alice::mail");
     private const string envoy = "test-envoy-container";
     private string AuditRoot => Path.Combine(root, "audit");
-    private string PolicyPath => Path.Combine(root, "policy", "state.json");
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     private string Allocate(NetworkAccessAuditStore store, NetworkAccessIdentity? owner = null)
         => store.RecordAllocations([new("10.89.1.10", owner is null ? "original-container" : "replacement-container", owner ?? identity)]);
@@ -116,34 +130,17 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
     }
 
     [Fact]
-    public void CrashReplayBetweenAuditRequestAndCursorCommitsDoesNotDoubleCount()
+    public void CrashReplayBeforeCursorCommitDoesNotDuplicateConnectionHistory()
     {
         var audit = new NetworkAccessAuditStore(AuditRoot);
         string allocation = Allocate(audit);
         string line = Line(allocation);
-        NetworkAuditBatch first = audit.Observe(envoy, [line], false);
-        var policy = new NetworkAccessPolicyStore(PolicyPath);
-        policy.ObserveDeniedBatch(first.Denials);
-        // Simulate restart after both writes, before the read cursor was saved.
+        audit.Observe(envoy, [line], false);
+        // Simulate restart after history was written, before the cursor was saved.
         var restarted = new NetworkAccessAuditStore(AuditRoot);
-        NetworkAuditBatch replay = restarted.Observe(envoy, [line], false);
-        var restoredPolicy = new NetworkAccessPolicyStore(PolicyPath);
-        restoredPolicy.ObserveDeniedBatch(replay.Denials);
-        Assert.Equal(1, Assert.Single(restoredPolicy.Read(alice).Requests).Attempts);
+        restarted.Observe(envoy, [line], false);
         Assert.Single(restarted.Read(alice, 0, 50, null).Events);
         Assert.Null(restarted.Checkpoint.Cursor);
-    }
-
-    [Fact]
-    public void AuditOnlyCommitIsReplayedIntoMissingRequestPersistence()
-    {
-        var audit = new NetworkAccessAuditStore(AuditRoot);
-        string allocation = Allocate(audit);
-        audit.Observe(envoy, [Line(allocation)], false);
-        var restarted = new NetworkAccessAuditStore(AuditRoot);
-        var policy = new NetworkAccessPolicyStore(PolicyPath);
-        policy.ObserveDeniedBatch(restarted.Observe(envoy, [Line(allocation)], false).Denials);
-        Assert.Equal("graph.microsoft.com", Assert.Single(policy.Read(alice).Requests).Destination);
     }
 
     [Fact]
@@ -151,13 +148,12 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
     {
         var store = new NetworkAccessAuditStore(AuditRoot);
         string allocation = Allocate(store);
-        NetworkAuditBatch batch = store.Observe(envoy, [
+        store.Observe(envoy, [
             Line(allocation, phase: "proxy", chain: "upstream-allowed", type: "TcpUpstreamConnected"),
             Line(allocation, phase: "proxy", chain: "upstream-allowed", type: "TcpConnectionEnd", second: 3),
             Line(allocation, chain: "upstream-allowed", second: 4),
             Line(allocation, 1, phase: "proxy", chain: "upstream-failed", type: "TcpConnectionEnd", second: 5),
         ], false);
-        Assert.Empty(batch.Denials);
         NetworkAuditEvent connected = Assert.Single(store.Read(alice, 0, 50, null).Events, item => item.Connected);
         Assert.True(connected.Closed);
         Assert.Equal("closed", connected.Outcome);
@@ -172,8 +168,7 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
         string allocation = Allocate(store);
         File.WriteAllText(Path.Combine(AuditRoot, "allocations", allocation + ".json"), "[]");
         var restarted = new NetworkAccessAuditStore(AuditRoot);
-        NetworkAuditBatch batch = restarted.Observe(envoy, [Line(allocation)], false);
-        Assert.Empty(batch.Denials);
+        restarted.Observe(envoy, [Line(allocation)], false);
         Assert.Empty(restarted.Read(alice, 0, 50, null).Events);
         Assert.Null(Assert.Single(restarted.Read(admin, 0, 50, null).Events).Identity);
         Assert.Equal(1, restarted.Read(admin, 0, 50, null).UnattributedConnections);

@@ -54,7 +54,6 @@ public sealed partial class ContainerEgressRuntime
                 && (lastLineId == emptyMarker && !batch.TailSaturated || lines.Any(line => NetworkAccessAuditStore.LogLineId(id, line) == lastLineId));
             gap |= batch.Truncated || lastLineId is not null && !overlaps || batch.TailSaturated && !overlaps;
             NetworkAuditBatch observed = networkAudit.Observe(id, lines, gap);
-            networkPolicy.ObserveDeniedBatch(observed.Denials);
             // This is a read high-water mark, not a completeness guarantee.
             // Any truncated/rotated interval remains explicitly recorded above.
             // Advancing after a known gap lets later traffic be collected.

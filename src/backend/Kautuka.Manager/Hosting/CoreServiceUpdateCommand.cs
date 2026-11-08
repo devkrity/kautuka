@@ -75,31 +75,40 @@ internal static class CoreServiceUpdateCommand
                 new CoreServicePaths("/var/lib/kautuka", KautukaHostNetworkPolicy.ResolveSocketRoot(configuration),
                     coreOptions.WorkspaceRoot ?? "/var/lib/kautuka/workspaces", coreOptions.ConfigurationRoot ?? "/var/lib/kautuka/manager/core-config",
                     KautukaDatabaseWriterLease.LockPath, recoveryRoot), coreOptions, archives, configuration);
-            IReadOnlyList<CoreServiceUpdateIdentity> cohort = [];
-            if (verification) cohort = await core.VerifyForUpdateAsync(timeout.Token).ConfigureAwait(false);
-            else await core.StopForUpdateAsync(timeout.Token).ConfigureAwait(false);
-            using var output = new Utf8JsonWriter(Console.OpenStandardOutput());
-            output.WriteStartObject();
-            output.WriteString("action", verification ? "verify" : "stop");
-            output.WriteString("operationId", args[1]);
-            output.WriteString("release", release);
-            output.WriteBoolean(verification ? "ready" : "stopped", true);
-            if (verification)
+            var authorizationHost = new EnvoyAuthorizationHost(egress);
+            try
             {
-                output.WriteStartArray("cohort");
-                foreach (CoreServiceUpdateIdentity service in cohort)
+                IReadOnlyList<CoreServiceUpdateIdentity> cohort = [];
+                if (verification)
                 {
-                    output.WriteStartObject();
-                    output.WriteString("service", service.Service);
-                    output.WriteString("containerId", service.ContainerId);
-                    output.WriteString("imageId", service.ImageId);
-                    output.WriteEndObject();
+                    await authorizationHost.StartAsync(timeout.Token).ConfigureAwait(false);
+                    cohort = await core.VerifyForUpdateAsync(timeout.Token).ConfigureAwait(false);
                 }
-                output.WriteEndArray();
+                else await core.StopForUpdateAsync(timeout.Token).ConfigureAwait(false);
+                using var output = new Utf8JsonWriter(Console.OpenStandardOutput());
+                output.WriteStartObject();
+                output.WriteString("action", verification ? "verify" : "stop");
+                output.WriteString("operationId", args[1]);
+                output.WriteString("release", release);
+                output.WriteBoolean(verification ? "ready" : "stopped", true);
+                if (verification)
+                {
+                    output.WriteStartArray("cohort");
+                    foreach (CoreServiceUpdateIdentity service in cohort)
+                    {
+                        output.WriteStartObject();
+                        output.WriteString("service", service.Service);
+                        output.WriteString("containerId", service.ContainerId);
+                        output.WriteString("imageId", service.ImageId);
+                        output.WriteEndObject();
+                    }
+                    output.WriteEndArray();
+                }
+                output.WriteEndObject();
+                await output.FlushAsync(timeout.Token).ConfigureAwait(false);
+                return 0;
             }
-            output.WriteEndObject();
-            await output.FlushAsync(timeout.Token).ConfigureAwait(false);
-            return 0;
+            finally { await authorizationHost.DisposeAsync().ConfigureAwait(false); }
         }
         catch (Exception error) when (error is InvalidOperationException or IOException or UnauthorizedAccessException
             or JsonException or OperationCanceledException or PlatformNotSupportedException)

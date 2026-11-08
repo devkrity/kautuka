@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <Protobuf Include="Protos\manager.proto" GrpcServices="Both" />
+    <Protobuf Include="Protos\envoy_authorization.proto" GrpcServices="Both" />
   </ItemGroup>
 
 </Project>
