@@ -32,6 +32,7 @@ public sealed class WorkspaceRuntimePaths
 
         RuntimeRoot = normalizedRuntimeRoot;
         SharedDataRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(configuration);
+        UsesManagedGatewayDataMount = configuration.GetValue<bool>("CoreServices:Enabled");
         OciImagesRoot = Path.GetFullPath(Path.Combine(SharedDataRoot, "oci-images"));
         Directory.CreateDirectory(OciImagesRoot);
 
@@ -56,6 +57,8 @@ public sealed class WorkspaceRuntimePaths
     public string SharedDataRoot { get; }
 
     public string OciImagesRoot { get; }
+
+    public bool UsesManagedGatewayDataMount { get; }
 
     public bool RequireSidecars { get; }
 

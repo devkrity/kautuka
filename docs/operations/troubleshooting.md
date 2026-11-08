@@ -149,6 +149,21 @@ Manager defers container reconciliation when Podman inspection times out, fails,
 
 Missing or stopped isolated connectors start on their next tool call. Manager startup audits existing running connectors without eagerly starting idle connectors.
 
+### Container connector discovery
+
+The connector editor's connection test must send container commands in
+`containerCommand` and `containerArgs`. Local runner fields belong only to local
+transport. Sending both for a saved container makes Gateway reject the test before
+the MCP handshake or `tools/list`; the UI displays the Gateway rejection detail.
+This applies to every explicit container command, including `uv`, Python and Node.
+
+Live agent discovery uses Manager directly rather than the editor's test endpoint.
+If both fail with a missing MCPB archive under `/data/mcpb-bundles`, check the
+Gateway-to-Manager filesystem boundary: `/data` is Gateway's container mount, while
+Manager runs on the host. The corresponding archive lives beneath the configured
+host state root's `gateway-data/mcpb-bundles` directory. Do not copy archives into a
+new host `/data` directory to work around that mismatch.
+
 ### Repeated capability drift
 
 Podman can expand `--cap-drop ALL` into individual capability names in `HostConfig.CapDrop`. Manager checks the resolved `EffectiveCaps` and `BoundingCaps` sets when supplied; both must be empty. Empty sets may serialize as `null` or `[]`. A nonempty set or added capability remains drift. Checking only for the literal `ALL` caused healthy agent containers to be recreated on each reconciliation pass.

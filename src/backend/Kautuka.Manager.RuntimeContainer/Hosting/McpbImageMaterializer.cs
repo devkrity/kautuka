@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
 using Microsoft.Extensions.Logging;
@@ -14,7 +15,8 @@ public sealed partial class McpbImageMaterializer(
     ILogger<McpbImageMaterializer> logger,
     RuntimeImageAllowlist? allowlist = null,
     PodmanImageArchiveStore? imageArchives = null,
-    ContainerEgressRuntime? egressRuntime = null)
+    ContainerEgressRuntime? egressRuntime = null,
+    WorkspaceRuntimePaths? runtimePaths = null)
 {
     internal bool UsesControlledEgress => egressRuntime?.Enabled == true;
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
@@ -40,6 +42,7 @@ public sealed partial class McpbImageMaterializer(
         CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
+        connector = ResolveGatewayBundle(connector);
 
         if (egressRuntime?.Enabled == true)
             return await EnsureEgressImageAsync(connector, BundleWorkdir, false, workspaceContext, cancellationToken).ConfigureAwait(false);
@@ -176,6 +179,7 @@ public sealed partial class McpbImageMaterializer(
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(installRoot);
+        connector = ResolveGatewayBundle(connector);
 
         if (egressRuntime?.Enabled == true)
             return await EnsureEgressImageAsync(connector, installRoot, true, workspaceContext, cancellationToken).ConfigureAwait(false);

@@ -12,6 +12,7 @@ public sealed partial class McpbImageMaterializer
     internal async Task<WorkspaceMcpContainerConnectorDefinition> ResolveControlledExecutionAsync(
         WorkspaceMcpContainerConnectorDefinition connector, bool materialize, ContainerContext? workspace, CancellationToken ct)
     {
+        connector = ResolveGatewayBundle(connector);
         if (egressRuntime?.Enabled != true) throw new InvalidOperationException("Controlled execution is not configured.");
         string? serverType = ResolveEgressServerType(connector);
         if (serverType is null)
@@ -119,6 +120,7 @@ public sealed partial class McpbImageMaterializer
 
     internal WorkspaceMcpContainerConnectorDefinition ResolveControlledRuntimeConnector(WorkspaceMcpContainerConnectorDefinition connector)
     {
+        connector = ResolveGatewayBundle(connector);
         string? serverType = ResolveEgressServerType(connector);
         if (serverType is null) return connector;
         connector = UseReleasedSandboxBase(connector, serverType) with { ServerType = serverType };

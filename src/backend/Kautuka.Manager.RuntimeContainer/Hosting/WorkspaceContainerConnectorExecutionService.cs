@@ -857,7 +857,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         foreach (string connectorId in desiredConnectorIds.Distinct(StringComparer.Ordinal).OrderBy(static connectorId => connectorId, StringComparer.Ordinal))
         {
-            WorkspaceMcpContainerConnectorDefinition sourceConnector = ResolveConnectorDefinition(connectorId);
+            WorkspaceMcpContainerConnectorDefinition sourceConnector = mcpbImageMaterializer.ResolveGatewayBundle(ResolveConnectorDefinition(connectorId));
             if (string.IsNullOrWhiteSpace(sourceConnector.BundlePath))
             {
                 throw new InvalidOperationException($"Container connector '{connectorId}' must be bundle-backed to run inside an agent sandbox.");
@@ -1036,6 +1036,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         WorkspaceMcpContainerConnectorDefinition connector,
         CancellationToken cancellationToken, ContainerContext? workspaceContext = null)
     {
+        connector = mcpbImageMaterializer.ResolveGatewayBundle(connector);
         if (egressRuntime?.Enabled == true)
             return await mcpbImageMaterializer.ResolveControlledExecutionAsync(connector, materialize: true, workspaceContext, cancellationToken).ConfigureAwait(false);
         string? serverType = connector.ServerType;

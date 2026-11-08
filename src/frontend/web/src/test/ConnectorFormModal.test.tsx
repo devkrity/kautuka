@@ -270,14 +270,17 @@ describe('ConnectorFormModal container validation credentials', () => {
     expect(savedCredValues).toMatchObject({ CONNECTOR_TOKEN: credentialValue });
   });
 
-  it('includes imported bundle metadata in the validation payload', () => {
+  it.each(['uv', 'python', 'node', 'npx'])('tests an imported %s container without sending a host command', (command) => {
     const draft = createDraft();
     draft.id = 'splose-mcp';
     draft.transport = 'container';
     draft.httpUrl = '';
     draft.containerImage = 'quay.io/fedora/fedora-minimal:44';
-    draft.containerCommand = 'uv';
+    draft.containerCommand = command;
     draft.containerArgs = 'run\n-m\nsplose_mcp.server';
+    // entryToDraft also initializes local runner fields for the local editor.
+    draft.localCommand = draft.containerCommand;
+    draft.localArgs = draft.containerArgs;
     draft.bundlePath = '/tmp/connectors/splose.mcpb';
     draft.serverType = 'uv';
 
@@ -296,14 +299,29 @@ describe('ConnectorFormModal container validation credentials', () => {
     expect(mutateSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         transport: 'container',
+        localCommand: null,
+        localArgs: [],
         containerImage: 'quay.io/fedora/fedora-minimal:44',
-        containerCommand: 'uv',
+        containerCommand: command,
         containerArgs: ['run', '-m', 'splose_mcp.server'],
         bundlePath: '/tmp/connectors/splose.mcpb',
         serverType: 'uv',
       }),
       expect.any(Object)
     );
+  });
+
+  it('shows the Gateway rejection detail instead of a generic HTTP status', () => {
+    mutateSpy.mockImplementation((_payload, options?: { onError?: (error: Error) => void }) => {
+      options?.onError?.(Object.assign(new Error('Request failed with status code 400'), {
+        isAxiosError: true,
+        response: { data: { detail: 'Connector test must use the saved destination.' } },
+      }));
+    });
+    render(<ConnectorFormModal draft={createDraft()} isNew={false} onSave={vi.fn()} onClose={vi.fn()} saving={false} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    expect(screen.getByText('Connector test must use the saved destination.')).toBeInTheDocument();
+    expect(screen.queryByText('Request failed with status code 400')).not.toBeInTheDocument();
   });
 
   it('refreshes visible fields when reopened for a different connector draft', () => {

@@ -1,5 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { readApiString } from '@/lib/apiResponse';
+import { isAxiosError } from 'axios';
 import { AlertCircle, CheckCircle2, FlaskConical, Loader2, X } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import type { ConnectorTestPayload } from '../api/connectors';
@@ -184,11 +186,10 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
       id: draft.id || null,
       transport: draft.transport,
       httpUrl: draft.httpUrl || null,
-      localCommand: draft.localCommand || null,
-      localArgs: draft.localArgs
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
+      localCommand: draft.transport === 'local' ? draft.localCommand || null : null,
+      localArgs: draft.transport === 'local'
+        ? draft.localArgs.split('\n').map((s) => s.trim()).filter(Boolean)
+        : [],
       containerImage: draft.containerImage || null,
       containerCommand: draft.containerCommand || null,
       containerArgs: draft.containerArgs
@@ -229,9 +230,10 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         }
       },
       onError: (err) => {
+        const detail = isAxiosError(err) ? readApiString(err.response?.data, 'detail') : undefined;
         setTestResult({
           success: false,
-          message: err instanceof Error ? err.message : 'Test request failed.',
+          message: detail?.trim() || (err instanceof Error ? err.message : 'Test request failed.'),
           toolCount: null,
           packageChecked: null,
           toolNames: null,
