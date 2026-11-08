@@ -217,3 +217,10 @@ mounts/arguments, optional collector outage without blocking readiness or changi
 core identity, and credential reuse after collector restart. This establishes
 transport and credential behavior; it does not claim a query of every persisted
 metric/span or a new full installed-application acceptance run.
+
+
+Data-preserving uninstall retains the telemetry credential tree together with the
+collector metadata database, preserving its private modes. Runtime ownership
+preparation does not follow symbolic links. Existing-state checks still reject
+an automatic fresh install over retained application data; these preservation
+and ownership fixtures do not claim a migration or full reinstall workflow.

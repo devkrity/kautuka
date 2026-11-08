@@ -3,8 +3,10 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -152,6 +154,77 @@ if ( retire_uninstall_containers fixture /tmp /run/user/123 ); then exit 1; fi
                                  str(Path(__file__).parent / 'kautuka-install-linux.sh.in')],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+@unittest.skipUnless(sys.platform == 'linux' and os.geteuid() == 0, 'requires disposable Linux root fixture')
+class TelemetryPreservationTests(unittest.TestCase):
+    def test_uninstall_preserves_credentials_with_metadata_and_repairs_ownership(self):
+        installer = Path(__file__).parent / 'kautuka-install-linux.sh.in'
+        with tempfile.TemporaryDirectory(prefix='kautuka-telemetry-preserve-', dir='/var/tmp') as temporary:
+            root = Path(temporary)
+            state = root / 'state'
+            telemetry = state / 'telemetry'
+            manager = telemetry / 'manager'
+            exporter = telemetry / 'exporter'
+            metadata = state / 'sidecars/openobserve/data/metadata.db'
+            manager.mkdir(parents=True)
+            exporter.mkdir()
+            metadata.parent.mkdir(parents=True)
+            password = manager / 'openobserve-root-password'
+            token = exporter / 'ingestion.authorization'
+            outside = root / 'outside'
+            outside.write_bytes(b'untouched')
+            link = exporter / 'outside-link'
+            link.symlink_to(outside)
+            password.write_bytes(b'fixture-root-secret\n')
+            token.write_bytes(b'Basic fixture-exporter\n')
+            metadata.write_bytes(b'fixture-openobserve-metadata')
+            for directory in (telemetry, manager, exporter):
+                directory.chmod(0o700)
+            for file in (password, token, metadata):
+                file.chmod(0o600)
+            for path in (telemetry, manager, exporter, password, token):
+                os.chown(path, 23991, 23991)
+            os.lchown(link, 23991, 23991)
+            env = dict(os.environ, KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY='1', TMPDIR=temporary)
+            saved = subprocess.run(['bash', '-c', 'source "$1"; preserve_uninstall_state "$2" "$2"',
+                                    'fixture', str(installer), str(state)], env=env, capture_output=True, text=True, check=True)
+            preserved = Path(saved.stdout.strip())
+            self.assertEqual((preserved / 'internal/telemetry/manager/openobserve-root-password').read_bytes(), b'fixture-root-secret\n')
+            self.assertEqual((preserved / 'internal/sidecars/openobserve/data/metadata.db').read_bytes(), b'fixture-openobserve-metadata')
+            shutil.rmtree(state)
+            subprocess.run(['bash', '-c', 'source "$1"; restore_preserved_uninstall_state "$2" "$3" "$3"',
+                            'fixture', str(installer), str(preserved), str(state)], env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(password.read_bytes(), b'fixture-root-secret\n')
+            self.assertEqual(token.read_bytes(), b'Basic fixture-exporter\n')
+            self.assertEqual(metadata.read_bytes(), b'fixture-openobserve-metadata')
+            subprocess.run(['bash', '-c', 'source "$1"; prepare_runtime_telemetry_directory "$2" 23998 23998',
+                            'fixture', str(installer), str(telemetry)], env=env, capture_output=True, text=True, check=True)
+            for directory in (telemetry, manager, exporter):
+                self.assertEqual(directory.stat().st_uid, 23998)
+                self.assertEqual(directory.stat().st_gid, 23998)
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            for file in (password, token):
+                self.assertEqual(file.stat().st_uid, 23998)
+                self.assertEqual(file.stat().st_gid, 23998)
+                self.assertEqual(file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(link.lstat().st_uid, 23998)
+            self.assertEqual(outside.stat().st_uid, 0)
+
+    def test_telemetry_root_symlink_is_rejected(self):
+        installer = Path(__file__).parent / 'kautuka-install-linux.sh.in'
+        with tempfile.TemporaryDirectory(prefix='kautuka-telemetry-link-', dir='/var/tmp') as temporary:
+            root = Path(temporary)
+            state = root / 'state'
+            state.mkdir()
+            target = root / 'target'
+            target.mkdir()
+            (state / 'telemetry').symlink_to(target, target_is_directory=True)
+            env = dict(os.environ, KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY='1', TMPDIR=temporary)
+            for function in ('preserve_uninstall_state "$2" "$2"', 'prepare_runtime_telemetry_directory "$2/telemetry" 23998 23998'):
+                result = subprocess.run(['bash', '-c', 'source "$1"; ' + function,
+                                         'fixture', str(installer), str(state)], env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == '__main__':

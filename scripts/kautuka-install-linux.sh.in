@@ -660,6 +660,18 @@ chown_tree_excluding() {
         -o -exec chown -h "$owner" {} +
 }
 
+prepare_runtime_telemetry_directory() {
+    local path="$1"
+    local service_user="$2"
+    local service_group="$3"
+
+    [[ ! -L "$path" ]] || fail 'container telemetry state directory cannot be a symlink'
+    install -d -o "$service_user" -g "$service_group" -m 0700 "$path"
+    # Retained credential files can have the previous runtime account's UID.
+    # Do not follow links while correcting ownership; preserve file modes.
+    chown -hR "$service_user:$service_group" "$path"
+}
+
 prepare_mcpb_bundle_share() {
     local internal_state_root="$1"
     local service_group="$2"
@@ -1661,6 +1673,15 @@ preserve_uninstall_state() {
     if [[ -d "$internal_state_root/credentialsHost/vault" ]]; then
         mkdir -p "$preserve_root/internal/credentialsHost/vault"
         cp -a "$internal_state_root/credentialsHost/vault/." "$preserve_root/internal/credentialsHost/vault/"
+    fi
+
+    # OpenObserve's retained metadata database requires the original root
+    # credential. Keep the Manager-only and exporter credentials together.
+    [[ ! -L "$internal_state_root/telemetry" ]] || fail 'cannot preserve a symlinked telemetry state directory'
+    [[ ! -e "$internal_state_root/telemetry" || -d "$internal_state_root/telemetry" ]] || fail 'cannot preserve invalid telemetry state'
+    if [[ -d "$internal_state_root/telemetry" ]]; then
+        mkdir -p "$preserve_root/internal"
+        cp -a "$internal_state_root/telemetry" "$preserve_root/internal/"
     fi
 
     # Gateway keys and application state live alongside its databases. Preserve
@@ -2804,7 +2825,7 @@ for service in ('manager', 'updateservice', 'gateway', 'channelhost', 'credentia
             info = parent.lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
                 raise SystemExit('installed version ancestry must be root-owned and non-writable')
-for name in ('manager', 'updateService', 'gateway', 'gateway-data', 'credentialsHost', 'channelHost', 'agents', 'security', 'sidecars', 'proxy'):
+for name in ('manager', 'updateService', 'gateway', 'gateway-data', 'credentialsHost', 'channelHost', 'agents', 'security', 'sidecars', 'proxy', 'telemetry'):
     path = root / name
     if path.is_symlink() or (path.exists() and (not path.is_dir() or any(entry.is_file() or entry.is_symlink() for entry in path.rglob('*')))):
         raise SystemExit('existing application state requires migration/recovery; no files were changed')
@@ -2871,6 +2892,7 @@ PY
         [[ ! -L "$internal_state_root/$path" ]] || fail 'container state directory cannot be a symlink'
         install -d -o "$service_user" -g "$service_group" -m 0700 "$internal_state_root/$path"
     done
+    prepare_runtime_telemetry_directory "$internal_state_root/telemetry" "$service_user" "$service_group"
     ensure_dotnet_host_libraries
     ensure_rootless_podman_ready "$service_user" "$service_group" "$service_home" "$xdg_runtime_dir" containers
     local existing_containers

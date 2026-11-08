@@ -142,6 +142,13 @@ link=wants/unit.name
 link.unlink(missing_ok=True);link.symlink_to('../'+unit.name)
 state=pathlib.Path('/var/lib/kautuka/gateway-data');state.mkdir(parents=True)
 (state/'gateway-auth.key').write_text('preserved')
+telemetry=pathlib.Path('/var/lib/kautuka/telemetry')
+manager=telemetry/'manager';manager.mkdir(parents=True)
+exporter=telemetry/'exporter';exporter.mkdir()
+for directory in (telemetry,manager,exporter): directory.chmod(0o700)
+password=manager/'openobserve-root-password';password.write_bytes(b'fixture-root-secret\n');password.chmod(0o600)
+token=exporter/'ingestion.authorization';token.write_bytes(b'Basic fixture-exporter\n');token.chmod(0o600)
+metadata=pathlib.Path('/var/lib/kautuka/sidecars/openobserve/data/metadata.db');metadata.parent.mkdir(parents=True);metadata.write_bytes(b'fixture-metadata')
 pathlib.Path('/run/kautuka-db-writer.lock').write_text('')
 script=r'''set -euo pipefail
 export KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1
@@ -169,6 +176,10 @@ assert not stage.parent.exists() and not unit.exists() and not link.is_symlink()
 assert not (config/'wsl-firstboot-complete').exists()
 assert sibling.read_text()=='keep'
 assert (state/'gateway-auth.key').read_text()=='preserved'
+assert password.read_bytes()==b'fixture-root-secret\n' and token.read_bytes()==b'Basic fixture-exporter\n'
+assert metadata.read_bytes()==b'fixture-metadata'
+assert all(path.stat().st_mode & 0o777 == 0o700 for path in (telemetry,manager,exporter))
+assert all(path.stat().st_mode & 0o777 == 0o600 for path in (password,token))
 """
             result = subprocess.run(['unshare','--mount','--fork','python3','-c',program,temporary,str(scripts)],
                                     capture_output=True,text=True,timeout=30)
