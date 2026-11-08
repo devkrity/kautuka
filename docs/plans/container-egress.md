@@ -40,10 +40,11 @@ operational-default and usability work, not a reason to replace the enforcement 
   Allow requires review of the exact destination and scope. Core-service approvals
   describe their shared scope, including remote HTTP connectors called by Gateway.
   Name enrichment does not expand catalog visibility or affect authoritative IDs.
-- **Audit remains open:** the bounded 512-line poll can permanently miss denials
-  and their approval requests. Gap reporting is not recovery. Consume unread native
-  log records from a durable cursor in bounded batches before claiming reliable
-  request discovery under bursts or Manager outages. Rotation/retention limits
+- **Approval delivery:** stock Envoy network authorization now records missing
+  permissions directly in Manager before Deny; outcome logs do not create requests.
+  **Outcome audit remains bounded:** log rotation, downtime and retention can omit
+  connection records. Gap reporting is not recovery. Do not claim lossless
+  connection history under bursts or Manager outages. Rotation/retention limits
   must remain explicit.
 - **Capacity remains open:** the default four private networks include core and
   management, leaving only two user-agent networks when both are present. Increase
@@ -1149,10 +1150,11 @@ and phone. Legacy deployment migration is excluded, not deferred.
 The current extension collects bounded native Podman/Envoy connection logs in
 Manager and exposes an owner-filtered, paged audit API and responsive audit view.
 Publication-time allocation maps preserve container attribution across IP reuse.
-Repeated collection coalesces connection phases and does not duplicate pending
-requests. Only attributable listener denials create approval requests. Unknown
-sources stay visible to administrators without assigning them to a current IP
-owner. Pending approvals, rule editing and activation status remain part of the
+Repeated collection coalesces connection phases. Network authorization checks
+record attributable missing permissions directly in Manager before returning
+Deny; approval delivery does not depend on collection of connection logs. Unknown
+sources fail closed without assigning an approval to a current IP owner.
+Pending approvals, rule editing and activation status remain part of the
 same page; the header shows a pending-request badge.
 
 This is bounded connection history, not a durable packet ledger. Envoy log

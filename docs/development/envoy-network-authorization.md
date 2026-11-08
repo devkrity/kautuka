@@ -58,3 +58,23 @@ account. Its native executable references the production Manager, policy store,
 runtime and configuration compiler. Observed runtime results and limitations are
 recorded separately from the unit and HTTP test results. The developer appliance
 and installed application data are outside that fixture.
+
+## Observed rootless runtime checkpoint, 8 November 2026
+
+The Native AOT fixture exercised the production authorization host and runtime
+under a dedicated rootless Podman account on Fedora. A previously unknown IP/port
+created a pending request through the actual Manager policy RPC without calling
+audit collection. An explicit administrator LAN decision activated the route and
+a client retry received the test server's nonce. A second owner remained denied;
+stopping the authorization host also denied a new connection on the approved
+route. Packet capture showed an outbound SYN only for the approved attempt, with
+the reserved private source translated to the pod's normal outside address.
+
+The test server was a separate container on the outside network. WSL's own host
+address refused connections from an ordinary outside-network container as well
+as from the private-bound proxy; that first fixture attempt is not counted as a
+successful connection test. The successful run demonstrates the rootless bridge,
+private-source translation and authorization path. It does not establish physical
+LAN reachability through the outer rootless helper. The earlier isolated
+transparent-network experiment covers SNI, wrong-IP binding, timeout and metadata
+cases; those cases are not represented as fresh rootless end-to-end tests here.
