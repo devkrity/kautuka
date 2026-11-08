@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 
 using Kautuka.Manager.RuntimeContainer.Sandbox;
+using Kautuka.Telemetry.DependencyInjection;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
@@ -18,13 +19,12 @@ public sealed class OpenObserveCredentialStore(string sharedDataRoot)
     private const string digits = "0123456789";
     private const string special = "!@#$%^&*()-_=+[]{}?";
     private const string passwordFileName = "openobserve-root-password";
-    private const string authorizationFileName = "ingestion.authorization";
 
     private string TelemetryDirectoryPath => Path.Combine(Path.GetFullPath(sharedDataRoot), "telemetry");
     private string RootCredentialDirectoryPath => Path.Combine(TelemetryDirectoryPath, "manager");
     public string ExporterDirectoryPath => Path.Combine(TelemetryDirectoryPath, "exporter");
     public string RootPasswordPath => Path.Combine(RootCredentialDirectoryPath, passwordFileName);
-    public string IngestionAuthorizationPath => Path.Combine(ExporterDirectoryPath, authorizationFileName);
+    public string IngestionAuthorizationPath => ManagedHostTelemetryConfiguration.AuthorizationFilePath(sharedDataRoot);
 
     public string GetOrCreateRootPassword()
     {

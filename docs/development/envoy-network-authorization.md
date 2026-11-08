@@ -191,6 +191,9 @@ configuration names the authorization file rather than putting its value in
 container arguments or runtime fingerprints. Atomic replacement is observed by
 the next request without restarting core applications.
 
+Manager and UpdateService apply the same managed host configuration after
+loading installed settings and before exporter registration. Both point to the
+provisioned ingestion file, with static authorization headers cleared.
 Host exporters use the fixed Unix socket; core exporters use only the fixed
 private collector origin and signal path. Both asynchronous and synchronous
 HTTP sends apply the same credential and endpoint checks. Synchronous exporter

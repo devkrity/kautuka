@@ -14,6 +14,10 @@ var builder = WebApplication.CreateSlimBuilder(args);
 // Use the same persisted egress selection as Manager before creating HTTP clients.
 if (OperatingSystem.IsLinux())
     KautukaInstalledDeploymentConfiguration.Add(builder.Configuration);
+if (OperatingSystem.IsLinux() && builder.Configuration.GetValue<bool>("ContainerEgress:TelemetryEnabled"))
+    ManagedHostTelemetryConfiguration.Apply(builder.Configuration,
+        KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration),
+        KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager"));
 var hostLayout = KautukaHostPathPolicy.Resolve(builder.Configuration);
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);

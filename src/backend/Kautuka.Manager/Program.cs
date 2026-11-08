@@ -30,15 +30,9 @@ if (OperatingSystem.IsLinux())
     KautukaInstalledDeploymentConfiguration.Add(builder.Configuration);
 if (OperatingSystem.IsLinux() && builder.Configuration.GetValue<bool>("ContainerEgress:TelemetryEnabled"))
 {
-    string telemetryStateRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration);
-    string managerRuntimeRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
-    builder.Configuration[KautukaTelemetryDefaults.LogsEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/logs";
-    builder.Configuration[KautukaTelemetryDefaults.MetricsEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/metrics";
-    builder.Configuration[KautukaTelemetryDefaults.TracesEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/traces";
-    builder.Configuration[KautukaTelemetryDefaults.ProtocolKey] = "http/protobuf";
-    builder.Configuration[KautukaTelemetryDefaults.HeadersKey] = string.Empty;
-    builder.Configuration[KautukaTelemetryDefaults.UnixSocketPathKey] = Path.Combine(managerRuntimeRoot, "egress", "host", "connect.sock");
-    builder.Configuration[KautukaTelemetryDefaults.AuthorizationHeaderFileKey] = new OpenObserveCredentialStore(telemetryStateRoot).IngestionAuthorizationPath;
+    ManagedHostTelemetryConfiguration.Apply(builder.Configuration,
+        KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration),
+        KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager"));
 }
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);
