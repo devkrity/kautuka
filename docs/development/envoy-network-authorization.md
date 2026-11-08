@@ -78,6 +78,12 @@ do not imply that the user should approve a destination. Known log
 collection gaps remain visible, and Linux firewall drops are not individually
 recorded in Envoy's connection history.
 
+A Podman running-state inspection timeout is not proof that the proxy stopped.
+The lifecycle operation is refused before admitting a new source, while the last
+accepted configuration and permissions remain valid. A later operation retries
+inspection instead of forcing a healthy Envoy/DNS restart. Caller cancellation
+also preserves this state; confirmed stopped services still require recovery.
+
 Normal Manager startup hosts the authorization endpoint before the core-service
 supervisor. The standalone update verification command also hosts it for its
 verification lifetime while normal Manager is stopped. The stop-only maintenance

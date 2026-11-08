@@ -301,10 +301,10 @@ public sealed partial class ContainerEgressRuntime(
             cancellationToken.ThrowIfCancellationRequested();
             string[] states = inspected.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (inspected.ExitCode == 0 && states.Length == 2 && states.All(static state => state == "true")) return;
+            if (inspected.TerminationReason is ProcessTerminationReason.TimedOut or ProcessTerminationReason.CallerCancelled)
+                throw new ContainerInspectionUnavailableException("Cannot confirm the egress services' running state; retry the operation.");
             ready = false;
             recoveryRequiresProxyStop = true;
-            if (inspected.TerminationReason is ProcessTerminationReason.TimedOut or ProcessTerminationReason.CallerCancelled)
-                throw new ContainerInspectionUnavailableException("Cannot confirm the egress services' running state; cached readiness is invalid.");
         }
         if (recoveryRequiresProxyStop) await StopProxyAsync(cancellationToken).ConfigureAwait(false);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Container egress requires the Linux appliance.");
