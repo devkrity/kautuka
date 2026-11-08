@@ -114,7 +114,7 @@ SECTION_SCHEMA: dict[str, Any] = {
 CHUNK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "chunkId": {"type": "string"},
+        "chunk_id": {"type": "string"},
         "ordinal": {"type": "integer"},
         "sectionId": {"type": "string"},
         "sectionPath": {"type": "array", "items": {"type": "string"}},
@@ -129,7 +129,7 @@ CHUNK_SCHEMA: dict[str, Any] = {
         "provenance": {"type": "object", "additionalProperties": True},
     },
     "required": [
-        "chunkId",
+        "chunk_id",
         "ordinal",
         "sectionId",
         "sectionPath",
@@ -298,16 +298,16 @@ TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
                 "preCleaner": STRING_OR_NULL_SCHEMA,
                 "preCleanerApplied": {"type": "boolean"},
                 "preCleanerRejectedReason": STRING_OR_NULL_SCHEMA,
+                "metadataExtractor": {"type": "string"},
+                "preCleanerRemovedElements": {"type": "integer", "minimum": 0},
                 "normalizationMode": {"type": "string"},
                 "contentPostProcessor": STRING_OR_NULL_SCHEMA,
                 "contentPostProcessorApplied": {"type": "boolean"},
+                "contentPostProcessorRemovedBlocks": {"type": "integer", "minimum": 0},
             },
             "required": [
                 "normalizer",
                 "normalizerVersion",
-                "preCleaner",
-                "preCleanerApplied",
-                "preCleanerRejectedReason",
                 "normalizationMode",
                 "contentPostProcessor",
                 "contentPostProcessorApplied",

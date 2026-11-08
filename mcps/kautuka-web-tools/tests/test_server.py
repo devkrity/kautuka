@@ -1,15 +1,37 @@
 from __future__ import annotations
 
 import pytest
+from jsonschema import validate
 
+from kautuka_web_tools import pipeline
+from kautuka_web_tools.pipeline import FetchResult
 from kautuka_web_tools.server import (
     PROMPT_NAME,
     SERVER_INSTRUCTIONS,
     TOOL_NAME,
+    handle_call_tool,
     handle_get_prompt,
     handle_list_prompts,
     handle_list_tools,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", ["text/html", "text/plain"])
+@pytest.mark.parametrize("response_mode", ["compact", "full"])
+async def test_successful_fetch_matches_advertised_output_schema(monkeypatch: pytest.MonkeyPatch, content_type: str, response_mode: str) -> None:
+    body = b"<html><body><h1>Fixture</h1><p>Evidence text.</p></body></html>" if content_type == "text/html" else b"Evidence text."
+
+    async def fake_fetch(url: str, options: pipeline.FetchOptions) -> FetchResult:
+        return FetchResult(url, url, 200, content_type, "2026-11-09T00:00:00Z", "http", 0, len(body), body, {})
+
+    monkeypatch.setattr(pipeline, "fetch_url", fake_fetch)
+    result = await handle_call_tool(TOOL_NAME, {"url": "https://example.com", "fetchMode": "http", "responseMode": response_mode})
+    assert not result.isError
+    assert result.structuredContent is not None
+    tool = (await handle_list_tools())[0]
+    assert tool.outputSchema is not None
+    validate(result.structuredContent, tool.outputSchema)
 
 
 @pytest.mark.asyncio
