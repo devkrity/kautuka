@@ -407,7 +407,7 @@ public sealed class PodmanContainerTool(
         }
     }
 
-    private static void DeleteSecretFile(string path)
+    internal static void DeleteSecretFile(string path)
     {
         try
         {

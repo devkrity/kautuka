@@ -242,6 +242,17 @@ public sealed class WorkspaceSidecarCatalogTests
                 || sidecar.Name.Contains("proxpi", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void CommittedOpenObserveDisablesPhoneHomeAndDoesNotShipRootPassword()
+    {
+        string path = Path.Combine(FindRepoRoot(), "src", "backend", "Kautuka.Manager", "sidecars.json");
+        WorkspaceSidecarCatalog catalog = WorkspaceSidecarCatalogLoader.Load(path);
+        WorkspaceSidecarDefinition collector = Assert.Single(catalog.Sidecars, sidecar => sidecar.Name == "kautuka-openobserve");
+
+        Assert.Equal("false", collector.Environment["ZO_TELEMETRY"]);
+        Assert.DoesNotContain("ZO_ROOT_USER_PASSWORD", collector.Environment.Keys);
+    }
+
     private static string CreateTempDirectory()
     {
         string path = Path.Combine(Path.GetTempPath(), $"kautuka-sidecar-catalog-tests-{Guid.NewGuid():N}");

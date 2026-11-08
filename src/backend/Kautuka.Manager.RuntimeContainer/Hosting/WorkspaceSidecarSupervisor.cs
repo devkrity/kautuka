@@ -21,7 +21,8 @@ public sealed class WorkspaceSidecarSupervisor(
     ILogger<WorkspaceSidecarSupervisor> logger,
     RuntimeImageAllowlist? allowlist = null,
     PodmanImageArchiveStore? imageArchives = null,
-    ContainerEgressRuntime? egressRuntime = null)
+    ContainerEgressRuntime? egressRuntime = null,
+    WorkspaceRuntimePaths? runtimePaths = null)
 {
     private const string alwaysPolicyName = "ALWAYS";
     private const string packageHealthCommand = "wget -q -O /dev/null http://127.0.0.1:20101/health";
@@ -32,6 +33,7 @@ public sealed class WorkspaceSidecarSupervisor(
     private readonly ILogger<WorkspaceSidecarSupervisor> logger = logger;
     private readonly RuntimeImageAllowlist allowlist = allowlist ?? RuntimeImageAllowlist.Empty;
     private readonly PodmanImageArchiveStore? imageArchives = imageArchives;
+    private readonly WorkspaceRuntimePaths? runtimePaths = runtimePaths;
     private const string managedLabel = "kautuka.managed=manager";
     private const string sidecarRoleLabel = "kautuka.role=sidecar";
     private const string sidecarSourceHashLabel = "io.kautuka.sidecar.source-hash";
@@ -370,6 +372,24 @@ public sealed class WorkspaceSidecarSupervisor(
     private async Task<bool> EnsureTelemetryEgressAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
     {
         ContainerEgressRuntime runtime = egressRuntime!;
+        OpenObserveCredentialStore credentialStore = new(runtimePaths?.SharedDataRoot
+            ?? throw new InvalidOperationException("Managed telemetry credentials require the Manager shared state root."));
+        try
+        {
+            _ = credentialStore.ReadIngestionAuthorizationHeader();
+        }
+        catch (InvalidOperationException error)
+        {
+            credentialStore.ClearIngestionAuthorizationHeader();
+            logger.LogWarning(error, "The persisted managed telemetry ingestion credential was invalid and has been disabled.");
+        }
+        string rootPassword = credentialStore.GetOrCreateRootPassword();
+        Dictionary<string, string> collectorEnvironment = sidecar.Environment.ToDictionary(
+            static pair => pair.Key,
+            static pair => pair.Value,
+            StringComparer.Ordinal);
+        collectorEnvironment["ZO_ROOT_USER_PASSWORD"] = rootPassword;
+        sidecar = sidecar with { Environment = collectorEnvironment };
         if (sidecar.Command.Count != 0) throw new InvalidOperationException("Managed telemetry requires the released collector command.");
         string image = allowlist.Images.SingleOrDefault(static entry => entry.Id == "openobserve")?.Image
             ?? throw new InvalidOperationException("The verified telemetry image is missing from the release inventory.");
@@ -385,7 +405,10 @@ public sealed class WorkspaceSidecarSupervisor(
             if (imageInspection.ExitCode != 0) throw new ContainerInspectionUnavailableException("Telemetry image identity inspection failed.");
             if (await TelemetrySecurityMatchesAsync(state.InspectJson!, executionImage, cancellationToken).ConfigureAwait(false)
                 && LiveContainerSpec.DescribeSidecarDrift(state.InspectJson!, executionImage, [], imageInspection.StdOut.Trim(), sidecar.Volumes, sidecar.Environment, "kautuka-core") is null)
-                return await runtime.ProbeTelemetryAsync(existing, cancellationToken).ConfigureAwait(false);
+            {
+                bool healthy = await runtime.ProbeTelemetryAsync(existing, cancellationToken).ConfigureAwait(false);
+                return healthy && await EnsureTelemetryIngestionAuthorizationAsync(rootPassword, cancellationToken).ConfigureAwait(false);
+            }
         }
         if (state.Exists)
         {
@@ -394,27 +417,73 @@ public sealed class WorkspaceSidecarSupervisor(
         }
         if (!EnsureVolumeHostPaths(sidecar)) return false;
         var identity = new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("system", "core", "core"), "core", telemetrySidecarName);
-        PreparedPodmanContainer prepared = await runtime.PrepareAndAuthorizeAsync(identity, sidecar.Name, (network, dns) =>
+        string environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["ZO_ROOT_USER_PASSWORD"] = rootPassword },
+            cancellationToken).ConfigureAwait(false);
+        PreparedPodmanContainer prepared;
+        try
         {
-            List<string> args = BuildRunArguments(sidecar, resolved);
-            args[0] = "create"; args.Remove("-d");
-            args[args.IndexOf("--network") + 1] = network;
-            int alias = args.IndexOf("--network-alias"); args.RemoveRange(alias, 2);
-            args.InsertRange(1, ["--pull=never", "--restart=no", "--dns", dns, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
-                "--user", "0:0", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid"]);
-            return args;
-        }, cancellationToken).ConfigureAwait(false);
+            WorkspaceSidecarDefinition launchDefinition = sidecar with
+            {
+                Environment = sidecar.Environment
+                    .Where(static pair => pair.Key != "ZO_ROOT_USER_PASSWORD")
+                    .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal),
+            };
+            prepared = await runtime.PrepareAndAuthorizeAsync(identity, sidecar.Name, (network, dns) =>
+            {
+                List<string> args = BuildRunArguments(launchDefinition, resolved);
+                args[0] = "create"; args.Remove("-d");
+                args[args.IndexOf("--network") + 1] = network;
+                int alias = args.IndexOf("--network-alias"); args.RemoveRange(alias, 2);
+                args.InsertRange(1, ["--env-file", environmentFile, "--pull=never", "--restart=no", "--dns", dns, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+                    "--user", "0:0", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid"]);
+                return args;
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (File.Exists(environmentFile)) PodmanContainerTool.DeleteSecretFile(environmentFile);
+        }
         try
         {
             PodmanCommandResult started = await runtime.StartWithAdmissionAsync(prepared,
                 token => podmanCommandRunner.RunAsync(prepared.StartArguments(attach: false), 15, token), cancellationToken).ConfigureAwait(false);
             if (started.ExitCode != 0) throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("Start telemetry service", started));
-            return await runtime.ProbeTelemetryAsync(prepared, cancellationToken).ConfigureAwait(false);
+            bool healthy = await runtime.ProbeTelemetryAsync(prepared, cancellationToken).ConfigureAwait(false);
+            return healthy && await EnsureTelemetryIngestionAuthorizationAsync(rootPassword, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
             await runtime.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false);
             throw;
+        }
+    }
+
+    private async Task<bool> EnsureTelemetryIngestionAuthorizationAsync(string rootPassword, CancellationToken cancellationToken)
+    {
+        try
+        {
+            string header = await OpenObserveIngestionTokenProvisioner.EnsureAsync(
+                egressRuntime!.ArtifactSocketPath,
+                rootPassword,
+                cancellationToken).ConfigureAwait(false);
+            new OpenObserveCredentialStore(runtimePaths!.SharedDataRoot).SaveIngestionAuthorizationHeader(header);
+            return true;
+        }
+        catch (OpenObserveIngestionTokenDisabledException error)
+        {
+            new OpenObserveCredentialStore(runtimePaths!.SharedDataRoot).ClearIngestionAuthorizationHeader();
+            logger.LogWarning(error, "The managed telemetry ingestion token is disabled; telemetry exporters remain disabled until repaired.");
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception error)
+        {
+            logger.LogWarning(error, "Managed telemetry ingestion credentials could not be provisioned; telemetry exporters remain disabled.");
+            return false;
         }
     }
 

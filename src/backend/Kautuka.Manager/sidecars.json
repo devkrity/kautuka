@@ -19,7 +19,7 @@
       ],
       "environment": {
         "ZO_ROOT_USER_EMAIL": "kautuka-telemetry@kautuka.local",
-        "ZO_ROOT_USER_PASSWORD": "KautukaOo!telemetry-7f3a",
+        "ZO_TELEMETRY": "false",
         "ZO_DATA_DIR": "/data"
       },
       "command": [],

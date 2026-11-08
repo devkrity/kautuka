@@ -8,7 +8,7 @@ namespace Kautuka.IntegrationTests;
 public sealed class EgressTelemetryConfigurationTests
 {
     [Fact]
-    public void HostTelemetryUsesOnlyThreeExactPostRoutesOnExistingSocket()
+    public void HostTelemetryUsesExactIngestionAndTokenRoutesOnExistingSocket()
     {
         EnvoyEgressConfiguration config = Compile();
         using JsonDocument lds = JsonDocument.Parse(config.ListenerDocument);
@@ -18,10 +18,14 @@ public sealed class EgressTelemetryConfigurationTests
         JsonElement telemetry = Assert.Single(hcm.GetProperty("route_config").GetProperty("virtual_hosts").EnumerateArray(), item => item.GetProperty("name").GetString() == "telemetry");
         Assert.Equal("kautuka-telemetry.internal", Assert.Single(telemetry.GetProperty("domains").EnumerateArray()).GetString());
         JsonElement[] routes = [.. telemetry.GetProperty("routes").EnumerateArray()];
-        Assert.Equal(5, routes.Length);
+        Assert.Equal(7, routes.Length);
         Assert.Equal(new[] { "/api/default/v1/logs", "/api/default/v1/metrics", "/api/default/v1/traces" }, routes.Take(3).Select(route => route.GetProperty("match").GetProperty("path").GetString()));
         Assert.All(routes.Take(3), route => Assert.Equal("POST", route.GetProperty("match").GetProperty("headers")[0].GetProperty("string_match").GetProperty("exact").GetString()));
-        Assert.All(routes.Skip(3), route => Assert.Equal(403, route.GetProperty("direct_response").GetProperty("status").GetInt32()));
+        Assert.Equal("/api/default/ingestion-tokens", routes[3].GetProperty("match").GetProperty("path").GetString());
+        Assert.Equal("GET", routes[3].GetProperty("match").GetProperty("headers")[0].GetProperty("string_match").GetProperty("exact").GetString());
+        Assert.Equal("/api/default/ingestion-tokens", routes[4].GetProperty("match").GetProperty("path").GetString());
+        Assert.Equal("POST", routes[4].GetProperty("match").GetProperty("headers")[0].GetProperty("string_match").GetProperty("exact").GetString());
+        Assert.All(routes.Skip(5), route => Assert.Equal(403, route.GetProperty("direct_response").GetProperty("status").GetInt32()));
     }
 
     [Fact]

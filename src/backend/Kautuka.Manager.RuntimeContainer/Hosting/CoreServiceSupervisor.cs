@@ -4,12 +4,14 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using System.Text;
 using System.Text.Json;
 
 using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
+using Kautuka.Telemetry.Telemetry;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
@@ -21,11 +23,12 @@ public sealed record CoreServiceUpdateIdentity(string Service, string ContainerI
 /// <summary>Fixed application services, reconciled by the existing Manager worker before Gateway's desired state.</summary>
 public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerEgressRuntime egress,
     RuntimeImageAllowlist inventory, CoreServicePaths paths, CoreServiceOptions options, PodmanImageArchiveStore? archives = null,
-    IConfiguration? applicationConfiguration = null) : IDisposable
+    ILogger<CoreServiceSupervisor>? logger = null) : IDisposable
 {
     private readonly PodmanImageArchiveStore imageStore = archives ?? new PodmanImageArchiveStore(runner, Path.Combine(paths.StateRoot, "oci-images"), inventory,
         Microsoft.Extensions.Logging.Abstractions.NullLogger<PodmanImageArchiveStore>.Instance);
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly ILogger<CoreServiceSupervisor>? logger = logger;
     private const string containerSocketRoot = "/run/kautuka";
     private const string containerStateRoot = "/data";
     private sealed record Service(string Id, string Executable, string Image, bool Networkless,
@@ -282,15 +285,30 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             ["Kautuka__Telemetry__Otlp__MetricsEndpoint"] = "",
             ["Kautuka__Telemetry__Otlp__TracesEndpoint"] = "",
             ["Kautuka__Telemetry__Otlp__UnixSocketPath"] = "",
+            ["Kautuka__Telemetry__Otlp__Headers"] = "",
+            ["Kautuka__Telemetry__Otlp__AuthorizationHeaderFile"] = "",
         };
         string? telemetryEndpoint = networkless ? null : await egress.GetCoreTelemetryEndpointAsync(ct).ConfigureAwait(false);
-        if (telemetryEndpoint is not null)
+        if (telemetryEndpoint is not null && IsCredentialedCoreTelemetryEndpoint(telemetryEndpoint))
         {
-            foreach ((string signal, string path) in new[] { ("Logs", "logs"), ("Metrics", "metrics"), ("Traces", "traces") })
-                environment["Kautuka__Telemetry__Otlp__" + signal + "Endpoint"] = telemetryEndpoint + "/v1/" + path;
-            environment["Kautuka__Telemetry__Otlp__Protocol"] = "http/protobuf";
-            if (applicationConfiguration?["Kautuka:Telemetry:Otlp:Headers"] is string headers)
-                environment["Kautuka__Telemetry__Otlp__Headers"] = headers;
+            try
+            {
+                var credentials = new OpenObserveCredentialStore(paths.StateRoot);
+                credentials.EnsureExporterDirectory();
+                mounts.Add(new(credentials.ExporterDirectoryPath, "/run/kautuka/telemetry-auth", true));
+                foreach ((string signal, string path) in new[] { ("Logs", "logs"), ("Metrics", "metrics"), ("Traces", "traces") })
+                    environment["Kautuka__Telemetry__Otlp__" + signal + "Endpoint"] = telemetryEndpoint + "/v1/" + path;
+                environment["Kautuka__Telemetry__Otlp__Protocol"] = "http/protobuf";
+                environment[KautukaTelemetryDefaults.AuthorizationHeaderFileKey.Replace(":", "__", StringComparison.Ordinal)] = "/run/kautuka/telemetry-auth/ingestion.authorization";
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                logger?.LogWarning(error, "Managed telemetry credentials could not be mounted for core services; core telemetry remains disabled.");
+            }
+        }
+        else if (telemetryEndpoint is not null)
+        {
+            logger?.LogWarning("The managed telemetry endpoint is outside the private IPv4 policy; core telemetry is disabled.");
         }
         if (networkless) mounts.Add(new(Path.Combine(paths.StateRoot, "credentialsHost"), containerStateRoot + "/credentialsHost", false));
         else if (id == "gateway")
@@ -347,18 +365,31 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         return new Service(id, executable, resolved.LocalImageId, networkless, mounts, environment, ports, fingerprint);
     }
 
-    private static List<string> CreateArguments(Service service, string network, string? dns)
+    internal static bool IsCredentialedCoreTelemetryEndpoint(string endpoint)
+    {
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out Uri? uri)
+            || uri.Scheme != Uri.UriSchemeHttp || uri.Port != 5080 || uri.UserInfo.Length != 0
+            || uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.AbsolutePath != "/api/default"
+            || !IPAddress.TryParse(uri.Host, out IPAddress? address) || address.AddressFamily != AddressFamily.InterNetwork)
+            return false;
+
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] == 10
+            || bytes[0] == 172 && bytes[1] is >= 16 and <= 31
+            || bytes[0] == 192 && bytes[1] == 168;
+    }
+
+    private static List<string> CreateArguments(Service service, string network, string? dns, string environmentFilePath)
     {
         var args = new List<string> { "create", "--pull=never", "--restart=no", "--name", service.Name,
             "--label", "kautuka.managed=manager", "--label", "kautuka.role=core", "--label", "kautuka.core-service=" + service.Id,
             "--label", "kautuka.core-spec=" + service.Fingerprint, "--network", network,
             "--userns=keep-id:uid=1000,gid=1000", "--user=1000:1000", "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--read-only", "--pids-limit", "512", "--memory", "1073741824", "--tmpfs", "/tmp:rw,noexec,nosuid",
-            "--workdir", "/app", "--entrypoint", "/app/" + service.Executable };
+            "--workdir", "/app", "--entrypoint", "/app/" + service.Executable, "--env-file", environmentFilePath };
         if (dns is not null) args.AddRange(["--dns", dns, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
         foreach (WorkspaceSidecarVolumeBinding mount in service.Mounts)
             args.AddRange(["--volume", mount.HostPath + ":" + mount.ContainerPath + (mount.ReadOnly ? ":ro" : ":rw")]);
-        foreach ((string key, string value) in service.Environment) args.AddRange(["--env", key + "=" + value]);
         foreach (WorkspaceSidecarPortBinding port in service.Ports)
             args.AddRange(["--publish", port.HostBindAddress + ":" + port.HostPort + ":" + port.ContainerPort + "/tcp"]);
         args.Add(service.Image);
@@ -383,8 +414,17 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
         if (!service.Networkless)
         {
             var identity = new ContainerEgressRuntime.SourceIdentity(new ContainerEgressRuntime.Scope("system", service.Id, "core"), "core", service.Id);
-            PreparedPodmanContainer prepared = await egress.PrepareAndAuthorizeAsync(identity, service.Name,
-                (network, dns) => CreateArguments(service, network, dns), ct).ConfigureAwait(false);
+            string environmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(service.Environment, ct).ConfigureAwait(false);
+            PreparedPodmanContainer prepared;
+            try
+            {
+                prepared = await egress.PrepareAndAuthorizeAsync(identity, service.Name,
+                    (network, dns) => CreateArguments(service, network, dns, environmentFile), ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                PodmanContainerTool.DeleteSecretFile(environmentFile);
+            }
             try
             {
                 await egress.StartWithAdmissionAsync(prepared, token => CommandAsync(prepared.StartArguments(false), token), ct).ConfigureAwait(false);
@@ -393,16 +433,23 @@ public sealed class CoreServiceSupervisor(PodmanCommandRunner runner, ContainerE
             catch { await egress.RetireAsync(prepared.Id, CancellationToken.None).ConfigureAwait(false); throw; }
         }
         string operation = Guid.NewGuid().ToString("N");
-        List<string> create = CreateArguments(service, "none", null);
-        create.InsertRange(1, ["--label", "kautuka.preparation=" + operation]);
+        string networklessEnvironmentFile = await PodmanContainerTool.WriteEphemeralEnvironmentFileAsync(service.Environment, ct).ConfigureAwait(false);
         try
         {
+            List<string> create = CreateArguments(service, "none", null, networklessEnvironmentFile);
+            create.InsertRange(1, ["--label", "kautuka.preparation=" + operation]);
             string id = (await CommandAsync(create, ct).ConfigureAwait(false)).StdOut.Trim();
+            PodmanContainerTool.DeleteSecretFile(networklessEnvironmentFile);
             if (id.Length != 64 || !id.All(char.IsAsciiHexDigit)) throw new InvalidOperationException("Core service create did not return an immutable ID.");
             await CommandAsync(["start", id], ct).ConfigureAwait(false);
             return id;
         }
-        catch { await new PodmanContainerPreparation(runner).RetireOperationAsync(operation).ConfigureAwait(false); throw; }
+        catch
+        {
+            if (File.Exists(networklessEnvironmentFile)) PodmanContainerTool.DeleteSecretFile(networklessEnvironmentFile);
+            await new PodmanContainerPreparation(runner).RetireOperationAsync(operation).ConfigureAwait(false);
+            throw;
+        }
     }
 
     private static void RequireOwnership(JsonElement container, string service)

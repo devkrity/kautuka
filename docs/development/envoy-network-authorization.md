@@ -172,3 +172,39 @@ immutable HTTP transport pins and pooled downgrade rejection, remains a separate
 checkpoint. This is trusted Gateway application authorization, not a separate
 packet identity for each remote connector. Existing active streaming responses
 are outside the per-send revocation boundary.
+
+
+## Collector credentials and exporter transport
+
+The pinned managed OpenObserve catalog explicitly sets `ZO_TELEMETRY=false`.
+Manager generates a strong per-install root password and stores it under the
+private `telemetry/manager` directory. Publication uses private temporary files,
+atomic moves and file/directory flushes. Collector data is preserved if its root
+credential does not match; no shared development password is tried as fallback.
+
+Manager supplies the root password to the collector through a temporary private
+environment file. It creates or reuses the named ingestion-only token through
+the existing restricted host Unix-socket route. Only the exact ingestion-token
+GET/POST API is added to that private route. Core applications mount only
+`telemetry/exporter` read-only, never the root-credential directory. Their stable
+configuration names the authorization file rather than putting its value in
+container arguments or runtime fingerprints. Atomic replacement is observed by
+the next request without restarting core applications.
+
+Host exporters use the fixed Unix socket; core exporters use only the fixed
+private collector origin and signal path. Both asynchronous and synchronous
+HTTP sends apply the same credential and endpoint checks. Synchronous exporter
+calls deliberately use the checked asynchronous transport internally, because
+the Unix-socket connection callback uses that transport. Missing or invalid
+credentials prevent a request; redirects and ambient proxies are disabled.
+CredentialsHost remains networkless with export disabled.
+
+The Fedora 44 rootless Native AOT cross-component fixture used the pinned
+collector and stock Envoy with SDK 10.0.403. It observed accepted OTLP log payloads
+through host and core routes, successful SDK metric and trace flushes through
+both routes, rejected invalid credentials, and ingestion-token rejection on
+read/admin APIs. It checked private credential modes, root absence from core
+mounts/arguments, optional collector outage without blocking readiness or changing
+core identity, and credential reuse after collector restart. This establishes
+transport and credential behavior; it does not claim a query of every persisted
+metric/span or a new full installed-application acceptance run.

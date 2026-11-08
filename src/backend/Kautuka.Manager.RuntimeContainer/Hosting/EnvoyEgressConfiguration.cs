@@ -274,6 +274,16 @@ internal sealed record EnvoyEgressConfiguration(
                     },
                     ["route"] = new JsonObject { ["cluster"] = TelemetryClusterName(telemetry), ["timeout"] = "10s" }
                 });
+            foreach (string method in new[] { "GET", "POST" })
+                routes.Add((JsonNode)new JsonObject
+                {
+                    ["match"] = new JsonObject
+                    {
+                        ["path"] = "/api/default/ingestion-tokens",
+                        ["headers"] = new JsonArray(new JsonObject { ["name"] = ":method", ["string_match"] = new JsonObject { ["exact"] = method } })
+                    },
+                    ["route"] = new JsonObject { ["cluster"] = TelemetryClusterName(telemetry), ["timeout"] = "10s" }
+                });
             routes.Add((JsonNode)new JsonObject { ["match"] = new JsonObject { ["prefix"] = "/" }, ["direct_response"] = new JsonObject { ["status"] = 403 } });
             routes.Add((JsonNode)new JsonObject { ["match"] = new JsonObject { ["connect_matcher"] = new JsonObject() }, ["direct_response"] = new JsonObject { ["status"] = 403 } });
             virtualHosts.Add((JsonNode)new JsonObject { ["name"] = "telemetry", ["domains"] = new JsonArray("kautuka-telemetry.internal"), ["routes"] = routes });

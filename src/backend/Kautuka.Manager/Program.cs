@@ -28,6 +28,18 @@ var builder = WebApplication.CreateSlimBuilder(args);
 // over release defaults and environment/argument deployment overrides.
 if (OperatingSystem.IsLinux())
     KautukaInstalledDeploymentConfiguration.Add(builder.Configuration);
+if (OperatingSystem.IsLinux() && builder.Configuration.GetValue<bool>("ContainerEgress:TelemetryEnabled"))
+{
+    string telemetryStateRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration);
+    string managerRuntimeRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
+    builder.Configuration[KautukaTelemetryDefaults.LogsEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/logs";
+    builder.Configuration[KautukaTelemetryDefaults.MetricsEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/metrics";
+    builder.Configuration[KautukaTelemetryDefaults.TracesEndpointKey] = KautukaTelemetryDefaults.ManagedHostEndpoint + "/v1/traces";
+    builder.Configuration[KautukaTelemetryDefaults.ProtocolKey] = "http/protobuf";
+    builder.Configuration[KautukaTelemetryDefaults.HeadersKey] = string.Empty;
+    builder.Configuration[KautukaTelemetryDefaults.UnixSocketPathKey] = Path.Combine(managerRuntimeRoot, "egress", "host", "connect.sock");
+    builder.Configuration[KautukaTelemetryDefaults.AuthorizationHeaderFileKey] = new OpenObserveCredentialStore(telemetryStateRoot).IngestionAuthorizationPath;
+}
 builder.WebHost.UseKestrelHttpsConfiguration();
 builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
@@ -67,7 +79,8 @@ builder.Services.AddSingleton(sp =>
         Path.GetFullPath(workspace), core.ConfigurationRoot ?? Path.Combine(paths.RuntimeRoot, "core-config"),
         KautukaDatabaseWriterLease.LockPath, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
     return new CoreServiceSupervisor(sp.GetRequiredService<PodmanCommandRunner>(), sp.GetRequiredService<ContainerEgressRuntime>(),
-        sp.GetRequiredService<RuntimeImageAllowlist>(), corePaths, core, sp.GetRequiredService<PodmanImageArchiveStore>(), builder.Configuration);
+        sp.GetRequiredService<RuntimeImageAllowlist>(), corePaths, core, sp.GetRequiredService<PodmanImageArchiveStore>(),
+        sp.GetRequiredService<ILogger<CoreServiceSupervisor>>());
 });
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();

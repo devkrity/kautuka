@@ -74,7 +74,7 @@ internal static class CoreServiceUpdateCommand
             using var core = new CoreServiceSupervisor(runner, egress, inventory,
                 new CoreServicePaths("/var/lib/kautuka", KautukaHostNetworkPolicy.ResolveSocketRoot(configuration),
                     coreOptions.WorkspaceRoot ?? "/var/lib/kautuka/workspaces", coreOptions.ConfigurationRoot ?? "/var/lib/kautuka/manager/core-config",
-                    KautukaDatabaseWriterLease.LockPath, recoveryRoot), coreOptions, archives, configuration);
+                    KautukaDatabaseWriterLease.LockPath, recoveryRoot), coreOptions, archives);
             var authorizationHost = new EnvoyAuthorizationHost(egress);
             try
             {
