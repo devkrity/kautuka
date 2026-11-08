@@ -127,3 +127,48 @@ private-source translation and authorization path. It does not establish physica
 LAN reachability through the outer rootless helper. The earlier isolated
 transparent-network experiment covers SNI, wrong-IP binding, timeout and metadata
 cases; those cases are not represented as fresh rootless end-to-end tests here.
+
+
+## Remote HTTP connector decision boundary
+
+The internal `CheckRemoteConnectorNetwork` Manager RPC accepts the trusted
+Gateway caller and an exact `remote-connector` subject: user, canonical agent
+workspace (or explicit management scope), and user-scoped connector ID. Neither
+an administrator actor nor a shared Gateway grant can substitute for that
+subject's permission. Only the Gateway mTLS identity may call the RPC.
+
+Logical permissions live in the existing policy and approval store. A missing
+permission is durably recorded before returning `missing_permission`; an explicit
+Block returns `blocked`. Routing prerequisites and policy transitions return
+separate decisions without reopening an already-approved logical request.
+Accepted logical policy data is included in routing generation binding. A
+candidate representing the desired revision permits unchanged logical grants,
+selected outer routes and allocations to continue; incompatible changes require
+a retry.
+
+Public-only logical grants contribute to the existing shared Gateway public
+route union. Explicit core Gateway decisions override the union. Private logical
+approvals never create a shared Gateway LAN entitlement. The logical and selected
+outer route must agree on private-source privilege. Metadata remains forbidden,
+and the Linux firewall still enforces actual upstream destination ranges.
+
+Plain HTTP hostname calls retain a logical hostname permission but require a
+transport-pinned IPv4 address and an explicitly approved compatible core Gateway
+IP route. HTTP has no TLS SNI, so a hostname rule alone cannot select that route.
+HTTPS checks conservatively require a core hostname route; public grants derive
+it, while private grants require a separate explicit core hostname approval.
+This application check does not reproduce the native listener's literal-IP
+fallback for HTTPS hostnames.
+
+An allowed response carries an opaque binding to the exact subject, destination,
+Gateway source/container allocation, selected route and private privilege.
+Gateway integration must bind its transport to the first successful value and
+reject a later mismatch before resolving credentials or sending a pooled
+request. An unrelated policy generation does not change this binding.
+
+The Manager boundary has focused regression coverage. Gateway request-handler
+integration, including initialization, discovery, invocation, connection tests,
+immutable HTTP transport pins and pooled downgrade rejection, remains a separate
+checkpoint. This is trusted Gateway application authorization, not a separate
+packet identity for each remote connector. Existing active streaming responses
+are outside the per-send revocation boundary.

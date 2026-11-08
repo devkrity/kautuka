@@ -11,6 +11,7 @@ service ManagerService {
   rpc GetPkgsProxyCacheStats (WorkspacePingRequest)  returns (ManagerPkgsProxyCacheStatsResponse);
   rpc GetNetworkAccessPolicy (NetworkAccessReadRequest) returns (NetworkAccessPolicyResponse);
   rpc GetNetworkAudit (NetworkAuditReadRequest) returns (NetworkAuditResponse);
+  rpc CheckRemoteConnectorNetwork (RemoteConnectorNetworkRequest) returns (RemoteConnectorNetworkResponse);
   rpc SetNetworkAccessRule (NetworkAccessRuleRequest) returns (NetworkAccessPolicyResponse);
   rpc DecideNetworkAccessRequest (NetworkAccessDecisionRequest) returns (NetworkAccessPolicyResponse);
   rpc DescribeWorkspace   (WorkspaceResolvedRequest) returns (WorkspaceContextResponse);
@@ -33,6 +34,14 @@ message NetworkAccessActorMessage { string user_id = 1; bool is_admin = 2; }
 message NetworkAccessIdentityMessage {
   string scope_type = 1; string user_id = 2; string agent_id = 3;
   string role = 4; string component_id = 5;
+}
+// Internal trusted Gateway check, never a caller-selected HTTP request body.
+message RemoteConnectorNetworkRequest {
+  NetworkAccessActorMessage actor = 1; NetworkAccessIdentityMessage identity = 2;
+  string scheme = 3; string hostname = 4; int32 port = 5; string pinned_ipv4 = 6;
+}
+message RemoteConnectorNetworkResponse {
+  bool enabled = 1; string decision = 2; string message = 3; string route_binding = 4;
 }
 message NetworkAccessRuleMessage {
   string id = 1; NetworkAccessIdentityMessage identity = 2;

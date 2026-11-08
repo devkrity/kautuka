@@ -286,10 +286,10 @@ public sealed class NetworkAccessPolicyStore
         ValidatePart(actor.UserId);
     }
 
-    private static void ValidateIdentity(NetworkAccessIdentity identity)
+    internal static void ValidateIdentity(NetworkAccessIdentity identity)
     {
         ArgumentNullException.ThrowIfNull(identity);
-        if (identity.ScopeType is not ("agent" or "management" or "core") || identity.Role is not ("connector" or "agent" or "core" or "package" or "materializer"))
+        if (identity.ScopeType is not ("agent" or "management" or "core") || identity.Role is not ("connector" or "agent" or "core" or "package" or "materializer" or "remote-connector"))
             throw new ArgumentException("Unknown network scope or component role.");
         ValidatePart(identity.UserId); ValidatePart(identity.AgentId); ValidatePart(identity.ComponentId);
     }

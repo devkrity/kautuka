@@ -6,7 +6,11 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal sealed record EgressAuthorizationSnapshot(string Generation,
     IReadOnlyDictionary<string, NetworkAccessIdentity> Sources, IReadOnlyList<EgressTcpRule> Rules,
-    IReadOnlyDictionary<string, string> Allocations);
+    IReadOnlyDictionary<string, string> Allocations)
+{
+    public IReadOnlyList<RemoteConnectorPermission> RemotePermissions { get; init; } = [];
+    public long PolicyRevision { get; init; } = -1;
+}
 internal sealed record EgressRetiredAuthorization(EgressAuthorizationSnapshot Snapshot, long ExpiresAt);
 internal sealed record EgressAuthorizationState(EgressAuthorizationSnapshot? Current,
     EgressAuthorizationSnapshot? Candidate, IReadOnlyList<EgressRetiredAuthorization> Retired);

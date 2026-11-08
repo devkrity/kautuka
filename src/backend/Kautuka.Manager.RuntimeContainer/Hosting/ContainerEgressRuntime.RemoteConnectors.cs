@@ -1,0 +1,125 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+
+using Kautuka.Manager.RuntimeContainer.Configuration;
+
+namespace Kautuka.Manager.RuntimeContainer.Hosting;
+
+internal sealed record RemoteConnectorPermission(NetworkAccessIdentity Identity, string Destination, int Port, bool AllowPrivateNetwork);
+public sealed record RemoteConnectorNetworkDecision(bool Enabled, string Decision, string Message, string RouteBinding = "");
+
+public sealed partial class ContainerEgressRuntime
+{
+    private static readonly NetworkAccessIdentity gatewayNetworkIdentity = new("core", "system", "gateway", "core", "gateway");
+
+    internal static RemoteConnectorPermission[] RemotePermissions(IReadOnlyList<ContainerEgressGrant> grants)
+        => [.. grants.Where(static grant => grant.Role == "remote-connector")
+            .Select(static grant => new RemoteConnectorPermission(NetworkAccessPolicyStore.Identity(grant),
+                EnvoyEgressConfiguration.Normalize(new("192.0.2.1", grant.Destination, grant.Port)).Destination,
+                grant.Port, grant.AllowPrivateNetwork))
+            .Distinct().OrderBy(static item => item.Identity.ScopeType, StringComparer.Ordinal)
+            .ThenBy(static item => item.Identity.UserId, StringComparer.Ordinal).ThenBy(static item => item.Identity.AgentId, StringComparer.Ordinal)
+            .ThenBy(static item => item.Identity.ComponentId, StringComparer.Ordinal).ThenBy(static item => item.Destination, StringComparer.Ordinal)
+            .ThenBy(static item => item.Port).ThenBy(static item => item.AllowPrivateNetwork)];
+
+    internal IReadOnlyList<ContainerEgressGrant> WithRemotePublicGatewayGrants(IReadOnlyList<ContainerEgressGrant> effective)
+    {
+        // Logical approvals cannot silently confer a shared private-source privilege.
+        // Explicit core decisions, including Blocks, always override this derived union.
+        NetworkAccessPolicyState policy = networkPolicy.Read(new("system", true));
+        var explicitCore = policy.Rules.Where(static rule => rule.Identity == gatewayNetworkIdentity)
+            .Select(static rule => (rule.Destination, rule.Port)).ToHashSet();
+        var existingCore = effective.Where(static grant => NetworkAccessPolicyStore.Identity(grant) == gatewayNetworkIdentity)
+            .Select(static grant => (grant.Destination, grant.Port)).ToHashSet();
+        return [.. effective, .. RemotePermissions(effective)
+            .Where(permission => !permission.AllowPrivateNetwork && !NetworkDestinationPolicy.IsNonPublic(permission.Destination)
+                && !explicitCore.Contains((permission.Destination, permission.Port)) && !existingCore.Contains((permission.Destination, permission.Port)))
+            .DistinctBy(static permission => (permission.Destination, permission.Port))
+            .Select(static permission => new ContainerEgressGrant
+            {
+                ScopeType = "core", UserId = "system", AgentId = "gateway", Role = "core", ComponentId = "gateway",
+                Destination = permission.Destination, Port = permission.Port,
+            })];
+    }
+
+    // Gateway supplies this subject from its authenticated operation context. This
+    // does not turn a shared Gateway socket into a per-connector packet identity.
+    public RemoteConnectorNetworkDecision CheckRemoteConnectorNetwork(NetworkAccessActor actor, NetworkAccessIdentity identity,
+        string scheme, string hostname, int port, string? pinnedIpv4 = null)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        NetworkAccessPolicyStore.ValidateIdentity(identity);
+        if (identity.Role != "remote-connector" || identity.ScopeType is not ("agent" or "management")
+            || identity.UserId != actor.UserId || identity.UserId == "system"
+            || !identity.ComponentId.StartsWith(actor.UserId + "::", StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("A remote connector must use the authenticated caller's own scoped identity.");
+        if (scheme is not ("http" or "https")) throw new ArgumentException("Remote connectors require HTTP or HTTPS.");
+        string host = EnvoyEgressConfiguration.Normalize(new("192.0.2.1", hostname, port)).Destination;
+        bool literal = IPAddress.TryParse(host, out IPAddress? hostIp);
+        IPAddress? pin = null;
+        if (!string.IsNullOrEmpty(pinnedIpv4) && (!IPAddress.TryParse(pinnedIpv4, out pin) || pin.AddressFamily != AddressFamily.InterNetwork))
+            throw new ArgumentException("A transport pin must be an IPv4 address.");
+        if (scheme == "http" && !literal && pin is null) throw new ArgumentException("An HTTP hostname requires a transport-pinned IPv4 address.");
+        if (literal && pin is not null && !hostIp!.Equals(pin)) throw new ArgumentException("A literal endpoint cannot use a different transport address.");
+        if (ProtectedRemoteAddress(host) || (pin is not null && ProtectedRemoteAddress(pin.ToString())))
+            return new(Enabled, "blocked", "Cloud metadata and platform control destinations cannot be approved.");
+        if (!Enabled) return new(false, "allowed", "Network access control is disabled.");
+
+        EgressAuthorizationState? state = Volatile.Read(ref authorization);
+        if (!Volatile.Read(ref ready) || recoveryRequiresProxyStop || state?.Current is not { } current
+            || !RepresentsDesiredRemotePolicy(state, networkPolicy.Revision))
+            return RemoteTransition();
+        RemoteConnectorPermission? permission = SelectRemotePermission(current, identity, host, port);
+        (string? source, EgressTcpRule? route) = SelectRemoteOuterRoute(current, host, port, scheme, pin);
+        if (state.Candidate is { } candidate
+            && (permission != SelectRemotePermission(candidate, identity, host, port)
+                || (source, route) != SelectRemoteOuterRoute(candidate, host, port, scheme, pin)
+                || (source is not null && (!candidate.Allocations.TryGetValue(source, out string? nextAllocation)
+                    || !current.Allocations.TryGetValue(source, out string? allocation) || allocation != nextAllocation))))
+            return RemoteTransition();
+        if (!ReferenceEquals(state, Volatile.Read(ref authorization)) || !RepresentsDesiredRemotePolicy(state, networkPolicy.Revision)) return RemoteTransition();
+        if (permission is null)
+        {
+            NetworkAccessRule? decision = networkPolicy.Read(actor).Rules.SingleOrDefault(rule => rule.Identity == identity && rule.Destination == host && rule.Port == port);
+            if (decision is { Allowed: false }) return new(true, "blocked", "This remote connector is blocked by network policy.");
+            networkPolicy.ObserveDenied(identity, host, port, DateTimeOffset.UtcNow);
+            return new(true, "missing_permission", "Network access needs approval for this connector and caller. Approve it in Network access, then retry.");
+        }
+        if (route is null)
+            return new(true, "outer_route_required", scheme == "http" && !literal
+                ? $"The connector is approved, but plain HTTP needs an administrator-approved Gateway IP route to {pin}:{port}. The hostname rule cannot route traffic without TLS SNI."
+                : "The connector is approved, but Gateway has no compatible accepted outer route. An administrator must check Gateway's network permissions.");
+        if (permission.AllowPrivateNetwork != route.AllowPrivateNetwork)
+            return new(true, "private_route_conflict", "The connector's local-network permission differs from Gateway's shared route. An administrator must explicitly align both permissions; a connector approval does not grant shared Gateway LAN access.");
+        if (!ReferenceEquals(state, Volatile.Read(ref authorization)) || !RepresentsDesiredRemotePolicy(state, networkPolicy.Revision)) return RemoteTransition();
+        if (source is null || !current.Allocations.TryGetValue(source, out string? gatewayAllocation)) return RemoteTransition();
+        string binding = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0',
+            identity.ScopeType, identity.UserId, identity.AgentId, identity.ComponentId, host, port.ToString(CultureInfo.InvariantCulture),
+            source, gatewayAllocation, route.Destination, route.AllowPrivateNetwork ? "private" : "public"))));
+        return new(true, "allowed", string.Empty, binding);
+    }
+
+    private static bool RepresentsDesiredRemotePolicy(EgressAuthorizationState state, long revision)
+        => state.Current?.PolicyRevision == revision || state.Candidate?.PolicyRevision == revision;
+
+    private static bool ProtectedRemoteAddress(string value)
+        => NetworkDestinationPolicy.IsMetadata(value) || value == NetworkDestinationPolicy.PlatformControlAddress
+            || value == NetworkDestinationPolicy.PrivateSourceAddress || (IPAddress.TryParse(value, out IPAddress? ip) && IPAddress.IsLoopback(ip));
+
+    private static RemoteConnectorNetworkDecision RemoteTransition()
+        => new(true, "transition_unavailable", "Network policy is unavailable or changing. Retry after policy activation; no new approval is required.");
+
+    private static RemoteConnectorPermission? SelectRemotePermission(EgressAuthorizationSnapshot snapshot, NetworkAccessIdentity identity, string host, int port)
+        => snapshot.RemotePermissions.SingleOrDefault(permission => permission.Identity == identity && permission.Destination == host && permission.Port == port);
+
+    private static (string? Source, EgressTcpRule? Rule) SelectRemoteOuterRoute(EgressAuthorizationSnapshot snapshot, string host, int port, string scheme, IPAddress? pin)
+    {
+        string? source = snapshot.Sources.SingleOrDefault(static pair => pair.Value == gatewayNetworkIdentity).Key;
+        if (source is null) return (null, null);
+        string destination = scheme == "http" && !IPAddress.TryParse(host, out _) ? pin!.ToString() : host;
+        return (source, snapshot.Rules.SingleOrDefault(rule => rule.SourceAddress == source && rule.Destination == destination && rule.Port == port));
+    }
+}

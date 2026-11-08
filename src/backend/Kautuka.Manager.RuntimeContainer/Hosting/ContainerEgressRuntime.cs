@@ -816,7 +816,9 @@ public sealed partial class ContainerEgressRuntime(
             ScopeType = package.Identity.Scope.Kind, UserId = package.Identity.Scope.UserId, AgentId = package.Identity.Scope.AgentId,
             Role = package.Identity.Role, ComponentId = package.Identity.ComponentId, Destination = host, Port = 443,
         })];
-        IReadOnlyList<ContainerEgressGrant> grants = networkPolicy.EffectiveGrants(policyDefaults);
+        IReadOnlyList<ContainerEgressGrant> effective = networkPolicy.EffectiveGrants(policyDefaults);
+        RemoteConnectorPermission[] remotePermissions = RemotePermissions(effective);
+        IReadOnlyList<ContainerEgressGrant> grants = WithRemotePublicGatewayGrants(effective);
         EgressTcpRule[] rules = [.. authorized.SelectMany(source => grants
             .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
                 && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
@@ -835,12 +837,16 @@ public sealed partial class ContainerEgressRuntime(
         var generationData = new JsonObject
         {
             ["allocation"] = allocationVersion,
+            ["policyRevision"] = networkPolicy.Revision,
+            ["remotePermissions"] = new JsonArray([.. remotePermissions.Select(item => (JsonNode)new JsonArray(item.Identity.ScopeType,
+                item.Identity.UserId, item.Identity.AgentId, item.Identity.Role, item.Identity.ComponentId, item.Destination, item.Port, item.AllowPrivateNetwork))]),
             ["sources"] = new JsonArray([.. identities.Select(pair => (JsonNode)new JsonArray(pair.Key, pair.Value.ScopeType, pair.Value.UserId, pair.Value.AgentId, pair.Value.Role, pair.Value.ComponentId))]),
             ["rules"] = new JsonArray([.. rules.Select(rule => (JsonNode)new JsonArray(rule.SourceAddress, rule.Destination, rule.Port, rule.AllowPrivateNetwork))])
         };
         string generation = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(generationData.ToJsonString())));
         var snapshot = new EgressAuthorizationSnapshot(generation, identities, rules,
-            authorized.ToDictionary(source => source.Container.Address, source => source.Container.Id, StringComparer.Ordinal));
+            authorized.ToDictionary(source => source.Container.Address, source => source.Container.Id, StringComparer.Ordinal))
+        { RemotePermissions = remotePermissions, PolicyRevision = networkPolicy.Revision };
         return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled, NetworkDestinationPolicy.PrivateSourceAddress, generation) with { AuthorizationSnapshot = snapshot };
     }
 
