@@ -287,6 +287,9 @@ jobs:
       - name: Verify Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Verify Linux installer OpenSSL prerequisite
+        run: bash ./scripts/test-linux-installer-openssl.sh
+
       - name: Verify container bootstrap and smoke regressions
         run: |
           sudo python3 -B ./scripts/test-container-uninstall.py

@@ -474,21 +474,28 @@ icu_library_available() {
 }
 
 ensure_dotnet_host_libraries() {
-    if icu_library_available libicuuc; then
-        return
+    if ! icu_library_available libicuuc; then
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y libicu >/dev/null
+        elif command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y libicu-dev >/dev/null
+        fi
     fi
 
-    if command -v dnf >/dev/null 2>&1; then
-        dnf install -y libicu >/dev/null
-    elif command -v apt-get >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y libicu-dev >/dev/null
-    fi
+    icu_library_available libicuuc || fail "libicu is required to run Kautuka host services. Install the distro ICU package and rerun."
 
-    if icu_library_available libicuuc; then
-        return
+    if ! ssl3_library_available && command -v dnf >/dev/null 2>&1; then
+        dnf install -y openssl3-libs >/dev/null
     fi
+    ssl3_library_available || fail "OpenSSL 3 is required to run Kautuka host services. Install your distro's OpenSSL 3 library package and rerun."
+}
 
-    fail "libicu is required to run Kautuka host services. Install the distro ICU package and rerun."
+ssl3_library_available() {
+    local candidate
+    for candidate in /usr/lib64/libssl.so.3 /usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/libssl.so.3; do
+        [[ ! -e "$candidate" ]] || return 0
+    done
+    return 1
 }
 
 ensure_rootless_idmap_helpers() {
