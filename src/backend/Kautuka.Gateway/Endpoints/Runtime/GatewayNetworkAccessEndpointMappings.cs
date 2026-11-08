@@ -15,7 +15,7 @@ internal sealed record NetworkAccessViewDto(bool Enabled, long Revision, long Ac
     string ActivationState, string? LastError, IReadOnlyList<NetworkAccessRuleDto> Rules, IReadOnlyList<NetworkAccessRequestDto> Requests,
     IReadOnlyList<NetworkAccessIdentityDto> Sources, IReadOnlyList<NetworkAccessRuleDto> Defaults, int NextOffset = 0,
     int RuleCount = 0, int RequestCount = 0, int SourceCount = 0, int DefaultCount = 0, int PendingRequestCount = 0, bool RequestCapacityReached = false,
-    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1);
+    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1, string? DnsRefreshError = null);
 internal sealed record NetworkAccessRuleChangeDto(NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, long ExpectedRevision, bool AllowPrivateNetwork = false);
 internal sealed record NetworkAccessDecisionDto(bool Allowed, long ExpectedRevision, bool AllowPrivateNetwork = false);
 
@@ -121,5 +121,5 @@ internal static partial class GatewayNetworkAccessEndpointMappings
                 request.Port, request.CreatedAtUtc, request.LastSeenAtUtc, request.Attempts, request.Status))],
             [.. value.Sources.Select(describe)], [.. value.Defaults.Select(rule => Rule(rule, describe))], value.NextOffset,
             value.RuleCount, value.RequestCount, value.SourceCount, value.DefaultCount, value.PendingRequestCount, value.RequestCapacityReached,
-            value.MaxPrivateNetworks, value.ActivePrivateNetworks);
+            value.MaxPrivateNetworks, value.ActivePrivateNetworks, string.IsNullOrEmpty(value.DnsRefreshError) ? null : value.DnsRefreshError);
 }

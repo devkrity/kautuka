@@ -116,6 +116,7 @@ public sealed partial class WorkspaceGrpcService
             RequestCapacityReached = view.RequestCapacityReached,
             MaxPrivateNetworks = view.MaxPrivateNetworks,
             ActivePrivateNetworks = view.ActivePrivateNetworks,
+            DnsRefreshError = view.DnsRefreshError ?? string.Empty,
             NextOffset = !summaryOnly && offset < maximum - pageSize ? offset + pageSize : 0,
         };
         if (summaryOnly) return response;

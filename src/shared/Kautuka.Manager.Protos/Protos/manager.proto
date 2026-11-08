@@ -87,6 +87,7 @@ message NetworkAccessPolicyResponse {
   int32 source_count = 14; int32 default_count = 15; int32 pending_request_count = 16;
   bool request_capacity_reached = 17;
   int32 max_private_networks = 18; int32 active_private_networks = 19;
+  string dns_refresh_error = 20;
 }
 
 message WorkspacePingRequest {

@@ -5,7 +5,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 public sealed record NetworkAccessPolicyView(NetworkAccessPolicyState Policy, long ActiveRevision,
     string? ActiveVersion, string ActivationState, string? LastError,
     IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults, bool RequestCapacityReached = false,
-    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1);
+    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1, string? DnsRefreshError = null);
 
 public sealed partial class ContainerEgressRuntime
 {
@@ -39,8 +39,13 @@ public sealed partial class ContainerEgressRuntime
             error, [.. policySources.Where(identity => NetworkAccessPolicyStore.CanAccess(actor, identity))],
             [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))], networkPolicy.RequestCapacityReached,
             actor.IsAdmin && Enabled ? options.MaxPrivateNetworks : 0,
-            actor.IsAdmin && Enabled && Volatile.Read(ref ready) ? Volatile.Read(ref activePrivateNetworks) : -1);
+            actor.IsAdmin && Enabled && Volatile.Read(ref ready) ? Volatile.Read(ref activePrivateNetworks) : -1,
+            DnsErrorForActor(DnsRefreshError, actor.IsAdmin));
     }
+
+    internal static string? DnsErrorForActor(string? error, bool isAdmin)
+        => error is null ? null : isAdmin ? error
+            : "DNS refresh needs attention. Name resolution may be impaired; an administrator should check the appliance resolver.";
 
     public Task<NetworkAccessPolicyView> SetNetworkAccessRuleAsync(NetworkAccessActor actor, NetworkAccessIdentity identity,
         string destination, int port, bool allowed, long expectedRevision, CancellationToken cancellationToken, bool allowPrivateNetwork = false)

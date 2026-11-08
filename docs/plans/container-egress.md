@@ -1435,3 +1435,19 @@ afterward; these are observations, not a performance guarantee. The fixture
 used a controlled outside-network container, not a physical LAN destination.
 Administrators can configure `ContainerEgress:MaxPrivateNetworks` after checking
 host capacity. Existing explicitly configured limits retain their meaning.
+
+Fresh installations configure `ContainerEgress:NetworkPool` to
+`10.247.0.0/16` and `FollowHostDns` to `true`. The pool is not guaranteed to
+be free on every host: the runtime checks host and VPN routes and other Podman
+networks, and refuses overlap or exhaustion. Administrators must choose a
+non-overlapping RFC1918 pool of /19 or larger. A VPN added after validation
+can still introduce a route conflict. Existing managed networks must
+match the configured pool; automatic topology migration is not provided.
+
+Host-follow DNS reads usable IPv4 resolvers from the host and updates CoreDNS
+without restarting Envoy or CoreDNS. A locally answered canary confirms the active
+configuration before old DNS firewall allowances are retired. If refresh or
+rollback cannot be confirmed, the Network access page reports that DNS needs
+attention; an administrator can inspect the detailed error. Explicit
+`DnsUpstreams` remain authoritative when `FollowHostDns` is false. A legacy
+unmarked DNS configuration is not automatically converted to host-follow mode.

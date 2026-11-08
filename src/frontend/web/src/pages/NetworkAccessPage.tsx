@@ -188,6 +188,12 @@ export function NetworkAccessPage() {
               ))}
             </div>
             {data.lastError && <Alert variant="destructive">{data.lastError}</Alert>}
+            {data.dnsRefreshError && (
+              <Alert>
+                <p>DNS refresh needs attention. Name resolution may be impaired; an administrator should check the appliance resolver.</p>
+                {currentUser?.role === 'admin' && <p className="mt-1">{data.dnsRefreshError}</p>}
+              </Alert>
+            )}
             {data.maxPrivateNetworks > 0 && data.activePrivateNetworks >= 0 && (
               <p className="text-sm text-muted-foreground">
                 Private networks in use: {data.activePrivateNetworks} of {data.maxPrivateNetworks}.

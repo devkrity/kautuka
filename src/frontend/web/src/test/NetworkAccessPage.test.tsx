@@ -81,6 +81,14 @@ describe('NetworkAccessPage', () => {
     expect(screen.queryByText(/Private networks in use/)).not.toBeInTheDocument();
   });
 
+  it('shows DNS recovery guidance and only shows details to administrators', async () => {
+    mockView({ ...fixture(), dnsRefreshError: 'Resolver detail 192.0.2.53' });
+    viewer.role = 'member';
+    renderPage();
+    expect(await screen.findByText(/DNS refresh needs attention/)).toBeInTheDocument();
+    expect(screen.queryByText(/Resolver detail 192.0.2.53/)).not.toBeInTheDocument();
+  });
+
   it('loads further policy pages with the displayed revision', async () => {
     const first = { ...fixture(), nextOffset: 50, ruleCount: 51 };
     const second = {

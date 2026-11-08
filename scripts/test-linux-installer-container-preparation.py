@@ -89,6 +89,10 @@ configure=root/'configure.sh'
 configure.write_text('set -euo pipefail\nexport KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1\nsource "'+str(scripts/'kautuka-install-linux.sh.in')+'"\nwrite_container_deployment_configuration "'+str(payload)+'" kautuka\n')
 subprocess.run(['bash',str(configure)],check=True)
 assert config.stat().st_mode & 0o777 == 0o640 and json.loads(config.read_text())==provided
+following=json.loads(json.dumps(provided)); following['ContainerEgress']['FollowHostDns']=True; following['ContainerEgress']['DnsUpstreams']=[]
+config.write_text(json.dumps(following)); config.chmod(0o600)
+subprocess.run(['bash',str(configure)],check=True)
+assert json.loads(config.read_text())==following
 config.unlink()
 wrapper=root/'run.sh'
 wrapper.write_text(r'''#!/bin/bash
@@ -153,8 +157,10 @@ settings=json.loads(pathlib.Path('/etc/kautuka/manager.json').read_text())
 for name in ('sidecars','proxy'):
     directory=pathlib.Path('/var/lib/kautuka')/name
     assert directory.is_dir() and directory.stat().st_mode & 0o777==0o700
-assert settings['ContainerEgress']['DnsUpstreams']
+assert settings['ContainerEgress']['DnsUpstreams'] == []
 assert settings['ContainerEgress']['MaxPrivateNetworks'] == 22
+assert settings['ContainerEgress']['FollowHostDns'] is True
+assert settings['ContainerEgress']['NetworkPool'] == '10.247.0.0/16'
 assert json.loads(feed.read_text())['manifestUrl']=='https://updates.example.test/preview/manifest.json'
 assert json.loads(pathlib.Path('/var/lib/kautuka/updateService/update-runtime-policy.json').read_text())['releaseChannel']=='preview'
 # UID 65534 is not root and receives only the actual deployment directory group.

@@ -2699,7 +2699,10 @@ if path.exists() or path.is_symlink():
     if settings.get('CoreServices', {}).get('Enabled') is not True or settings.get('ContainerEgress', {}).get('Enabled') is not True:
         raise SystemExit('installed deployment settings must explicitly enable core and egress')
     upstreams = settings.get('ContainerEgress', {}).get('DnsUpstreams')
-    if not isinstance(upstreams, list) or not upstreams:
+    follow_host_dns = settings.get('ContainerEgress', {}).get('FollowHostDns', False)
+    if not isinstance(follow_host_dns, bool):
+        raise SystemExit('installed deployment host DNS selection must be a boolean')
+    if not isinstance(upstreams, list) or (not follow_host_dns and not upstreams):
         raise SystemExit('installed deployment settings require explicit IPv4 DNS upstreams')
     for value in upstreams:
         address = ipaddress.ip_address(value)
@@ -2746,7 +2749,7 @@ else:
     grants = [dict(ScopeType='core', UserId='system', AgentId=component, Role='core', ComponentId=component, Destination=host, Port=443)
               for component, hosts in (('gateway', gateway), ('channelhost', channel)) for host in hosts]
     settings = {'CoreServices': {'Enabled': True, 'WorkspaceRoot': '/var/lib/kautuka/workspaces', 'ConfigurationRoot': '/var/lib/kautuka/manager/core-config'},
-                'ContainerEgress': {'Enabled': True, 'TelemetryEnabled': True, 'MaxPrivateNetworks': 22, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
+                'ContainerEgress': {'Enabled': True, 'TelemetryEnabled': True, 'MaxPrivateNetworks': 22, 'NetworkPool': '10.247.0.0/16', 'FollowHostDns': True, 'DnsUpstreams': [], 'ArtifactHosts': artifacts, 'Grants': grants},
                 'Kautuka': {'Telemetry': {'Otlp': {
                     'LogsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/logs',
                     'MetricsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/metrics',

@@ -39,6 +39,7 @@ export const networkAccessSchema = z.object({
   requestCapacityReached: z.boolean().default(false),
   maxPrivateNetworks: z.number().int().default(0),
   activePrivateNetworks: z.number().int().default(-1),
+  dnsRefreshError: z.string().nullable().default(null),
   sources: z.array(identitySchema),
   requests: z.array(
     z.object({

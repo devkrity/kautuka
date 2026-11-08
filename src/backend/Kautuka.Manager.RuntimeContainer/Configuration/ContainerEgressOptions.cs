@@ -12,7 +12,12 @@ public sealed class ContainerEgressOptions
     // Shared by core, management and agent scopes; 20 agents plus core and management were measured.
     public int MaxPrivateNetworks { get; set; } = 22;
 
+    // Select a non-overlapping RFC1918 pool; existing managed networks are not migrated.
+    public string NetworkPool { get; set; } = "10.247.0.0/16";
+
     public IReadOnlyList<string> DnsUpstreams { get; set; } = [];
+
+    public bool FollowHostDns { get; set; }
 
     public IReadOnlyList<string> ArtifactHosts { get; set; } = [];
 

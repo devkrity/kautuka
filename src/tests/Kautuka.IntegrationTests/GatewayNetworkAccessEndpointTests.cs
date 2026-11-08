@@ -69,6 +69,7 @@ public sealed partial class GatewayNetworkAccessEndpointTests
         using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         Assert.Equal(22, body.RootElement.GetProperty("maxPrivateNetworks").GetInt32());
         Assert.Equal(17, body.RootElement.GetProperty("activePrivateNetworks").GetInt32());
+        Assert.Equal("resolver detail", body.RootElement.GetProperty("dnsRefreshError").GetString());
     }
 
     [Fact]
@@ -174,7 +175,7 @@ public sealed partial class GatewayNetworkAccessEndpointTests
         {
             Actor = actor;
             return Error is { } status ? Task.FromException<NetworkAccessPolicyResponse>(new RpcException(new Status(status, "test response")))
-                : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active", MaxPrivateNetworks = CapacityResponse ? 22 : 0, ActivePrivateNetworks = CapacityResponse ? 17 : -1 });
+                : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active", MaxPrivateNetworks = CapacityResponse ? 22 : 0, ActivePrivateNetworks = CapacityResponse ? 17 : -1, DnsRefreshError = CapacityResponse ? "resolver detail" : "" });
         }
         public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
         {

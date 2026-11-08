@@ -309,9 +309,13 @@ public sealed partial class ContainerEgressRuntime(
         if (recoveryRequiresProxyStop) await StopProxyAsync(cancellationToken).ConfigureAwait(false);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Container egress requires the Linux appliance.");
         if (options.MaxPrivateNetworks < 2) throw new InvalidOperationException("Egress needs capacity for core and a workload scope.");
+        NetworkAddressPool configuredPool = NetworkAddressPool.Parse(options.NetworkPool);
+        if (options.MaxPrivateNetworks >= configuredPool.SlotCount)
+            throw new InvalidOperationException("The configured egress pool does not have enough /24 subnets for the private-network limit and outside network.");
+        _ = await ValidatePoolInventoryAsync(configuredPool, cancellationToken).ConfigureAwait(false);
         networks.Clear();
         Volatile.Write(ref activePrivateNetworks, 0);
-        NetworkDestinationPolicy.ValidateDnsUpstreams(options.DnsUpstreams);
+        if (!options.FollowHostDns) NetworkDestinationPolicy.ValidateDnsUpstreams(options.DnsUpstreams);
 
         helperImage = await RequireCachedImageAsync("egress-setup", cancellationToken).ConfigureAwait(false);
         await RecoverHelpersAsync(cancellationToken).ConfigureAwait(false);
@@ -319,6 +323,7 @@ public sealed partial class ContainerEgressRuntime(
         ResolvedRuntimeImage dns = await RequireCachedImageAsync("egress-dns", cancellationToken).ConfigureAwait(false);
         Directory.CreateDirectory(configurationRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
             | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        await PrepareDnsStartupAsync(cancellationToken).ConfigureAwait(false);
         if ((options.ArtifactHosts.Count > 0 || TelemetryEnabled)) await PrepareArtifactSocketDirectoryAsync(cancellationToken).ConfigureAwait(false);
         ScopeNetwork outside = await EnsureNetworkAsync(outsideName, "outside", isPrivate: false, cancellationToken).ConfigureAwait(false);
         outsideDefaultGateway = outside.NativeGateway ?? throw new InvalidOperationException("The outside network has no native gateway.");
@@ -380,7 +385,8 @@ public sealed partial class ContainerEgressRuntime(
             active = null;
             Volatile.Write(ref authorization, null);
         }
-        string desiredDns = ".:53 {\n forward . " + string.Join(' ', options.DnsUpstreams) + "\n log\n errors\n}\n";
+        string desiredDns = options.FollowHostDns ? dnsStartup!.Corefile
+            : ".:53 {\n forward . " + string.Join(' ', options.DnsUpstreams) + "\n log\n errors\n}\n";
         if (!File.Exists(Path.Combine(configurationRoot, "bootstrap.json")))
         {
             await WriteAsync("cds.json", initial.ClusterDocument, cancellationToken).ConfigureAwait(false);
@@ -393,11 +399,14 @@ public sealed partial class ContainerEgressRuntime(
             await WriteAsync("Corefile", desiredDns, cancellationToken).ConfigureAwait(false);
         }
 
+        if (options.FollowHostDns) await WriteAsync("Corefile", desiredDns, cancellationToken).ConfigureAwait(false);
         if (!File.Exists(Path.Combine(configurationRoot, "Corefile"))
             || await File.ReadAllTextAsync(Path.Combine(configurationRoot, "Corefile"), cancellationToken).ConfigureAwait(false) != desiredDns)
             throw new InvalidOperationException("Persisted DNS configuration differs from the requested upstreams; controlled DNS replacement is required.");
 
         await EnsureServiceAsync("kautuka-egress-dns", dns, isDns: true, cancellationToken).ConfigureAwait(false);
+        await ConfirmDnsStartupAsync(cancellationToken).ConfigureAwait(false);
+        if (options.FollowHostDns) await TryRefreshDnsAtStartupAsync(cancellationToken).ConfigureAwait(false);
         await EnsureServiceAsync("kautuka-egress-envoy", envoy, isDns: false, cancellationToken, requireRunning: proxyRunning).ConfigureAwait(false);
         if (proxyRunning) active = await ReadActiveConfigurationAsync(cancellationToken).ConfigureAwait(false);
         await PublishAsync(initial, cancellationToken).ConfigureAwait(false);
@@ -609,10 +618,19 @@ public sealed partial class ContainerEgressRuntime(
 
     private async Task<ScopeNetwork> EnsureNetworkAsync(string name, string scopeKey, bool isPrivate, CancellationToken cancellationToken)
     {
-        if (!await ExistsAsync(["network", "exists", name], cancellationToken).ConfigureAwait(false))
+        NetworkAddressPool pool = NetworkAddressPool.Parse(options.NetworkPool);
+        bool exists = await ExistsAsync(["network", "exists", name], cancellationToken).ConfigureAwait(false);
+        // Startup already validated the complete inventory. Revalidate before each new
+        // allocation and before adopting an existing network during steady state.
+        HashSet<int> occupied = !exists || ready ? await ValidatePoolInventoryAsync(pool, cancellationToken).ConfigureAwait(false) : [];
+        if (!exists)
         {
             var args = new List<string> { "network", "create", "--disable-dns", "--label", ownerLabel + "=true", "--label", "kautuka.egress.scope=" + scopeKey };
             if (isPrivate) args.Add("--internal");
+            int slot = name == outsideName ? 0 : name == coreName ? 1 : Enumerable.Range(2, pool.SlotCount - 2).FirstOrDefault(candidate => !occupied.Contains(candidate), -1);
+            if (slot < 0 || occupied.Contains(slot))
+                throw new InvalidOperationException("The configured container egress network pool has no free /24 subnet for this scope. Choose a larger non-overlapping pool before creating a new topology.");
+            args.AddRange(["--subnet", pool.Subnet(slot), "--gateway", pool.Gateway(slot)]);
             args.Add(name);
             _ = await RunAsync(args, cancellationToken).ConfigureAwait(false);
         }
@@ -627,6 +645,11 @@ public sealed partial class ContainerEgressRuntime(
         JsonElement subnets = network.GetProperty("subnets");
         if (subnets.GetArrayLength() != 1) throw new InvalidOperationException("Expected one native IPv4 subnet per managed network.");
         string subnet = subnets[0].GetProperty("subnet").GetString()!;
+        if (!pool.TryGetSlot(subnet, out int actualSlot)
+            || name == outsideName && actualSlot != 0 || name == coreName && actualSlot != 1
+            || name is not (outsideName or coreName) && actualSlot < 2
+            || !subnets[0].TryGetProperty("gateway", out JsonElement actualGateway) || actualGateway.GetString() != pool.Gateway(actualSlot))
+            throw new InvalidOperationException("Existing managed network does not match the configured pool. Configure the original pool; automatic migration is not supported.");
         string[] parts = subnet.Split('/');
         if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out IPAddress? address) || address.AddressFamily != AddressFamily.InterNetwork
             || !int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out int prefix) || prefix is < 8 or > 29)
@@ -639,6 +662,8 @@ public sealed partial class ContainerEgressRuntime(
 
     private async Task ApplyBoundaryAsync(CancellationToken cancellationToken)
     {
+        NetworkAddressPool pool = NetworkAddressPool.Parse(options.NetworkPool);
+        pool.ValidateResolvers(dnsBoundaryUpstreams);
         await EnsurePrivateSourceAsync(cancellationToken).ConfigureAwait(false);
         string subnets = string.Join(", ", networks.Values.Select(static network => network.Subnet));
         string addresses = string.Join(", ", networks.Values.Select(static network => network.Gateway));
@@ -657,7 +682,7 @@ public sealed partial class ContainerEgressRuntime(
         Source? package = sources.Values.SingleOrDefault(static source => source.Authorized && source.Identity.Role == "package");
         Source? telemetry = TelemetryEnabled ? sources.Values.SingleOrDefault(static source => source.Authorized && IsTelemetrySource(source.Identity)) : null;
         text.Append(NetworkDestinationPolicy.RenderBoundary(subnets, addresses, networks.GetValueOrDefault(coreName)?.Gateway,
-            outsideSourceAddress, options.DnsUpstreams, package?.Container.Address, telemetry?.Container.Address));
+            outsideSourceAddress, dnsBoundaryUpstreams, package?.Container.Address, telemetry?.Container.Address));
         await WriteAsync("boundary.nft", text.ToString() + "\n", cancellationToken).ConfigureAwait(false);
         _ = await HelperAsync("/usr/sbin/nft", ["-f", "/egress/boundary.nft"], cancellationToken, networkAdmin: true).ConfigureAwait(false);
         PodmanCommandResult routes = await HelperAsync("/usr/sbin/ip", ["-j", "-4", "route", "show", "default"], cancellationToken).ConfigureAwait(false);
@@ -968,7 +993,7 @@ public sealed partial class ContainerEgressRuntime(
         ["--silent", "--show-error", "--fail", "--max-time", "2", "--retry", "8", "--retry-connrefused",
             "--retry-delay", "1", "--retry-max-time", "8", "http://127.0.0.1:9901/config_dump"];
 
-    private async Task<PodmanCommandResult> HelperAsync(string entrypoint, string[] arguments, CancellationToken cancellationToken, bool networkAdmin = false, string? networkNamespace = null)
+    private async Task<PodmanCommandResult> HelperAsync(string entrypoint, string[] arguments, CancellationToken cancellationToken, bool networkAdmin = false, string? networkNamespace = null, bool dnsProbe = false)
     {
         string operation = Guid.NewGuid().ToString("N");
         var args = new List<string> { "run", "--rm", "--pull=never", "--pod", podName, "--cap-drop=ALL", "--security-opt=no-new-privileges",
@@ -980,6 +1005,7 @@ public sealed partial class ContainerEgressRuntime(
             args.InsertRange(1, ["--network", "ns:" + networkNamespace]);
         }
         if (networkAdmin) args.Add("--cap-add=NET_ADMIN");
+        if (dnsProbe) args.InsertRange(args.IndexOf("--entrypoint"), ["--volume", Path.Combine(configurationRoot, "dns-probe-resolv.conf") + ":/etc/resolv.conf:ro"]);
         args.Add(helperImage!.LocalImageId);
         args.AddRange(arguments);
         pendingHelpers.Add(operation);
