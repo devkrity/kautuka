@@ -504,7 +504,7 @@ internal sealed record EnvoyEgressConfiguration(
               "timestamp": "%START_TIME%", "event_type": "%ACCESS_LOG_TYPE%", "source": "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%",
               "source_address": "%DOWNSTREAM_REMOTE_ADDRESS%", "destination": "%DOWNSTREAM_LOCAL_ADDRESS%",
               "sni": "%REQUESTED_SERVER_NAME%", "upstream_cluster": "%UPSTREAM_CLUSTER%", "details": "%CONNECTION_TERMINATION_DETAILS%",
-              "response_flags": "%RESPONSE_FLAGS%",
+              "response_flags": "%RESPONSE_FLAGS%", "response_code_details": "%RESPONSE_CODE_DETAILS%",
               "filter_chain": "%FILTER_CHAIN_NAME%", "stream_id": "%STREAM_ID%", "connection_id": "%CONNECTION_ID%",
               "connection_started": "%START_TIME(%s.%9f)%",
               "bytes_received": "%BYTES_RECEIVED%", "bytes_sent": "%BYTES_SENT%", "duration_ms": "%DURATION%"

@@ -143,12 +143,15 @@ internal sealed class NetworkAccessAuditStore(string root)
                         destination = authority.IdnHost;
                         port = authority.Port;
                     }
-                    bool denied = Text(value, "filter_chain") == "deny" && phase == "listener"
-                        || Text(value, "response_flags").Split(',').Contains("UAEX", StringComparer.Ordinal)
+                    string authorizationDetail = Text(value, "response_code_details");
+                    bool denied = authorizationDetail == "ext_authz_denied"
                         || phase == "host-artifact" && Number(value, "status") == 403;
+                    bool authorizationFailed = authorizationDetail == "ext_authz_error"
+                        || Text(value, "response_flags").Split(',').Contains("UAEX", StringComparer.Ordinal) && !denied;
                     bool connected = phase == "proxy" && Text(value, "event_type") == "TcpUpstreamConnected";
                     bool closed = phase == "listener" || Text(value, "event_type") is "TcpConnectionEnd" or "DownstreamEnd";
-                    string outcome = denied ? "denied" : connected ? "connected" : closed ? "closed" : "diagnostic";
+                    string outcome = denied ? "denied" : authorizationFailed ? "authorization_error"
+                        : connected ? "connected" : closed ? "closed" : "diagnostic";
                     DateTimeOffset startedAt = DateTimeOffset.TryParse(Text(value, "timestamp"), CultureInfo.InvariantCulture,
                         DateTimeStyles.AssumeUniversal, out DateTimeOffset time) ? time : observedAt;
                     try
@@ -164,7 +167,9 @@ internal sealed class NetworkAccessAuditStore(string root)
                     events[id] = new(checked(++sequence), id, prior?.StartedAt ?? startedAt, observedAt,
                         prior?.Identity ?? allocation?.Identity, prior?.ContainerId ?? allocation?.ContainerId,
                         sourceAddress.Length <= 128 ? sourceAddress : sourceAddress[..128], destination, port,
-                        denied || prior?.Outcome == "denied" ? "denied" : closed || prior?.Closed == true ? "closed" : outcome,
+                        denied || prior?.Outcome == "denied" ? "denied"
+                            : authorizationFailed || prior?.Outcome == "authorization_error" ? "authorization_error"
+                            : closed || prior?.Closed == true ? "closed" : outcome,
                         connected || prior?.Connected == true, closed || prior?.Closed == true,
                         Math.Max(prior?.BytesSent ?? 0, Number(value, "bytes_sent")), Math.Max(prior?.BytesReceived ?? 0, Number(value, "bytes_received")),
                         Math.Max(prior?.DurationMilliseconds ?? 0, Number(value, "duration_ms")), Text(value, "publication"));

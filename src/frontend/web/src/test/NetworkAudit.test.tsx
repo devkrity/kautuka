@@ -36,6 +36,21 @@ const renderAudit = () =>
 
 describe('NetworkAudit', () => {
   beforeEach(() => vi.resetAllMocks());
+  it('explains authorization faults without labelling them as a permission block', async () => {
+    get.mockResolvedValue({
+      data: {
+        events: [{ ...row('3', 'allowed.example.com'), outcome: 'authorization_error' }],
+        nextBefore: 0,
+        coverageGaps: 0,
+        unattributedConnections: 0,
+        lastError: null,
+      },
+    });
+    renderAudit();
+    expect(await screen.findByText('Authorization unavailable · allowed.example.com:443')).toBeInTheDocument();
+    expect(screen.getByText(/Network control could not complete the check/)).toBeInTheDocument();
+    expect(screen.queryByText(/Blocked ·/)).not.toBeInTheDocument();
+  });
   it('shows bounded-history limitations and known coverage gaps without inventing source identity', async () => {
     get.mockResolvedValue({
       data: {

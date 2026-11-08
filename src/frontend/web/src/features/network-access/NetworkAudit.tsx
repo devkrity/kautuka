@@ -3,14 +3,13 @@ import { Button } from '@/components/ui/button';
 import { identityLabel, useNetworkAudit } from './networkAccess';
 import { NetworkSource } from './NetworkSource';
 
-const outcomeLabel = (outcome: string) =>
-  outcome === 'denied'
-    ? 'Blocked'
-    : outcome === 'connected'
-      ? 'Connected'
-      : outcome === 'closed'
-        ? 'Connection ended'
-        : 'Diagnostic';
+const outcomeLabels: Record<string, string> = {
+  denied: 'Blocked',
+  authorization_error: 'Authorization unavailable',
+  connected: 'Connected',
+  closed: 'Connection ended',
+};
+const outcomeLabel = (outcome: string) => outcomeLabels[outcome] ?? 'Diagnostic';
 
 export function NetworkAudit({ search = '' }: { search?: string }) {
   const query = useNetworkAudit();
@@ -61,6 +60,11 @@ export function NetworkAudit({ search = '' }: { search?: string }) {
               {outcomeLabel(event.outcome)} · {event.destination}
               {event.port > 0 ? `:${event.port}` : ''}
             </p>
+            {event.outcome === 'authorization_error' && (
+              <p className="text-sm text-muted-foreground">
+                Network control could not complete the check. Retry when the policy service is healthy.
+              </p>
+            )}
             {event.identity ? (
               <NetworkSource identity={event.identity} />
             ) : (

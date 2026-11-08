@@ -62,7 +62,15 @@ than a silently omitted request. Distinct first requests still require durable
 writes, so repeated-request efficiency is not a claim of unlimited flood isolation.
 
 Connection logs remain bounded outcome history, including authorization rejection
-flags. They are not a reliable source of approval requests. Unavailable Manager,
+details from stock `%RESPONSE_CODE_DETAILS%`. `ext_authz_denied` is a deliberate
+denial; `ext_authz_error` is an authorization-service fault. `UAEX` alone is
+ambiguous and is not presented as a policy block. Activity labels the latter
+**Authorization unavailable**, and generic close records do not erase it.
+The pinned Envoy 1.40.2 logging fixture observed both details on matched and
+unknown chains for denial, gRPC Unavailable, timeout and authorizer absence.
+That fixture tests logging on loopback; the separate rootless Manager fixture
+establishes the routing and direct-approval boundary.
+Logs are not a reliable source of approval requests. Unavailable Manager,
 invalid attributes, unavailable generations, timeout and capacity rejection also
 fail closed. Capacity, storage and routing-transition faults use actual gRPC
 transport errors; deliberate denials use the authorization response. These faults

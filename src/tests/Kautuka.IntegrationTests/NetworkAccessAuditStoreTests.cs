@@ -8,6 +8,42 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class NetworkAccessAuditStoreTests : IDisposable
 {
+    [Theory]
+    [InlineData("deny", "ext_authz_error")]
+    [InlineData("upstream-allowed", "ext_authz_error")]
+    [InlineData("deny", "")]
+    [InlineData("upstream-allowed", "")]
+    public void AuthorizationFaultAndAmbiguousUaexAreNotPolicyBlocksAndSurviveClose(string chain, string detail)
+    {
+        var store = new NetworkAccessAuditStore(AuditRoot);
+        string allocation = Allocate(store);
+        store.Observe(envoy, [WithAuthorizationDetail(Line(allocation, chain: chain), detail, "UAEX"),
+            WithAuthorizationDetail(Line(allocation, chain: chain, second: 3), "", "-")], false);
+        NetworkAuditEvent entry = Assert.Single(store.Read(alice, 0, 50, null).Events);
+        Assert.Equal("authorization_error", entry.Outcome);
+        Assert.False(entry.Connected);
+        Assert.True(entry.Closed);
+        Assert.Equal("authorization_error", Assert.Single(new NetworkAccessAuditStore(AuditRoot).Read(alice, 0, 50, null).Events).Outcome);
+    }
+
+    [Fact]
+    public void UnknownChainWithoutADecisionIsNotInventedAsAPolicyDenial()
+    {
+        var store = new NetworkAccessAuditStore(AuditRoot);
+        string allocation = Allocate(store);
+        store.Observe(envoy, [WithAuthorizationDetail(Line(allocation), "", "-")], false);
+        Assert.Equal("closed", Assert.Single(store.Read(alice, 0, 50, null).Events).Outcome);
+    }
+
+    private static string WithAuthorizationDetail(string line, string detail, string flags)
+    {
+        int separator = line.IndexOf(' ', StringComparison.Ordinal);
+        JsonObject record = JsonNode.Parse(line[(separator + 1)..])!.AsObject();
+        record["response_flags"] = flags;
+        record["response_code_details"] = detail;
+        return line[..(separator + 1)] + record.ToJsonString();
+    }
+
     [Fact]
     public void AuthorizationDenialOnMatchedRouteIsRecordedAsDenied()
     {
@@ -17,6 +53,7 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
         int separator = line.IndexOf(' ', StringComparison.Ordinal);
         JsonObject record = JsonNode.Parse(line[(separator + 1)..])!.AsObject();
         record["response_flags"] = "UAEX";
+        record["response_code_details"] = "ext_authz_denied";
         store.Observe(envoy, [line[..(separator + 1)] + record.ToJsonString()], false);
         NetworkAuditEvent entry = Assert.Single(store.Read(alice, 0, 50, null).Events);
         Assert.Equal("denied", entry.Outcome);
@@ -105,6 +142,7 @@ public sealed class NetworkAccessAuditStoreTests : IDisposable
             ["destination"] = "203.0.113.20:443",
             ["sni"] = "Graph.Microsoft.com.",
             ["filter_chain"] = chain,
+            ["response_code_details"] = chain == "deny" ? "ext_authz_denied" : null,
             ["connection_id"] = connection,
             ["connection_started"] = $"1794052800.{connection:000000000}",
             ["stream_id"] = null,
