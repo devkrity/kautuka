@@ -3,7 +3,7 @@
   "platform": "linux/amd64",
   "sdkImage": "mcr.microsoft.com/dotnet/sdk:10.0.403-azurelinux3.0-aot@sha256:be109b4b7a2fa42149ee4be17d1807176b34471530b2339a5ca6331dc640b52a",
   "coreRuntimeImage": "mcr.microsoft.com/dotnet/runtime-deps:10.0-azurelinux3.0-distroless-extra@sha256:6601c6381eac77fbcb2a35e24949b48f62cb390f0bc7847c3038fe496f846595",
-  "setupBaseImage": "quay.io/fedora/fedora-minimal@sha256:6829e3465e85be3cbad548e2d5ff55f1cd35c31bc0db3e79662331aee3a4bfeb",
+  "setupBaseImage": "quay.io/fedora/fedora-minimal@sha256:cd2464bcb490577370c77239f2335d1ccebf5bac0649ede2c0139015be816a9c",
   "envoyImage": "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded",
   "dnsImage": "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea",
   "acquisitionImage": "quay.io/skopeo/stable@sha256:2681eccb8b02c495b013c2669cbf7f41d5c0b0b0e644e7c69bd3ea9bcb20641f"
