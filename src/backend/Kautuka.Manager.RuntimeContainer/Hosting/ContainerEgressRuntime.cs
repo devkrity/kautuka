@@ -782,7 +782,8 @@ public sealed partial class ContainerEgressRuntime(
             ["rules"] = new JsonArray([.. rules.Select(rule => (JsonNode)new JsonArray(rule.SourceAddress, rule.Destination, rule.Port, rule.AllowPrivateNetwork))])
         };
         string generation = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(generationData.ToJsonString())));
-        var snapshot = new EgressAuthorizationSnapshot(generation, identities, rules);
+        var snapshot = new EgressAuthorizationSnapshot(generation, identities, rules,
+            authorized.ToDictionary(source => source.Container.Address, source => source.Container.Id, StringComparer.Ordinal));
         return EnvoyEgressConfiguration.Compile(rules, outsideSourceAddress ?? throw new InvalidOperationException("Missing outside source address."), routes, options.ArtifactHosts, allocationVersion, telemetry, TelemetryEnabled, NetworkDestinationPolicy.PrivateSourceAddress, generation) with { AuthorizationSnapshot = snapshot };
     }
 
@@ -815,11 +816,14 @@ public sealed partial class ContainerEgressRuntime(
     private async Task PublishAsync(EnvoyEgressConfiguration next, CancellationToken cancellationToken)
     {
         EnvoyEgressConfiguration? previous = active;
+        EgressAuthorizationSnapshot candidate = next.AuthorizationSnapshot
+            ?? throw new InvalidOperationException("A policy publication requires its bound authorization snapshot.");
+        BeginAuthorizationTransition(candidate);
         try
         {
             await ActivateAsync(next, previous, cancellationToken).ConfigureAwait(false);
             active = next;
-            Volatile.Write(ref authorization, next.AuthorizationSnapshot);
+            CompleteAuthorizationTransition(candidate);
             Interlocked.Exchange(ref activePolicyRevision, networkPolicy.Revision);
             policyActivationError = null;
         }
@@ -839,6 +843,7 @@ public sealed partial class ContainerEgressRuntime(
                 }
             }
 
+            RestoreAuthorizationTransition();
             throw;
         }
     }

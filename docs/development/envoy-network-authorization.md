@@ -34,15 +34,39 @@ authorization check and still fail at that firewall; it does not automatically
 gain LAN permission.
 
 Listener publications carry an authorization generation tied to policy and source
-allocations. A stale or unknown generation denies without generating an approval.
-A check's snapshot read is its decision point. Publication does not revoke an
-already established connection or promise to interrupt a check already executing
-against the previous accepted snapshot.
+allocations, including the exact container ID behind each source IP. Before
+publication, Manager atomically exposes the accepted and candidate snapshots.
+During activation a check from either generation may proceed only when both
+snapshots agree on its allocation, identity and selected SNI-or-IP rule, including
+the private-network source binding. New grants wait for acceptance; removals,
+ownership changes and privilege changes fail closed during the transition.
+
+After acceptance, old generations describe routes rather than independent
+permissions. Each is checked against the current identity, allocation and exact
+selected rule. Manager retains at most eight old descriptors for ten seconds,
+using a monotonic clock; expired, evicted and incompatible generations require a
+retry without creating an approval. This provides bounded continuity across
+ordinary updates, not unlimited continuity under arbitrarily rapid churn.
+Confirmed rollback restores the last accepted policy and checks any briefly
+loaded candidate route against that restored authority. Failed rollback clears
+authorization and stops Envoy. Established connections retain the existing
+new-connection policy contract.
+
+The first missing-permission request is durable before Deny returns. Retries of
+an existing pending request update attempt and last-seen counters only in memory;
+the next real request or policy write flushes them. Restart may lose those counter
+increments, but not the pending request. The direct path no longer constructs
+random observation IDs, batches log observations or maintains a dedupe history.
+Pending-request storage is bounded; exhaustion is an operational failure rather
+than a silently omitted request. Distinct first requests still require durable
+writes, so repeated-request efficiency is not a claim of unlimited flood isolation.
 
 Connection logs remain bounded outcome history, including authorization rejection
 flags. They are not a reliable source of approval requests. Unavailable Manager,
-invalid attributes, stale generation, timeout and capacity rejection also deny;
-these failures do not imply that the user should approve a destination. Known log
+invalid attributes, unavailable generations, timeout and capacity rejection also
+fail closed. Capacity, storage and routing-transition faults use actual gRPC
+transport errors; deliberate denials use the authorization response. These faults
+do not imply that the user should approve a destination. Known log
 collection gaps remain visible, and Linux firewall drops are not individually
 recorded in Envoy's connection history.
 

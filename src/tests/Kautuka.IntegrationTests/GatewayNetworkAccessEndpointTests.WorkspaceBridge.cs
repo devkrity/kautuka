@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Reflection;
 using System.Net.Http.Json;
 
 using Grpc.Core;
@@ -27,9 +26,9 @@ public sealed partial class GatewayNetworkAccessEndpointTests
             var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("The policy read and decision must not bootstrap Podman."));
             using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
             var identity = new NetworkAccessIdentity("agent", "owner", "agent-1", "connector", "owner::mail");
-            typeof(ContainerEgressRuntime).GetField("authorization", BindingFlags.NonPublic | BindingFlags.Instance)!
-                .SetValue(runtime, new EgressAuthorizationSnapshot("generation-1",
-                    new Dictionary<string, NetworkAccessIdentity> { ["10.247.91.2"] = identity }, []));
+            runtime.CompleteAuthorizationTransition(new EgressAuthorizationSnapshot("generation-1",
+                new Dictionary<string, NetworkAccessIdentity> { ["10.247.91.2"] = identity }, [],
+                new Dictionary<string, string> { ["10.247.91.2"] = "container-1" }));
             var workspace = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
                 new StubRuntimeHealthProbe(), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, runtime);
             var manager = new RecordingManager(workspace);

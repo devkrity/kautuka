@@ -77,6 +77,52 @@ public sealed class NetworkAccessPolicyStoreTests : IDisposable
         Assert.Equal(8443, grant.Port);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LegacyPrivateLiteralAllowNeedsApprovalAndObservedDenialReopensDurably(bool previouslyRequested)
+    {
+        var original = new NetworkAccessPolicyStore(PolicyPath);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        if (previouslyRequested) original.ObserveDenied(connector, "10.0.0.7", 11434, now);
+        original.SetRule(admin, connector, "10.0.0.7", 11434, true, 0, allowPrivateNetwork: true);
+        // The old release wrote AllowPrivateNetwork for every admin Allow, without
+        // evidence that private-network approval was explicitly chosen.
+        File.WriteAllText(PolicyPath, File.ReadAllText(PolicyPath).Replace(
+            "\"privateNetworkApprovalExplicit\": true", "\"legacyField\": true", StringComparison.Ordinal));
+        var store = new NetworkAccessPolicyStore(PolicyPath);
+        Assert.Empty(store.EffectiveGrants([])); // No upstream chain: Envoy can report a policy denial.
+        store.ObserveDenied(connector, "10.0.0.7", 11434, now.AddSeconds(1));
+        NetworkAccessRequest request = Assert.Single(store.Read(alice).Requests);
+        Assert.Equal("pending", request.Status);
+        Assert.Equal(previouslyRequested ? 2 : 1, request.Attempts);
+        Assert.Equal(1, store.Revision);
+        var restarted = new NetworkAccessPolicyStore(PolicyPath);
+        Assert.Equal(request, Assert.Single(restarted.Read(alice).Requests));
+        restarted.ObserveDenied(connector, "10.0.0.7", 11434, now.AddSeconds(1));
+        Assert.Equal(request.Attempts + 1, Assert.Single(restarted.Read(alice).Requests).Attempts);
+        Assert.Throws<UnauthorizedAccessException>(() => restarted.DecideRequest(alice, request.Id, true, 1, true));
+        restarted.DecideRequest(admin, request.Id, true, 1, true);
+        Assert.True(Assert.Single(new NetworkAccessPolicyStore(PolicyPath).EffectiveGrants([])).AllowPrivateNetwork);
+        Assert.Equal("allowed", Assert.Single(new NetworkAccessPolicyStore(PolicyPath).Read(alice).Requests).Status);
+    }
+
+    [Fact]
+    public void EffectiveAllowDoesNotReopenButExplicitKeepBlockedResolvesLegacyPrivateRequest()
+    {
+        var store = new NetworkAccessPolicyStore(PolicyPath);
+        store.SetRule(admin, connector, "public.example.com", 443, true, 0);
+        store.ObserveDenied(connector, "public.example.com", 443, DateTimeOffset.UtcNow);
+        Assert.Empty(store.Read(alice).Requests);
+        store.ObserveDenied(connector, "10.0.0.7", 11434, DateTimeOffset.UtcNow);
+        NetworkAccessRequest request = Assert.Single(store.Read(alice).Requests);
+        store.DecideRequest(alice, request.Id, false, 1);
+        var restarted = new NetworkAccessPolicyStore(PolicyPath);
+        restarted.ObserveDenied(connector, "10.0.0.7", 11434, DateTimeOffset.UtcNow);
+        Assert.Equal("blocked", Assert.Single(restarted.Read(alice).Requests).Status);
+        Assert.DoesNotContain(restarted.EffectiveGrants([]), grant => grant.Destination == "10.0.0.7");
+    }
+
     [Fact]
     public void StaleEditsCannotReplaceANewerDecision()
     {

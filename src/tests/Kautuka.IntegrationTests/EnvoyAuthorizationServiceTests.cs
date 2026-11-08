@@ -21,6 +21,51 @@ public sealed class EnvoyAuthorizationHostSerialTests { }
 public sealed class EnvoyAuthorizationServiceTests
 {
     [Fact]
+    public async Task CapacityExhaustionIsAnOperationalErrorRatherThanPermissionDenied()
+    {
+        using var runtime = CreateRuntime();
+        using var capacity = new SemaphoreSlim(0, 1);
+        var service = new EnvoyAuthorizationService(runtime, capacity);
+        RpcException error = await Assert.ThrowsAsync<RpcException>(() => service.Check(ValidRequest(), new TestCallContext([])));
+        Assert.Equal(StatusCode.Unavailable, error.StatusCode);
+    }
+
+    [Fact]
+    public async Task CancellationAndDeadlineRetainTheirTransportStatus()
+    {
+        using var runtime = CreateRuntime();
+        var service = new EnvoyAuthorizationService(runtime);
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+        RpcException cancelledError = await Assert.ThrowsAsync<RpcException>(() => service.Check(
+            ValidRequest(), new TestCallContext([], cancellationToken: cancelled.Token)));
+        Assert.Equal(StatusCode.Cancelled, cancelledError.StatusCode);
+        RpcException deadlineError = await Assert.ThrowsAsync<RpcException>(() => service.Check(
+            ValidRequest(), new TestCallContext([], deadline: DateTime.UtcNow.AddSeconds(-1))));
+        Assert.Equal(StatusCode.DeadlineExceeded, deadlineError.StatusCode);
+    }
+
+    [Fact]
+    public async Task ApprovalStorageFailureIsAnOperationalErrorRatherThanAMissingPermissionDecision()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-authorizer-storage-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(Path.Combine(root, "egress"), "prevent policy-directory creation", TestContext.Current.CancellationToken);
+            using var runtime = new ContainerEgressRuntime(new PodmanCommandRunner(), new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
+            runtime.CompleteAuthorizationTransition(new EgressAuthorizationSnapshot("generation-a",
+                new Dictionary<string, NetworkAccessIdentity> { ["10.0.0.2"] = new("agent", "owner", "agent", "connector", "connector") }, [],
+                new Dictionary<string, string> { ["10.0.0.2"] = "container-1" }));
+            var service = new EnvoyAuthorizationService(runtime);
+            RpcException error = await Assert.ThrowsAsync<RpcException>(() => service.Check(ValidRequest(), new TestCallContext(
+                [new Metadata.Entry("x-kautuka-nac-generation", "generation-a")])));
+            Assert.Equal(StatusCode.Unavailable, error.StatusCode);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
     public async Task CheckFailsClosedWhenGenerationHeaderIsMissing()
     {
         using var runtime = CreateRuntime();
@@ -63,10 +108,10 @@ public sealed class EnvoyAuthorizationServiceTests
         using var runtime = CreateRuntime();
         var service = new EnvoyAuthorizationService(runtime);
 
-        CheckResponse response = await service.Check(ValidRequest(), new TestCallContext(
-            [new Metadata.Entry("x-kautuka-nac-generation", "generation-a")]));
+        RpcException error = await Assert.ThrowsAsync<RpcException>(() => service.Check(ValidRequest(), new TestCallContext(
+            [new Metadata.Entry("x-kautuka-nac-generation", "generation-a")])));
 
-        Assert.Equal(7, response.Status.Code);
+        Assert.Equal(StatusCode.Unavailable, error.StatusCode);
     }
 
     [Fact]
@@ -112,9 +157,9 @@ public sealed class EnvoyAuthorizationServiceTests
             using GrpcChannel channel = GrpcChannel.ForAddress("http://localhost", new GrpcChannelOptions { HttpHandler = grpcHandler });
             var client = new Kautuka.Manager.Protos.EnvoyAuthorization.Authorization.AuthorizationClient(channel);
             var headers = new Metadata { { "x-kautuka-nac-generation", "generation-a" } };
-            CheckResponse response = await client.CheckAsync(ValidRequest(), headers, deadline: DateTime.UtcNow.AddSeconds(5),
-                cancellationToken: TestContext.Current.CancellationToken);
-            Assert.Equal(7, response.Status.Code); // Enabled runtime with no active snapshot denies.
+            RpcException error = await Assert.ThrowsAsync<RpcException>(async () => await client.CheckAsync(ValidRequest(), headers,
+                deadline: DateTime.UtcNow.AddSeconds(5), cancellationToken: TestContext.Current.CancellationToken));
+            Assert.Equal(StatusCode.Unavailable, error.StatusCode); // No active snapshot is an operational failure, still closed.
 
             using var httpHandler = CreateUnixSocketHandler(socketPath);
             using var http = new HttpClient(httpHandler) { DefaultRequestVersion = HttpVersion.Version20, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact };
@@ -169,7 +214,7 @@ public sealed class EnvoyAuthorizationServiceTests
         },
     };
 
-    private sealed class TestCallContext(Metadata headers) : ServerCallContext
+    private sealed class TestCallContext(Metadata headers, DateTime? deadline = null, CancellationToken cancellationToken = default) : ServerCallContext
     {
         private readonly Dictionary<object, object> userState = [];
         private Metadata responseTrailers = [];
@@ -178,9 +223,9 @@ public sealed class EnvoyAuthorizationServiceTests
         protected override string MethodCore => "/envoy.service.auth.v3.Authorization/Check";
         protected override string HostCore => "localhost";
         protected override string PeerCore => "ipv4:127.0.0.1:12345";
-        protected override DateTime DeadlineCore => DateTime.MaxValue;
+        protected override DateTime DeadlineCore => deadline ?? DateTime.MaxValue;
         protected override Metadata RequestHeadersCore => headers;
-        protected override CancellationToken CancellationTokenCore => CancellationToken.None;
+        protected override CancellationToken CancellationTokenCore => cancellationToken;
         protected override Metadata ResponseTrailersCore => responseTrailers;
         protected override IDictionary<object, object> UserStateCore => userState;
         protected override Grpc.Core.Status StatusCore { get => status; set => status = value; }

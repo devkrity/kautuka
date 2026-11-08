@@ -18,11 +18,7 @@ public sealed record NetworkAccessRule(string Id, NetworkAccessIdentity Identity
 }
 public sealed record NetworkAccessRequest(string Id, NetworkAccessIdentity Identity, string Destination, int Port,
     DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, long Attempts, string Status);
-public sealed record NetworkAccessPolicyState(int SchemaVersion, long Revision, IReadOnlyList<NetworkAccessRule> Rules, IReadOnlyList<NetworkAccessRequest> Requests)
-{
-    public IReadOnlyList<string> ObservedDenials { get; init; } = [];
-}
-internal sealed record NetworkDeniedObservation(NetworkAccessIdentity Identity, string Destination, int Port, DateTimeOffset ObservedAt, string EventId);
+public sealed record NetworkAccessPolicyState(int SchemaVersion, long Revision, IReadOnlyList<NetworkAccessRule> Rules, IReadOnlyList<NetworkAccessRequest> Requests);
 
 /// <summary>Durable scoped decisions. Recording a decision does not claim that Envoy has accepted it.</summary>
 public sealed class NetworkAccessPolicyStore
@@ -116,40 +112,38 @@ public sealed class NetworkAccessPolicyStore
 
     /// <summary>The denied connection has already closed. This records an asynchronous request, never a continuation.</summary>
     public void ObserveDenied(NetworkAccessIdentity identity, string destination, int port, DateTimeOffset observedAt)
-        => ObserveDeniedBatch([new(identity, destination, port, observedAt, Convert.ToHexStringLower(SHA256.HashData(Guid.NewGuid().ToByteArray())))]);
-
-    internal void ObserveDeniedBatch(IReadOnlyList<NetworkDeniedObservation> observations)
     {
+        ValidateIdentity(identity);
+        EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", destination, port));
+        string id = Key(identity, normalized.Destination, port);
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            var seen = current.ObservedDenials.ToHashSet(StringComparer.Ordinal);
-            var ordered = current.ObservedDenials.ToList();
-            var requests = current.Requests.ToDictionary(item => item.Id, StringComparer.Ordinal);
-            bool changed = false;
-            foreach (NetworkDeniedObservation observation in observations)
-            {
-                ValidateIdentity(observation.Identity);
-                if (!IsEventId(observation.EventId)) throw new ArgumentException("A bounded denial event ID is required.", nameof(observations));
-                EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", observation.Destination, observation.Port));
-                if (!seen.Add(observation.EventId)) continue;
-                string id = Key(observation.Identity, normalized.Destination, observation.Port);
-                // A durable Keep blocked decision must not continually reopen requests.
-                if (current.Rules.Any(item => item.Id == id)) continue;
-                requests.TryGetValue(id, out NetworkAccessRequest? previous);
-                if (previous is null && requests.Count >= requestLimit)
+            // Preserve explicit Blocks and effective Allows, but an older public-only
+            // Allow for a private literal cannot satisfy this connection's approval.
+            NetworkAccessRule? decision = current.Rules.SingleOrDefault(item => item.Id == id);
+            if (decision is not null && (!decision.Allowed || IsEffectiveAllow(decision))) return;
+            NetworkAccessRequest? previous = current.Requests.SingleOrDefault(item => item.Id == id);
+            NetworkAccessRequest request = previous is null
+                ? new(id, identity, normalized.Destination, port, observedAt, observedAt, 1, "pending")
+                : previous with
                 {
-                    NetworkAccessRequest? oldestResolved = requests.Values.Where(item => item.Status != "pending").OrderBy(item => item.LastSeenAt).FirstOrDefault();
-                    if (oldestResolved is null) continue;
-                    requests.Remove(oldestResolved.Id);
-                }
-                requests[id] = previous is null
-                    ? new(id, observation.Identity, normalized.Destination, observation.Port, observation.ObservedAt, observation.ObservedAt, 1, "pending")
-                    : previous with { LastSeenAt = observation.ObservedAt > previous.LastSeenAt ? observation.ObservedAt : previous.LastSeenAt, Attempts = checked(previous.Attempts + 1) };
-                ordered.Add(observation.EventId);
-                changed = true;
+                    LastSeenAt = observedAt > previous.LastSeenAt ? observedAt : previous.LastSeenAt,
+                    Attempts = previous.Attempts == long.MaxValue ? long.MaxValue : previous.Attempts + 1,
+                    Status = "pending",
+                };
+            if (previous?.Status == "pending")
+            {
+                // Counters are best-effort until the next real policy/request write.
+                // Admission never fsyncs a retry of an already-durable pending request.
+                state = current with { Requests = [.. current.Requests.Select(item => item.Id == id ? request : item)] };
+                return;
             }
-            if (changed) Save(current with { Requests = [.. requests.Values], ObservedDenials = ordered.TakeLast(4096).ToArray() });
+            string? retire = null;
+            if (previous is null && current.Requests.Count >= requestLimit)
+                retire = current.Requests.Where(item => item.Status != "pending").MinBy(item => item.LastSeenAt)?.Id
+                    ?? throw new InvalidOperationException("The pending network approval capacity has been reached.");
+            Save(current with { Requests = [.. current.Requests.Where(item => item.Id != id && item.Id != retire), request] });
         }
     }
 
@@ -161,8 +155,7 @@ public sealed class NetworkAccessPolicyStore
             var keys = overrides.Select(rule => rule.Id).ToHashSet(StringComparer.Ordinal);
             return [.. bootstrap.Where(grant => !keys.Contains(Key(Identity(grant),
                     EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", grant.Destination, grant.Port)).Destination, grant.Port))),
-                .. overrides.Where(rule => rule.Allowed && !NetworkDestinationPolicy.IsMetadata(rule.Destination)
-                    && rule.Destination != NetworkDestinationPolicy.PlatformControlAddress && rule.Destination != NetworkDestinationPolicy.PrivateSourceAddress).Select(rule => new ContainerEgressGrant
+                .. overrides.Where(IsEffectiveAllow).Select(rule => new ContainerEgressGrant
                 {
                     ScopeType = rule.Identity.ScopeType, UserId = rule.Identity.UserId, AgentId = rule.Identity.AgentId,
                     Role = rule.Identity.Role, ComponentId = rule.Identity.ComponentId, Destination = rule.Destination, Port = rule.Port,
@@ -173,6 +166,16 @@ public sealed class NetworkAccessPolicyStore
 
     internal static NetworkAccessIdentity Identity(ContainerEgressGrant grant)
         => new(grant.ScopeType, grant.UserId, grant.AgentId, grant.Role, grant.ComponentId);
+
+    public static bool IsEffectiveAllow(NetworkAccessRule rule)
+    {
+        ArgumentNullException.ThrowIfNull(rule);
+        return rule.Allowed && !NetworkDestinationPolicy.IsMetadata(rule.Destination)
+            && rule.Destination != NetworkDestinationPolicy.PlatformControlAddress
+            && rule.Destination != NetworkDestinationPolicy.PrivateSourceAddress
+            && (!NetworkDestinationPolicy.IsNonPublic(rule.Destination)
+                || (rule.AllowPrivateNetwork && rule.PrivateNetworkApprovalExplicit));
+    }
 
     private NetworkAccessPolicyState Load()
     {
@@ -185,8 +188,7 @@ public sealed class NetworkAccessPolicyStore
         NetworkAccessPolicyState loaded = JsonSerializer.Deserialize(bytes, NetworkAccessPolicyJsonContext.Default.NetworkAccessPolicyState)
             ?? throw new InvalidDataException("Network policy state is empty.");
         if (loaded.SchemaVersion != 1 || loaded.Revision < 0 || loaded.Rules is null || loaded.Requests is null
-            || loaded.Rules.Count > ruleLimit || loaded.Requests.Count > requestLimit || loaded.ObservedDenials is null
-            || loaded.ObservedDenials.Count > 4096 || loaded.ObservedDenials.Any(id => !IsEventId(id)))
+            || loaded.Rules.Count > ruleLimit || loaded.Requests.Count > requestLimit)
             throw new InvalidDataException("Unsupported network policy state.");
         foreach (NetworkAccessRule rule in loaded.Rules)
         {
@@ -203,7 +205,8 @@ public sealed class NetworkAccessPolicyStore
             if (normalized.Destination != request.Destination || request.Id != Key(request.Identity, normalized.Destination, request.Port) || request.Attempts < 1
                 || request.Status is not ("pending" or "allowed" or "blocked"))
                 throw new InvalidDataException("Network policy contains an invalid request.");
-            if (request.Status == "pending" ? decision is not null : decision is null || decision.Allowed != (request.Status == "allowed"))
+            if (request.Status == "pending" ? decision is not null && (!decision.Allowed || IsEffectiveAllow(decision))
+                : decision is null || decision.Allowed != (request.Status == "allowed"))
                 throw new InvalidDataException("Network policy request and decision disagree.");
         }
         if (loaded.Rules.Select(rule => rule.Id).Distinct(StringComparer.Ordinal).Count() != loaded.Rules.Count
@@ -302,7 +305,6 @@ public sealed class NetworkAccessPolicyStore
             identity.ScopeType, identity.UserId, identity.AgentId, identity.Role, identity.ComponentId, destination,
             port.ToString(System.Globalization.CultureInfo.InvariantCulture)))));
 
-    private static bool IsEventId(string value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
 }
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, WriteIndented = true)]

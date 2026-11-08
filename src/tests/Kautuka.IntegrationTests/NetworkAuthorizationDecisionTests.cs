@@ -1,5 +1,3 @@
-using System.Reflection;
-
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 
@@ -42,7 +40,6 @@ public sealed class NetworkAuthorizationDecisionTests
     }
 
     [Theory]
-    [InlineData("stale", "10.247.91.2", "93.184.216.34", "unknown.example.com")]
     [InlineData("accepted", "10.247.91.3", "93.184.216.34", "unknown.example.com")]
     [InlineData("accepted", "10.247.91.2", "169.254.169.254", "unknown.example.com")]
     [InlineData("accepted", "10.247.91.2", "93.184.216.34", "metadata.google.internal")]
@@ -76,8 +73,9 @@ public sealed class NetworkAuthorizationDecisionTests
     private static ContainerEgressRuntime Create(string root, EgressTcpRule[] rules)
     {
         var runtime = new ContainerEgressRuntime(new PodmanCommandRunner(), new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
-        typeof(ContainerEgressRuntime).GetField("authorization", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .SetValue(runtime, new EgressAuthorizationSnapshot("accepted", new Dictionary<string, NetworkAccessIdentity> { ["10.247.91.2"] = Identity }, rules));
+        runtime.CompleteAuthorizationTransition(new EgressAuthorizationSnapshot("accepted",
+            new Dictionary<string, NetworkAccessIdentity> { ["10.247.91.2"] = Identity }, rules,
+            new Dictionary<string, string> { ["10.247.91.2"] = "container-1" }));
         return runtime;
     }
 }
