@@ -294,19 +294,21 @@ install_fresh_container_appliance "$2"
 
 
 def run(repo, port, session):
+    started = time.monotonic()
     record = CACHE / 'build.json'
-    if not record.is_file(): raise ValueError('No successful development build; omit --skip-build')
+    if not record.is_file(): raise ValueError('No successful development build; run npm run launch -- --build')
     if json.loads(record.read_text()).get('publication') != 'native-aot':
-        raise ValueError('The previous build is not Native AOT; rebuild without --skip-build')
-    if (CACHE / 'pending-build.json').exists(): raise ValueError('The previous build was interrupted; rerun without --skip-build')
+        raise ValueError('The previous build is not Native AOT; run npm run launch -- --build')
+    if (CACHE / 'pending-build.json').exists(): raise ValueError('The previous build was interrupted; run npm run launch -- --build')
     version = json.loads(record.read_text())['version']
     if any((Path('/opt/kautuka') / role / 'current').resolve() != Path('/opt/kautuka') / role / 'versions' / version for role in SERVICES):
-        raise ValueError('Development service pointers differ from the completed build; rerun without --skip-build')
+        raise ValueError('Development service pointers differ from the completed build; run npm run launch -- --build')
     (CACHE / 'launcher-session').write_text(session)
     (CACHE / 'stop').unlink(missing_ok=True)
     settings = Path('/etc/kautuka/manager.json'); value = json.loads(settings.read_text())
     value['CoreServices']['WebHostPort'] = port
     settings.write_text(json.dumps(value, indent=2))
+    print('[launch-kautuka] Preparing the existing rootless runtime...', flush=True)
     installer(repo, '''
 ensure_rootless_podman_ready kautuka kautuka /var/lib/kautuka /run/user/$(id -u kautuka) containers
 install_socket_runtime_dirs kautuka containers kautuka
@@ -319,6 +321,8 @@ install_socket_runtime_dirs kautuka containers kautuka
         if time.monotonic() >= deadline: raise ValueError('Manager did not publish its local bootstrap identity')
         time.sleep(1)
     as_runtime('systemctl', '--user', 'start', 'kautuka-updateservice.service', 'kautuka.target')
+    print('[launch-kautuka] Manager started; waiting for core containers and WebHost...', flush=True)
+    next_progress = time.monotonic() + 10
     # Do not enable boot-time activation: this is a foreground development stack.
     while True:
         if (CACHE / 'stop').exists(): return
@@ -332,8 +336,11 @@ install_socket_runtime_dirs kautuka containers kautuka
             if ready and health.get('lifecycle', {}).get('coreReady') and health.get('workspace', {}).get('status') == 'healthy': break
         except (OSError, ValueError, subprocess.CalledProcessError): pass
         if time.monotonic() >= deadline: raise ValueError('Development containers did not become healthy; inspect the Manager user-service journal inside this development distro')
+        if time.monotonic() >= next_progress:
+            print(f'[launch-kautuka] Still waiting for runtime health ({time.monotonic() - started:.0f}s); no compilation is running.', flush=True)
+            next_progress = time.monotonic() + 10
         time.sleep(1)
-    print(f'\n[launch-kautuka] Network-controlled development stack ready: http://localhost:{port}', flush=True)
+    print(f'\n[launch-kautuka] Network-controlled development stack ready in {time.monotonic() - started:.1f}s: http://localhost:{port}', flush=True)
     token = STATE / 'gateway-data/setup-token'
     if token.is_file(): print('[launch-kautuka] First setup token is stored inside this distro at /var/lib/kautuka/gateway-data/setup-token.', flush=True)
     print('[launch-kautuka] Ctrl+C stops this stack. Data is retained in the development distro.', flush=True)

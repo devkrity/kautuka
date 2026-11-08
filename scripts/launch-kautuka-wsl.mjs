@@ -9,12 +9,13 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const markerPath = '/etc/kautuka-dev.json';
 
 export function parseOptions(args, defaultDistro = 'KautukaDev') {
-  const options = { distro: defaultDistro, port: 20229, skipBuild: false, stop: false, help: false, service: null, action: null };
+  const options = { distro: defaultDistro, port: 20229, build: false, skipBuild: false, stop: false, help: false, service: null, action: null };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case '--distro': options.distro = args[++i]; break;
       case '--port': options.port = Number(args[++i]); break;
       case '--skip-build': options.skipBuild = true; break;
+      case '--build': options.build = true; break;
       case '--stop': options.stop = true; break;
       case '--service': options.service = args[++i]; break;
       case '--action': options.action = args[++i]; break;
@@ -29,9 +30,24 @@ export function parseOptions(args, defaultDistro = 'KautukaDev') {
   if (options.service !== null && !['frontend', 'webhost', 'gateway', 'channelhost', 'credentialshost', 'manager', 'updateservice'].includes(options.service)) throw new Error('Invalid --service. Choose frontend, webhost, gateway, channelhost, credentialshost, manager or updateservice.');
   if (options.action !== null && !['start', 'restart', 'rebuild'].includes(options.action)) throw new Error('Invalid --action. Choose start, restart or rebuild.');
   if (options.action && !options.service) throw new Error('--action requires --service.');
+  if (options.build && (options.skipBuild || options.stop || options.service)) throw new Error('--build cannot be combined with --skip-build, --stop or --service.');
   if (options.service && (options.stop || options.skipBuild)) throw new Error('--service cannot be combined with --stop or --skip-build. Use --action start, restart or rebuild.');
   if (options.service && !options.action) options.action = 'restart';
   return options;
+}
+
+export async function prepareLaunch(options, state, { stage, bootstrap, build, log = console.log }) {
+  if (!options.build && state === 'pending') throw new Error('The previous build was interrupted. Run npm run launch -- --build to recover it; no services were started.');
+  if (options.skipBuild && state === 'missing') throw new Error('No successful development build. Run npm run launch first.');
+  if (options.build || (state === 'missing' && !options.skipBuild)) {
+    log('[launch-kautuka] Building development images with Native AOT. This can take several minutes.');
+    await stage();
+    await bootstrap();
+    await build();
+  } else {
+    log('[launch-kautuka] Starting the last successful Native AOT build; source changes are not compiled.');
+    log('[launch-kautuka] Use --build for the full stack, or --service <name> --action rebuild for one service.');
+  }
 }
 
 export function workspaceIdentity(workspace) {
@@ -93,7 +109,7 @@ export async function launchDevelopmentAppliance(args) {
   const identity = workspaceIdentity(realpathSync(repo));
   const options = parseOptions(args, 'KautukaDev-' + identity.slice(0, 8));
   if (options.help) {
-    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--skip-build] [--stop]\n       npm run launch -- --service <name> [--action start|restart|rebuild]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\n--skip-build starts the last successful AOT build. Ctrl+C stops only this development stack.\n--service targets an initialized development stack; default action is restart.\nServices: frontend, webhost, gateway, channelhost, credentialshost, manager, updateservice.\nfrontend rebuild replaces only static assets; core service rebuild publishes only that service with Native AOT.\nCore actions briefly restart Manager and may interrupt active tool calls; other core containers remain running.\nManager/UpdateService support start/restart; rebuild them with a normal full launch.');
+    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--build | --skip-build] [--stop]\n       npm run launch -- --service <name> [--action start|restart|rebuild]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\nLater launches start the last successful build without compiling source changes.\n--build explicitly checks source and rebuilds changed full-stack images. --skip-build requires an existing build.\nCtrl+C stops only this development stack.\n--service targets an initialized development stack; default action is restart.\nServices: frontend, webhost, gateway, channelhost, credentialshost, manager, updateservice.\nfrontend rebuild replaces only static assets; core service rebuild publishes only that service with Native AOT.\nCore actions briefly restart Manager and may interrupt active tool calls; other core containers remain running.\nManager/UpdateService support start/restart; rebuild them with --build.');
     return;
   }
   if (process.platform !== 'win32') throw new Error('The isolated development launcher currently requires Windows WSL. Use the Native AOT Linux appliance for Linux testing; host-process/JIT fallback is not supported.');
@@ -122,12 +138,12 @@ export async function launchDevelopmentAppliance(args) {
   }
   common.push('--session', randomUUID());
   await requireFreePort(options.port);
-  if (!options.skipBuild) {
-    console.log('[launch-kautuka] Preparing frontend and built-in connector bundles...');
-    await stageAssets();
-    await execute('wsl.exe', [...wsl, 'bash', `${linuxRepo}/scripts/dev-appliance-bootstrap.sh`, identity]);
-    await execute('wsl.exe', [...wsl, ...common, 'build']);
-  } else if (!existsSync(path.join(repo, 'scripts/dev-appliance.py'))) throw new Error('Missing development driver.');
+  const state = (await execute('wsl.exe', [...wsl, 'sh', '-c', 'if test -e /var/cache/kautuka-dev/pending-build.json; then printf pending; elif test -f /var/cache/kautuka-dev/build.json; then printf ready; else printf missing; fi'], { capture: true })).trim();
+  await prepareLaunch(options, state, {
+    stage: () => stageAssets(),
+    bootstrap: () => execute('wsl.exe', [...wsl, 'bash', `${linuxRepo}/scripts/dev-appliance-bootstrap.sh`, identity]),
+    build: () => execute('wsl.exe', [...wsl, ...common, 'build']),
+  });
   let stopping;
   const stop = () => stopping ??= (async () => {
     console.log('\n[launch-kautuka] Stopping the development stack; retaining data...');

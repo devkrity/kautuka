@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:net';
-import { assertOwnership, parseOptions, requireFreePort, workspaceIdentity } from './launch-kautuka-wsl.mjs';
+import { assertOwnership, parseOptions, prepareLaunch, requireFreePort, workspaceIdentity } from './launch-kautuka-wsl.mjs';
 
 test('development launcher cannot target production, acceptance or Podman distros', () => {
   for (const distro of ['Ubuntu', 'KautukaTestFedora44', 'podman-machine-default', '../KautukaDev', 'KautukaDev;echo']) {
@@ -11,12 +11,40 @@ test('development launcher cannot target production, acceptance or Podman distro
 });
 
 test('default launch is isolated and skip-build does not select host mode', () => {
-  assert.deepEqual(parseOptions([]), { distro: 'KautukaDev', port: 20229, skipBuild: false, stop: false, help: false, service: null, action: null });
+  assert.deepEqual(parseOptions([]), { distro: 'KautukaDev', port: 20229, build: false, skipBuild: false, stop: false, help: false, service: null, action: null });
   assert.equal(parseOptions(['--skip-build']).skipBuild, true);
   assert.equal(parseOptions([], 'KautukaDev-0123abcd').distro, 'KautukaDev-0123abcd');
   assert.throws(() => parseOptions(['--unknown']), /Unknown option/);
   assert.throws(() => parseOptions(['--host']), /Unknown option/);
   for (const port of ['0', '22', '65536', 'NaN']) assert.throws(() => parseOptions(['--port', port]), /Invalid --port/);
+});
+
+test('cached launch never stages assets, bootstraps or builds; first launch and explicit builds do', async () => {
+  for (const [args, state, expected] of [
+    [[], 'ready', []], [['--skip-build'], 'ready', []],
+    [[], 'missing', ['stage', 'bootstrap', 'build']],
+    [['--build'], 'ready', ['stage', 'bootstrap', 'build']],
+    [['--build'], 'pending', ['stage', 'bootstrap', 'build']],
+  ]) {
+    const calls = [];
+    await prepareLaunch(parseOptions(args), state, {
+      stage: async () => calls.push('stage'), bootstrap: async () => calls.push('bootstrap'),
+      build: async () => calls.push('build'), log: () => {},
+    });
+    assert.deepEqual(calls, expected);
+  }
+});
+
+test('incomplete launches fail before compilation or service startup', async () => {
+  for (const [args, state] of [[[], 'pending'], [['--skip-build'], 'pending'], [['--skip-build'], 'missing']]) {
+    await assert.rejects(prepareLaunch(parseOptions(args), state, {
+      stage: () => assert.fail('staged'), bootstrap: () => assert.fail('bootstrapped'),
+      build: () => assert.fail('built'), log: () => {},
+    }), /previous build was interrupted|No successful development build/);
+  }
+  for (const args of [['--build', '--skip-build'], ['--build', '--service', 'gateway'], ['--build', '--stop']]) {
+    assert.throws(() => parseOptions(args), /cannot be combined/);
+  }
 });
 
 test('individual service actions are explicit and cannot select arbitrary containers or stack modes', () => {

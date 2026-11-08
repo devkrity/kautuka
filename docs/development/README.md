@@ -92,9 +92,14 @@ it in your own terminal when the setup page requests it:
 wsl -d <distro-name-printed-by-launcher> -u root -- cat /var/lib/kautuka/gateway-data/setup-token
 ```
 
-Use `npm run launch -- --skip-build` to start the last successful development
-build without rebuilding assets. Normal launch rebuilds when source or assets
-change. Data, configured providers, network policy, approvals and workspaces are
+After the first build, `npm run launch` starts the last successful Native AOT
+build without rebuilding assets or compiling source changes. Use
+`npm run launch -- --build` to check sources and build the full stack, or a
+selected-service rebuild below for a smaller change. `--skip-build` remains an
+explicit reuse command and requires an existing build. An interrupted installation
+requires `--build` before startup. Startup reports elapsed time while Manager
+reconciles containers; this waiting period is separate from compilation.
+Data, configured providers, network policy, approvals and workspaces are
 retained. These are local Native AOT development images, not signed release
 artifacts; automatic release updates are disabled for this profile. Development
 and release use the same AOT compilation path and core runtime base. There is no
@@ -127,7 +132,7 @@ The fixed service names are `frontend` (WebHost assets), `webhost`, `gateway`,
 `channelhost`, `credentialshost`, `manager`, and `updateservice`. The default
 action is `restart`; `start` reuses the installed build, while `rebuild` builds
 only the selected core service. Manager and UpdateService support `start` and
-`restart`; use a normal full launch to rebuild these host services. Pass the
+`restart`; use `npm run launch -- --build` to rebuild these host services. Pass the
 same `--distro` when using a named development instance. Service commands use
 the instance's existing port and do not start a second foreground launcher.
 
