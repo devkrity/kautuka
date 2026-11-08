@@ -41,7 +41,7 @@ builder.WebHost.ConfigureKestrel(options =>
 IHttpClientBuilder gatewayClient = builder.Services.AddHttpClient("gateway", client =>
 {
     client.BaseAddress = new Uri(gatewayBaseUrl, UriKind.Absolute);
-    client.Timeout = TimeSpan.FromSeconds(300);
+    client.Timeout = TimeSpan.FromSeconds(GatewayProxy.GatewayTimeoutSeconds);
 });
 
 // The handler is shared by every browser. The default cookie jar would keep a

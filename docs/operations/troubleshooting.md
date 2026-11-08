@@ -167,13 +167,22 @@ new host `/data` directory to work around that mismatch.
 For a UV bundle, retain `uv.lock` in the archive. Manager exports its locked
 requirements and synchronizes them with hash checks through the configured package
 proxy; direct frozen synchronization can follow origin URLs from the lock instead.
+After preparation, locked UV bundles retain their normal UV launcher with
+`UV_NO_SYNC=1` and the prepared virtual environment enforced after environment
+overrides, for both isolated connectors and AgentSandbox execution. `UV_FROZEN`
+alone does not prevent another synchronization. Verify the actual launch command
+and a tool call; directly starting the virtual environment's Python only verifies
+the installed environment.
 Bundles without a lock retain their existing installation behavior. Cold image
 preparation is shared and serialized, so it can delay other uncached connectors.
 
 Connection testing honors an explicitly configured readiness timeout, bounded to
-5–600 seconds, with a 30-second default. Its Manager RPC adds the existing
-15-second envelope. This setup budget includes cold materialization; it does not
-increase the production agent/tool-call deadline.
+5–280 seconds, with a 30-second default. Its Manager RPC adds the existing
+15-second envelope, leaving margin inside WebHost's 300-second edge timeout.
+This setup budget includes cold materialization; it does not increase the
+production agent/tool-call deadline. Client cancellation propagates to the
+Manager probe; WebHost does not attempt a new error response after the client
+has disconnected.
 
 ### Repeated capability drift
 

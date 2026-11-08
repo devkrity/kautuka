@@ -22,7 +22,7 @@ public sealed partial class McpbImageMaterializer(
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
-    private const string materializationRecipeVersion = "mcpb-materializer-v9";
+    private const string materializationRecipeVersion = "mcpb-materializer-v10";
     private static readonly SemaphoreSlim imageBuildGate = new(1, 1);
     private const string pipTrustedHostShellInit =
         "pip_trusted=\"\"; if [ -n \"${PIP_TRUSTED_HOST:-}\" ]; then pip_trusted=\"--trusted-host $PIP_TRUSTED_HOST\"; fi; ";

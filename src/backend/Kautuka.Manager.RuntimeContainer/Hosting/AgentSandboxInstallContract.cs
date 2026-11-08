@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
@@ -21,6 +22,7 @@ internal static class AgentSandboxInstallContract
                 && string.Equals(pair.Left.ExecutablePath, pair.Right.ExecutablePath, StringComparison.Ordinal)
                 && string.Equals(pair.Left.WorkingDirectory, pair.Right.WorkingDirectory, StringComparison.Ordinal)
                 && pair.Left.NormalizationVersion == pair.Right.NormalizationVersion
+                && pair.Left.LockedUv == pair.Right.LockedUv
                 && pair.Left.ArgsTemplate.SequenceEqual(pair.Right.ArgsTemplate, StringComparer.Ordinal)
                 && pair.Left.EnvTemplate.SequenceEqual(pair.Right.EnvTemplate));
 
@@ -51,22 +53,48 @@ internal static class AgentSandboxInstallContract
             connector.ServerType,
             McpbImageMaterializer.RewriteBundlePlaceholder(connector.Command),
             [.. connector.Args.Select(McpbImageMaterializer.RewriteBundlePlaceholder)],
-            McpbImageMaterializer.BundleWorkdir, useVirtualEnvironment);
+            McpbImageMaterializer.BundleWorkdir, useVirtualEnvironment, HasLockedUvBundle(connector));
         return connector with
         {
             Image = runtimeImage,
             BundlePath = null,
             Command = command,
             Args = args,
-            Environment = [.. connector.Environment.Select(static pair => new KeyValuePair<string, string>(pair.Key, McpbImageMaterializer.RewriteBundlePlaceholder(pair.Value)))],
+            Environment = PrepareEnvironment(connector, McpbImageMaterializer.BundleWorkdir),
         };
+    }
+
+    internal static IReadOnlyList<KeyValuePair<string, string>> PrepareEnvironment(
+        WorkspaceMcpContainerConnectorDefinition connector, string bundleRoot)
+    {
+        bool lockedUv = HasLockedUvBundle(connector);
+        var environment = connector.Environment
+            .Where(pair => !lockedUv || (!string.Equals(pair.Key, "UV_NO_SYNC", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(pair.Key, "UV_PROJECT_ENVIRONMENT", StringComparison.OrdinalIgnoreCase)))
+            .Select(pair => new KeyValuePair<string, string>(pair.Key, McpbImageMaterializer.RewriteBundlePlaceholder(pair.Value, bundleRoot)))
+            .ToList();
+        if (lockedUv)
+        {
+            environment.Add(new("UV_NO_SYNC", "1"));
+            environment.Add(new("UV_PROJECT_ENVIRONMENT", bundleRoot + "/.venv"));
+        }
+        return environment;
+    }
+
+    internal static bool HasLockedUvBundle(WorkspaceMcpContainerConnectorDefinition connector)
+    {
+        if (!string.Equals(connector.ServerType, "uv", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(connector.BundlePath) || !File.Exists(connector.BundlePath)) return false;
+        using ZipArchive archive = ZipFile.OpenRead(connector.BundlePath);
+        return archive.Entries.Any(static entry => !string.IsNullOrEmpty(entry.Name)
+            && entry.FullName.Replace('\\', '/').Split('/').Where(static part => part != ".").SequenceEqual(["uv.lock"], StringComparer.Ordinal));
     }
 
     public static (string Command, IReadOnlyList<string> Args) RewriteLaunch(
         string? serverType,
         string command,
         IReadOnlyList<string> args,
-        string bundleRoot, bool useVirtualEnvironment = false)
+        string bundleRoot, bool useVirtualEnvironment = false, bool preserveUvLauncher = false)
     {
         if (useVirtualEnvironment && string.Equals(serverType, "python", StringComparison.OrdinalIgnoreCase)
             && IsShippedPythonCommand(command))
@@ -79,6 +107,9 @@ internal static class AgentSandboxInstallContract
         {
             return (command, args);
         }
+
+        if (preserveUvLauncher && string.Equals(command, "uv", StringComparison.OrdinalIgnoreCase))
+            return (command, args);
 
         List<string> remaining = [.. args.Skip(1)];
         if (remaining.Count == 0)

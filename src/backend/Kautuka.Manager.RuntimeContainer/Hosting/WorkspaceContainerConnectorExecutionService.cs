@@ -28,7 +28,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
-    private const int agentSandboxNormalizationVersion = 3;
+    private const int agentSandboxNormalizationVersion = 4;
 
     private readonly ConcurrentDictionary<string, string> trackedConnectorContainers = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConnectorCooldownScheduler connectorCooldowns = new();
@@ -872,7 +872,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 sourceConnector.ServerType,
                 McpbImageMaterializer.RewriteBundlePlaceholder(sourceConnector.Command, installRoot),
                 [.. sourceConnector.Args.Select(arg => McpbImageMaterializer.RewriteBundlePlaceholder(arg, installRoot))],
-                installRoot, egressRuntime?.Enabled == true);
+                installRoot, egressRuntime?.Enabled == true, AgentSandboxInstallContract.HasLockedUvBundle(sourceConnector));
 
             contracts.Add(new AgentSandboxInstalledContract(
                 sourceConnector.ConnectorId,
@@ -882,11 +882,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 installRoot,
                 executablePath,
                 argsTemplate,
-                [.. sourceConnector.Environment.Select(pair => new KeyValuePair<string, string>(
-                    pair.Key,
-                    McpbImageMaterializer.RewriteBundlePlaceholder(pair.Value, installRoot)))],
+                AgentSandboxInstallContract.PrepareEnvironment(sourceConnector, installRoot),
                 installRoot,
-                agentSandboxNormalizationVersion));
+                agentSandboxNormalizationVersion,
+                AgentSandboxInstallContract.HasLockedUvBundle(sourceConnector)));
         }
 
         return new AgentSandboxInstalledManifest(
@@ -934,6 +933,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
 
             mergedEnvironment[pair.Key] = AgentSandboxInstallContract.RewriteRuntimePath(pair.Value, installedContract.InstallRoot);
+        }
+
+        if (installedContract.LockedUv)
+        {
+            mergedEnvironment["UV_NO_SYNC"] = "1";
+            mergedEnvironment["UV_PROJECT_ENVIRONMENT"] = installedContract.InstallRoot + "/.venv";
         }
 
         return connector with
@@ -1616,7 +1621,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         IReadOnlyList<string> ArgsTemplate,
         IReadOnlyList<KeyValuePair<string, string>> EnvTemplate,
         string? WorkingDirectory,
-        int NormalizationVersion);
+        int NormalizationVersion,
+        bool LockedUv = false);
 
     public async ValueTask DisposeAsync()
     {

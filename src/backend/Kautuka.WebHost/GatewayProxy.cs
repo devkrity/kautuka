@@ -7,6 +7,7 @@ namespace Kautuka.WebHost;
 
 internal static class GatewayProxy
 {
+    internal const int GatewayTimeoutSeconds = 300;
     private static readonly HashSet<string> fixedHopByHopHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
         "Connection",
@@ -126,6 +127,10 @@ internal static class GatewayProxy
             await WriteProxyErrorAsync(context, logger, StatusCodes.Status504GatewayTimeout, ex).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
+        {
+            GatewayProxyLog.RequestAborted(logger, context.Request.Method, context.Request.Path.Value ?? string.Empty);
+        }
+        catch (Exception ex) when (context.RequestAborted.IsCancellationRequested && (ex is HttpRequestException or InvalidOperationException))
         {
             GatewayProxyLog.RequestAborted(logger, context.Request.Method, context.Request.Path.Value ?? string.Empty);
         }

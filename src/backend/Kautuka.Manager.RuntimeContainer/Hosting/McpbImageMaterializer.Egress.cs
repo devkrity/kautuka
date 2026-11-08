@@ -7,7 +7,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 public sealed partial class McpbImageMaterializer
 {
-    private const string egressRecipeVersion = "mcpb-egress-v2";
+    private const string egressRecipeVersion = "mcpb-egress-v3";
 
     internal async Task<WorkspaceMcpContainerConnectorDefinition> ResolveControlledExecutionAsync(
         WorkspaceMcpContainerConnectorDefinition connector, bool materialize, ContainerContext? workspace, CancellationToken ct)

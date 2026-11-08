@@ -15,16 +15,22 @@ using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Manager.Grpc;
+using Kautuka.Manager.Hosting;
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Protos;
+using Kautuka.WebHost;
 
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Xunit.Sdk;
 
@@ -264,7 +270,9 @@ public sealed class ConnectorValidationEndpointTests
     public void ProbeTimeoutHonorsManagerBound()
     {
         Assert.Equal(30, McpConnectorTestService.ClampProbeTimeoutSeconds(null));
-        Assert.Equal(600, McpConnectorTestService.ClampProbeTimeoutSeconds(int.MaxValue));
+        Assert.Equal(280, McpConnectorTestService.ClampProbeTimeoutSeconds(int.MaxValue));
+        Assert.Equal(280, McpConnectorTestService.ClampProbeTimeoutSeconds(280));
+        Assert.Equal(280, McpConnectorTestService.ClampProbeTimeoutSeconds(281));
         Assert.Equal(5, McpConnectorTestService.ClampProbeTimeoutSeconds(1));
         Assert.Equal(15, McpConnectorTestService.ClampProbeTimeoutSeconds(15));
         Assert.Equal(60, McpConnectorTestService.ClampProbeTimeoutSeconds(60));
@@ -1445,8 +1453,38 @@ public sealed class ConnectorValidationEndpointTests
             request => Assert.Equal(60, request.TimeoutSeconds),
             request => Assert.Equal(60, request.TimeoutSeconds),
             request => Assert.Equal(30, request.TimeoutSeconds),
-            request => Assert.Equal(600, request.TimeoutSeconds));
+            request => Assert.Equal(280, request.TimeoutSeconds));
 
+    }
+
+    [Fact]
+    public async Task ProbeBudgetFitsWebHostAndAbortReachesManager()
+    {
+        var invoker = new ReadinessGateCallInvoker();
+        var manager = new ManagerGrpcServiceClient(invoker, "http://manager.test");
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        fixture.Client.Timeout = TimeSpan.FromSeconds(GatewayProxy.GatewayTimeoutSeconds);
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+        using var abort = new CancellationTokenSource();
+        byte[] body = Encoding.UTF8.GetBytes("{\"id\":\"budget-test\",\"transport\":\"container\",\"containerImage\":\"example/image\",\"containerCommand\":\"uv\",\"readinessTimeoutSeconds\":999}");
+        var context = new DefaultHttpContext();
+        context.Request.Method = "POST";
+        context.Request.Path = "/api/connectors/test";
+        context.Request.Scheme = "http";
+        context.Request.Headers.Authorization = "Bearer " + accessToken;
+        context.Request.ContentType = "application/json";
+        context.Request.ContentLength = body.Length;
+        context.Request.Body = new MemoryStream(body);
+        context.Response.Body = new MemoryStream();
+        context.RequestAborted = abort.Token;
+        Task forwarding = GatewayProxy.ForwardAsync(context, fixture.Client, NullLogger.Instance);
+        (int requested, TimeSpan remaining) = await invoker.ProbeStarted.Task.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        Assert.Equal(280, requested);
+        Assert.InRange(remaining.TotalSeconds, 290, 295);
+        Assert.True(remaining < fixture.Client.Timeout);
+        await abort.CancelAsync();
+        await forwarding.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        await invoker.ManagerCompleted.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -2085,6 +2123,54 @@ public sealed class ConnectorValidationEndpointTests
         }
 
         return stream.ToArray();
+    }
+
+    private sealed class ReadinessGateCallInvoker : CallInvoker
+    {
+        private readonly WorkspaceGrpcService manager = new(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(),
+            new WorkspaceExecTracker(), null!, null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
+        public TaskCompletionSource<(int Timeout, TimeSpan Remaining)> ProbeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ManagerCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
+        {
+            async Task<TResponse> InvokeAsync()
+            {
+                if (request is not WorkspaceMcpContainerProbeRequest probe) return Activator.CreateInstance<TResponse>();
+                ProbeStarted.TrySetResult((probe.TimeoutSeconds, options.Deadline!.Value - DateTime.UtcNow));
+                try
+                {
+                    WorkspaceMcpProbeResponse response = await manager.ProbeMcpContainer(probe, new ProbeCallContext(options.Deadline.Value, options.CancellationToken));
+                    return (TResponse)(object)response;
+                }
+                finally
+                {
+                    if (options.CancellationToken.IsCancellationRequested) ManagerCompleted.TrySetResult();
+                }
+            }
+            return new AsyncUnaryCall<TResponse>(InvokeAsync(), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
+        }
+        public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
+        public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
+        public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
+        public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
+    }
+
+    private sealed class ProbeCallContext(DateTime deadline, CancellationToken cancellationToken) : ServerCallContext
+    {
+        protected override string MethodCore => "ProbeMcpContainer";
+        protected override string HostCore => "manager.test";
+        protected override string PeerCore => "test";
+        protected override DateTime DeadlineCore => deadline;
+        protected override Metadata RequestHeadersCore => [];
+        protected override CancellationToken CancellationTokenCore => cancellationToken;
+        protected override Metadata ResponseTrailersCore { get; } = [];
+        protected override IDictionary<object, object> UserStateCore { get; } = new Dictionary<object, object>();
+        protected override Status StatusCore { get; set; }
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+        protected override AuthContext AuthContextCore => new(string.Empty, []);
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options) => throw new NotSupportedException();
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders) => Task.CompletedTask;
     }
 
     private sealed class FakeManagerGrpcService(
