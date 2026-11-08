@@ -188,6 +188,12 @@ export function NetworkAccessPage() {
               ))}
             </div>
             {data.lastError && <Alert variant="destructive">{data.lastError}</Alert>}
+            {data.maxPrivateNetworks > 0 && data.activePrivateNetworks >= 0 && (
+              <p className="text-sm text-muted-foreground">
+                Private networks in use: {data.activePrivateNetworks} of {data.maxPrivateNetworks}.
+                Core, management, setup, and agent scopes share this limit.
+              </p>
+            )}
             {error && (
               <Alert variant="destructive" role="alert">
                 {error}

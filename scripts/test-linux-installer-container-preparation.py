@@ -154,6 +154,7 @@ for name in ('sidecars','proxy'):
     directory=pathlib.Path('/var/lib/kautuka')/name
     assert directory.is_dir() and directory.stat().st_mode & 0o777==0o700
 assert settings['ContainerEgress']['DnsUpstreams']
+assert settings['ContainerEgress']['MaxPrivateNetworks'] == 22
 assert json.loads(feed.read_text())['manifestUrl']=='https://updates.example.test/preview/manifest.json'
 assert json.loads(pathlib.Path('/var/lib/kautuka/updateService/update-runtime-policy.json').read_text())['releaseChannel']=='preview'
 # UID 65534 is not root and receives only the actual deployment directory group.
@@ -163,7 +164,12 @@ reader=subprocess.run(['setpriv','--reuid','65534','--regid',str(grp.getgrnam('k
                       capture_output=True,text=True)
 assert reader.returncode==0,reader.stdout+reader.stderr
 assert all(grant['AgentId']==grant['ComponentId'] for grant in settings['ContainerEgress']['Grants'])
-assert settings['Kautuka']['Telemetry']['Otlp']==dict(LogsEndpoint='',MetricsEndpoint='',TracesEndpoint='')
+assert settings['Kautuka']['Telemetry']['Otlp']==dict(
+    LogsEndpoint='http://kautuka-telemetry.internal/api/default/v1/logs',
+    MetricsEndpoint='http://kautuka-telemetry.internal/api/default/v1/metrics',
+    TracesEndpoint='http://kautuka-telemetry.internal/api/default/v1/traces',
+    Protocol='http/protobuf',
+    UnixSocketPath='/var/lib/kautuka/manager/egress/host/connect.sock')
 before=events.read_text(); rejected=subprocess.run(command,env=env,capture_output=True,text=True)
 assert rejected.returncode!=0 and events.read_text()==before, 'existing deployment was mutated'
 print('PASS private fresh preparation, pre-activation cleanup/retry, two host units, matching grants and existing-deployment refusal')

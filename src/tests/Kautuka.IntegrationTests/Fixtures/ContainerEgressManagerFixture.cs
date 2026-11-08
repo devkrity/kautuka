@@ -36,6 +36,8 @@ internal static class ContainerEgressManagerFixture
         await CheckClientPublicationAsync(data, native, report, ct);
         await ImageArchiveManagerFixture.RunAsync(data, native, report, ct);
         bool failAdmin = false;
+        bool failInitialBoundary = false;
+        bool failedInitialBoundary = false;
         ContainerEgressRuntime? recoveryRuntime = null;
         bool recoveredBeforeCommit = false;
         string? forceAddress = null;
@@ -47,6 +49,12 @@ internal static class ContainerEgressManagerFixture
                 actual.InsertRange(1, ["--ip", forceAddress]); forceAddress = null;
             }
             trace.Add(actual.ToArray());
+            if (failInitialBoundary && actual.Contains("/usr/sbin/nft") && actual.Contains("-f") && actual.Contains("/egress/boundary.nft"))
+            {
+                failInitialBoundary = false;
+                failedInitialBoundary = true;
+                return new PodmanCommandResult(1, "", "fixture initial boundary failure");
+            }
             if (actual[0] == "commit" && !recoveredBeforeCommit && recoveryRuntime is not null)
             {
                 recoveredBeforeCommit = true;
@@ -519,7 +527,23 @@ internal static class ContainerEgressManagerFixture
         var remaining = await native.RunAsync(["network", "ls", "--filter", "label=kautuka.egress=true", "--format", "{{.Name}}"], 15, ct);
         string[] names = remaining.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (names.Length != 2 || !names.Contains("kautuka-core") || !names.Contains("kautuka-outside")) throw new InvalidOperationException("Private scope capacity was not recovered: " + remaining.StdOut);
-        report["emptyScopesRetired"] = true; report["passed"] = true;
+        report["emptyScopesRetired"] = true;
+        failInitialBoundary = true;
+        using (var replacement = new ContainerEgressRuntime(runner, options, allowlist, stateRoot))
+        {
+            bool failed = false;
+            try { await replacement.EnsureReadyAsync(ct); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("fixture initial boundary failure", StringComparison.Ordinal)) { failed = true; }
+            if (!failed || !failedInitialBoundary) throw new InvalidOperationException("Initial boundary failure was not propagated.");
+            PodmanCommandResult proxy = await native.RunAsync(["inspect", "--format", "{{.State.Running}}", "kautuka-egress-envoy"], 15, ct);
+            if (proxy.ExitCode != 0 || proxy.StdOut.Trim() != "false") throw new InvalidOperationException("Proxy remained running after initial boundary failure.");
+            bool unpublished = false;
+            try { _ = replacement.AuthorizeNetworkConnection("unaccepted", "10.0.0.1", "10.0.0.2", 443, null); }
+            catch (InvalidOperationException) { unpublished = true; }
+            if (!unpublished) throw new InvalidOperationException("Authorization remained published after boundary failure.");
+        }
+        report["initialBoundaryFailureStoppedProxy"] = true;
+        report["passed"] = true;
         return report;
     }
     private static async Task CheckClientPublicationAsync(JsonElement data, PodmanCommandRunner native, JsonObject report, CancellationToken ct)

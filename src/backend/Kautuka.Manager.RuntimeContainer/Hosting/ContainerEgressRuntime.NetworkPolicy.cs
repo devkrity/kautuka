@@ -4,7 +4,8 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 public sealed record NetworkAccessPolicyView(NetworkAccessPolicyState Policy, long ActiveRevision,
     string? ActiveVersion, string ActivationState, string? LastError,
-    IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults, bool RequestCapacityReached = false);
+    IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults, bool RequestCapacityReached = false,
+    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1);
 
 public sealed partial class ContainerEgressRuntime
 {
@@ -28,6 +29,7 @@ public sealed partial class ContainerEgressRuntime
 
     public NetworkAccessPolicyView GetNetworkAccessPolicy(NetworkAccessActor actor)
     {
+        ArgumentNullException.ThrowIfNull(actor);
         NetworkAccessPolicyState policy = networkPolicy.Read(actor);
         long accepted = Interlocked.Read(ref activePolicyRevision);
         string? error = Volatile.Read(ref policyActivationError);
@@ -35,7 +37,9 @@ public sealed partial class ContainerEgressRuntime
         return new NetworkAccessPolicyView(policy, accepted, active?.Version,
             !Enabled ? "disabled" : error is not null ? "failed" : !ready || accepted != policy.Revision ? "pending" : "active",
             error, [.. policySources.Where(identity => NetworkAccessPolicyStore.CanAccess(actor, identity))],
-            [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))], networkPolicy.RequestCapacityReached);
+            [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))], networkPolicy.RequestCapacityReached,
+            actor.IsAdmin && Enabled ? options.MaxPrivateNetworks : 0,
+            actor.IsAdmin && Enabled && Volatile.Read(ref ready) ? Volatile.Read(ref activePrivateNetworks) : -1);
     }
 
     public Task<NetworkAccessPolicyView> SetNetworkAccessRuleAsync(NetworkAccessActor actor, NetworkAccessIdentity identity,

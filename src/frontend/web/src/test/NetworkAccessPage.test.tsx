@@ -67,6 +67,20 @@ describe('NetworkAccessPage', () => {
     mockView(fixture());
   });
 
+  it('shows the shared private-network capacity when Manager reports it', async () => {
+    mockView({ ...fixture(), maxPrivateNetworks: 22, activePrivateNetworks: 17 });
+    renderPage();
+    expect(await screen.findByText(/Private networks in use: 17 of 22/)).toBeInTheDocument();
+    expect(screen.getByText(/Core, management, setup, and agent scopes share this limit/)).toBeInTheDocument();
+  });
+
+  it('does not display an unavailable private-network count', async () => {
+    mockView({ ...fixture(), maxPrivateNetworks: 22, activePrivateNetworks: -1 });
+    renderPage();
+    await screen.findByText(/graph.microsoft.com/);
+    expect(screen.queryByText(/Private networks in use/)).not.toBeInTheDocument();
+  });
+
   it('loads further policy pages with the displayed revision', async () => {
     const first = { ...fixture(), nextOffset: 50, ruleCount: 51 };
     const second = {

@@ -1417,7 +1417,7 @@ Detailed reports and screenshots remain under the local
 was moved aside with matching file hashes before the fresh 1004 installation.
 The parked branch was not modified. The v6 branch remains unmerged.
 
-The declared v1 limits remain: four active private networks, visible SNI or
+The declared v1 limits include 22 shared private networks, visible SNI or
 explicit IPv4/port TCP rules, direct same-network communication, new-connection
 policy changes, bounded audit retention and the trusted runtime-owner boundary.
 Gateway-delegated traffic is attributed to Gateway. Temporary approvals and
@@ -1425,3 +1425,13 @@ package-name policy remain explicitly deferred. Legacy deployment conversion is
 excluded. Interactive Windows import and Mac execution are not claimed by these
 tests; Fedora Linux behavior was exercised inside WSL, not on separate bare-metal
 hardware.
+
+The private-network limit includes core, management, setup, and agent scopes;
+it does not reserve a management slot. A rootless Fedora fixture admitted 20
+agent scopes plus core and management, exercised first/last approved traffic,
+denied an unapproved agent, and recovered and retired scopes. On that loaded
+test host, recovery took 904.6 seconds before batched recovery and 278.3 seconds
+afterward; these are observations, not a performance guarantee. The fixture
+used a controlled outside-network container, not a physical LAN destination.
+Administrators can configure `ContainerEgress:MaxPrivateNetworks` after checking
+host capacity. Existing explicitly configured limits retain their meaning.

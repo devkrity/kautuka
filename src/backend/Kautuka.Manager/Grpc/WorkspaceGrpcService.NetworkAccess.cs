@@ -114,6 +114,8 @@ public sealed partial class WorkspaceGrpcService
             DefaultCount = view.Defaults.Count,
             PendingRequestCount = view.Policy.Requests.Count(item => item.Status == "pending"),
             RequestCapacityReached = view.RequestCapacityReached,
+            MaxPrivateNetworks = view.MaxPrivateNetworks,
+            ActivePrivateNetworks = view.ActivePrivateNetworks,
             NextOffset = !summaryOnly && offset < maximum - pageSize ? offset + pageSize : 0,
         };
         if (summaryOnly) return response;
@@ -123,7 +125,7 @@ public sealed partial class WorkspaceGrpcService
             Identity = Identity(rule.Identity),
             Destination = rule.Destination,
             Port = rule.Port,
-            Allowed = rule.Allowed,
+            Allowed = NetworkAccessPolicyStore.IsEffectiveAllow(rule),
             UpdatedAtUtc = rule.UpdatedAt.ToString("O", CultureInfo.InvariantCulture),
             AllowPrivateNetwork = rule.AllowPrivateNetwork,
         }));

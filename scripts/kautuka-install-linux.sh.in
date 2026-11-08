@@ -2746,7 +2746,7 @@ else:
     grants = [dict(ScopeType='core', UserId='system', AgentId=component, Role='core', ComponentId=component, Destination=host, Port=443)
               for component, hosts in (('gateway', gateway), ('channelhost', channel)) for host in hosts]
     settings = {'CoreServices': {'Enabled': True, 'WorkspaceRoot': '/var/lib/kautuka/workspaces', 'ConfigurationRoot': '/var/lib/kautuka/manager/core-config'},
-                'ContainerEgress': {'Enabled': True, 'TelemetryEnabled': True, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
+                'ContainerEgress': {'Enabled': True, 'TelemetryEnabled': True, 'MaxPrivateNetworks': 22, 'DnsUpstreams': upstreams, 'ArtifactHosts': artifacts, 'Grants': grants},
                 'Kautuka': {'Telemetry': {'Otlp': {
                     'LogsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/logs',
                     'MetricsEndpoint': 'http://kautuka-telemetry.internal/api/default/v1/metrics',

@@ -37,6 +37,8 @@ export const networkAccessSchema = z.object({
   defaultCount: z.number().int().default(0),
   pendingRequestCount: z.number().int().default(0),
   requestCapacityReached: z.boolean().default(false),
+  maxPrivateNetworks: z.number().int().default(0),
+  activePrivateNetworks: z.number().int().default(-1),
   sources: z.array(identitySchema),
   requests: z.array(
     z.object({

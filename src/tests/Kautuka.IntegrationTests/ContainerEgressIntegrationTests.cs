@@ -86,6 +86,7 @@ public sealed class ContainerEgressIntegrationTests
         Assert.SkipWhen(!OperatingSystem.IsLinux() || string.IsNullOrWhiteSpace(input), "Requires the disposable rootless Linux topology fixture.");
         var report = await ContainerEgressManagerFixture.RunAsync(input!, TestContext.Current.CancellationToken);
         Assert.True(report["passed"]!.GetValue<bool>());
+        Assert.True(report["initialBoundaryFailureStoppedProxy"]!.GetValue<bool>());
     }
 
     private static ContainerContext Workspace(string agent, string owner)

@@ -12,6 +12,35 @@ namespace Kautuka.IntegrationTests;
 
 public sealed partial class WorkspaceGrpcServiceTests
 {
+    [Fact]
+    public async Task ReadProjectsEffectiveGrantRatherThanLegacyPrivateAllowIntent()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-effective-network-rpc-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string path = Path.Combine(root, "egress", "policy", "state.json");
+            var store = new NetworkAccessPolicyStore(path);
+            var actor = new NetworkAccessActor("owner", true);
+            var identity = new NetworkAccessIdentity("agent", "owner", "agent", "connector", "tools");
+            store.SetRule(actor, identity, "10.0.0.7", 11434, true, 0, true);
+            await File.WriteAllTextAsync(path, (await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken)).Replace("\"privateNetworkApprovalExplicit\": true", "\"legacyField\": true", StringComparison.Ordinal), TestContext.Current.CancellationToken);
+            store = new NetworkAccessPolicyStore(path);
+            store.SetRule(actor, identity, "example.com", 443, true, 1);
+            store.SetRule(actor, identity, "10.0.0.8", 11434, true, 2, true);
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Read must not bootstrap Podman."));
+            using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
+            var service = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
+                new StubRuntimeHealthProbe(true), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, runtime);
+            NetworkAccessPolicyResponse response = await service.GetNetworkAccessPolicy(new() { Actor = new() { UserId = "owner", IsAdmin = true } }, TestServerCallContext.Instance);
+            Assert.False(Assert.Single(response.Rules, rule => rule.Destination == "10.0.0.7").Allowed);
+            Assert.True(Assert.Single(response.Rules, rule => rule.Destination == "example.com").Allowed);
+            NetworkAccessRuleMessage approved = Assert.Single(response.Rules, rule => rule.Destination == "10.0.0.8");
+            Assert.True(approved.Allowed);
+            Assert.True(approved.AllowPrivateNetwork);
+            Assert.True(Assert.Single(store.Read(actor).Rules, rule => rule.Destination == "10.0.0.7").Allowed);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
     [Theory]
     [InlineData(false, true, false)]
     [InlineData(true, false, true)]

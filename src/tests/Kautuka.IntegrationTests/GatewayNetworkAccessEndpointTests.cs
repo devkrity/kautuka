@@ -61,6 +61,17 @@ public sealed partial class GatewayNetworkAccessEndpointTests
     }
 
     [Fact]
+    public async Task ReadForwardsManagerPrivateNetworkCapacity()
+    {
+        var manager = new RecordingManager { CapacityResponse = true };
+        await using WebApplication app = await CreateAsync(manager, new Guard(admin: true));
+        using HttpResponseMessage response = await app.GetTestClient().GetAsync(new Uri("http://localhost/api/network-access"), TestContext.Current.CancellationToken);
+        using JsonDocument body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(22, body.RootElement.GetProperty("maxPrivateNetworks").GetInt32());
+        Assert.Equal(17, body.RootElement.GetProperty("activePrivateNetworks").GetInt32());
+    }
+
+    [Fact]
     public async Task AnonymousReadDoesNotCallManager()
     {
         var manager = new RecordingManager();
@@ -152,6 +163,7 @@ public sealed partial class GatewayNetworkAccessEndpointTests
         public NetworkAccessRuleRequest? Rule { get; private set; }
         public NetworkAuditReadRequest? Audit { get; private set; }
         public StatusCode? Error { get; init; }
+        public bool CapacityResponse { get; init; }
         public Task<NetworkAuditResponse> GetNetworkAuditAsync(NetworkAuditReadRequest request, CancellationToken cancellationToken = default)
         {
             Actor = request.Actor;
@@ -162,7 +174,7 @@ public sealed partial class GatewayNetworkAccessEndpointTests
         {
             Actor = actor;
             return Error is { } status ? Task.FromException<NetworkAccessPolicyResponse>(new RpcException(new Status(status, "test response")))
-                : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active" });
+                : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active", MaxPrivateNetworks = CapacityResponse ? 22 : 0, ActivePrivateNetworks = CapacityResponse ? 17 : -1 });
         }
         public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default)
         {

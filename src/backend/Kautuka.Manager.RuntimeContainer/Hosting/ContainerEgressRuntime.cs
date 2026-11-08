@@ -40,6 +40,7 @@ public sealed partial class ContainerEgressRuntime(
     private string? outsideSourceAddress;
     private bool recoveryRequiresProxyStop;
     private bool ready;
+    private int activePrivateNetworks;
 
     public bool Enabled => options.Enabled;
     public bool TelemetryEnabled => Enabled && options.TelemetryEnabled;
@@ -309,6 +310,7 @@ public sealed partial class ContainerEgressRuntime(
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Container egress requires the Linux appliance.");
         if (options.MaxPrivateNetworks < 2) throw new InvalidOperationException("Egress needs capacity for core and a workload scope.");
         networks.Clear();
+        Volatile.Write(ref activePrivateNetworks, 0);
         NetworkDestinationPolicy.ValidateDnsUpstreams(options.DnsUpstreams);
 
         helperImage = await RequireCachedImageAsync("egress-setup", cancellationToken).ConfigureAwait(false);
@@ -346,7 +348,20 @@ public sealed partial class ContainerEgressRuntime(
         // Starting the whole pod would revive Envoy with stale files before ownership recovery.
         _ = await RunAsync(["start", infraId!], cancellationToken).ConfigureAwait(false);
         // Install a dropping boundary before attaching any private network to a new namespace.
-        await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
+        Volatile.Write(ref authorization, null);
+        sources.Clear(); // Do not restore package or collector exceptions from stale allocations.
+        try
+        {
+            await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
+            await PrepareRecoveredScopesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            ready = false;
+            recoveryRequiresProxyStop = true;
+            await StopProxyAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
         _ = await EnsureScopeCoreAsync(coreName, "core", cancellationToken).ConfigureAwait(false);
         List<string> inactive = await RestoreSourcesAsync(cancellationToken).ConfigureAwait(false);
         await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
@@ -511,9 +526,10 @@ public sealed partial class ContainerEgressRuntime(
         PodmanCommandResult inventory = await RunAsync(["network", "ls", "--filter", "label=" + ownerLabel + "=true", "--format", "{{.Name}}"], cancellationToken).ConfigureAwait(false);
         string[] existing = inventory.StdOut.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (!existing.Contains(name, StringComparer.Ordinal) && existing.Count(static item => item != outsideName) >= options.MaxPrivateNetworks)
-            throw new InvalidOperationException("The measured private-network capacity is reached; no broader network fallback is allowed.");
+            throw new InvalidOperationException($"The limit of {options.MaxPrivateNetworks} private networks is reached. Core, management, and agent scopes share this limit; stop an unused scope or increase ContainerEgress:MaxPrivateNetworks after checking host capacity.");
         ScopeNetwork network = await EnsureNetworkAsync(name, scopeKey, isPrivate: true, cancellationToken).ConfigureAwait(false);
         networks[name] = network;
+        Volatile.Write(ref activePrivateNetworks, networks.Count);
         try
         {
             // Protect even a newly local/private destination before adding its route/interface.
@@ -549,6 +565,45 @@ public sealed partial class ContainerEgressRuntime(
             if (!(name == coreName && key == "core") && (key is null || !IsId(key) || name != "kautuka-" + key[..32]))
                 throw new InvalidOperationException("Unrecognized managed private topology.");
             networks[name] = await EnsureNetworkAsync(name, key!, isPrivate: true, cancellationToken).ConfigureAwait(false);
+            Volatile.Write(ref activePrivateNetworks, networks.Count);
+        }
+    }
+
+    private async Task PrepareRecoveredScopesAsync(CancellationToken cancellationToken)
+    {
+        if (networks.Count == 0) return;
+        try
+        {
+            // The already-installed boundary covers every inventoried subnet before any attachment.
+            foreach (ScopeNetwork network in networks.Values.OrderBy(static item => item.Name, StringComparer.Ordinal))
+            {
+                using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", infraId!], cancellationToken).ConfigureAwait(false)).StdOut);
+                JsonElement attachments = inspected.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
+                if (!attachments.TryGetProperty(network.Name, out JsonElement attached))
+                {
+                    _ = await RunAsync(["network", "connect", "--ip", network.Gateway, network.Name, infraId!], cancellationToken).ConfigureAwait(false);
+                    using JsonDocument connected = JsonDocument.Parse((await RunAsync(["inspect", infraId!], cancellationToken).ConfigureAwait(false)).StdOut);
+                    JsonElement current = connected.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
+                    if (!current.TryGetProperty(network.Name, out JsonElement verified) || verified.GetProperty("IPAddress").GetString() != network.Gateway)
+                        throw new InvalidOperationException("Recovered egress scope attachment could not be verified.");
+                }
+                else if (attached.GetProperty("IPAddress").GetString() != network.Gateway)
+                    throw new InvalidOperationException("Egress scope address does not match its managed attachment.");
+                PodmanCommandResult routes = await HelperAsync("/usr/sbin/ip", ["-j", "-4", "route", "show", "default"], cancellationToken).ConfigureAwait(false);
+                using JsonDocument defaults = JsonDocument.Parse(routes.StdOut);
+                if (defaults.RootElement.GetArrayLength() != 1 || defaults.RootElement[0].GetProperty("gateway").GetString() != outsideDefaultGateway)
+                    throw new InvalidOperationException("The egress namespace lost its sole outside default route during recovery.");
+            }
+            // No package or collector source exception exists until RestoreSources validates allocations.
+            await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
+            foreach (string name in networks.Keys.ToArray()) networks[name] = networks[name] with { Prepared = true };
+        }
+        catch
+        {
+            ready = false;
+            recoveryRequiresProxyStop = true;
+            await StopProxyAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -724,6 +779,7 @@ public sealed partial class ContainerEgressRuntime(
             if (scopeKey is null || !IsId(scopeKey) || name != "kautuka-" + scopeKey[..32])
                 throw new InvalidOperationException("Unexpected managed scope identity; automatic network retirement is deferred.");
             networks.Add(name, await EnsureNetworkAsync(name, scopeKey, isPrivate: true, cancellationToken).ConfigureAwait(false));
+            Volatile.Write(ref activePrivateNetworks, networks.Count);
         }
         foreach (ScopeNetwork network in networks.Values.Where(static item => item.Name != coreName).ToArray())
         {
@@ -744,6 +800,7 @@ public sealed partial class ContainerEgressRuntime(
             }
             _ = await RunAsync(["network", "rm", network.Name], cancellationToken).ConfigureAwait(false);
             networks.Remove(network.Name);
+            Volatile.Write(ref activePrivateNetworks, networks.Count);
             await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
         }
     }

@@ -77,6 +77,7 @@ message NetworkAccessPolicyResponse {
   int32 next_offset = 11; int32 rule_count = 12; int32 request_count = 13;
   int32 source_count = 14; int32 default_count = 15; int32 pending_request_count = 16;
   bool request_capacity_reached = 17;
+  int32 max_private_networks = 18; int32 active_private_networks = 19;
 }
 
 message WorkspacePingRequest {
