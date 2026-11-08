@@ -482,9 +482,12 @@ internal sealed class WorkspaceRuntimeContextResolver(
     }
 
     private static string StableScopeId(AgentDefinition agent)
+        => BuildAgentWorkspaceScopeId(agent.Id, agent.OwnerUserId);
+
+    internal static string BuildAgentWorkspaceScopeId(string agentId, string? ownerUserId)
     {
-        string ownerId = string.IsNullOrWhiteSpace(agent.OwnerUserId) ? agent.Id : agent.OwnerUserId;
-        string scopeId = DistinctSegment(ownerId) + "-" + DistinctSegment(agent.Id);
+        string ownerId = string.IsNullOrWhiteSpace(ownerUserId) ? agentId : ownerUserId;
+        string scopeId = DistinctSegment(ownerId) + "-" + DistinctSegment(agentId);
         if (scopeId.Length <= 128)
         {
             return scopeId;
@@ -494,7 +497,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
         // id fails the whole desired-state update. The hash is taken from the raw ids
         // so two long ids that sanitize alike stay apart, and it cannot match a short
         // id because those begin with the owner segment.
-        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ownerId + "\n" + agent.Id)));
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ownerId + "\n" + agentId)));
         return "ws-" + hash;
     }
 

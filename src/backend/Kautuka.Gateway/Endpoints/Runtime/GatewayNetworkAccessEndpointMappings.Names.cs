@@ -28,6 +28,13 @@ internal static partial class GatewayNetworkAccessEndpointMappings
         GatewayMcpServer? connector = null;
         GatewayUser? owner = null;
         catalog?.TryGetAgent(value.AgentId, out agent);
+        if (agent is null && catalog is not null && value.ScopeType == "agent")
+        {
+            GatewayAgent[] matches = catalog.ListAgents()
+                .Where(candidate => MatchesAgent(value, candidate) && GatewayOwnershipAccess.CanAccessAgent(caller, candidate))
+                .Take(2).ToArray();
+            if (matches.Length == 1) agent = matches[0];
+        }
         if (value.Role is "connector" or "materializer") catalog?.TryGetMcpServer(ConnectorCatalogId(value), out connector);
         if (GatewayOwnershipAccess.IsAdmin(caller) || value.UserId == caller.Id) users?.TryGetUserById(value.UserId, out owner);
         return DescribeIdentity(value, caller, agent, connector, owner);
@@ -38,7 +45,7 @@ internal static partial class GatewayNetworkAccessEndpointMappings
     {
         bool admin = GatewayOwnershipAccess.IsAdmin(caller);
         if (!admin && (value.UserId != caller.Id || value.ScopeType == "core")) return Identity(value);
-        string? agentName = agent?.Id == value.AgentId && GatewayOwnershipAccess.CanAccessAgent(caller, agent) ? agent.Name : null;
+        string? agentName = agent is not null && MatchesAgent(value, agent) && GatewayOwnershipAccess.CanAccessAgent(caller, agent) ? agent.Name : null;
         string? connectorName = connector?.Id == ConnectorCatalogId(value) && GatewayOwnershipAccess.CanAccessConnector(caller, connector) ? connector.Name : null;
         string? userName = owner?.Id == value.UserId && (admin || owner.Id == caller.Id) ? owner.Username : null;
         string? displayName = value.Role switch
@@ -60,6 +67,11 @@ internal static partial class GatewayNetworkAccessEndpointMappings
         };
         return new(value.ScopeType, value.UserId, value.AgentId, value.Role, value.ComponentId, displayName, agentName, userName);
     }
+
+    private static bool MatchesAgent(NetworkAccessIdentityMessage value, GatewayAgent agent)
+        => agent.Id == value.AgentId || (value.ScopeType == "agent"
+            && (agent.OwnerUserId == value.UserId || agent.Scope == GatewayOwnershipScopes.System)
+            && WorkspaceRuntimeContextResolver.BuildAgentWorkspaceScopeId(agent.Id, agent.OwnerUserId) == value.AgentId);
 
     private static string ConnectorCatalogId(NetworkAccessIdentityMessage value)
     {

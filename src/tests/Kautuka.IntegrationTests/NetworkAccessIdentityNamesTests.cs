@@ -1,12 +1,61 @@
 using System.Text.Json;
 
 using Kautuka.Gateway.Endpoints.Runtime;
+using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Manager.Protos;
+
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Kautuka.IntegrationTests;
 
 public sealed class NetworkAccessIdentityNamesTests
 {
+    [Fact]
+    public void RuntimeWorkspaceIdentityResolvesThroughCatalogLookup()
+    {
+        using ServiceProvider services = new ServiceCollection()
+            .AddSingleton<IGatewayCatalogStore>(new NaradTestSupport.FakeCatalogStore())
+            .BuildServiceProvider();
+        NetworkAccessIdentityMessage scoped = identity.Clone();
+        scoped.UserId = "user-1";
+        scoped.AgentId = "user-1-agent-1";
+        NetworkAccessIdentityDto result = GatewayNetworkAccessEndpointMappings.CreateIdentityDescriber(
+            caller with { Id = "user-1" }, services)(scoped);
+        Assert.Equal("Agent One", result.AgentName);
+        Assert.Equal(scoped.AgentId, result.AgentId);
+    }
+
+    [Theory]
+    [InlineData("user-f2c14ef823c04a1a9ef0a34a84b8b43e", "agent-1794103575374")]
+    [InlineData("owner with spaces", "agent/with/slashes")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+    public void RuntimeScopeUsesCanonicalWorkspaceNameAndKeepsIdentity(string ownerId, string agentId)
+    {
+        GatewayAgent agent = Agent(ownerId) with { Id = agentId, Name = "Desk Assistant" };
+        NetworkAccessIdentityMessage scoped = identity.Clone();
+        scoped.UserId = ownerId;
+        scoped.AgentId = WorkspaceRuntimeContextResolver.BuildAgentWorkspaceScopeId(agentId, ownerId);
+        GatewayUser user = caller with { Id = ownerId };
+        NetworkAccessIdentityDto result = GatewayNetworkAccessEndpointMappings.DescribeIdentity(scoped, user, agent, null, user);
+        Assert.Equal("Desk Assistant", result.AgentName);
+        Assert.Equal(scoped.AgentId, result.AgentId);
+        Assert.Equal("Renamed assistant", GatewayNetworkAccessEndpointMappings.DescribeIdentity(
+            scoped, user, agent with { Name = "Renamed assistant" }, null, user).AgentName);
+        Assert.Null(GatewayNetworkAccessEndpointMappings.DescribeIdentity(
+            scoped, caller with { Role = "admin" }, agent, null, user).AgentName);
+    }
+
+    [Fact]
+    public void RuntimeScopeCannotBorrowAnotherOwnersAgentName()
+    {
+        NetworkAccessIdentityMessage scoped = identity.Clone();
+        scoped.AgentId = WorkspaceRuntimeContextResolver.BuildAgentWorkspaceScopeId("agent", "victim");
+        Assert.Null(GatewayNetworkAccessEndpointMappings.DescribeIdentity(scoped,
+            caller with { Role = "admin" }, Agent("victim") with { Scope = "user" }, null, caller).AgentName);
+        Assert.Null(GatewayNetworkAccessEndpointMappings.DescribeIdentity(scoped,
+            caller, Agent("owner"), null, caller).AgentName);
+    }
+
     private sealed class CountingServices : IServiceProvider
     {
         internal int Calls { get; private set; }

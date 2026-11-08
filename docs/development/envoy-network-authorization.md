@@ -12,6 +12,12 @@ the existing policy store before Deny returns. Gateway reads and decides those
 requests through its existing network-access API. Approval requires a new client
 attempt; no connection is held for approval and no action is resumed.
 
+Gateway resolves agent workspace identities back to visible catalog agents using
+the same canonical scope ID builder as workspace creation. The network-access
+page shows the current agent name alongside the connector and owner names;
+runtime IDs remain unchanged under **Technical identity**. Missing, deleted or
+inaccessible catalog entries retain the technical-ID fallback.
+
 Every protected TCP proxy explicitly uses `ON_DOWNSTREAM_DATA` with an 8192-byte
 early-data limit. Authorization errors and the two-second authorization timeout
 fail closed. The listener also closes on its two-second inspection timeout.
