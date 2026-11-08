@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { NetworkAudit } from '@/features/network-access/NetworkAudit';
 import { NetworkSource } from '@/features/network-access/NetworkSource';
+import { LocalNetworkChoice } from '@/features/network-access/LocalNetworkChoice';
 import { destinationScope } from '@/features/network-access/destinationScope';
 import { useCurrentUser } from '@/features/auth';
 import {
@@ -39,17 +40,22 @@ export function NetworkAccessPage() {
   const change = useNetworkAccessChange();
   const [view, setView] = React.useState<View>('requests');
   const [search, setSearch] = React.useState('');
-  const [reviewing, setReviewing] = React.useState<{ id: string; revision: number } | null>(null);
+  const [reviewing, setReviewing] = React.useState<{
+    id: string;
+    revision: number;
+    allowPrivateNetwork: boolean;
+  } | null>(null);
   const [selected, setSelected] = React.useState('');
   const [destination, setDestination] = React.useState('');
   const [port, setPort] = React.useState('443');
   const [allowed, setAllowed] = React.useState('allow');
+  const [allowPrivateNetwork, setAllowPrivateNetwork] = React.useState(false);
   const [editing, setEditing] = React.useState(false);
   const [editRevision, setEditRevision] = React.useState<number | null>(null);
   const reviewPanel = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
-    if (reviewing) reviewPanel.current?.focus();
-  }, [reviewing]);
+    if (reviewing?.id) reviewPanel.current?.focus();
+  }, [reviewing?.id]);
   const data = query.data;
   const matches = (value: string) => value.toLowerCase().includes(search.trim().toLowerCase());
   const pending = data?.requests.filter((item) => item.status === 'pending') ?? [];
@@ -89,6 +95,7 @@ export function NetworkAccessPage() {
     setDestination(rule?.destination ?? '');
     setPort(String(rule?.port ?? 443));
     setAllowed(rule?.allowed === false ? 'block' : 'allow');
+    setAllowPrivateNetwork(rule?.allowPrivateNetwork ?? false);
     setEditing(true);
     setView('permissions');
   };
@@ -360,13 +367,36 @@ export function NetworkAccessPage() {
                             original action after the policy becomes active.
                           </p>
                           <p className="text-sm text-muted-foreground">
-                            {currentUser?.role === 'admin'
-                              ? 'This is an administrator approval and may authorize access to private-network addresses.'
-                              : 'This grants public-network access only. LAN destinations require an administrator.'}
+                            {reviewing.allowPrivateNetwork
+                              ? 'This approval includes local-network access for this destination.'
+                              : 'This approval is for public destinations only. LAN access requires an explicit administrator choice.'}
                           </p>
+                          {currentUser?.role === 'admin' && (
+                            <LocalNetworkChoice
+                              checked={reviewing.allowPrivateNetwork}
+                              disabled={busy}
+                              onChange={(checked) =>
+                                setReviewing(
+                                  (current) =>
+                                    current && { ...current, allowPrivateNetwork: checked }
+                                )
+                              }
+                            />
+                          )}
+                          {destinationScope(request.destination) === 'private' &&
+                            !reviewing.allowPrivateNetwork && (
+                              <p className="text-sm text-muted-foreground">
+                                Select local-network access to allow this private address.
+                              </p>
+                            )}
                           <div className="flex flex-wrap gap-2">
                             <Button
-                              disabled={busy || !!restriction(request.destination)}
+                              disabled={
+                                busy ||
+                                !!restriction(request.destination) ||
+                                (destinationScope(request.destination) === 'private' &&
+                                  !reviewing.allowPrivateNetwork)
+                              }
                               onClick={() =>
                                 change.mutate(
                                   {
@@ -374,6 +404,9 @@ export function NetworkAccessPage() {
                                     requestId: request.id,
                                     allowed: true,
                                     expectedRevision: reviewing.revision,
+                                    allowPrivateNetwork:
+                                      currentUser?.role === 'admin' &&
+                                      reviewing.allowPrivateNetwork,
                                   },
                                   {
                                     onSuccess: () => setReviewing(null),
@@ -398,7 +431,11 @@ export function NetworkAccessPage() {
                           <Button
                             disabled={busy || !!restriction(request.destination)}
                             onClick={() =>
-                              setReviewing({ id: request.id, revision: data.revision })
+                              setReviewing({
+                                id: request.id,
+                                revision: data.revision,
+                                allowPrivateNetwork: false,
+                              })
                             }
                           >
                             Allow
@@ -466,6 +503,10 @@ export function NetworkAccessPage() {
                             port: Number(port),
                             allowed: allowed === 'allow',
                             expectedRevision: editRevision,
+                            allowPrivateNetwork:
+                              allowed === 'allow' &&
+                              currentUser?.role === 'admin' &&
+                              allowPrivateNetwork,
                           },
                           {
                             onSuccess: () => setEditing(false),
@@ -500,11 +541,20 @@ export function NetworkAccessPage() {
                       </p>
                     )}
                     {allowed === 'allow' && (
-                      <p className="text-sm text-muted-foreground sm:col-span-2">
-                        {currentUser?.role === 'admin'
-                          ? 'This is an administrator approval and may authorize private-network access for this destination.'
-                          : 'This grants public-network access only. LAN destinations require an administrator.'}
-                      </p>
+                      <div className="sm:col-span-2 space-y-2">
+                        <p className="text-sm text-muted-foreground">
+                          {allowPrivateNetwork && currentUser?.role === 'admin'
+                            ? 'This rule includes local-network access.'
+                            : 'This rule allows public destinations only.'}
+                        </p>
+                        {currentUser?.role === 'admin' && (
+                          <LocalNetworkChoice
+                            checked={allowPrivateNetwork}
+                            disabled={busy}
+                            onChange={setAllowPrivateNetwork}
+                          />
+                        )}
+                      </div>
                     )}
                     <label className="space-y-1 text-sm">
                       Hostname or IPv4 address
@@ -544,7 +594,12 @@ export function NetworkAccessPage() {
                       <Button
                         type="submit"
                         disabled={
-                          busy || !chosen || (allowed === 'allow' && !!restriction(destination))
+                          busy ||
+                          !chosen ||
+                          (allowed === 'allow' &&
+                            (!!restriction(destination) ||
+                              (destinationScope(destination) === 'private' &&
+                                !allowPrivateNetwork)))
                         }
                       >
                         Save rule

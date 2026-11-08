@@ -1,3 +1,4 @@
+import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { CompactSetupScreen } from '@/features/onboarding/components/CompactSetupScreen';
@@ -24,7 +25,7 @@ const brainPresets = [
 describe('CompactSetupScreen', () => {
   it('shows agent controls before AI brain presets and supporting notes', () => {
     const allowNetwork = vi.fn();
-    render(
+    const component = (
       <CompactSetupScreen
         helperName="Desk Assistant"
         onHelperNameChange={vi.fn()}
@@ -65,6 +66,7 @@ describe('CompactSetupScreen', () => {
         onSave={vi.fn()}
       />
     );
+    const { rerender } = render(component);
 
     expect(screen.getByText('Create your helper')).toBeInTheDocument();
     expect(
@@ -91,6 +93,27 @@ describe('CompactSetupScreen', () => {
     expect(screen.getByText(/Permission is limited/)).toHaveTextContent('api.example.com:443');
     fireEvent.click(screen.getByRole('button', { name: 'Allow this endpoint and retry setup' }));
     expect(allowNetwork).toHaveBeenCalledOnce();
+    expect(allowNetwork).toHaveBeenCalledWith(false);
+    rerender(
+      React.cloneElement<React.ComponentProps<typeof CompactSetupScreen>>(component, {
+        providerNetworkBlock: { destination: '192.168.1.4', port: 11434 },
+      })
+    );
+    expect(
+      screen.getByRole('button', { name: 'Allow this endpoint and retry setup' })
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Allow local-network access/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Allow this endpoint and retry setup' }));
+    expect(allowNetwork).toHaveBeenLastCalledWith(true);
+    rerender(
+      React.cloneElement<React.ComponentProps<typeof CompactSetupScreen>>(component, {
+        providerNetworkBlock: { destination: '192.168.1.5', port: 11434 },
+      })
+    );
+    expect(screen.getByRole('checkbox', { name: /Allow local-network access/ })).not.toBeChecked();
+    expect(
+      screen.getByRole('button', { name: 'Allow this endpoint and retry setup' })
+    ).toBeDisabled();
   });
 
   it('shows manual brain controls when manual mode is enabled', () => {

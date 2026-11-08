@@ -22,7 +22,7 @@ public sealed class NetworkDestinationPolicyTests : IDisposable
     {
         Assert.Throws<UnauthorizedAccessException>(() => Store().SetRule(new("alice", false), identity, address, 443, true, 0));
         Assert.Equal(0, Store().Revision);
-        NetworkAccessRule rule = Store().SetRule(new("admin", true), identity, address, 443, true, 0);
+        NetworkAccessRule rule = Store().SetRule(new("admin", true), identity, address, 443, true, 0, allowPrivateNetwork: true);
         Assert.True(rule.AllowPrivateNetwork);
         Assert.True(Assert.Single(Store().EffectiveGrants([])).AllowPrivateNetwork);
     }
@@ -46,7 +46,7 @@ public sealed class NetworkDestinationPolicyTests : IDisposable
     public void HostnameApprovalDoesNotGiveOrdinaryOwnerPrivateEntitlement()
     {
         NetworkAccessPolicyStore store = Store();
-        store.SetRule(new("admin", true), identity, "ollama.example.com", 11434, true, 0);
+        store.SetRule(new("admin", true), identity, "ollama.example.com", 11434, true, 0, allowPrivateNetwork: true);
         Assert.True(Assert.Single(Store().EffectiveGrants([])).AllowPrivateNetwork);
         store.SetRule(new("alice", false), identity, "ollama.example.com", 11434, true, 1);
         Assert.False(Assert.Single(Store().EffectiveGrants([])).AllowPrivateNetwork);
@@ -113,6 +113,63 @@ public sealed class NetworkDestinationPolicyTests : IDisposable
     {
         Assert.Throws<InvalidOperationException>(() => NetworkDestinationPolicy.RenderBoundary(
             "10.0.0.0/24, 169.254.169.0/24", "", null, "10.2.0.2", ["169.254.169.254"], null, null));
+    }
+
+    [Fact]
+    public void StartupDnsValidationAllowsGceAndAzureButNotOtherMetadataEndpoints()
+    {
+        NetworkDestinationPolicy.ValidateDnsUpstreams(["169.254.169.254", "168.63.129.16", "10.0.0.53"]);
+        foreach (string invalid in new[] { "169.254.170.2", "100.100.100.200", "127.0.0.1", "::1", "192.0.0.8" })
+            Assert.Throws<InvalidOperationException>(() => NetworkDestinationPolicy.ValidateDnsUpstreams([invalid]));
+    }
+
+    [Fact]
+    public async Task ActualLinuxStartupAcceptsGceDnsBeforeRequiringVerifiedImages()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Requires the actual Linux startup branch.");
+        var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command is expected before verified inventory."));
+        using var runtime = new ContainerEgressRuntime(runner,
+            new Kautuka.Manager.RuntimeContainer.Configuration.ContainerEgressOptions { Enabled = true, DnsUpstreams = ["169.254.169.254"] },
+            RuntimeImageAllowlist.Empty, root);
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => runtime.EnsureReadyAsync(TestContext.Current.CancellationToken));
+        Assert.Contains("inventory is missing egress-setup", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PrivateApprovalIsExplicitAdministratorOnlyAndPersists()
+    {
+        var store = Store();
+        Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new("alice", false), identity, "example.com", 443, true, 0, true));
+        Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new("admin", true), identity, "10.0.0.1", 443, true, 0));
+        Assert.False(store.SetRule(new("admin", true), identity, "example.com", 443, true, 0).AllowPrivateNetwork);
+        Assert.True(store.SetRule(new("admin", true), identity, "10.0.0.1", 443, true, 1, true).AllowPrivateNetwork);
+        Assert.True(Store().Read(new("admin", true)).Rules.Single(rule => rule.Destination == "10.0.0.1").PrivateNetworkApprovalExplicit);
+        foreach (string metadata in new[] { "169.254.169.254", "metadata.google.internal", "168.63.129.16" })
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new("admin", true), identity, metadata, 80, true, 2, true));
+    }
+
+    [Fact]
+    public void LegacyImplicitPrivateEntitlementIsPublicOnlyUntilExplicitReapproval()
+    {
+        Store().SetRule(new("admin", true), identity, "10.0.0.1", 443, true, 0, true);
+        string path = Path.Combine(root, "policy.json");
+        string legacy = File.ReadAllText(path).Replace("\"privateNetworkApprovalExplicit\": true", "\"legacyField\": true", StringComparison.Ordinal);
+        File.WriteAllText(path, legacy);
+        var restarted = Store();
+        Assert.False(Assert.Single(restarted.Read(new("admin", true)).Rules).AllowPrivateNetwork);
+        Assert.False(Assert.Single(restarted.EffectiveGrants([])).AllowPrivateNetwork);
+        restarted.SetRule(new("admin", true), identity, "10.0.0.1", 443, true, 1, true);
+        Assert.True(Assert.Single(Store().EffectiveGrants([])).AllowPrivateNetwork);
+    }
+
+    [Fact]
+    public void PendingPrivateRequestAlsoRequiresExplicitAdministratorChoice()
+    {
+        var store = Store(); store.ObserveDenied(identity, "10.0.0.1", 443, DateTimeOffset.UtcNow);
+        string id = Assert.Single(store.Read(new("admin", true)).Requests).Id;
+        Assert.Throws<UnauthorizedAccessException>(() => store.DecideRequest(new("alice", false), id, true, 0, true));
+        Assert.Throws<UnauthorizedAccessException>(() => store.DecideRequest(new("admin", true), id, true, 0));
+        Assert.True(store.DecideRequest(new("admin", true), id, true, 0, true).AllowPrivateNetwork);
     }
 
     public void Dispose()

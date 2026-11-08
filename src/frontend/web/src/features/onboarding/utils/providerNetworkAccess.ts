@@ -5,7 +5,10 @@ export type ProviderNetworkBlock = { destination: string; port: number };
 
 // Use the existing revision-checked policy API. Never retry provider work until
 // Manager confirms that the new policy is active.
-export async function allowProviderNetworkAccess(block: ProviderNetworkBlock): Promise<void> {
+export async function allowProviderNetworkAccess(
+  block: ProviderNetworkBlock,
+  allowPrivateNetwork = false
+): Promise<void> {
   const current = networkAccessSchema.parse((await apiClient.get('/network-access')).data);
   if (!current.enabled)
     throw new Error('Network control is disabled. Retry the provider connection.');
@@ -23,6 +26,7 @@ export async function allowProviderNetworkAccess(block: ProviderNetworkBlock): P
         port: block.port,
         allowed: true,
         expectedRevision: current.revision,
+        ...(allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
       })
     ).data
   );

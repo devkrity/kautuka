@@ -68,12 +68,12 @@ public sealed partial class WorkspaceGrpcService
             NetworkAccessRuleMessage rule = request.Rule ?? throw new ArgumentException("A network rule is required.");
             if (rule.AllowPrivateNetwork) throw new ArgumentException("Private-network entitlement is read-only and cannot be supplied by a client.");
             return NetworkRuntime.SetNetworkAccessRuleAsync(Actor(request.Actor), Identity(rule.Identity), rule.Destination,
-                rule.Port, rule.Allowed, request.ExpectedRevision, context.CancellationToken);
+                rule.Port, rule.Allowed, request.ExpectedRevision, context.CancellationToken, request.AllowPrivateNetwork);
         });
 
     public override Task<NetworkAccessPolicyResponse> DecideNetworkAccessRequest(NetworkAccessDecisionRequest request, ServerCallContext context)
         => NetworkCallAsync(() => NetworkRuntime.DecideNetworkAccessRequestAsync(Actor(request.Actor), request.RequestId,
-            request.Allowed, request.ExpectedRevision, context.CancellationToken));
+            request.Allowed, request.ExpectedRevision, context.CancellationToken, request.AllowPrivateNetwork));
 
     private static NetworkAccessActor Actor(NetworkAccessActorMessage? value)
         => value is null ? throw new ArgumentException("An authenticated actor is required.") : new(value.UserId, value.IsAdmin);

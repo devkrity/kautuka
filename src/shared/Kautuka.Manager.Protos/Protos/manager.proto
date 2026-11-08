@@ -62,10 +62,10 @@ message NetworkAuditResponse {
   int64 unattributed_connections = 4; string last_error = 5;
 }
 message NetworkAccessRuleRequest {
-  NetworkAccessActorMessage actor = 1; NetworkAccessRuleMessage rule = 2; int64 expected_revision = 3;
+  NetworkAccessActorMessage actor = 1; NetworkAccessRuleMessage rule = 2; int64 expected_revision = 3; bool allow_private_network = 4;
 }
 message NetworkAccessDecisionRequest {
-  NetworkAccessActorMessage actor = 1; string request_id = 2; bool allowed = 3; int64 expected_revision = 4;
+  NetworkAccessActorMessage actor = 1; string request_id = 2; bool allowed = 3; int64 expected_revision = 4; bool allow_private_network = 5;
 }
 message NetworkAccessPolicyResponse {
   bool enabled = 1; int64 revision = 2; int64 active_revision = 3;

@@ -309,12 +309,7 @@ public sealed partial class ContainerEgressRuntime(
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Container egress requires the Linux appliance.");
         if (options.MaxPrivateNetworks < 2) throw new InvalidOperationException("Egress needs capacity for core and a workload scope.");
         networks.Clear();
-        if (options.DnsUpstreams.Count == 0 || options.DnsUpstreams.Any(static value =>
-            !IPAddress.TryParse(value, out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(ip)
-            || NetworkDestinationPolicy.IsMetadata(value) || value == NetworkDestinationPolicy.PrivateSourceAddress))
-        {
-            throw new InvalidOperationException("Configure explicit non-loopback IPv4 DNS upstreams for the appliance resolver.");
-        }
+        NetworkDestinationPolicy.ValidateDnsUpstreams(options.DnsUpstreams);
 
         helperImage = await RequireCachedImageAsync("egress-setup", cancellationToken).ConfigureAwait(false);
         await RecoverHelpersAsync(cancellationToken).ConfigureAwait(false);

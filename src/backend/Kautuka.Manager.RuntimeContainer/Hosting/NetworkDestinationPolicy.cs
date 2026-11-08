@@ -17,6 +17,17 @@ internal static class NetworkDestinationPolicy
     internal static bool IsMetadata(string destination) => KautukaNetworkDestinationPolicy.IsMetadata(destination);
     internal static bool IsNonPublic(string destination) => KautukaNetworkDestinationPolicy.IsNonPublic(destination);
 
+    internal static void ValidateDnsUpstreams(IReadOnlyList<string> upstreams)
+    {
+        if (upstreams.Count == 0 || upstreams.Any(static value =>
+            !System.Net.IPAddress.TryParse(value, out var ip)
+            || ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+            || System.Net.IPAddress.IsLoopback(ip)
+            || value == PrivateSourceAddress
+            || (IsMetadata(value) && value != "169.254.169.254")))
+            throw new InvalidOperationException("Configure explicit non-loopback IPv4 DNS upstreams for the appliance resolver.");
+    }
+
     internal static string RenderBoundary(string subnets, string addresses, string? coreGateway,
         string? outsideSourceAddress, IReadOnlyList<string> dnsUpstreams, string? packageAddress, string? telemetryAddress)
     {

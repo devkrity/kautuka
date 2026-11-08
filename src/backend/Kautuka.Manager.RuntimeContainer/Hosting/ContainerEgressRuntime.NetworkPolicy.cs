@@ -39,12 +39,12 @@ public sealed partial class ContainerEgressRuntime
     }
 
     public Task<NetworkAccessPolicyView> SetNetworkAccessRuleAsync(NetworkAccessActor actor, NetworkAccessIdentity identity,
-        string destination, int port, bool allowed, long expectedRevision, CancellationToken cancellationToken)
-        => ChangeNetworkPolicyAsync(actor, () => networkPolicy.SetRule(actor, identity, destination, port, allowed, expectedRevision), cancellationToken);
+        string destination, int port, bool allowed, long expectedRevision, CancellationToken cancellationToken, bool allowPrivateNetwork = false)
+        => ChangeNetworkPolicyAsync(actor, () => networkPolicy.SetRule(actor, identity, destination, port, allowed, expectedRevision, allowPrivateNetwork), cancellationToken);
 
     public Task<NetworkAccessPolicyView> DecideNetworkAccessRequestAsync(NetworkAccessActor actor, string requestId,
-        bool allowed, long expectedRevision, CancellationToken cancellationToken)
-        => ChangeNetworkPolicyAsync(actor, () => networkPolicy.DecideRequest(actor, requestId, allowed, expectedRevision), cancellationToken);
+        bool allowed, long expectedRevision, CancellationToken cancellationToken, bool allowPrivateNetwork = false)
+        => ChangeNetworkPolicyAsync(actor, () => networkPolicy.DecideRequest(actor, requestId, allowed, expectedRevision, allowPrivateNetwork), cancellationToken);
 
     private async Task<NetworkAccessPolicyView> ChangeNetworkPolicyAsync(NetworkAccessActor actor, Action change,
         CancellationToken cancellationToken)

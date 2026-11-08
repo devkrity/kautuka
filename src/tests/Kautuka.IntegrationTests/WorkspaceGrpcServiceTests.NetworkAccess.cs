@@ -12,6 +12,39 @@ namespace Kautuka.IntegrationTests;
 
 public sealed partial class WorkspaceGrpcServiceTests
 {
+    [Theory]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, true)]
+    public async Task PrivateNetworkRequestChoiceIsAuthorizedAndServerDerived(bool admin, bool privateChoice, bool succeeds)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-private-request-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Unready policy writes must not bootstrap Podman."));
+            using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
+            var service = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
+                new StubRuntimeHealthProbe(true), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, runtime);
+            var request = new NetworkAccessRuleRequest
+            {
+                Actor = new() { UserId = "owner", IsAdmin = admin },
+                AllowPrivateNetwork = privateChoice,
+                Rule = new() { Identity = new() { ScopeType = "agent", UserId = "owner", AgentId = "agent", Role = "connector", ComponentId = "tools" }, Destination = "example.com", Port = 443, Allowed = true },
+            };
+            if (!succeeds)
+            {
+                RpcException error = await Assert.ThrowsAsync<RpcException>(() => service.SetNetworkAccessRule(request, TestServerCallContext.Instance));
+                Assert.Equal(StatusCode.PermissionDenied, error.StatusCode);
+            }
+            else
+            {
+                NetworkAccessPolicyResponse response = await service.SetNetworkAccessRule(request, TestServerCallContext.Instance);
+                Assert.Equal(privateChoice, Assert.Single(response.Rules).AllowPrivateNetwork);
+            }
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task ClientCannotForgePrivateNetworkEntitlement()
     {

@@ -98,7 +98,13 @@ export function useNetworkAudit() {
   });
 }
 type Change =
-  | { kind: 'decision'; requestId: string; allowed: boolean; expectedRevision: number }
+  | {
+      kind: 'decision';
+      requestId: string;
+      allowed: boolean;
+      expectedRevision: number;
+      allowPrivateNetwork?: boolean;
+    }
   | {
       kind: 'rule';
       identity: NetworkIdentity;
@@ -106,6 +112,7 @@ type Change =
       port: number;
       allowed: boolean;
       expectedRevision: number;
+      allowPrivateNetwork?: boolean;
     };
 const queryKey = ['network-access'] as const;
 
@@ -178,6 +185,9 @@ export function useNetworkAccessChange() {
               {
                 allowed: change.allowed,
                 expectedRevision: change.expectedRevision,
+                ...(change.allowed && change.allowPrivateNetwork
+                  ? { allowPrivateNetwork: true }
+                  : {}),
               }
             )
           : await apiClient.put<unknown>('/network-access/rules', {
@@ -186,6 +196,9 @@ export function useNetworkAccessChange() {
               port: change.port,
               allowed: change.allowed,
               expectedRevision: change.expectedRevision,
+              ...(change.allowed && change.allowPrivateNetwork
+                ? { allowPrivateNetwork: true }
+                : {}),
             });
       return networkAccessSchema.parse(response.data);
     },

@@ -401,4 +401,64 @@ describe('NetworkAccessPage', () => {
     expect(await screen.findByText(/policy changed while you were editing/)).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Save rule' })).not.toBeInTheDocument();
   });
+
+  it.each(['api.example.com', '192.168.1.20'])(
+    'requires a visible administrator opt-in to grant local access for %s',
+    async (destination) => {
+      const data = fixture();
+      data.requests[0].destination = destination;
+      mockView(data);
+      post.mockResolvedValue({ data });
+      renderPage();
+      await userEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+      const checkbox = screen.getByRole('checkbox', { name: /Allow local-network access/ });
+      expect(checkbox).not.toBeChecked();
+      if (destination.startsWith('192.168'))
+        expect(screen.getByRole('button', { name: 'Confirm allow' })).toBeDisabled();
+      await userEvent.click(checkbox);
+      await userEvent.click(screen.getByRole('button', { name: 'Confirm allow' }));
+      await waitFor(() =>
+        expect(post).toHaveBeenCalledWith('/network-access/requests/request-1/decision', {
+          allowed: true,
+          expectedRevision: 7,
+          allowPrivateNetwork: true,
+        })
+      );
+    }
+  );
+
+  it('does not offer the local-network choice to an ordinary user', async () => {
+    viewer.role = 'user';
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'Allow' }));
+    expect(
+      screen.queryByRole('checkbox', { name: /Allow local-network access/ })
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps a new administrator rule public-only until local access is explicitly selected', async () => {
+    put.mockResolvedValue({ data: fixture() });
+    renderPage();
+    await userEvent.click(await screen.findByRole('tab', { name: 'Permissions' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add rule' }));
+    await userEvent.selectOptions(
+      screen.getByLabelText('Component'),
+      screen.getByRole('option', { name: /Connector.*owner/ })
+    );
+    await userEvent.type(screen.getByLabelText('Hostname or IPv4 address'), '192.168.1.20');
+    expect(screen.getByRole('button', { name: 'Save rule' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: /Allow local-network access/ })).not.toBeChecked();
+    await userEvent.click(screen.getByRole('checkbox', { name: /Allow local-network access/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save rule' }));
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/network-access/rules', {
+        identity,
+        destination: '192.168.1.20',
+        port: 443,
+        allowed: true,
+        expectedRevision: 7,
+        allowPrivateNetwork: true,
+      })
+    );
+  });
 });

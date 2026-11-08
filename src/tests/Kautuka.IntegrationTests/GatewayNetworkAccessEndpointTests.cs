@@ -100,6 +100,26 @@ public sealed class GatewayNetworkAccessEndpointTests
         Assert.Equal("request-1", manager.Decision?.RequestId);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ExplicitPrivateChoiceIsAdminOnlyAndUsesRequestField(bool admin, bool decision)
+    {
+        var manager = new RecordingManager();
+        await using WebApplication app = await CreateAsync(manager, new Guard(admin: admin));
+        using HttpResponseMessage response = decision
+            ? await app.GetTestClient().PostAsJsonAsync("/api/network-access/requests/request-1/decision",
+                new { allowed = true, expectedRevision = 7, allowPrivateNetwork = true }, json, TestContext.Current.CancellationToken)
+            : await app.GetTestClient().PutAsJsonAsync("/api/network-access/rules",
+                new { identity = new { scopeType = "agent", userId = "owner", agentId = "agent", role = "connector", componentId = "mail" }, destination = "10.0.0.1", port = 443, allowed = true, expectedRevision = 7, allowPrivateNetwork = true }, json, TestContext.Current.CancellationToken);
+        Assert.Equal(admin ? HttpStatusCode.OK : HttpStatusCode.Forbidden, response.StatusCode);
+        if (!admin) Assert.Null(manager.Actor);
+        else if (decision) Assert.True(manager.Decision!.AllowPrivateNetwork);
+        else { Assert.True(manager.Rule!.AllowPrivateNetwork); Assert.False(manager.Rule.Rule.AllowPrivateNetwork); }
+    }
+
     private static async Task<WebApplication> CreateAsync(RecordingManager manager, Guard guard)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -128,6 +148,7 @@ public sealed class GatewayNetworkAccessEndpointTests
     {
         public NetworkAccessActorMessage? Actor { get; private set; }
         public NetworkAccessDecisionRequest? Decision { get; private set; }
+        public NetworkAccessRuleRequest? Rule { get; private set; }
         public NetworkAuditReadRequest? Audit { get; private set; }
         public StatusCode? Error { get; init; }
         public Task<NetworkAuditResponse> GetNetworkAuditAsync(NetworkAuditReadRequest request, CancellationToken cancellationToken = default)
@@ -143,7 +164,7 @@ public sealed class GatewayNetworkAccessEndpointTests
                 : Task.FromResult(new NetworkAccessPolicyResponse { Enabled = true, ActivationState = "active" });
         }
         public Task<NetworkAccessPolicyResponse> GetNetworkAccessPolicyAsync(NetworkAccessReadRequest request, CancellationToken cancellationToken = default) => Result(request.Actor);
-        public Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default) => Result(request.Actor);
+        public Task<NetworkAccessPolicyResponse> SetNetworkAccessRuleAsync(NetworkAccessRuleRequest request, CancellationToken cancellationToken = default) { Rule = request; return Result(request.Actor); }
         public Task<NetworkAccessPolicyResponse> DecideNetworkAccessRequestAsync(NetworkAccessDecisionRequest request, CancellationToken cancellationToken = default)
         {
             Decision = request;

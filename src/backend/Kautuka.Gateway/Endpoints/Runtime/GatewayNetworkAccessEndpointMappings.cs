@@ -15,8 +15,8 @@ internal sealed record NetworkAccessViewDto(bool Enabled, long Revision, long Ac
     string ActivationState, string? LastError, IReadOnlyList<NetworkAccessRuleDto> Rules, IReadOnlyList<NetworkAccessRequestDto> Requests,
     IReadOnlyList<NetworkAccessIdentityDto> Sources, IReadOnlyList<NetworkAccessRuleDto> Defaults, int NextOffset = 0,
     int RuleCount = 0, int RequestCount = 0, int SourceCount = 0, int DefaultCount = 0, int PendingRequestCount = 0, bool RequestCapacityReached = false);
-internal sealed record NetworkAccessRuleChangeDto(NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, long ExpectedRevision);
-internal sealed record NetworkAccessDecisionDto(bool Allowed, long ExpectedRevision);
+internal sealed record NetworkAccessRuleChangeDto(NetworkAccessIdentityDto Identity, string Destination, int Port, bool Allowed, long ExpectedRevision, bool AllowPrivateNetwork = false);
+internal sealed record NetworkAccessDecisionDto(bool Allowed, long ExpectedRevision, bool AllowPrivateNetwork = false);
 
 internal static partial class GatewayNetworkAccessEndpointMappings
 {
@@ -43,12 +43,14 @@ internal static partial class GatewayNetworkAccessEndpointMappings
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null) return Results.Unauthorized();
             if (request.Identity is null || string.IsNullOrWhiteSpace(request.Destination)) return Results.BadRequest();
             NetworkAccessActorMessage actor = Actor(user);
+            if (request.AllowPrivateNetwork && !actor.IsAdmin) return Results.StatusCode(StatusCodes.Status403Forbidden);
             if (!actor.IsAdmin && (request.Identity.UserId != user.Id || request.Identity.ScopeType == "core" || request.Identity.UserId == "system"))
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             return await NetworkResultAsync(() => manager.SetNetworkAccessRuleAsync(new NetworkAccessRuleRequest
             {
                 Actor = actor,
                 ExpectedRevision = request.ExpectedRevision,
+                AllowPrivateNetwork = request.AllowPrivateNetwork,
                 Rule = new NetworkAccessRuleMessage
                 {
                     Identity = new NetworkAccessIdentityMessage
@@ -69,12 +71,14 @@ internal static partial class GatewayNetworkAccessEndpointMappings
             HttpContext context, IGatewayAuthGuard auth, [FromServices] IManagerGrpcService manager, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null) return Results.Unauthorized();
+            if (request.AllowPrivateNetwork && !Actor(user).IsAdmin) return Results.StatusCode(StatusCodes.Status403Forbidden);
             return await NetworkResultAsync(() => manager.DecideNetworkAccessRequestAsync(new NetworkAccessDecisionRequest
             {
                 Actor = Actor(user),
                 RequestId = requestId,
                 Allowed = request.Allowed,
                 ExpectedRevision = request.ExpectedRevision,
+                AllowPrivateNetwork = request.AllowPrivateNetwork,
             }, ct), CreateIdentityDescriber(user, context.RequestServices)).ConfigureAwait(false);
         });
         return app;

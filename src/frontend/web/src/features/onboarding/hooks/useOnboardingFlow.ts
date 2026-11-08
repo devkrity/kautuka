@@ -561,13 +561,13 @@ export function useOnboardingFlow() {
     }
   };
 
-  const allowProviderAndRetry = async () => {
+  const allowProviderAndRetry = async (allowPrivateNetwork = false) => {
     const block = providerValidation?.networkBlock;
     if (!block || saving || currentUser?.role !== 'admin') return;
     setSaving(true);
     setError(null);
     try {
-      await allowProviderNetworkAccess(block);
+      await allowProviderNetworkAccess(block, allowPrivateNetwork);
       await queryClient.invalidateQueries({ queryKey: ['network-access'] });
       if (currentProviderForm.current !== providerForm) return;
       await saveSetup();

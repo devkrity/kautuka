@@ -41,6 +41,20 @@ describe('provider network approval', () => {
     });
   });
 
+  it('sends local-network entitlement only when the setup action explicitly requests it', async () => {
+    get.mockResolvedValue({ data: policy(7) });
+    put.mockResolvedValue({ data: policy(8) });
+    await allowProviderNetworkAccess({ destination: '192.168.1.4', port: 11434 }, true);
+    expect(put).toHaveBeenCalledWith(
+      '/network-access/rules',
+      expect.objectContaining({
+        allowPrivateNetwork: true,
+        destination: '192.168.1.4',
+        port: 11434,
+      })
+    );
+  });
+
   it('waits for activation instead of treating a saved permission as active', async () => {
     vi.useFakeTimers();
     get.mockResolvedValueOnce({ data: policy(7) }).mockResolvedValueOnce({ data: policy(8) });

@@ -23,11 +23,18 @@ operational-default and usability work, not a reason to replace the enforcement 
   workload identities. LAN/special-purpose unicast access requires an administrator.
   Metadata/container-credential endpoints are never approvable. The actual resolved
   upstream address is enforced natively, including after DNS changes. Administrative
-  private-network entitlement is server-derived; older rules without it remain
-  public-only until administrator reapproval. Provider setup must explain that case.
+  private-network entitlement requires an explicit administrator choice; approving
+  a public hostname does not enable LAN access. Network Access and first-run provider
+  setup use an unchecked local-network checkbox. Persisted rules without explicit
+  approval provenance, including earlier automatically privileged admin rules, are
+  public-only until explicitly reapproved. Provider setup explains that case.
   Explicitly configured DNS services co-located on a metadata/platform IP may be
   queried only by the trusted CoreDNS UID on TCP/UDP53; this does not authorize
   application, Envoy or metadata API access. The user approved this narrow exception.
+  Startup validation accepts the exact supported Google Cloud DNS resolver
+  `169.254.169.254`; other metadata endpoints remain invalid DNS upstreams. A Linux
+  Native AOT probe exercises the actual startup validation and persisted approval
+  behavior. This is not a complete appliance startup test on Google Cloud.
 - **UI:** requests, permissions and activity are separate views. Authorized catalog
   names identify components and agents; raw identities remain available in details.
   Allow requires review of the exact destination and scope. Core-service approvals

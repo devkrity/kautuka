@@ -14,6 +14,7 @@ public sealed record NetworkAccessIdentity(string ScopeType, string UserId, stri
 public sealed record NetworkAccessRule(string Id, NetworkAccessIdentity Identity, string Destination, int Port, bool Allowed, DateTimeOffset UpdatedAt)
 {
     public bool AllowPrivateNetwork { get; init; }
+    public bool PrivateNetworkApprovalExplicit { get; init; }
 }
 public sealed record NetworkAccessRequest(string Id, NetworkAccessIdentity Identity, string Destination, int Port,
     DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, long Attempts, string Status);
@@ -65,11 +66,12 @@ public sealed class NetworkAccessPolicyStore
     }
 
     public NetworkAccessRule SetRule(NetworkAccessActor actor, NetworkAccessIdentity identity, string destination,
-        int port, bool allowed, long expectedRevision)
+        int port, bool allowed, long expectedRevision, bool allowPrivateNetwork = false)
     {
         ValidateActor(actor);
         ValidateIdentity(identity);
         if (!CanAccess(actor, identity)) throw new UnauthorizedAccessException("This network scope belongs to another owner or requires an administrator.");
+        if (allowPrivateNetwork && !actor.IsAdmin) throw new UnauthorizedAccessException("Only an administrator may request private-network access.");
         EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", destination, port));
         if (allowed && NetworkDestinationPolicy.IsMetadata(normalized.Destination))
             throw new UnauthorizedAccessException("Cloud metadata and container credential endpoints cannot be allowed, including by administrators.");
@@ -77,8 +79,8 @@ public sealed class NetworkAccessPolicyStore
             throw new UnauthorizedAccessException("The reserved proxy source address cannot be used as a destination.");
         if (allowed && normalized.Destination == NetworkDestinationPolicy.PlatformControlAddress)
             throw new UnauthorizedAccessException("Cloud platform control endpoints cannot be granted. Only the configured resolver may use their DNS service.");
-        if (allowed && !actor.IsAdmin && NetworkDestinationPolicy.IsNonPublic(normalized.Destination))
-            throw new UnauthorizedAccessException("A LAN or special-purpose destination requires an administrator's approval.");
+        if (allowed && !allowPrivateNetwork && NetworkDestinationPolicy.IsNonPublic(normalized.Destination))
+            throw new UnauthorizedAccessException("A LAN or special-purpose destination requires explicit private-network approval by an administrator.");
         string id = Key(identity, normalized.Destination, port);
         lock (gate)
         {
@@ -86,7 +88,8 @@ public sealed class NetworkAccessPolicyStore
             if (current.Revision != expectedRevision) throw new InvalidOperationException("Network policy changed. Refresh before saving the decision.");
             var rule = new NetworkAccessRule(id, identity, normalized.Destination, port, allowed, DateTimeOffset.UtcNow)
             {
-                AllowPrivateNetwork = allowed && actor.IsAdmin,
+                AllowPrivateNetwork = allowed && actor.IsAdmin && allowPrivateNetwork,
+                PrivateNetworkApprovalExplicit = allowed && actor.IsAdmin && allowPrivateNetwork,
             };
             NetworkAccessRule[] rules = [.. current.Rules.Where(item => item.Id != id), rule];
             if (rules.Length > ruleLimit) throw new InvalidOperationException("The network policy rule limit has been reached.");
@@ -100,14 +103,14 @@ public sealed class NetworkAccessPolicyStore
         }
     }
 
-    public NetworkAccessRule DecideRequest(NetworkAccessActor actor, string requestId, bool allowed, long expectedRevision)
+    public NetworkAccessRule DecideRequest(NetworkAccessActor actor, string requestId, bool allowed, long expectedRevision, bool allowPrivateNetwork = false)
     {
         ValidateActor(actor);
         lock (gate)
         {
             NetworkAccessRequest request = Load().Requests.SingleOrDefault(item => item.Id == requestId && CanAccess(actor, item.Identity))
                 ?? throw new KeyNotFoundException("The network access request no longer exists.");
-            return SetRule(actor, request.Identity, request.Destination, request.Port, allowed, expectedRevision);
+            return SetRule(actor, request.Identity, request.Destination, request.Port, allowed, expectedRevision, allowPrivateNetwork);
         }
     }
 
@@ -206,7 +209,7 @@ public sealed class NetworkAccessPolicyStore
         if (loaded.Rules.Select(rule => rule.Id).Distinct(StringComparer.Ordinal).Count() != loaded.Rules.Count
             || loaded.Requests.Select(request => request.Id).Distinct(StringComparer.Ordinal).Count() != loaded.Requests.Count)
             throw new InvalidDataException("Network policy contains duplicate identities.");
-        return state = loaded;
+        return state = loaded with { Rules = [.. loaded.Rules.Select(rule => rule.PrivateNetworkApprovalExplicit ? rule : rule with { AllowPrivateNetwork = false })] };
     }
 
     private void Save(NetworkAccessPolicyState next)

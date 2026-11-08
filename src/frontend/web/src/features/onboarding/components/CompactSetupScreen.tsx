@@ -5,6 +5,8 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import React from 'react';
+import { LocalNetworkChoice } from '@/features/network-access/LocalNetworkChoice';
+import { destinationScope } from '@/features/network-access/destinationScope';
 
 export type BrainPresetOption = {
   id: string;
@@ -48,7 +50,7 @@ type CompactSetupScreenProps = {
   providerValidationMessage?: string | null;
   providerValidationSuccess?: boolean;
   providerNetworkBlock?: { destination: string; port: number } | null;
-  onAllowProviderNetwork?: () => void;
+  onAllowProviderNetwork?: (allowPrivateNetwork: boolean) => void;
   runtimeNote: string;
   relationshipNote: string;
   saving: boolean;
@@ -95,6 +97,11 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
   onBack,
   onSave,
 }) => {
+  const [allowPrivateNetwork, setAllowPrivateNetwork] = React.useState(false);
+  React.useEffect(
+    () => setAllowPrivateNetwork(false),
+    [providerNetworkBlock?.destination, providerNetworkBlock?.port]
+  );
   const showConnectionDetails = manualBrainSelection || requiresApiKey || requiresBaseUrl;
 
   return (
@@ -319,9 +326,24 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
                 {providerNetworkBlock.destination}:{providerNetworkBlock.port}.
               </p>
               {onAllowProviderNetwork ? (
-                <Button type="button" onClick={onAllowProviderNetwork} disabled={saving}>
-                  Allow this endpoint and retry setup
-                </Button>
+                <>
+                  <LocalNetworkChoice
+                    checked={allowPrivateNetwork}
+                    onChange={setAllowPrivateNetwork}
+                    disabled={saving}
+                  />
+                  <Button
+                    type="button"
+                    onClick={() => onAllowProviderNetwork(allowPrivateNetwork)}
+                    disabled={
+                      saving ||
+                      (destinationScope(providerNetworkBlock.destination) === 'private' &&
+                        !allowPrivateNetwork)
+                    }
+                  >
+                    Allow this endpoint and retry setup
+                  </Button>
+                </>
               ) : (
                 <p>
                   Ask an administrator to allow this endpoint in Network access, then retry setup.
