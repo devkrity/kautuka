@@ -161,7 +161,6 @@ dnf install -y \
   dbus-broker \
   dbus-daemon \
   dnf \
-  fuse-overlayfs \
   iproute \
   iptables \
   libicu \

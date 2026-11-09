@@ -127,6 +127,9 @@ jobs:
       - name: Test Linux installer OpenSSL prerequisite
         run: bash ./scripts/test-linux-installer-openssl.sh
 
+      - name: Test Linux installer overlay selection
+        run: bash ./scripts/test-linux-installer-overlay.sh
+
       - name: Test container bootstrap and smoke regressions
         run: |
           node --test ./scripts/test-launch-kautuka-wsl.mjs

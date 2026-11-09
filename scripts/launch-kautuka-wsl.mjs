@@ -122,10 +122,14 @@ export async function launchDevelopmentAppliance(args) {
     console.log(`[launch-kautuka] Creating dedicated Fedora 44 WSL distro ${options.distro}...`);
     await execute('wsl.exe', ['--install', '--distribution', 'FedoraLinux-44', '--name', options.distro, '--vhd-size', '64GB', '--no-launch']);
     await execute('wsl.exe', [...wsl, 'sh', '-c', 'umask 077; test ! -e /etc/kautuka-dev.json && cat > /etc/kautuka-dev.json'], { input: JSON.stringify({ schemaVersion: 1, workspaceId: identity }) });
-    await execute('wsl.exe', [...wsl, 'sh', '-c', 'printf "[boot]\\nsystemd=true\\n" > /etc/wsl.conf']);
+    await execute('wsl.exe', [...wsl, 'sh', '-c', 'printf "[boot]\\nsystemd=true\\n\\n[automount]\\nenabled=false\\n\\n[interop]\\nenabled=false\\nappendWindowsPath=false\\n" > /etc/wsl.conf']);
     await execute('wsl.exe', ['--terminate', options.distro]);
   }
   assertOwnership(await execute('wsl.exe', [...wsl, 'cat', markerPath], { capture: true }), identity);
+  const drive = /^([a-z]):[\\/]/i.exec(repo);
+  if (!drive) throw new Error('The WSL development launcher requires a workspace on a local Windows drive.');
+  const mountPath = `/mnt/${drive[1].toLowerCase()}`;
+  await execute('wsl.exe', [...wsl, 'sh', '-c', 'mkdir -p "$2"; mountpoint -q "$2" || mount -t drvfs "$1" "$2"', 'kautuka-workspace', `${drive[1].toUpperCase()}:`, mountPath]);
   const linuxRepo = (await execute('wsl.exe', [...wsl, 'wslpath', '-a', repo], { capture: true })).trim();
   const driver = `${linuxRepo}/scripts/dev-appliance.py`;
   const common = ['python3', '-B', driver, '--repo', linuxRepo, '--workspace-id', identity, '--port', String(options.port)];

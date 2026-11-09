@@ -220,6 +220,22 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
+    public void UvRunPinsIndexAfterTheRunSubcommand()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
+        {
+            Command = "uv",
+            Args = ["run", "--index-url", "https://pypi.org/simple", "python", "-m", "kautuka_web_tools.server"],
+            Environment = [new KeyValuePair<string, string>("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")],
+        };
+        List<string> arguments = ConnectorContainerSpecBuilder.BuildRun(connector, "connector-test", WorkspaceMcpExecutionContext.Isolated, null, persistent: false);
+        int commandIndex = arguments.IndexOf("uv");
+        Assert.True(commandIndex >= 0);
+        Assert.Equal(["uv", "run", "--index-url", "http://kautuka-pkgs-proxy:20101/pypi/simple/", "--default-index", "http://kautuka-pkgs-proxy:20101/pypi/simple/", "python", "-m", "kautuka_web_tools.server"], arguments[commandIndex..]);
+        Assert.DoesNotContain("https://pypi.org/simple", arguments, StringComparer.Ordinal);
+    }
+
+    [Fact]
     public void MaterializerStoresBytesBesideTheView()
     {
         string root = Directory.CreateTempSubdirectory("kautuka-view-files-").FullName;

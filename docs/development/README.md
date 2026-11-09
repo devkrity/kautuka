@@ -150,6 +150,12 @@ testing use the Native AOT appliance deployment in a dedicated environment.
 The old six-host-process launcher and managed Gateway-only debug configuration
 are removed so they cannot silently exercise a different runtime.
 
+New WSL development distros disable interop and automatic Windows-drive mounts.
+The launcher explicitly mounts the checkout's Windows drive when needed. New
+appliance stores require native rootless overlay; the installer checks support
+before writing the storage configuration and does not convert existing stores.
+For locked `uv run` connectors, package-index options follow the `run` subcommand.
+
 ## Validation commands
 
 Run the checks relevant to the files and behavior changed:

@@ -290,10 +290,9 @@ internal static class ConnectorContainerSpecBuilder
             }
 
             arguments = StripOptionFlags(arguments, "--index-url", "--default-index", "--extra-index-url", "--index");
-            arguments.Insert(0, indexUrl);
-            arguments.Insert(0, "--default-index");
-            arguments.Insert(0, indexUrl);
-            arguments.Insert(0, "--index-url");
+            int insertionIndex = string.Equals(command, "uv", StringComparison.OrdinalIgnoreCase)
+                && arguments.Count > 0 && string.Equals(arguments[0], "run", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            arguments.InsertRange(insertionIndex, ["--index-url", indexUrl, "--default-index", indexUrl]);
             return arguments;
         }
 

@@ -355,7 +355,7 @@ run_core_update_command() {
         DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" Kautuka__Mode=prod Kautuka__ContainerStateRoot=/var/lib/kautuka)
     # These leases belong to this helper, not to Manager/Podman's long-lived
     # descendants. Closing only the child's copies preserves the parent lease
-    # while preventing conmon/fuse-overlayfs from retaining it after we exit.
+    # while preventing runtime processes from retaining it after we exit.
     capability="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" --update-core-capabilities 8>&- 9>&-)" || return 1
     [[ "$capability" == core-service-update-v1 ]] || { echo 'error: Manager lacks container maintenance capability' >&2; return 1; }
     result="$(cd "$(dirname "$executable")" && "${command[@]}" "$executable" "--update-core-$action" "$operation" 8>&- 9>&-)" || return 1

@@ -590,19 +590,49 @@ ensure_rootless_podman_ready() {
     mkdir -p "$run_root"
     chown "$service_user:$service_group" "$run_root"
 
+    write_rootless_storage_config "$storage_conf_path" "$service_user" "$service_home" "$xdg_runtime_dir" "$graph_root" "$run_root"
+    chown "$service_user:$service_group" "$storage_conf_path"
+    chmod 600 "$storage_conf_path"
+
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman info --format json \
+        | python3 -c 'import json,sys; s=json.load(sys.stdin)["store"]; o=s.get("graphOptions") or {}; sys.exit(0 if s.get("graphDriverName") == "overlay" and not o.get("mount_program") and not o.get("overlay.mount_program") else 1)' \
+        || fail 'Rootless Podman must use native overlay storage.'
+}
+
+write_rootless_storage_config() {
+    local storage_conf_path="$1" service_user="$2" service_home="$3" xdg_runtime_dir="$4" graph_root="$5" run_root="$6"
+    if [[ -f "$storage_conf_path" ]]; then
+        # Do not convert an existing store in place.
+        if grep -Eq '^[[:space:]]*mount_program[[:space:]]*=' "$storage_conf_path"; then
+            fail 'Existing Podman storage uses a mount program; a fresh native-overlay store is required.'
+        fi
+        return
+    fi
+    if [[ -n "$(find "$graph_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+        fail 'Existing Podman storage has no verified native configuration; a fresh store is required.'
+    fi
+    native_rootless_overlay_available "$service_user" "$service_home" "$xdg_runtime_dir" "$graph_root" \
+        || fail 'Native rootless overlay storage is required but is not available on this filesystem.'
+
     cat > "$storage_conf_path" <<EOF
 [storage]
 driver = "overlay"
 graphroot = "$graph_root"
 runroot = "$run_root"
-
-[storage.options]
-mount_program = "/usr/bin/fuse-overlayfs"
 EOF
-    chown "$service_user:$service_group" "$storage_conf_path"
-    chmod 600 "$storage_conf_path"
+}
 
-    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman info --format json >/dev/null
+native_rootless_overlay_available() {
+    local service_user="$1" service_home="$2" xdg_runtime_dir="$3" graph_root="$4"
+    command -v unshare >/dev/null 2>&1 || return 1
+    run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" unshare -Urm sh -c '
+        set -eu
+        d=$(mktemp -d "$1/.overlay-probe.XXXXXX")
+        trap '\''rm -rf -- "$d"'\'' EXIT
+        mkdir "$d/lower" "$d/upper" "$d/work" "$d/merged"
+        mount -t overlay overlay -o "lowerdir=$d/lower,upperdir=$d/upper,workdir=$d/work" "$d/merged"
+        umount "$d/merged"
+    ' overlay-probe "$graph_root" >/dev/null 2>&1
 }
 
 ensure_service_account() {
