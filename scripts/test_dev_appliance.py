@@ -13,6 +13,29 @@ spec.loader.exec_module(driver)
 
 
 class DevelopmentPublicationTests(unittest.TestCase):
+    def test_development_gate_is_cleared_for_archive_images_and_restored_on_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / 'marker'
+            dropin = Path(temporary) / 'units/gate.conf'
+            with driver.development_image_gate(True, marker, dropin): pass
+            self.assertTrue(marker.is_file()); self.assertTrue(dropin.is_file())
+            with self.assertRaisesRegex(RuntimeError, 'activation'):
+                with driver.development_image_gate(False, marker, dropin):
+                    self.assertFalse(marker.exists()); self.assertFalse(dropin.exists())
+                    raise RuntimeError('activation')
+            self.assertEqual(marker.read_text(), 'kautuka-dev-local-images-v1')
+            self.assertIn('KAUTUKA_DEV_LOCAL_IMAGE_INVENTORY=1', dropin.read_text())
+            with driver.development_image_gate(False, marker, dropin): pass
+            self.assertFalse(marker.exists()); self.assertFalse(dropin.exists())
+
+    def test_development_gate_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'target'; target.write_text('safe')
+            marker = root / 'marker'; marker.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, 'regular files'):
+                with driver.development_image_gate(False, marker, root / 'dropin'): pass
+            self.assertEqual(target.read_text(), 'safe')
+
     def test_missing_local_image_is_rebuilt_from_retained_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

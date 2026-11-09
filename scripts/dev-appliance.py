@@ -5,6 +5,7 @@ Uses the real image producer, installer preparation and Manager lifecycle. Never
 imports Windows state, adopts an installed appliance or signs/publishes a release.
 """
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import importlib.util
@@ -36,6 +37,32 @@ def save_record(path, value):
     temporary = path.with_name(path.name + '.next')
     temporary.write_text(json.dumps(value, indent=2))
     os.replace(temporary, path)
+
+
+@contextmanager
+def development_image_gate(enabled, marker=Path('/etc/kautuka/development-local-images'),
+                           dropin=Path('/etc/systemd/user/kautuka-manager.service.d/development-local-images.conf')):
+    paths = (marker, dropin)
+    previous = []
+    for path in paths:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError('Development image gate files must be regular files')
+        previous.append((path.read_bytes(), path.stat().st_mode & 0o777) if path.exists() else None)
+    try:
+        if enabled:
+            for path in paths: path.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text('kautuka-dev-local-images-v1'); marker.chmod(0o644)
+            dropin.write_text('[Service]\nEnvironment=KAUTUKA_DEV_LOCAL_IMAGE_INVENTORY=1\n'); dropin.chmod(0o644)
+        else:
+            for path in paths: path.unlink(missing_ok=True)
+        yield
+    except BaseException:
+        for path, prior in zip(paths, previous):
+            if prior is None: path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(prior[0]); path.chmod(prior[1])
+        raise
 
 
 def _read_dev_build_record(path, identity):
@@ -435,18 +462,11 @@ install_fresh_container_appliance "$2"
                 if pending.get('version') != version or dest.resolve() != dest:
                     raise ValueError('Development version path does not belong to this pending build')
             shutil.copytree(src, dest, dirs_exist_ok=True)
-        if local_images:
-            marker = Path('/etc/kautuka/development-local-images')
-            if marker.is_symlink(): raise ValueError('Development image marker cannot be a symlink')
-            marker.write_text('kautuka-dev-local-images-v1')
-            marker.chmod(0o644)
-            dropin = Path('/etc/systemd/user/kautuka-manager.service.d')
-            dropin.mkdir(parents=True, exist_ok=True)
-            (dropin / 'development-local-images.conf').write_text('[Service]\nEnvironment=KAUTUKA_DEV_LOCAL_IMAGE_INVENTORY=1\n')
-        else:
+        if not local_images:
             subprocess.run(['python3', '/usr/local/lib/kautuka/runtime-images.py', payload], check=True)
-        installer(repo, 'install_apply_release_helper "$2"\n', payload)
-        switch_pointers(Path('/opt/kautuka'), version)
+        with development_image_gate(local_images):
+            installer(repo, 'install_apply_release_helper "$2"\n', payload)
+            switch_pointers(Path('/opt/kautuka'), version)
     settings = Path('/etc/kautuka/manager.json')
     value = json.loads(settings.read_text()); value['Update'] = {'Enabled': False}
     settings.write_text(json.dumps(value, indent=2))
