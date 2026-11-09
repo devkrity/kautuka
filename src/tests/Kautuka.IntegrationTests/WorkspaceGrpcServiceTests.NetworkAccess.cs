@@ -17,7 +17,7 @@ namespace Kautuka.IntegrationTests;
 public sealed partial class WorkspaceGrpcServiceTests
 {
     [Fact]
-    public async Task ReadMarksConflictingLegacyAgentRuleIneffective()
+    public async Task ReadRejectsUnreleasedComponentScopedPolicy()
     {
         string root = Path.Combine(Path.GetTempPath(), "kautuka-network-conflict-rpc-" + Guid.NewGuid().ToString("N"));
         try
@@ -45,9 +45,8 @@ public sealed partial class WorkspaceGrpcServiceTests
             using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
             var service = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
                 new StubRuntimeHealthProbe(true), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, runtime);
-            NetworkAccessPolicyResponse response = await service.GetNetworkAccessPolicy(new() { Actor = new() { UserId = "owner", IsAdmin = true } }, TestServerCallContext.Instance);
-            Assert.Contains(response.Rules, rule => rule.Allowed == false && rule.Identity.Role == "remote-connector");
-            Assert.Contains(response.Rules, rule => rule.Allowed == false && rule.Identity.Role == "agent");
+            await Assert.ThrowsAsync<InvalidDataException>(() => service.GetNetworkAccessPolicy(
+                new() { Actor = new() { UserId = "owner", IsAdmin = true } }, TestServerCallContext.Instance));
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
