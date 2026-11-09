@@ -31,10 +31,11 @@ public sealed class NetworkAuthorizationDecisionTests
                 NetworkAccessRequest request = Assert.Single(runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
                 Assert.Equal("unknown.example.com", request.Destination);
                 Assert.Equal("pending", request.Status);
-                Assert.Equal(Identity, request.Identity);
+                Assert.Equal(new NetworkAccessIdentity("agent", "owner", "alpha", "agent", "alpha"), request.Identity);
             }
             using var restarted = Create(root, []);
-            Assert.Single(restarted.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+            NetworkAccessRequest persisted = Assert.Single(restarted.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+            Assert.Equal(new NetworkAccessIdentity("agent", "owner", "alpha", "agent", "alpha"), persisted.Identity);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
