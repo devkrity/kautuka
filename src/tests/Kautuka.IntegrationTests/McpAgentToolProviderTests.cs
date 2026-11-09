@@ -1006,8 +1006,8 @@ public sealed class McpAgentToolProviderTests
         Assert.Equal("user-1", manager.LastRemoteConnectorNetworkRequest!.Actor.UserId);
         Assert.Equal("agent", manager.LastRemoteConnectorNetworkRequest.Identity.ScopeType);
         Assert.Equal(toolContext.WorkspaceBinding.ScopeId, manager.LastRemoteConnectorNetworkRequest.Identity.AgentId);
-        Assert.Equal("remote-connector", manager.LastRemoteConnectorNetworkRequest.Identity.Role);
-        Assert.Equal("user-1::remote", manager.LastRemoteConnectorNetworkRequest.Identity.ComponentId);
+        Assert.Equal("agent", manager.LastRemoteConnectorNetworkRequest.Identity.Role);
+        Assert.Equal(toolContext.WorkspaceBinding.ScopeId, manager.LastRemoteConnectorNetworkRequest.Identity.ComponentId);
         await captured.Revalidate(CancellationToken.None);
         revisions.BeginChange("remote", "user:user-1");
         await Assert.ThrowsAnyAsync<Exception>(() => captured.Revalidate(CancellationToken.None));

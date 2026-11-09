@@ -126,7 +126,8 @@ public sealed partial class WorkspaceGrpcService
             Identity = Identity(rule.Identity),
             Destination = rule.Destination,
             Port = rule.Port,
-            Allowed = NetworkAccessPolicyStore.IsEffectiveAllow(rule),
+            Allowed = NetworkAccessPolicyStore.IsEffectiveAllow(rule)
+                && view.IneffectiveRuleIds?.Contains(rule.Id) != true,
             UpdatedAtUtc = rule.UpdatedAt.ToString("O", CultureInfo.InvariantCulture),
             AllowPrivateNetwork = rule.AllowPrivateNetwork,
         }));

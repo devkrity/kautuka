@@ -1,7 +1,12 @@
 using Kautuka.Manager.Protos;
+using Kautuka.Gateway.Domain.Providers;
+
+using System.Net;
+using System.Text.Json.Nodes;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.AI;
 
 namespace Kautuka.IntegrationTests;
 
@@ -10,7 +15,51 @@ public sealed class AgentRuntimeNetworkPreflightTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task PrivateProviderIsBlockedBeforeAnyClientInitialization(bool legacyAllow)
+    public async Task ProviderTestAttemptsConnectionBeforeReadingRecordedDenial(bool httpResponse)
+    {
+        var manager = new PolicyManager();
+        var provider = new DeniedProvider(manager, httpResponse);
+        var validation = new ProviderValidationService(null!, new KautukaAiClientFactory([provider], null!), null!,
+            NullLogger<ProviderValidationService>.Instance, manager);
+        GatewayProviderTestResult result = await validation.ValidateProviderConnectivityAsync("ollama", "ollama",
+            new JsonObject { ["base_url"] = "http://192.168.1.20:11434" }, TestContext.Current.CancellationToken);
+        Assert.True(provider.Attempted);
+        Assert.False(result.Success);
+        Assert.Equal(httpResponse ? 0 : 1, manager.Reads);
+        if (httpResponse)
+        {
+            Assert.Null(result.NetworkBlock);
+            Assert.Contains("authentication failed", result.Message, StringComparison.Ordinal);
+        }
+        else Assert.Equal("request-1", result.NetworkBlock?.RequestId);
+    }
+
+    private sealed class DeniedProvider(PolicyManager manager, bool httpResponse) : IAiClientProvider
+    {
+        public string ProviderType => "ollama";
+        public bool Attempted { get; private set; }
+        public IChatClient? TryCreate(JsonObject settings, string modelName, string? apiKey) => null;
+        public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(JsonObject settings, string? apiKey,
+            bool throwOnFailure = false, CancellationToken cancellationToken = default)
+        {
+            Attempted = true;
+            manager.Policy.Requests.Add(new NetworkAccessRequestMessage
+            {
+                Id = "request-1",
+                Identity = Gateway(),
+                Destination = "192.168.1.20",
+                Port = 11434,
+                Status = "pending",
+                LastSeenAtUtc = DateTimeOffset.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
+            });
+            throw new HttpRequestException(httpResponse ? "authentication failed" : "connection closed", null,
+                httpResponse ? HttpStatusCode.Unauthorized : null);
+        }
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrivateProviderProceedsToClientCreationWithoutReadingPolicy(bool legacyAllow)
     {
         var config = new PlatformConfiguration();
         config.Agents.Add(new() { Id = "agent", ModelId = "model" });
@@ -18,7 +67,7 @@ public sealed class AgentRuntimeNetworkPreflightTests
         config.Providers.Add(new()
         {
             Id = "ollama",
-            Type = "ollama",
+            Type = "unknown-fixture",
             Settings = new(StringComparer.OrdinalIgnoreCase)
             {
                 ["base_url"] = "http://192.168.1.20:11434/private-path?secret=never-display",
@@ -28,18 +77,15 @@ public sealed class AgentRuntimeNetworkPreflightTests
         var manager = new PolicyManager();
         if (legacyAllow) manager.Policy.Rules.Add(new NetworkAccessRuleMessage() { Identity = Gateway(), Destination = "192.168.1.20", Port = 11434, Allowed = true });
         using ServiceProvider services = new ServiceCollection().AddSingleton<IManagerGrpcService>(manager).BuildServiceProvider();
-        // A client factory (or any later runtime dependency) must never be used
-        // when the accepted policy already proves this target is blocked.
-        var factory = new AgentRuntimeFactory(new FixedConfiguration(config), null!, null!, null!, null!, null!, null!,
+        var factory = new AgentRuntimeFactory(new FixedConfiguration(config), new KautukaAiClientFactory([], null!), null!, null!, null!, null!, null!,
             null!, null!, null!, null!, null!, null!, services, NullLogger<AgentRuntimeFactory>.Instance);
         AgentRuntimeResult result = await factory.BuildAsync("agent", "session", "owner", null, [], false, false, null, null,
             TestContext.Current.CancellationToken);
         Assert.False(result.IsSuccess);
-        Assert.Equal(AgentRuntimeError.NetworkAccessBlocked, result.Error);
-        Assert.Contains("192.168.1.20:11434", result.ErrorMessage, StringComparison.Ordinal);
+        Assert.Equal(AgentRuntimeError.ClientCreationFailed, result.Error);
         Assert.DoesNotContain("never-display", result.ErrorMessage, StringComparison.Ordinal);
         Assert.DoesNotContain("private-path", result.ErrorMessage, StringComparison.Ordinal);
-        Assert.Equal(1, manager.Reads);
+        Assert.Equal(0, manager.Reads);
     }
 
     private static NetworkAccessIdentityMessage Gateway() => new() { ScopeType = "core", UserId = "system", AgentId = "gateway", Role = "core", ComponentId = "gateway" };

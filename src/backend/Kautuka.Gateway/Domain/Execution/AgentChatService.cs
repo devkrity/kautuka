@@ -37,7 +37,8 @@ internal sealed partial class AgentChatService(
     IRunStopRegistry? runStopRegistry = null,
     IRunLimitResolver? runLimitResolver = null,
     IToolInvocationSettingsResolver? toolInvocationSettingsResolver = null,
-    IWorkspaceRuntimeTool? workspaceTool = null) : IAgentChatService
+    IWorkspaceRuntimeTool? workspaceTool = null,
+    IManagerGrpcService? networkManager = null) : IAgentChatService
 {
     private IGatewayContinuationStore GetContinuationStore() => continuationStore;
 

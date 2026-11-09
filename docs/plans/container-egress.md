@@ -39,14 +39,16 @@ operational-default and usability work, not a reason to replace the enforcement 
   names identify components and agents; raw identities remain available in details.
   Allow requires review of the exact destination and scope. Core-service approvals
   describe their shared outer route. Remote HTTP connectors additionally require
-  their own caller/agent/connector permission before every request.
+  the caller's agent-scoped permission before each agent request and an
+  independently approved Gateway route; management connector tests retain
+  their own management scope.
   Name enrichment does not expand catalog visibility or affect authoritative IDs.
   Manager reports the effective Allow value using the same evaluation as its
   Envoy configuration; the UI does not derive a second policy or create synthetic
   approval requests. Explicitly blocked rules stay resolved. Subsequent captured
-  denials may reopen an inadequate Allow. Chat checks
-  the accepted provider policy before provider initialization and explains an
-  incomplete LAN permission instead of reporting a generic send error. Exceptions
+  denials may reopen an inadequate Allow. Chat and provider tests use the normal
+  outbound path; Manager records missing permissions. After a transport failure,
+  a recent matching pending request can inform the diagnostic. Exceptions
   after a run starts must publish a durable terminal error, without replaying work.
 - **Approval delivery:** stock Envoy network authorization now records missing
   permissions directly in Manager before Deny; outcome logs do not create requests.

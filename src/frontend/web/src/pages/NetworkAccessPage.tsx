@@ -491,12 +491,12 @@ export function NetworkAccessPage() {
                       Policy rules
                     </h2>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Control future connections for a specific component and destination.
+                      Agent permissions apply across that agent’s sandboxes and connectors for the same destination.
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Container and remote HTTP connectors have scoped permissions. Remote HTTP
-                      calls also need a compatible shared Gateway route; a connector approval
-                      does not grant Gateway local-network access.
+                      Remote connector calls also need a separate Gateway route approval, including
+                      public destinations. Agent rules do not authorize provider traffic from
+                      Gateway. Gateway route approvals require an administrator.
                     </p>
                   </div>
                   <Button onClick={() => edit()} disabled={busy}>

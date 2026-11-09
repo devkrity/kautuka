@@ -1,3 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+
 using Grpc.Core;
 
 using Kautuka.Manager.Grpc;
@@ -12,6 +16,42 @@ namespace Kautuka.IntegrationTests;
 
 public sealed partial class WorkspaceGrpcServiceTests
 {
+    [Fact]
+    public async Task ReadMarksConflictingLegacyAgentRuleIneffective()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-network-conflict-rpc-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string path = Path.Combine(root, "egress", "policy", "state.json");
+            var store = new NetworkAccessPolicyStore(path);
+            var actor = new NetworkAccessActor("owner", true);
+            store.SetRule(actor, new("agent", "owner", "agent", "connector", "one"), "service.example.com", 443, true, 0);
+            JsonObject state = JsonNode.Parse(await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken))!.AsObject();
+            // Add a pre-scope-normalization Block, retaining a valid legacy key.
+            string blockId = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                string.Join('\0', "agent", "owner", "agent", "remote-connector", "owner::legacy", "service.example.com", "443"))));
+            state["rules"]!.AsArray().Add(new JsonObject
+            {
+                ["id"] = blockId,
+                ["identity"] = new JsonObject { ["scopeType"] = "agent", ["userId"] = "owner", ["agentId"] = "agent", ["role"] = "remote-connector", ["componentId"] = "owner::legacy" },
+                ["destination"] = "service.example.com",
+                ["port"] = 443,
+                ["allowed"] = false,
+                ["updatedAt"] = "2026-01-01T00:00:00+00:00",
+            });
+            await File.WriteAllTextAsync(path, state.ToJsonString(), TestContext.Current.CancellationToken);
+
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Read must not bootstrap Podman."));
+            using var runtime = new ContainerEgressRuntime(runner, new ContainerEgressOptions { Enabled = true }, RuntimeImageAllowlist.Empty, root);
+            var service = new WorkspaceGrpcService(null!, new WorkspaceDesiredStateStore(), new WorkspaceReadinessGate(), new WorkspaceExecTracker(),
+                new StubRuntimeHealthProbe(true), null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, runtime);
+            NetworkAccessPolicyResponse response = await service.GetNetworkAccessPolicy(new() { Actor = new() { UserId = "owner", IsAdmin = true } }, TestServerCallContext.Instance);
+            Assert.Contains(response.Rules, rule => rule.Allowed == false && rule.Identity.Role == "remote-connector");
+            Assert.Contains(response.Rules, rule => rule.Allowed == false && rule.Identity.Role == "agent");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task ReadProjectsEffectiveGrantRatherThanLegacyPrivateAllowIntent()
     {

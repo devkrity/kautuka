@@ -73,8 +73,50 @@ public sealed class NetworkAccessPolicyStoreTests : IDisposable
         Assert.Equal("allowed", Assert.Single(store.Read(alice).Requests).Status);
         ContainerEgressGrant grant = Assert.Single(store.EffectiveGrants([]));
         Assert.Equal(connector.AgentId, grant.AgentId);
-        Assert.Equal(connector.ComponentId, grant.ComponentId);
+        Assert.Equal("agent", grant.Role);
+        Assert.Equal(connector.AgentId, grant.ComponentId);
         Assert.Equal(8443, grant.Port);
+    }
+
+    [Fact]
+    public void AgentRequestsAndDecisionsUseOneCanonicalIdentityAcrossConnectors()
+    {
+        var store = new NetworkAccessPolicyStore(PolicyPath);
+        DateTimeOffset observed = DateTimeOffset.UtcNow;
+        store.ObserveDenied(connector, "shared.example.com", 443, observed);
+        NetworkAccessIdentity secondConnector = connector with { ComponentId = "alice::calendar" };
+        store.ObserveDenied(secondConnector, "shared.example.com", 443, observed.AddSeconds(1));
+
+        NetworkAccessRequest request = Assert.Single(store.Read(alice).Requests);
+        Assert.Equal("agent", request.Identity.Role);
+        Assert.Equal(request.Identity.AgentId, request.Identity.ComponentId);
+        Assert.Equal(2, request.Attempts);
+        NetworkAccessRule rule = store.DecideRequest(alice, request.Id, true, 0);
+        Assert.Equal(request.Identity, rule.Identity);
+        Assert.Single(store.EffectiveGrants([]));
+    }
+
+    [Fact]
+    public void ExplicitAgentDecisionReplacesItsBootstrapDefaultAndReconcilesLegacyRows()
+    {
+        var store = new NetworkAccessPolicyStore(PolicyPath);
+        ContainerEgressGrant bootstrap = new()
+        {
+            ScopeType = "agent",
+            UserId = "alice",
+            AgentId = "agent-one",
+            Role = "connector",
+            ComponentId = "alice::mail",
+            Destination = "shared.example.com",
+            Port = 443,
+            AllowPrivateNetwork = true,
+        };
+        store.SetRule(alice, connector, "shared.example.com", 443, true, 0);
+        ContainerEgressGrant grant = Assert.Single(store.EffectiveGrants([bootstrap]));
+        Assert.False(grant.AllowPrivateNetwork);
+        NetworkAccessPolicyState persisted = store.Read(alice);
+        Assert.Equal("agent", Assert.Single(persisted.Rules).Identity.Role);
+        Assert.Empty(persisted.Requests);
     }
 
     [Theory]

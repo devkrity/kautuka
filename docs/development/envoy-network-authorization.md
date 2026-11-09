@@ -138,10 +138,13 @@ cases; those cases are not represented as fresh rootless end-to-end tests here.
 ## Remote HTTP connector decision boundary
 
 The internal `CheckRemoteConnectorNetwork` Manager RPC accepts the trusted
-Gateway caller and an exact `remote-connector` subject: user, canonical agent
-workspace (or explicit management scope), and user-scoped connector ID. Neither
-an administrator actor nor a shared Gateway grant can substitute for that
-subject's permission. Only the Gateway mTLS identity may call the RPC.
+Gateway caller and the existing user+agent policy identity for agent calls:
+user, canonical agent workspace, role `agent`, and the workspace ID as the
+component ID. Connectors inside that agent share its logical permission. Saved
+and draft setup tests have no agent context, so they use an explicit management
+identity with a user-scoped connector ID. Neither an administrator actor nor a
+shared Gateway grant can substitute for the caller's logical permission. Only
+the Gateway mTLS identity may call the RPC.
 
 Logical permissions live in the existing policy and approval store. A missing
 permission is durably recorded before returning `missing_permission`; an explicit
@@ -152,21 +155,33 @@ candidate representing the desired revision permits unchanged logical grants,
 selected outer routes and allocations to continue; incompatible changes require
 a retry.
 
-Public-only logical grants contribute to the existing shared Gateway public
-route union. Explicit core Gateway decisions override the union. Private logical
-approvals never create a shared Gateway LAN entitlement. The logical and selected
-outer route must agree on private-source privilege. Metadata remains forbidden,
-and the Linux firewall still enforces actual upstream destination ranges.
+For agent scope, connector and sandbox source decisions are evaluated together
+by user and canonical workspace, while source identities remain separate in
+allocation and audit data. Existing records are not rewritten. Contradictory
+component-level Allows and Blocks, or conflicting public/private choices, fail
+closed and may require an administrator to reconcile or re-approve the agent
+permission. There is no automatic policy migration.
+
+Agent logical grants apply to sources owned by that user and canonical workspace;
+they never create a shared Gateway source route. A remote connector needs both its
+user-agent logical permission and a separate explicit core Gateway route. When the
+logical permission is accepted but its Gateway route is absent, Manager records a
+core Gateway approval request. An explicit core Block remains authoritative and
+does not create a new request. The logical and selected outer route must agree on
+private-source privilege. Metadata remains forbidden, and the Linux firewall still
+enforces actual upstream destination ranges.
 
 Plain HTTP hostname calls retain a logical hostname permission but require a
-transport-pinned IPv4 address and an explicitly approved compatible core Gateway
+transport-pinned IPv4 address and a separately approved compatible core Gateway
 IP route. HTTP has no TLS SNI, so a hostname rule alone cannot select that route.
-HTTPS checks conservatively require a core hostname route; public grants derive
-it, while private grants require a separate explicit core hostname approval.
+HTTPS calls require a separately approved core route for the normalized hostname
+or literal address, including public destinations. Sandbox permissions therefore
+cannot open provider or other Gateway traffic to the same destination.
 This application check does not reproduce the native listener's literal-IP
 fallback for HTTPS hostnames.
 
-An allowed response carries an opaque binding to the exact subject, destination,
+An allowed response carries an opaque binding to the exact user+agent or
+management subject, destination,
 Gateway source/container allocation, selected route and private privilege.
 Gateway binds its transport to the first successful value and rejects a later
 mismatch before resolving authentication credentials or sending a pooled request.

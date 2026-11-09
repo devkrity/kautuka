@@ -5,7 +5,8 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 public sealed record NetworkAccessPolicyView(NetworkAccessPolicyState Policy, long ActiveRevision,
     string? ActiveVersion, string ActivationState, string? LastError,
     IReadOnlyList<NetworkAccessIdentity> Sources, IReadOnlyList<ContainerEgressGrant> Defaults, bool RequestCapacityReached = false,
-    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1, string? DnsRefreshError = null);
+    int MaxPrivateNetworks = 0, int ActivePrivateNetworks = -1, string? DnsRefreshError = null,
+    IReadOnlySet<string>? IneffectiveRuleIds = null);
 
 public sealed partial class ContainerEgressRuntime
 {
@@ -16,6 +17,17 @@ public sealed partial class ContainerEgressRuntime
     private ContainerEgressGrant[] policyDefaults = [.. options.Grants, .. HostedProviderDefaults()];
     private static readonly string[] hostedProviderHosts = ["api.openai.com", "api.anthropic.com", "api.groq.com",
         "api.mistral.ai", "openrouter.ai", "generativelanguage.googleapis.com"];
+
+    internal static bool GrantAppliesToSource(ContainerEgressGrant grant, SourceIdentity source)
+    {
+        if (grant.Role == source.Role && grant.ScopeType == source.Scope.Kind && grant.UserId == source.Scope.UserId
+            && grant.AgentId == source.Scope.AgentId && grant.ComponentId == source.ComponentId)
+            return true;
+
+        return grant.ScopeType == "agent" && grant.Role == "agent" && grant.ComponentId == grant.AgentId
+            && source.Scope.Kind == "agent" && (source.Role is "agent" or "connector")
+            && grant.UserId == source.Scope.UserId && grant.AgentId == source.Scope.AgentId;
+    }
 
     // Only the fixed hosted-provider endpoints shipped in AiProviderCatalog.
     // The integration contract test cross-checks that catalog; custom/tenant URLs
@@ -31,6 +43,16 @@ public sealed partial class ContainerEgressRuntime
     {
         ArgumentNullException.ThrowIfNull(actor);
         NetworkAccessPolicyState policy = networkPolicy.Read(actor);
+        IReadOnlyList<ContainerEgressGrant> effective = networkPolicy.EffectiveGrants(policyDefaults);
+        HashSet<(string UserId, string AgentId, string Destination, int Port)> effectiveAgentRules = effective
+            .Where(static grant => grant.ScopeType == "agent" && grant.Role == "agent" && grant.ComponentId == grant.AgentId)
+            .Select(static grant => (grant.UserId, grant.AgentId, grant.Destination, grant.Port))
+            .ToHashSet();
+        HashSet<string> ineffectiveRuleIds = policy.Rules
+            .Where(rule => NetworkAccessPolicyStore.IsSharedAgentIdentity(rule.Identity) && rule.Allowed
+                && !effectiveAgentRules.Contains((rule.Identity.UserId, rule.Identity.AgentId, rule.Destination, rule.Port)))
+            .Select(static rule => rule.Id)
+            .ToHashSet(StringComparer.Ordinal);
         long accepted = Interlocked.Read(ref activePolicyRevision);
         string? error = Volatile.Read(ref policyActivationError);
         if (recoveryRequiresProxyStop) error ??= "Network policy cannot be confirmed. Runtime recovery is required.";
@@ -40,7 +62,8 @@ public sealed partial class ContainerEgressRuntime
             [.. policyDefaults.Where(grant => NetworkAccessPolicyStore.CanAccess(actor, NetworkAccessPolicyStore.Identity(grant)))], networkPolicy.RequestCapacityReached,
             actor.IsAdmin && Enabled ? options.MaxPrivateNetworks : 0,
             actor.IsAdmin && Enabled && Volatile.Read(ref ready) ? Volatile.Read(ref activePrivateNetworks) : -1,
-            DnsErrorForActor(DnsRefreshError, actor.IsAdmin));
+            DnsErrorForActor(DnsRefreshError, actor.IsAdmin),
+            ineffectiveRuleIds);
     }
 
     internal static string? DnsErrorForActor(string? error, bool isAdmin)

@@ -8,6 +8,7 @@ using System.Threading.Channels;
 
 using Kautuka.Gateway.Domain.AgentFiles;
 using Kautuka.Gateway.Domain.Assets;
+using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
@@ -1167,7 +1168,10 @@ internal sealed partial class AgentChatService
                     CancellationToken.None).ConfigureAwait(false);
             }
             result = "failed";
-            errorMsg = ex.Message;
+            errorMsg = activeToolCallId is null && networkManager is not null
+                ? await ProviderNetworkAccessCheck.DescribeChatFailureAsync(networkManager.GetNetworkAccessPolicyAsync,
+                    runtime.PathKey.EndpointKey, runStartedAt, ex, ct).ConfigureAwait(false)
+                : ex.Message;
             AgentChatServiceLog.AgentStreamFailed(logger, ex, agentId);
         }
         finally

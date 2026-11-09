@@ -191,10 +191,13 @@ internal sealed class KautukaAiClientFactory(
 
         string providerType = ProviderTypeCatalogSettings.NormalizeType(provider.Type);
         JsonObject settingsJson = ToSettingsObject(provider);
+        string? knownDefault = providerType is "openai" or "openai-responses" or "gemini"
+            && AiProviderCatalog.Defaults.TryGetValue(providerType, out AiProviderCatalog.ProviderMetadata? metadata)
+                ? metadata.DefaultBaseUrl : null;
         // base_url is the common settings key across all providers
         string value = AiProviderSettings.GetString(settingsJson, "base_url")
             ?? AiProviderSettings.GetString(settingsJson, "endpoint")
-            ?? providerType;
+            ?? knownDefault ?? providerType;
 
         return Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
             ? uri

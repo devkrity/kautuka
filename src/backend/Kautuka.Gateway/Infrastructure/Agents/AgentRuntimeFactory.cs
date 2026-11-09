@@ -3,7 +3,6 @@ using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Assets;
 using Kautuka.Gateway.Domain.Execution;
-using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
@@ -101,14 +100,6 @@ internal sealed class AgentRuntimeFactory(
         if (providerDef is null)
             return AgentRuntimeResult.Failure(AgentRuntimeError.ProviderNotFound,
                 $"Provider '{resolvedProviderId}' for model '{resolvedModelId}' not found.");
-
-        if (serviceProvider.GetService<IManagerGrpcService>() is { } networkManager)
-        {
-            JsonObject settings = JsonObject.Create(JsonSerializer.SerializeToElement(providerDef.Settings, KautukaJsonContext.Default.DictionaryStringObject))!;
-            GatewayProviderTestResult? blocked = await ProviderNetworkAccessCheck.CheckAsync(networkManager.GetNetworkAccessPolicyAsync, settings, ct).ConfigureAwait(false);
-            if (blocked is { Success: false })
-                return AgentRuntimeResult.Failure(AgentRuntimeError.NetworkAccessBlocked, blocked.Message);
-        }
 
         IChatClient? rawChatClient = await aiClientFactory.TryCreateAsync(providerDef, modelDef.ModelName, ct).ConfigureAwait(false);
         if (rawChatClient is null)

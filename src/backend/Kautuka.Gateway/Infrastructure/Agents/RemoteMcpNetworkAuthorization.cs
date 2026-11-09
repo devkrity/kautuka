@@ -8,14 +8,31 @@ internal static class RemoteMcpNetworkAuthorization
     internal const string ManagementAgentId = "management";
 
     internal static NetworkAccessIdentityMessage CreateIdentity(string scopeType, string userId, string agentId, string connectorId)
-        => new()
+    {
+        if (scopeType == "agent")
         {
-            ScopeType = scopeType,
+            return new NetworkAccessIdentityMessage
+            {
+                ScopeType = "agent",
+                UserId = userId,
+                AgentId = agentId,
+                Role = "agent",
+                ComponentId = agentId,
+            };
+        }
+
+        if (scopeType != "management")
+            throw new ArgumentException("Remote MCP network authorization requires an agent or management scope.", nameof(scopeType));
+
+        return new NetworkAccessIdentityMessage
+        {
+            ScopeType = "management",
             UserId = userId,
-            AgentId = agentId,
+            AgentId = ManagementAgentId,
             Role = RemoteConnectorRole,
             ComponentId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(userId, connectorId),
         };
+    }
 
     internal static Func<Uri, string?, CancellationToken, Task<RemoteConnectorNetworkResponse>> CreateCheck(
         IManagerGrpcService manager,

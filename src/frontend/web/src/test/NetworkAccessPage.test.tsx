@@ -67,6 +67,13 @@ describe('NetworkAccessPage', () => {
     mockView(fixture());
   });
 
+  it('explains that agent permissions apply across sandboxes and connectors', async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole('tab', { name: 'Permissions' }));
+    expect(screen.getByText(/Agent permissions apply across that agent’s sandboxes and connectors/)).toBeVisible();
+    expect(screen.getByText(/Remote connector calls also need a separate Gateway route approval/)).toBeVisible();
+  });
+
   it('shows the shared private-network capacity when Manager reports it', async () => {
     mockView({ ...fixture(), maxPrivateNetworks: 22, activePrivateNetworks: 17 });
     renderPage();

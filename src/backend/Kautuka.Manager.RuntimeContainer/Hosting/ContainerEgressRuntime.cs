@@ -858,10 +858,11 @@ public sealed partial class ContainerEgressRuntime(
         })];
         IReadOnlyList<ContainerEgressGrant> effective = networkPolicy.EffectiveGrants(policyDefaults);
         RemoteConnectorPermission[] remotePermissions = RemotePermissions(effective);
-        IReadOnlyList<ContainerEgressGrant> grants = WithRemotePublicGatewayGrants(effective);
+        // Agent grants authorize their own agent/container sources only. Gateway
+        // routes come from explicit core policy or built-in Gateway defaults.
+        IReadOnlyList<ContainerEgressGrant> grants = effective;
         EgressTcpRule[] rules = [.. authorized.SelectMany(source => grants
-            .Where(grant => grant.Role == source.Identity.Role && grant.ScopeType == source.Identity.Scope.Kind && grant.UserId == source.Identity.Scope.UserId
-                && grant.AgentId == source.Identity.Scope.AgentId && grant.ComponentId == source.Identity.ComponentId)
+            .Where(grant => GrantAppliesToSource(grant, source.Identity))
             .Select(grant => EnvoyEgressConfiguration.Normalize(new EgressTcpRule(source.Container.Address, grant.Destination, grant.Port, grant.AllowPrivateNetwork)))).Distinct().OrderBy(rule => rule.SourceAddress, StringComparer.Ordinal).ThenBy(rule => rule.Destination, StringComparer.Ordinal).ThenBy(rule => rule.Port).ThenBy(rule => rule.AllowPrivateNetwork)];
         EgressPackageRoute[] routes = package is null ? [] : [.. authorized.Where(static source => source.Identity.PackageEligible)
             .Select(source => new EgressPackageRoute(source.Container.Address, networks[source.Container.NetworkName].Gateway, package.Container.Address, networks[coreName].Gateway))];
