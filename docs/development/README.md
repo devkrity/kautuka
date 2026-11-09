@@ -92,12 +92,11 @@ it in your own terminal when the setup page requests it:
 wsl -d <distro-name-printed-by-launcher> -u root -- cat /var/lib/kautuka/gateway-data/setup-token
 ```
 
-After the first build, `npm run launch` starts the last successful Native AOT
-build without rebuilding assets or compiling source changes. Use
-`npm run launch -- --build` to check sources and build the full stack, or a
-selected-service rebuild below for a smaller change. `--skip-build` remains an
-explicit reuse command and requires an existing build. An interrupted installation
-requires `--build` before startup. Startup reports elapsed time while Manager
+Each `npm run launch` checks sources and builds Native AOT images when they change;
+unchanged builds reuse the existing images. Use a selected-service rebuild below
+for a smaller change. `--skip-build` explicitly reuses an existing build without
+checking source changes. An interrupted installation requires a normal launch
+before startup. Startup reports elapsed time while Manager
 reconciles containers; this waiting period is separate from compilation.
 Data, configured providers, network policy, approvals and workspaces are
 retained. These are local Native AOT development images, not signed release

@@ -233,7 +233,8 @@ def build(repo, identity):
         inventory = producer.binding.bind_inventory({'schemaVersion': 1, 'images': entries}, payload / 'oci-images', 'linux/amd64')
         (payload / 'bin/runtime-images.json').write_text(json.dumps(inventory))
         producer.package(argparse.Namespace(source_root=source, payload=payload, work_root=work, runtime=str(wrapper),
-                                           version=version, numeric_version=numeric_version, source_sha=sha))
+                                           version=version, numeric_version=numeric_version, source_sha=sha,
+                                           nuget_cache=CACHE / 'nuget'))
         inventory = json.loads((payload / 'bin/runtime-images.json').read_text())
         for entry in inventory['images']:
             if not entry['id'].startswith('core-'): continue
@@ -294,6 +295,21 @@ install_fresh_container_appliance "$2"
 
 
 def run(repo, port, session):
+    identifiers = ('kautuka-manager', 'kautuka-updateservice', 'kautuka-gateway',
+                   'kautuka-webhost', 'kautuka-channelhost', 'kautuka-credentialshost')
+    matches = []
+    for identifier in identifiers:
+        if matches: matches.append('+')
+        matches.append('SYSLOG_IDENTIFIER=' + identifier)
+    logs = subprocess.Popen(['journalctl', '--follow', '--since=now', '--no-pager', '--output=short', *matches])
+    try:
+        run_stack(repo, port, session)
+    finally:
+        logs.terminate()
+        logs.wait()
+
+
+def run_stack(repo, port, session):
     started = time.monotonic()
     record = CACHE / 'build.json'
     if not record.is_file(): raise ValueError('No successful development build; run npm run launch -- --build')
@@ -311,6 +327,7 @@ def run(repo, port, session):
     print('[launch-kautuka] Preparing the existing rootless runtime...', flush=True)
     installer(repo, '''
 ensure_rootless_podman_ready kautuka kautuka /var/lib/kautuka /run/user/$(id -u kautuka) containers
+prepare_runtime_telemetry_directory /var/lib/kautuka/telemetry kautuka kautuka
 install_socket_runtime_dirs kautuka containers kautuka
 ''')
     as_runtime('systemctl', '--user', 'daemon-reload')

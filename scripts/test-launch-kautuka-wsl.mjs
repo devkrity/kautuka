@@ -19,9 +19,9 @@ test('default launch is isolated and skip-build does not select host mode', () =
   for (const port of ['0', '22', '65536', 'NaN']) assert.throws(() => parseOptions(['--port', port]), /Invalid --port/);
 });
 
-test('cached launch never stages assets, bootstraps or builds; first launch and explicit builds do', async () => {
+test('normal launch checks Native AOT output; explicit skip-build starts cached output', async () => {
   for (const [args, state, expected] of [
-    [[], 'ready', []], [['--skip-build'], 'ready', []],
+    [[], 'ready', ['stage', 'bootstrap', 'build']], [['--skip-build'], 'ready', []],
     [[], 'missing', ['stage', 'bootstrap', 'build']],
     [['--build'], 'ready', ['stage', 'bootstrap', 'build']],
     [['--build'], 'pending', ['stage', 'bootstrap', 'build']],
@@ -36,7 +36,7 @@ test('cached launch never stages assets, bootstraps or builds; first launch and 
 });
 
 test('incomplete launches fail before compilation or service startup', async () => {
-  for (const [args, state] of [[[], 'pending'], [['--skip-build'], 'pending'], [['--skip-build'], 'missing']]) {
+  for (const [args, state] of [[['--skip-build'], 'pending'], [['--skip-build'], 'missing']]) {
     await assert.rejects(prepareLaunch(parseOptions(args), state, {
       stage: () => assert.fail('staged'), bootstrap: () => assert.fail('bootstrapped'),
       build: () => assert.fail('built'), log: () => {},
@@ -45,6 +45,18 @@ test('incomplete launches fail before compilation or service startup', async () 
   for (const args of [['--build', '--skip-build'], ['--build', '--service', 'gateway'], ['--build', '--stop']]) {
     assert.throws(() => parseOptions(args), /cannot be combined/);
   }
+});
+
+test('asset preparation and bootstrap complete concurrently before building', async () => {
+  const calls = [];
+  let releaseStage;
+  const stageReady = new Promise(resolve => { releaseStage = resolve; });
+  await prepareLaunch(parseOptions([]), 'ready', {
+    stage: async () => { calls.push('stage-start'); await stageReady; calls.push('stage-end'); },
+    bootstrap: async () => { calls.push('bootstrap'); releaseStage(); },
+    build: async () => calls.push('build'), log: () => {},
+  });
+  assert.deepEqual(calls, ['stage-start', 'bootstrap', 'stage-end', 'build']);
 });
 
 test('individual service actions are explicit and cannot select arbitrary containers or stack modes', () => {

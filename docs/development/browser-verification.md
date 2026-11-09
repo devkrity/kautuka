@@ -22,7 +22,7 @@ Never report a full pass when a scenario was skipped, blocked, or inferred from 
 5. Sign in with the role required by the scenario. Do not reuse a session whose authorization state is uncertain.
 6. Open browser developer tools. Keep the Console and Network panels available; monitor Narad session watch on `/api/narad/v1` when testing chat.
 
-The root command `npm run launch` starts the last successful native build (building automatically on first use). Run `npm run launch -- --build` to include current source changes. The browser is served at the WebHost address listed in the [runtime reference](../reference/runtime.md).
+The root command `npm run launch` checks the current sources and builds Native AOT output when needed. The browser is served at the WebHost address listed in the [runtime reference](../reference/runtime.md).
 
 ## Mandatory smoke
 

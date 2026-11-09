@@ -174,8 +174,8 @@ def package(options):
             if file.is_file(): shutil.copyfile(file, clean_source / file.name)
         publishes = work / "publish"
         publishes.mkdir()
-        nuget = work / "nuget"
-        nuget.mkdir()
+        nuget = Path(options.nuget_cache) if getattr(options, "nuget_cache", None) else work / "nuget"
+        nuget.mkdir(parents=True, exist_ok=True)
         sdk = pull(options.runtime, inputs["sdkImage"])
         pull(options.runtime, inputs["coreRuntimeImage"])
         helper = pull(options.runtime, inputs["acquisitionImage"])

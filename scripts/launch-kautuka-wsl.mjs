@@ -37,16 +37,14 @@ export function parseOptions(args, defaultDistro = 'KautukaDev') {
 }
 
 export async function prepareLaunch(options, state, { stage, bootstrap, build, log = console.log }) {
-  if (!options.build && state === 'pending') throw new Error('The previous build was interrupted. Run npm run launch -- --build to recover it; no services were started.');
+  if (options.skipBuild && state === 'pending') throw new Error('The previous build was interrupted. Run npm run launch to recover it; no services were started.');
   if (options.skipBuild && state === 'missing') throw new Error('No successful development build. Run npm run launch first.');
-  if (options.build || (state === 'missing' && !options.skipBuild)) {
-    log('[launch-kautuka] Building development images with Native AOT. This can take several minutes.');
-    await stage();
-    await bootstrap();
+  if (!options.skipBuild) {
+    log('[launch-kautuka] Checking development sources and Native AOT images. Changed builds can take several minutes.');
+    await Promise.all([stage(), bootstrap()]);
     await build();
   } else {
     log('[launch-kautuka] Starting the last successful Native AOT build; source changes are not compiled.');
-    log('[launch-kautuka] Use --build for the full stack, or --service <name> --action rebuild for one service.');
   }
 }
 
@@ -86,8 +84,8 @@ export async function requireFreePort(port) {
 }
 
 async function stageAssets({ web = true, bundles = true } = {}) {
-  if (web) await execute(process.execPath, ['node_modules/vite/bin/vite.js', 'build'], { cwd: path.join(repo, 'src/frontend/web') });
-  if (!bundles) return;
+  const frontend = web ? execute(process.execPath, ['node_modules/vite/bin/vite.js', 'build'], { cwd: path.join(repo, 'src/frontend/web') }) : Promise.resolve();
+  if (!bundles) return frontend;
   const bundle = path.join(repo, 'artifacts/mcpb/kautuka-web-tools-dev.mcpb');
   const newestInput = directory => {
     let newest = statSync(directory).mtimeMs;
@@ -98,18 +96,18 @@ async function stageAssets({ web = true, bundles = true } = {}) {
     }
     return newest;
   };
-  if (existsSync(bundle) && statSync(bundle).mtimeMs >= newestInput(path.join(repo, 'mcps/kautuka-web-tools'))) return;
+  if (existsSync(bundle) && statSync(bundle).mtimeMs >= newestInput(path.join(repo, 'mcps/kautuka-web-tools'))) return frontend;
   const args = ['-y', '@anthropic-ai/mcpb', 'pack', 'mcps/kautuka-web-tools', 'artifacts/mcpb/kautuka-web-tools-dev.mcpb'];
   if (process.platform === 'win32') {
-    await execute(process.execPath, [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npx-cli.js'), ...args]);
-  } else await execute('npx', args);
+    await Promise.all([frontend, execute(process.execPath, [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npx-cli.js'), ...args])]);
+  } else await Promise.all([frontend, execute('npx', args)]);
 }
 
 export async function launchDevelopmentAppliance(args) {
   const identity = workspaceIdentity(realpathSync(repo));
   const options = parseOptions(args, 'KautukaDev-' + identity.slice(0, 8));
   if (options.help) {
-    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--build | --skip-build] [--stop]\n       npm run launch -- --service <name> [--action start|restart|rebuild]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\nLater launches start the last successful build without compiling source changes.\n--build explicitly checks source and rebuilds changed full-stack images. --skip-build requires an existing build.\nCtrl+C stops only this development stack.\n--service targets an initialized development stack; default action is restart.\nServices: frontend, webhost, gateway, channelhost, credentialshost, manager, updateservice.\nfrontend rebuild replaces only static assets; core service rebuild publishes only that service with Native AOT.\nCore actions briefly restart Manager and may interrupt active tool calls; other core containers remain running.\nManager/UpdateService support start/restart; rebuild them with --build.');
+    console.log('Usage: npm run launch -- [--distro KautukaDev[-name]] [--port 20229] [--build | --skip-build] [--stop]\n       npm run launch -- --service <name> [--action start|restart|rebuild]\nWindows: runs the complete Native AOT stack in its own Fedora 44 WSL distro.\nFirst launch installs the distro/prerequisites and builds all services and .NET connectors with Native AOT. Data persists between launches.\nEach launch checks source changes and builds Native AOT images when needed.\n--skip-build starts the last successful build without checking source changes.\nCtrl+C stops only this development stack.\n--service targets an initialized development stack; default action is restart.\nServices: frontend, webhost, gateway, channelhost, credentialshost, manager, updateservice.\nfrontend rebuild replaces only static assets; core service rebuild publishes only that service with Native AOT.\nCore actions briefly restart Manager and may interrupt active tool calls; other core containers remain running.\nManager/UpdateService support start/restart; rebuild them with --build.');
     return;
   }
   if (process.platform !== 'win32') throw new Error('The isolated development launcher currently requires Windows WSL. Use the Native AOT Linux appliance for Linux testing; host-process/JIT fallback is not supported.');

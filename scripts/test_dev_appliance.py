@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 spec = importlib.util.spec_from_file_location('dev_appliance', Path(__file__).with_name('dev-appliance.py'))
 driver = importlib.util.module_from_spec(spec)
@@ -13,6 +13,16 @@ spec.loader.exec_module(driver)
 
 
 class DevelopmentPublicationTests(unittest.TestCase):
+    def test_log_stream_is_stopped_when_stack_exits(self):
+        process = MagicMock()
+        with patch.object(driver.subprocess, 'Popen', return_value=process) as start, \
+             patch.object(driver, 'run_stack', side_effect=RuntimeError('failed')):
+            with self.assertRaisesRegex(RuntimeError, 'failed'):
+                driver.run(Path('/repo'), 20229, 'session')
+        self.assertIn('SYSLOG_IDENTIFIER=kautuka-gateway', start.call_args.args[0])
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once()
+
     def prepare(self, root):
         for role in driver.SERVICES:
             version = root / role / 'versions/old'
@@ -65,7 +75,7 @@ class DevelopmentPublicationTests(unittest.TestCase):
             (cache / 'build.json').write_text(json.dumps({'publication': 'self-contained-jit', 'version': 'old'}))
             with patch.object(driver, 'CACHE', cache), patch.object(driver, 'installer') as installer, patch.object(driver, 'as_runtime') as runtime:
                 with self.assertRaisesRegex(ValueError, 'not Native AOT'):
-                    driver.run(Path(temporary), 20229, 'new-launcher')
+                    driver.run_stack(Path(temporary), 20229, 'new-launcher')
             installer.assert_not_called()
             runtime.assert_not_called()
 
