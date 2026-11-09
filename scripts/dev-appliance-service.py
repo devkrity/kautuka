@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +94,18 @@ def wait_ready(driver, service, expected_image, old_id=None):
     raise RuntimeError('Selected service did not become healthy after Manager reconciliation')
 
 
+def copy_runtime_image(driver, image, destination):
+    user = pwd.getpwnam('kautuka')
+    with tempfile.TemporaryDirectory(prefix='kautuka-dev-copy-', dir='/var/tmp') as temporary:
+        os.chown(temporary, user.pw_uid, user.pw_gid)
+        cid = driver.as_runtime('podman', 'create', '--pull=never', '--network=none', image)
+        try:
+            driver.as_runtime('podman', 'cp', cid + ':/app/.', temporary)
+            shutil.copytree(temporary, destination, dirs_exist_ok=True)
+        finally:
+            driver.as_runtime('podman', 'rm', cid)
+
+
 def build_image(driver, repo, work, service, frontend_only, inventory, current):
     producer = driver.module(repo, 'package-runtime-images')
     engine = str(driver.CACHE / 'podman-build')
@@ -102,7 +116,15 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
     original = next(entry for entry in inventory['images'] if entry['id'] == 'core-' + service)
     if current['Image'].removeprefix('sha256:') != original['localImageId'].removeprefix('sha256:'):
         raise ValueError('Running core image differs from the installed immutable inventory')
-    if frontend_only:
+    local_images = inventory.get('developmentLocalImages') is True
+    if frontend_only and local_images:
+        copy_runtime_image(driver, original['localImageId'], context)
+        binary = context / 'Kautuka.WebHost'
+        if binary.read_bytes()[:4] != b'\x7fELF' or (context / 'Kautuka.WebHost.dll').exists() or (context / 'libcoreclr.so').exists():
+            raise ValueError('Installed WebHost is not Native AOT')
+        binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
+        shutil.rmtree(context / 'wwwroot')
+    elif frontend_only:
         # Import the verified archive into the separate build engine, never trust a mutable tag.
         archive = driver.STATE / 'oci-images' / original['archive']
         with archive.open('rb') as stream:
@@ -131,8 +153,12 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
             target = source / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(repo / name, target)
-        sdk = producer.pull(engine, inputs['sdkImage'])
-        base = inputs['coreRuntimeImage']; producer.pull(engine, base)
+        if local_images:
+            try: sdk = producer.inspect(engine, inputs['sdkImage'])
+            except subprocess.CalledProcessError: sdk = producer.pull(engine, inputs['sdkImage'])
+        else:
+            sdk = producer.pull(engine, inputs['sdkImage'])
+            base = inputs['coreRuntimeImage']; producer.pull(engine, base)
         properties = ET.parse(repo / 'src/Directory.Build.props').getroot().find('PropertyGroup')
         project = 'Kautuka.' + CORES[service]
         (driver.CACHE / 'nuget').mkdir(exist_ok=True)
@@ -146,7 +172,11 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
                      '-p:Version=' + properties.findtext('KautukaDevVersion'), '-o', '/out')
         if (context / (project + '.dll')).exists() or (context / 'libcoreclr.so').exists() or (context / project).read_bytes()[:4] != b'\x7fELF':
             raise ValueError('Selected service publication is not Native AOT')
-        if service == 'gateway':
+        if service == 'gateway' and local_images:
+            previous = work / 'previous-image'
+            copy_runtime_image(driver, original['localImageId'], previous)
+            shutil.copytree(previous / 'built-in-mcpb', context / 'built-in-mcpb')
+        elif service == 'gateway':
             archive = driver.STATE / 'oci-images' / original['archive']
             with archive.open('rb') as stream:
                 if hashlib.file_digest(stream, 'sha256').hexdigest() != original['archiveSha256']:
@@ -155,13 +185,19 @@ def build_image(driver, repo, work, service, frontend_only, inventory, current):
             cid = producer.run(engine, 'create', '--pull=never', '--network=none', original['localImageId']).strip()
             try: producer.run(engine, 'cp', cid + ':/app/built-in-mcpb', context / 'built-in-mcpb')
             finally: producer.run(engine, 'rm', cid)
-        recipe = 'FROM ' + base + '\nCOPY . /app\nWORKDIR /app\nENTRYPOINT ' + json.dumps(['/app/' + project]) + '\n'
+        if not local_images:
+            recipe = 'FROM ' + base + '\nCOPY . /app\nWORKDIR /app\nENTRYPOINT ' + json.dumps(['/app/' + project]) + '\n'
     if service == 'webhost':
         web = repo / 'src/frontend/web/dist'
         if not (web / 'index.html').is_file(): raise ValueError('Build frontend assets first')
         shutil.copytree(web, context / 'wwwroot', dirs_exist_ok=True)
         if frontend_only and hashlib.sha256((context / 'Kautuka.WebHost').read_bytes()).hexdigest() != binary_hash:
             raise ValueError('Frontend rebuild changed the Native AOT executable')
+    if local_images:
+        replacement = driver.module(repo, 'dev-local-images').build_one(
+            producer, engine, inputs, work, context, service, 'service-' + secrets.token_hex(8))
+        driver.save_local_output(service, replacement['localImageId'], context)
+        return replace_inventory(inventory, service, replacement)
     (context / 'Containerfile').write_text(recipe)
     (context / '.dockerignore').write_text('Containerfile\nimage-id.txt\n.dockerignore\n')
     image = producer.build(engine, context, context / 'Containerfile')
@@ -227,6 +263,13 @@ def operate(repo, identity, service, action):
             if INVENTORY.resolve(strict=True) != inventory_path or inventory_path.read_bytes() != before:
                 raise ValueError('The installed image inventory changed during this build; retry the service operation')
             activate(driver, service, current, inventory_path, before, updated, expected)
+        if updated and updated.get('developmentLocalImages') is True:
+            cache = driver.CACHE / 'local-outputs' / service
+            for item in cache.iterdir():
+                if (not item.is_symlink() and item.is_dir() and len(item.name) == 64
+                        and all(c in '0123456789abcdef' for c in item.name)
+                        and item.name != expected.removeprefix('sha256:')):
+                    shutil.rmtree(item)
 
 
 def activate(driver, service, current, inventory_path, before, updated, expected):

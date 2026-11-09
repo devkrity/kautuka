@@ -27,12 +27,65 @@ STATE = Path('/var/lib/kautuka')
 INITIAL_CHANNEL = 'preview'
 SERVICES = {'manager': 'Manager', 'updateservice': 'UpdateService', 'gateway': 'Gateway',
             'webhost': 'WebHost', 'channelhost': 'ChannelHost', 'credentialshost': 'CredentialsHost'}
+SUPPORT_INPUTS = ('src/images/runtime-release-inputs.json', 'src/images/kautuka-egress-setup/Containerfile',
+                  'src/images/kautuka-base/release.json', 'src/images/kautuka-pkgs-proxy/release.json',
+                  'src/images/openobserve/release.json')
 
 
 def save_record(path, value):
     temporary = path.with_name(path.name + '.next')
     temporary.write_text(json.dumps(value, indent=2))
     os.replace(temporary, path)
+
+
+def _read_dev_build_record(path, identity):
+    try:
+        if path.is_symlink() or not path.is_file(): return None
+        value = json.loads(path.read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if (not isinstance(value, dict) or value.get('schemaVersion') != 1 or value.get('workspaceId') != identity
+            or value.get('publication') != 'native-aot'
+            or not isinstance(value.get('fingerprint'), str)
+            or len(value['fingerprint']) != 64
+            or any(character not in '0123456789abcdef' for character in value['fingerprint'])
+            or not isinstance(value.get('version'), str)
+            or not value['version']):
+        return None
+    return value
+
+
+def cleanup_superseded_dev_builds(identity, cache_root=CACHE):
+    """Remove only completed prepared payloads owned by this dev workspace."""
+    cache_root = Path(cache_root)
+    if cache_root.is_symlink() or not cache_root.is_dir(): return
+
+    active_path = cache_root / 'build.json'
+    pending_path = cache_root / 'pending-build.json'
+    active = _read_dev_build_record(active_path, identity)
+    pending = _read_dev_build_record(pending_path, identity)
+    if (active_path.is_symlink() or pending_path.is_symlink()
+            or (active_path.exists() and active is None) or (pending_path.exists() and pending is None)):
+        return
+    protected_fingerprints = {record['fingerprint'] for record in (active, pending) if record}
+    protected_versions = {record['version'] for record in (active, pending) if record}
+
+    # Keep prepared payloads named by the active or pending build. Ignore
+    # interrupted staging directories and anything without a complete record.
+    try:
+        for child in cache_root.iterdir():
+            if child.is_symlink() or not child.is_dir(): continue
+            if not child.name.startswith('prepared-') or child.name.startswith('prepared-next-'): continue
+            record = _read_dev_build_record(child / 'build.json', identity)
+            if record is None or record['fingerprint'] in protected_fingerprints or record['version'] in protected_versions:
+                continue
+            if child.name != 'prepared-' + record['fingerprint']: continue
+            if child.resolve().parent != cache_root.resolve(): continue
+            shutil.rmtree(child)
+    except OSError:
+        # Cache cleanup is best effort; it must not make an otherwise valid
+        # development install fail.
+        pass
 
 
 def switch_pointers(root, version):
@@ -113,6 +166,78 @@ def module(repo, name):
     return value
 
 
+def support_fingerprint(root):
+    digest = hashlib.sha256()
+    for name in SUPPORT_INPUTS:
+        path = root / name
+        if not path.is_file(): return None
+        digest.update(name.encode()); digest.update(b'\0'); digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def can_reuse_support(contract_exists, fingerprint, previous_record):
+    return contract_exists and fingerprint is not None and fingerprint == previous_record.get('supportFingerprint')
+
+
+def save_local_output(role, image, source):
+    cache = CACHE / 'local-outputs' / role
+    cache.mkdir(parents=True, exist_ok=True)
+    saved = cache / image.removeprefix('sha256:')
+    if not saved.exists():
+        with tempfile.TemporaryDirectory(prefix='output-', dir=cache) as temporary:
+            staging = Path(temporary) / 'payload'
+            shutil.copytree(source, staging)
+            os.rename(staging, saved)
+
+
+def repair_local_images(repo, payload, record, inventory_path=None):
+    """Recreate missing dev images from retained AOT outputs before activation."""
+    if not record.get('localImages'): return False
+    prepared_inventory = payload / 'bin/runtime-images.json'
+    inventory_path = inventory_path or prepared_inventory
+    inventory = json.loads(inventory_path.read_text())
+    prepared = json.loads(prepared_inventory.read_text())
+    if inventory.get('developmentLocalImages') is not True:
+        raise ValueError('Prepared development image inventory is invalid')
+    missing = []
+    for role in ('credentialshost', 'channelhost', 'gateway', 'webhost'):
+        entries = [entry for entry in inventory['images'] if entry.get('id') == 'core-' + role]
+        if len(entries) != 1: raise ValueError('Expected one development core image: ' + role)
+        entry = entries[0]
+        image = entry.get('localImageId', '')
+        if not isinstance(image, str) or len(image) != 71 or not image.startswith('sha256:') or any(c not in '0123456789abcdef' for c in image[7:]):
+            raise ValueError('Invalid immutable development image ID')
+        try:
+            as_runtime('podman', 'image', 'exists', image)
+        except subprocess.CalledProcessError as error:
+            if error.returncode != 1: raise
+            missing.append((role, entry))
+            continue
+        inspected = json.loads(as_runtime('podman', 'image', 'inspect', image))
+        if (len(inspected) != 1 or inspected[0].get('Id', '').removeprefix('sha256:') != image[7:]
+                or inspected[0].get('Os') != 'linux' or inspected[0].get('Architecture') != 'amd64'):
+            raise ValueError('Development image identity or platform differs from its inventory')
+    if not missing: return False
+    print('[launch-kautuka] Restoring missing development images from retained Native AOT outputs...', flush=True)
+    producer = module(repo, 'package-runtime-images')
+    local = module(repo, 'dev-local-images')
+    inputs = json.loads((repo / 'src/images/runtime-release-inputs.json').read_text())
+    with tempfile.TemporaryDirectory(prefix='repair-images-', dir=CACHE) as temporary:
+        for role, previous in missing:
+            cached_output = CACHE / 'local-outputs' / role / previous['localImageId'][7:]
+            if not cached_output.is_dir():
+                archived = [entry for entry in prepared['images'] if entry.get('id') == previous['id']]
+                if len(archived) != 1 or archived[0].get('localImageId') != previous['localImageId']:
+                    raise ValueError('No retained Native AOT output for the missing development image: ' + role)
+                cached_output = payload / 'services' / role
+            replacement = local.build_one(producer, CACHE / 'podman-build', inputs, Path(temporary),
+                                          cached_output, role, record['version'])
+            save_local_output(role, replacement['localImageId'], cached_output)
+            inventory['images'][inventory['images'].index(previous)] = replacement
+    save_record(inventory_path, inventory)
+    return True
+
+
 def inputs(repo):
     names = command(['git', '-c', 'safe.directory=' + str(repo), '-C', repo, 'ls-files', '-co', '--exclude-standard']).splitlines()
     files = sorted({n for n in names if n.startswith(('src/backend/', 'src/shared/', 'src/images/', 'src/Directory.', 'scripts/'))
@@ -122,7 +247,7 @@ def inputs(repo):
     web = repo / 'src/frontend/web/dist'
     if not (web / 'index.html').is_file() or any(not p.is_file() for p in assets.values()):
         raise ValueError('Build frontend and built-in bundles with npm run launch first')
-    payload_scripts = {'scripts/package-runtime-images.py', 'scripts/bind-runtime-image-archives.py',
+    payload_scripts = {'scripts/package-runtime-images.py', 'scripts/bind-runtime-image-archives.py', 'scripts/dev-local-images.py',
                        'scripts/kautuka-apply-release.sh', 'scripts/kautuka-update-recovery.py', 'scripts/kautuka-runtime-images.py'}
     hashed = [(n, repo / n) for n in files if not n.startswith('scripts/') or n in payload_scripts]
     hashed += [('bundle/' + n, p) for n, p in assets.items()]
@@ -149,20 +274,28 @@ def build(repo, identity):
     files, assets, web, fingerprint = inputs(repo)
     active = CACHE / 'build.json'
     pending = CACHE / 'pending-build.json'
+    prepared = CACHE / ('prepared-' + fingerprint)
     if active.is_file() and not pending.exists() and json.loads(active.read_text()).get('fingerprint') == fingerprint:
+        record = json.loads(active.read_text())
+        if record.get('localImages'):
+            repair_local_images(repo, prepared / 'payload', record,
+                                Path('/opt/kautuka/manager/current/runtime-images.json'))
         print('[launch-kautuka] Development build unchanged; reusing installed images.', flush=True)
         return
     contract_exists = Path('/etc/kautuka/service-scope.json').exists()
+    support = support_fingerprint(repo)
+    previous_record = json.loads(active.read_text()) if active.is_file() else {}
+    reuse_support = can_reuse_support(contract_exists, support, previous_record)
     if contract_exists and not active.exists():
         unfinished = json.loads(pending.read_text()) if pending.is_file() else {}
         if unfinished.get('workspaceId') != identity or any(
                 (Path('/opt/kautuka') / role / 'current').resolve() != Path('/opt/kautuka') / role / 'versions' / unfinished.get('version', '') for role in SERVICES):
             raise ValueError('An existing installation has no matching development build record; it will not be adopted')
-    prepared = CACHE / ('prepared-' + fingerprint)
     if (prepared / 'build.json').is_file():
         record = json.loads((prepared / 'build.json').read_text())
         if record.get('workspaceId') != identity or record.get('publication') != 'native-aot':
             raise ValueError('Prepared build is not this checkout Native AOT payload')
+        repair_local_images(repo, prepared / 'payload', record)
         print('[launch-kautuka] Reusing the completed Native AOT payload for installation.', flush=True)
         install_prepared(repo, prepared / 'payload', record, contract_exists)
         return
@@ -186,8 +319,11 @@ def build(repo, identity):
     wrapper.write_text('#!/bin/sh\nexec /usr/bin/podman --root /var/cache/kautuka-dev/engine --runroot /run/kautuka-dev-build --events-backend=file --storage-driver=overlay --cgroup-manager=cgroupfs "$@"\n')
     wrapper.chmod(0o700)
     config = json.loads((source / 'src/images/runtime-release-inputs.json').read_text())
-    sdk = producer.pull(str(wrapper), config['sdkImage'])
-    helper = producer.pull(str(wrapper), config['acquisitionImage'])
+    if contract_exists:
+        try: sdk = producer.inspect(str(wrapper), config['sdkImage'])
+        except subprocess.CalledProcessError: sdk = producer.pull(str(wrapper), config['sdkImage'])
+    else:
+        sdk = producer.pull(str(wrapper), config['sdkImage'])
     with tempfile.TemporaryDirectory(prefix='build-', dir=CACHE) as temp:
         work = Path(temp); payload = work / 'payload'
         (payload / 'bin').mkdir(parents=True); (payload / 'oci-images').mkdir()
@@ -224,6 +360,19 @@ def build(repo, identity):
                 shutil.copy2(output / project, output / ('kautuka-' + role))
         for n, p in assets.items(): shutil.copy2(p, bundles / n)
         shutil.copytree(web, payload / 'services/webhost/wwwroot')
+        if reuse_support:
+            module(source, 'dev-local-images').prepare(producer, wrapper, sdk, source, payload, work, version, sha, config)
+            record = {'schemaVersion': 1, 'workspaceId': identity, 'fingerprint': fingerprint,
+                      'version': version, 'sourceSha': sha, 'publication': 'native-aot', 'localImages': True,
+                      'supportFingerprint': support}
+            stage = Path(tempfile.mkdtemp(prefix='prepared-next-', dir=CACHE))
+            shutil.copytree(payload, stage / 'payload')
+            save_record(stage / 'build.json', record)
+            os.rename(stage, prepared)
+            install_prepared(repo, prepared / 'payload', record, True)
+            print('[launch-kautuka] Development images installed; application data retained.', flush=True)
+            return
+        helper = producer.pull(str(wrapper), config['acquisitionImage'])
         entries = []
         for role, directory in (('kautuka-base', 'kautuka-base'), ('git-pkgs-proxy', 'kautuka-pkgs-proxy'), ('openobserve', 'openobserve')):
             reference = json.loads((source / 'src/images' / directory / 'release.json').read_text())['image']
@@ -244,7 +393,7 @@ def build(repo, identity):
             finally: producer.run(str(wrapper), 'rm', cid)
             shutil.copy2(dest / ('Kautuka.' + SERVICES[role]), dest / ('kautuka-' + role))
         record = {'schemaVersion': 1, 'workspaceId': identity, 'fingerprint': fingerprint,
-                  'version': version, 'sourceSha': sha, 'publication': 'native-aot'}
+                  'version': version, 'sourceSha': sha, 'publication': 'native-aot', 'supportFingerprint': support}
         # Preserve a completed native build independently of installation retries.
         # Application source changes invalidate this cache; launcher-only fixes do not.
         stage = Path(tempfile.mkdtemp(prefix='prepared-next-', dir=CACHE))
@@ -259,12 +408,12 @@ def install_prepared(repo, payload, record, existing):
     # Only a completed AOT build may replace the stopped development cohort.
     stop()
     save_record(CACHE / 'pending-build.json', record)
-    publish(repo, payload, record['version'], existing)
+    publish(repo, payload, record['version'], existing, record.get('localImages', False))
     save_record(CACHE / 'build.json', record)
     (CACHE / 'pending-build.json').unlink()
 
 
-def publish(repo, payload, version, existing):
+def publish(repo, payload, version, existing, local_images=False):
     if not existing:
         key = CACHE / 'local-development-key.pem'; public = CACHE / 'local-development-public.pem'
         subprocess.run(['openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', key], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -286,7 +435,16 @@ install_fresh_container_appliance "$2"
                 if pending.get('version') != version or dest.resolve() != dest:
                     raise ValueError('Development version path does not belong to this pending build')
             shutil.copytree(src, dest, dirs_exist_ok=True)
-        subprocess.run(['python3', '/usr/local/lib/kautuka/runtime-images.py', payload], check=True)
+        if local_images:
+            marker = Path('/etc/kautuka/development-local-images')
+            if marker.is_symlink(): raise ValueError('Development image marker cannot be a symlink')
+            marker.write_text('kautuka-dev-local-images-v1')
+            marker.chmod(0o644)
+            dropin = Path('/etc/systemd/user/kautuka-manager.service.d')
+            dropin.mkdir(parents=True, exist_ok=True)
+            (dropin / 'development-local-images.conf').write_text('[Service]\nEnvironment=KAUTUKA_DEV_LOCAL_IMAGE_INVENTORY=1\n')
+        else:
+            subprocess.run(['python3', '/usr/local/lib/kautuka/runtime-images.py', payload], check=True)
         installer(repo, 'install_apply_release_helper "$2"\n', payload)
         switch_pointers(Path('/opt/kautuka'), version)
     settings = Path('/etc/kautuka/manager.json')
@@ -358,6 +516,7 @@ install_socket_runtime_dirs kautuka containers kautuka
             next_progress = time.monotonic() + 10
         time.sleep(1)
     print(f'\n[launch-kautuka] Network-controlled development stack ready in {time.monotonic() - started:.1f}s: http://localhost:{port}', flush=True)
+    cleanup_superseded_dev_builds(json.loads(record.read_text())['workspaceId'])
     token = STATE / 'gateway-data/setup-token'
     if token.is_file(): print('[launch-kautuka] First setup token is stored inside this distro at /var/lib/kautuka/gateway-data/setup-token.', flush=True)
     print('[launch-kautuka] Ctrl+C stops this stack. Data is retained in the development distro.', flush=True)

@@ -104,6 +104,11 @@ artifacts; automatic release updates are disabled for this profile. Development
 and release use the same AOT compilation path and core runtime base. There is no
 JIT or `dotnet run` fallback.
 
+After the initial appliance setup, changed core services are built as thin local
+images directly in the runtime Podman store. Existing network and supporting
+images are reused. Once the new stack is healthy, superseded completed development
+build caches are removed; application data is retained.
+
 Ctrl+C stops only this development stack and preserves its data. You can also
 stop it from another terminal with `npm run launch -- --stop`. Use
 `--distro KautukaDev-<name>` for another isolated checkout. The launcher does not

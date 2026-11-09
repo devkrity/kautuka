@@ -38,8 +38,8 @@ public sealed class PodmanImageArchiveStore
         ContainerImageProvenancePolicy.EnsureTrusted(entry.Image, entry.Id, allowlist.ImageReferences, requireListed: true);
         foreach (RuntimeImageEntry candidate in entries)
         {
-            candidate.ValidateArchiveIdentity();
-            if (candidate.Platform != entry.Platform || !string.Equals(candidate.LocalImageId, entry.LocalImageId, StringComparison.OrdinalIgnoreCase))
+            candidate.ValidateArchiveIdentity(allowlist.DevelopmentLocalImages);
+            if (candidate.IsDevelopmentLocalOnly != entry.IsDevelopmentLocalOnly || candidate.Platform != entry.Platform || !string.Equals(candidate.LocalImageId, entry.LocalImageId, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The release inventory contains conflicting config/platform bindings for one source image.");
         }
         if (!entry.HasArchiveIdentity && (!ContainerImageProvenancePolicy.HasSha256Digest(entry.Image)
@@ -48,6 +48,8 @@ public sealed class PodmanImageArchiveStore
         string reference = entry.LocalImageId ?? entry.Image;
         if (!await ImageExistsAsync(reference, ct).ConfigureAwait(false))
         {
+            if (entry.IsDevelopmentLocalOnly)
+                throw new InvalidOperationException("The immutable development core image is missing from the local runtime store; rebuild it with the development launcher.");
             if (!allowLoad) throw new InvalidOperationException("The runtime image is not ready; background preparation must finish before execution.");
             if (!entry.HasArchiveIdentity)
                 throw new InvalidOperationException("A missing bootstrap image requires a signed archive/config identity; network acquisition cannot bootstrap itself.");

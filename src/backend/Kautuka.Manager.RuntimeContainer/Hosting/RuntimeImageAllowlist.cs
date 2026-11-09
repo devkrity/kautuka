@@ -8,7 +8,8 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 public sealed record RuntimeImageAllowlist(
     int SchemaVersion,
-    IReadOnlyList<RuntimeImageEntry> Images)
+    IReadOnlyList<RuntimeImageEntry> Images,
+    bool DevelopmentLocalImages = false)
 {
     public static RuntimeImageAllowlist Empty { get; } = new(1, []);
 
@@ -99,9 +100,18 @@ public sealed record RuntimeImageEntry(
     string? LocalImageId = null)
 {
     internal bool HasArchiveIdentity => ArchiveSha256 is not null || Platform is not null || LocalImageId is not null;
+    internal bool IsDevelopmentLocalOnly => Archive is null && ArchiveSha256 is null && Platform is not null && LocalImageId is not null;
 
-    internal void ValidateArchiveIdentity()
+    internal void ValidateArchiveIdentity(bool allowDevelopmentLocalImages = false)
     {
+        if (IsDevelopmentLocalOnly)
+        {
+            if (!allowDevelopmentLocalImages || Id is not ("core-gateway" or "core-webhost" or "core-channelhost" or "core-credentialshost")
+                || Platform is not ("linux/amd64" or "linux/arm64") || !IsLocalId(LocalImageId)
+                || !ContainerImageProvenancePolicy.IsLocalImage(Image))
+                throw new InvalidOperationException("Local-only image identities are limited to explicitly enabled development core images.");
+            return;
+        }
         if (!HasArchiveIdentity) return;
         if (string.IsNullOrWhiteSpace(Archive) || Archive is "." or ".." || Archive.IndexOfAny(['/', '\\', ':', '\0', '\r', '\n']) >= 0
             || Path.IsPathRooted(Archive) || ArchiveSha256 is null || ArchiveSha256.Length != 64 || !ArchiveSha256.All(char.IsAsciiHexDigit)
@@ -143,7 +153,7 @@ public static class RuntimeImageAllowlistLoader
 {
     public const string FileName = "runtime-images.json";
 
-    public static RuntimeImageAllowlist Load(string path, bool requirePresent, ILogger? logger = null)
+    public static RuntimeImageAllowlist Load(string path, bool requirePresent, ILogger? logger = null, bool allowDevelopmentLocalImages = false)
     {
         if (!File.Exists(path))
         {
@@ -171,6 +181,9 @@ public static class RuntimeImageAllowlistLoader
                 return RuntimeImageAllowlist.Empty;
             }
 
+            if (loaded.DevelopmentLocalImages && !allowDevelopmentLocalImages)
+                throw new InvalidOperationException("Development local-image inventories are not permitted in this environment.");
+
             foreach (RuntimeImageEntry entry in loaded.Images)
             {
                 if (string.IsNullOrWhiteSpace(entry.Id) || string.IsNullOrWhiteSpace(entry.Image))
@@ -179,7 +192,9 @@ public static class RuntimeImageAllowlistLoader
                 }
 
                 ContainerImageProvenancePolicy.EnsureTrusted(entry.Image, $"Allowlist entry '{entry.Id}'");
-                entry.ValidateArchiveIdentity();
+                entry.ValidateArchiveIdentity(loaded.DevelopmentLocalImages && allowDevelopmentLocalImages);
+                if (loaded.DevelopmentLocalImages && !entry.IsDevelopmentLocalOnly && !entry.HasArchiveIdentity)
+                    throw new InvalidOperationException("Development inventory bootstrap images require complete archive identities.");
             }
 
             return loaded;

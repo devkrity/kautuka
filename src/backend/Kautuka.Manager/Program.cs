@@ -52,7 +52,8 @@ builder.Services.AddSingleton(static sp =>
     return RuntimeImageAllowlistLoader.Load(
         Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName),
         requirePresent: !environment.IsDevelopment(),
-        logger);
+        logger,
+        allowDevelopmentLocalImages: DevelopmentLocalImageGate.Enabled(Environment.GetEnvironmentVariable("KAUTUKA_DEV_LOCAL_IMAGE_INVENTORY")));
 });
 builder.Services.AddSingleton<PodmanImageArchiveStore>();
 builder.Services.AddOptions<ContainerEgressOptions>()
