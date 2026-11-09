@@ -351,6 +351,13 @@ export function NetworkAccessPage() {
                       {restriction(request.destination) && (
                         <Alert>{restriction(request.destination)}</Alert>
                       )}
+                      {request.gatewayDestination && (
+                        <Alert>
+                          An administrator’s approval grants this agent access and also permits the
+                          shared Gateway service to reach {request.gatewayDestination}:{request.port}.
+                          Other Gateway traffic can use that route.
+                        </Alert>
+                      )}
                       {reviewing?.id === request.id ? (
                         <div
                           ref={reviewPanel}
@@ -494,9 +501,8 @@ export function NetworkAccessPage() {
                       Agent permissions apply across that agent’s sandboxes and connectors for the same destination.
                     </p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Remote connector calls also need a separate Gateway route approval, including
-                      public destinations. Agent rules do not authorize provider traffic from
-                      Gateway. Gateway route approvals require an administrator.
+                      Remote connector requests also need a Gateway route. An administrator can
+                      approve both together; the Gateway route is shared by Gateway traffic.
                     </p>
                   </div>
                   <Button onClick={() => edit()} disabled={busy}>

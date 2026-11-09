@@ -143,6 +143,7 @@ public sealed partial class WorkspaceGrpcService
                 LastSeenAtUtc = request.LastSeenAt.ToString("O", CultureInfo.InvariantCulture),
                 Attempts = request.Attempts,
                 Status = request.Status,
+                GatewayDestination = request.GatewayDestination ?? string.Empty,
             }));
         response.Sources.AddRange(view.Sources.Skip(offset).Take(pageSize).Select(Identity));
         response.Defaults.AddRange(view.Defaults.Skip(offset).Take(pageSize).Select(grant => new NetworkAccessRuleMessage

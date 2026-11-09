@@ -71,7 +71,16 @@ describe('NetworkAccessPage', () => {
     renderPage();
     await userEvent.click(await screen.findByRole('tab', { name: 'Permissions' }));
     expect(screen.getByText(/Agent permissions apply across that agent’s sandboxes and connectors/)).toBeVisible();
-    expect(screen.getByText(/Remote connector calls also need a separate Gateway route approval/)).toBeVisible();
+    expect(screen.getByText(/Remote connector requests also need a Gateway route/)).toBeVisible();
+  });
+
+  it('explains the shared Gateway route on a combined request', async () => {
+    const view = fixture();
+    view.requests[0].gatewayDestination = '93.184.216.34';
+    mockView(view);
+    renderPage();
+    expect(await screen.findByText(/Other Gateway traffic can use that route/)).toBeVisible();
+    expect(screen.getByText(/93\.184\.216\.34:443/)).toBeVisible();
   });
 
   it('shows the shared private-network capacity when Manager reports it', async () => {

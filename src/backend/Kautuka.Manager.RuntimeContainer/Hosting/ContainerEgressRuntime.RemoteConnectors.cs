@@ -76,38 +76,40 @@ public sealed partial class ContainerEgressRuntime
             : AgentScopeNetworkDecision.None;
         if (scopeDecision == AgentScopeNetworkDecision.Blocked)
             return new(true, "blocked", "This agent is blocked from reaching the requested destination.");
-        if (scopeDecision == AgentScopeNetworkDecision.Conflict)
-            return new(true, "blocked", "Existing component-level network decisions for this agent conflict. Reconcile or re-approve the agent permission before retrying.");
-        if (permission is null)
-        {
-            if (scopeDecision == AgentScopeNetworkDecision.Allowed)
-                return new(true, "blocked", "Existing agent-scope permissions conflict with the accepted runtime policy. Reconcile or re-approve the agent permission before retrying.");
-            NetworkAccessRule? decision = networkPolicy.Read(actor).Rules.SingleOrDefault(rule => rule.Identity == identity && rule.Destination == host && rule.Port == port);
-            if (decision is { Allowed: false }) return new(true, "blocked", "This remote connector is blocked by network policy.");
-            networkPolicy.ObserveDenied(identity, host, port, DateTimeOffset.UtcNow);
-            return new(true, "missing_permission", "Network access needs approval for this agent and caller. Approve it in Network access, then retry.");
-        }
-        if (pin is not null && NetworkDestinationPolicy.IsNonPublic(pin.ToString()) && !permission.AllowPrivateNetwork)
-            return new(true, "private_route_conflict", "The selected destination is on a local or special-purpose network. An administrator must explicitly approve local-network access for this agent and Gateway.");
         if (source is null || !current.Allocations.TryGetValue(source, out string? gatewayAllocation)) return RemoteTransition();
         string outerDestination = scheme == "http" && !literal ? pin!.ToString() : host;
         NetworkAccessRule? outerDecision = networkPolicy.Read(new("system", true)).Rules.SingleOrDefault(rule =>
             rule.Identity == gatewayNetworkIdentity && rule.Destination == outerDestination && rule.Port == port);
         if (outerDecision is { Allowed: false })
             return new(true, "blocked", "Gateway is explicitly blocked from reaching the requested destination.");
+        if (permission is null)
+        {
+            if (scopeDecision == AgentScopeNetworkDecision.Allowed)
+                return RemoteTransition();
+            NetworkAccessRule? decision = networkPolicy.Read(actor).Rules.SingleOrDefault(rule => rule.Identity == identity && rule.Destination == host && rule.Port == port);
+            if (decision is { Allowed: false }) return new(true, "blocked", "This remote connector is blocked by network policy.");
+            networkPolicy.ObserveRemoteDenied(identity, host, port, outerDestination, DateTimeOffset.UtcNow);
+            return new(true, "missing_permission", "An administrator must approve network access for this agent and the shared Gateway route, then retry.");
+        }
+        if (pin is not null && NetworkDestinationPolicy.IsNonPublic(pin.ToString()) && !permission.AllowPrivateNetwork)
+        {
+            networkPolicy.ObserveRemoteDenied(identity, host, port, outerDestination, DateTimeOffset.UtcNow);
+            return new(true, "private_route_conflict", "The selected destination is on a local or special-purpose network. An administrator must explicitly approve local-network access for this agent and Gateway.");
+        }
         if (route is null)
         {
             // Recheck the accepted generation immediately before creating an
             // administrator request. A transitioning or detached Gateway source
             // must not manufacture approval work.
             if (!ReferenceEquals(state, Volatile.Read(ref authorization)) || !RepresentsDesiredRemotePolicy(state, networkPolicy.Revision)) return RemoteTransition();
-            networkPolicy.ObserveDenied(gatewayNetworkIdentity, outerDestination, port, DateTimeOffset.UtcNow);
-            return new(true, "outer_route_required", scheme == "http" && !literal
-                ? $"The agent is approved, but plain HTTP needs a separate administrator approval for Gateway to {pin}:{port}. The hostname rule cannot route traffic without TLS SNI."
-                : $"The agent is approved, but Gateway needs a separate administrator route approval for {outerDestination}:{port}.");
+            networkPolicy.ObserveRemoteDenied(identity, host, port, outerDestination, DateTimeOffset.UtcNow);
+            return new(true, "outer_route_required", $"An administrator must approve the shared Gateway route to {outerDestination}:{port}, then retry.");
         }
         if (permission.AllowPrivateNetwork != route.AllowPrivateNetwork)
+        {
+            networkPolicy.ObserveRemoteDenied(identity, host, port, outerDestination, DateTimeOffset.UtcNow);
             return new(true, "private_route_conflict", "The agent's local-network permission differs from Gateway's shared route. An administrator must explicitly align both permissions; an agent approval does not grant shared Gateway LAN access.");
+        }
         if (!ReferenceEquals(state, Volatile.Read(ref authorization)) || !RepresentsDesiredRemotePolicy(state, networkPolicy.Revision)) return RemoteTransition();
         string binding = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\0',
             identity.ScopeType, identity.UserId, identity.AgentId, identity.ComponentId, host, port.ToString(CultureInfo.InvariantCulture),

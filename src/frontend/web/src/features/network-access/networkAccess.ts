@@ -49,6 +49,7 @@ export const networkAccessSchema = z.object({
       port: z.number().int(),
       createdAtUtc: z.string(),
       lastSeenAtUtc: z.string(),
+      gatewayDestination: z.string().nullable().optional(),
       attempts: z.number().int(),
       status: z.enum(['pending', 'allowed', 'blocked']),
     })

@@ -17,9 +17,12 @@ public sealed record NetworkAccessRule(string Id, NetworkAccessIdentity Identity
     public bool PrivateNetworkApprovalExplicit { get; init; }
 }
 public sealed record NetworkAccessRequest(string Id, NetworkAccessIdentity Identity, string Destination, int Port,
-    DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, long Attempts, string Status);
+    DateTimeOffset CreatedAt, DateTimeOffset LastSeenAt, long Attempts, string Status)
+{
+    public string? GatewayDestination { get; init; }
+}
 public sealed record NetworkAccessPolicyState(int SchemaVersion, long Revision, IReadOnlyList<NetworkAccessRule> Rules, IReadOnlyList<NetworkAccessRequest> Requests);
-internal enum AgentScopeNetworkDecision { None, Allowed, Blocked, Conflict }
+internal enum AgentScopeNetworkDecision { None, Allowed, Blocked }
 
 /// <summary>Durable scoped decisions. Recording a decision does not claim that Envoy has accepted it.</summary>
 public sealed class NetworkAccessPolicyStore
@@ -51,7 +54,7 @@ public sealed class NetworkAccessPolicyStore
             return current with
             {
                 Rules = [.. current.Rules.Where(rule => CanAccess(actor, rule.Identity))],
-                Requests = [.. current.Requests.Where(request => CanAccess(actor, request.Identity))],
+                Requests = [.. current.Requests.Where(request => CanAccess(actor, request.Identity) && (request.GatewayDestination is null || actor.IsAdmin))],
             };
         }
     }
@@ -89,29 +92,10 @@ public sealed class NetworkAccessPolicyStore
                 AllowPrivateNetwork = allowed && actor.IsAdmin && allowPrivateNetwork,
                 PrivateNetworkApprovalExplicit = allowed && actor.IsAdmin && allowPrivateNetwork,
             };
-            NetworkAccessRule[] rules = [.. current.Rules.Where(item => IsCanonicalAgentIdentity(identity)
-                    ? !IsSameAgentEndpoint(item.Identity, item.Destination, item.Port, identity, normalized.Destination, port)
-                    : item.Id != id), rule];
+            NetworkAccessRule[] rules = [.. current.Rules.Where(item => item.Id != id), rule];
             if (rules.Length > ruleLimit) throw new InvalidOperationException("The network policy rule limit has been reached.");
-            NetworkAccessRequest[] relatedRequests = [.. current.Requests.Where(item => item.Id == id
-                || (IsCanonicalAgentIdentity(identity)
-                    && IsSameAgentEndpoint(item.Identity, item.Destination, item.Port, identity, normalized.Destination, port)))];
-            NetworkAccessRequest[] updatedRequests;
-            if (IsCanonicalAgentIdentity(identity) && relatedRequests.Length > 0)
-            {
-                long attempts = 0;
-                foreach (NetworkAccessRequest existing in relatedRequests)
-                    attempts = attempts > long.MaxValue - existing.Attempts ? long.MaxValue : attempts + existing.Attempts;
-                NetworkAccessRequest consolidated = new(id, identity, normalized.Destination, port,
-                    relatedRequests.Min(static item => item.CreatedAt), relatedRequests.Max(static item => item.LastSeenAt),
-                    Math.Max(1, attempts), allowed ? "allowed" : "blocked");
-                var relatedIds = relatedRequests.Select(static item => item.Id).ToHashSet(StringComparer.Ordinal);
-                updatedRequests = [.. current.Requests.Where(item => !relatedIds.Contains(item.Id)), consolidated];
-            }
-            else
-            {
-                updatedRequests = [.. current.Requests.Select(item => item.Id == id ? item with { Status = allowed ? "allowed" : "blocked" } : item)];
-            }
+            NetworkAccessRequest[] updatedRequests = [.. current.Requests.Select(item => item.Id == id && (!allowed || item.GatewayDestination is null)
+                ? item with { Status = allowed ? "allowed" : "blocked" } : item)];
             Save(current with
             {
                 Revision = checked(current.Revision + 1),
@@ -129,7 +113,90 @@ public sealed class NetworkAccessPolicyStore
         {
             NetworkAccessRequest request = Load().Requests.SingleOrDefault(item => item.Id == requestId && CanAccess(actor, item.Identity))
                 ?? throw new KeyNotFoundException("The network access request no longer exists.");
+            if (request.GatewayDestination is not null)
+                return DecideRemoteRequest(actor, request, allowed, expectedRevision, allowPrivateNetwork);
             return SetRule(actor, request.Identity, request.Destination, request.Port, allowed, expectedRevision, allowPrivateNetwork);
+        }
+    }
+
+    private NetworkAccessRule DecideRemoteRequest(NetworkAccessActor actor, NetworkAccessRequest request, bool allowed, long expectedRevision, bool allowPrivateNetwork)
+    {
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Combined Gateway approval requires an administrator.");
+        NetworkAccessPolicyState current = Load();
+        if (current.Revision != expectedRevision) throw new InvalidOperationException("Network policy changed. Refresh before saving the decision.");
+        var gateway = new NetworkAccessIdentity("core", "system", "gateway", "core", "gateway");
+        string outer = request.GatewayDestination!;
+        string outerId = Key(gateway, outer, request.Port);
+        NetworkAccessRule? existingOuter = current.Rules.SingleOrDefault(rule => rule.Id == outerId);
+        if (allowed && existingOuter is { Allowed: false }) throw new InvalidOperationException("Gateway is explicitly blocked from this destination.");
+        if (allowed && existingOuter is { Allowed: true, AllowPrivateNetwork: true } && !allowPrivateNetwork)
+            throw new InvalidOperationException("Gateway already has local-network access. Select local-network access or change the existing Gateway rule first.");
+        if (allowed && !allowPrivateNetwork && (NetworkDestinationPolicy.IsNonPublic(request.Destination) || NetworkDestinationPolicy.IsNonPublic(outer)))
+            throw new UnauthorizedAccessException("A LAN or special-purpose destination requires explicit private-network approval by an administrator.");
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        var decision = new NetworkAccessRule(request.Id, request.Identity, request.Destination, request.Port, allowed, now)
+        {
+            AllowPrivateNetwork = allowed && allowPrivateNetwork,
+            PrivateNetworkApprovalExplicit = allowed && allowPrivateNetwork,
+        };
+        var rules = current.Rules.Where(rule => rule.Id != request.Id).ToList();
+        rules.Add(decision);
+        if (allowed)
+        {
+            rules.RemoveAll(rule => rule.Id == outerId);
+            rules.Add(new NetworkAccessRule(outerId, gateway, outer, request.Port, true, now)
+            {
+                AllowPrivateNetwork = allowPrivateNetwork,
+                PrivateNetworkApprovalExplicit = allowPrivateNetwork,
+            });
+        }
+        if (rules.Count > ruleLimit) throw new InvalidOperationException("The network policy rule limit has been reached.");
+        Save(current with
+        {
+            Revision = checked(current.Revision + 1),
+            Rules = rules,
+            Requests = [.. current.Requests.Select(item => item.Id == request.Id ? item with { Status = allowed ? "allowed" : "blocked" }
+                : allowed && item.Id == outerId ? item with { Status = "allowed" } : item)]
+        });
+        return decision;
+    }
+
+    internal void ObserveRemoteDenied(NetworkAccessIdentity identity, string destination, int port, string gatewayDestination, DateTimeOffset observedAt)
+    {
+        ValidateIdentity(identity);
+        identity = CanonicalDecisionIdentity(identity);
+        string host = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", destination, port)).Destination;
+        string outer = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", gatewayDestination, port)).Destination;
+        if (NetworkDestinationPolicy.IsMetadata(host) || NetworkDestinationPolicy.IsMetadata(outer)
+            || host == NetworkDestinationPolicy.PlatformControlAddress || outer == NetworkDestinationPolicy.PlatformControlAddress
+            || host == NetworkDestinationPolicy.PrivateSourceAddress || outer == NetworkDestinationPolicy.PrivateSourceAddress)
+            throw new UnauthorizedAccessException("Protected destinations cannot be approved.");
+        string id = Key(identity, host, port);
+        lock (gate)
+        {
+            NetworkAccessPolicyState current = Load();
+            NetworkAccessRule? agentRule = current.Rules.SingleOrDefault(rule => rule.Id == id);
+            var gateway = new NetworkAccessIdentity("core", "system", "gateway", "core", "gateway");
+            NetworkAccessRule? gatewayRule = current.Rules.SingleOrDefault(rule => rule.Id == Key(gateway, outer, port));
+            if (agentRule is { Allowed: false } || gatewayRule is { Allowed: false }) return;
+            NetworkAccessRequest? previous = current.Requests.SingleOrDefault(item => item.Id == id);
+            var request = new NetworkAccessRequest(id, identity, host, port, previous?.CreatedAt ?? observedAt, observedAt,
+                previous is null ? 1 : previous.Attempts == long.MaxValue ? long.MaxValue : previous.Attempts + 1, "pending")
+            { GatewayDestination = outer };
+            if (previous is { Status: "pending" } && previous.GatewayDestination == outer)
+            {
+                state = current with { Requests = [.. current.Requests.Select(item => item.Id == id ? request : item)] };
+                return;
+            }
+            string? retire = null;
+            if (previous is null && current.Requests.Count >= requestLimit)
+                retire = current.Requests.Where(item => item.Status != "pending").MinBy(item => item.LastSeenAt)?.Id
+                    ?? throw new InvalidOperationException("The pending network approval capacity has been reached.");
+            Save(current with
+            {
+                Revision = previous is null ? current.Revision : checked(current.Revision + 1),
+                Requests = [.. current.Requests.Where(item => item.Id != id && item.Id != retire), request]
+            });
         }
     }
 
@@ -143,19 +210,11 @@ public sealed class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            NetworkAccessRule[] sharedDecisions = [.. current.Rules.Where(rule => IsSharedAgentIdentity(rule.Identity)
-                && IsSameAgentEndpoint(rule.Identity, rule.Destination, rule.Port, identity, normalized.Destination, port))];
-            if (sharedDecisions.Any(static rule => !rule.Allowed)) return;
-            if (sharedDecisions.Length > 1 && (sharedDecisions.Select(static rule => rule.AllowPrivateNetwork).Distinct().Skip(1).Any()
-                || sharedDecisions.Any(static rule => !IsEffectiveAllow(rule)))) return;
-            if (sharedDecisions.Length > 0 && sharedDecisions.All(IsEffectiveAllow)) return;
             // Preserve explicit Blocks and effective Allows, but an older public-only
             // Allow for a private literal cannot satisfy this connection's approval.
             NetworkAccessRule? decision = current.Rules.SingleOrDefault(item => item.Id == id);
             if (decision is not null && (!decision.Allowed || IsEffectiveAllow(decision))) return;
-            NetworkAccessRequest[] relatedRequests = [.. current.Requests.Where(item => item.Id == id
-                || (IsCanonicalAgentIdentity(identity)
-                    && IsSameAgentEndpoint(item.Identity, item.Destination, item.Port, identity, normalized.Destination, port)))];
+            NetworkAccessRequest[] relatedRequests = [.. current.Requests.Where(item => item.Id == id)];
             long attempts = 0;
             foreach (NetworkAccessRequest existing in relatedRequests)
                 attempts = attempts > long.MaxValue - existing.Attempts ? long.MaxValue : attempts + existing.Attempts;
@@ -163,13 +222,13 @@ public sealed class NetworkAccessPolicyStore
             DateTimeOffset createdAt = relatedRequests.Length == 0 ? observedAt : relatedRequests.Min(static item => item.CreatedAt);
             DateTimeOffset lastSeenAt = relatedRequests.Length == 0 || observedAt > relatedRequests.Max(static item => item.LastSeenAt)
                 ? observedAt : relatedRequests.Max(static item => item.LastSeenAt);
-            NetworkAccessRequest request = new(id, identity, normalized.Destination, port, createdAt, lastSeenAt, attempts, "pending");
+            NetworkAccessRequest request = new(id, identity, normalized.Destination, port, createdAt, lastSeenAt, attempts, "pending")
+            { GatewayDestination = relatedRequests.SingleOrDefault()?.GatewayDestination };
             if (relatedRequests is [{ Id: var previousId, Identity: var previousIdentity, Status: "pending" }]
                 && previousId == id && previousIdentity == identity)
             {
                 // Retries of an already durable canonical request only update
-                // the in-memory counter. A first request or legacy consolidation
-                // still goes through the durable replacement path below.
+                // the in-memory counter. A first request remains durable.
                 state = current with { Requests = [.. current.Requests.Select(item => item.Id == id ? request : item)] };
                 return;
             }
@@ -192,57 +251,25 @@ public sealed class NetworkAccessPolicyStore
             {
                 string destination = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", grant.Destination, grant.Port)).Destination;
                 if (keys.Contains(Key(Identity(grant), destination, grant.Port))) return false;
-                // A deliberate rule for this user-agent endpoint replaces all
-                // shared bootstrap defaults for that endpoint. Component-scoped
-                // legacy rules still conflict with each other below and fail closed.
+                // A deliberate rule replaces shared bootstrap defaults for this agent endpoint.
                 return !IsSharedAgentGrant(grant) || !overrides.Any(rule => IsSharedAgentIdentity(rule.Identity)
                     && rule.Identity.UserId == grant.UserId && rule.Identity.AgentId == grant.AgentId
                     && rule.Destination == destination && rule.Port == grant.Port);
             })];
-            var agentDecisions = new List<(string UserId, string AgentId, string Destination, int Port, bool Allowed, bool AllowPrivateNetwork, bool Effective)>();
-            foreach (ContainerEgressGrant grant in unmatchedBootstrap.Where(IsSharedAgentGrant))
+            // Canonical agent decisions replace all bootstrap grants for that endpoint.
+            ContainerEgressGrant[] explicitGrants = [.. overrides.Where(IsEffectiveAllow).Select(rule => new ContainerEgressGrant
             {
-                string destination = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", grant.Destination, grant.Port)).Destination;
-                agentDecisions.Add((grant.UserId, grant.AgentId, destination, grant.Port, true, grant.AllowPrivateNetwork, true));
-            }
-            foreach (NetworkAccessRule rule in overrides.Where(rule => IsSharedAgentIdentity(rule.Identity)))
-                agentDecisions.Add((rule.Identity.UserId, rule.Identity.AgentId, rule.Destination, rule.Port,
-                    rule.Allowed, rule.AllowPrivateNetwork, IsEffectiveAllow(rule)));
-
-            ContainerEgressGrant[] nonAgentGrants = [.. unmatchedBootstrap.Where(static grant => !IsSharedAgentGrant(grant)),
-                .. overrides.Where(rule => !IsSharedAgentIdentity(rule.Identity) && IsEffectiveAllow(rule)).Select(rule => new ContainerEgressGrant
-                {
-                    ScopeType = rule.Identity.ScopeType, UserId = rule.Identity.UserId, AgentId = rule.Identity.AgentId,
-                    Role = rule.Identity.Role, ComponentId = rule.Identity.ComponentId, Destination = rule.Destination, Port = rule.Port,
-                    AllowPrivateNetwork = rule.AllowPrivateNetwork,
-                })];
-
-            var sharedAgentGrants = new List<ContainerEgressGrant>();
-            foreach (var group in agentDecisions.GroupBy(static item => (item.UserId, item.AgentId, item.Destination, item.Port)))
-            {
-                var decisions = group.ToArray();
-                // Old component-scoped decisions may disagree. Do not silently
-                // merge a Block with an Allow or public-only with private approval.
-                if (decisions.Any(static item => !item.Allowed)
-                    || decisions.Select(static item => item.AllowPrivateNetwork).Distinct().Skip(1).Any()
-                    || decisions.Any(static item => !item.Effective))
-                    continue;
-
-                var first = decisions[0];
-                sharedAgentGrants.Add(new ContainerEgressGrant
-                {
-                    ScopeType = "agent",
-                    UserId = first.UserId,
-                    AgentId = first.AgentId,
-                    Role = "agent",
-                    ComponentId = first.AgentId,
-                    Destination = first.Destination,
-                    Port = first.Port,
-                    AllowPrivateNetwork = first.AllowPrivateNetwork,
-                });
-            }
-
-            return [.. nonAgentGrants, .. sharedAgentGrants];
+                ScopeType = rule.Identity.ScopeType, UserId = rule.Identity.UserId, AgentId = rule.Identity.AgentId,
+                Role = rule.Identity.Role, ComponentId = rule.Identity.ComponentId, Destination = rule.Destination, Port = rule.Port,
+                AllowPrivateNetwork = rule.AllowPrivateNetwork,
+            })];
+            ContainerEgressGrant[] agentDefaults = [.. unmatchedBootstrap.Where(IsSharedAgentGrant)
+                .GroupBy(grant => (grant.UserId, grant.AgentId, Destination: EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", grant.Destination, grant.Port)).Destination, grant.Port))
+                .Where(group => group.Select(grant => grant.AllowPrivateNetwork).Distinct().Count() == 1)
+                .Select(group => new ContainerEgressGrant { ScopeType = "agent", UserId = group.Key.UserId, AgentId = group.Key.AgentId,
+                    Role = "agent", ComponentId = group.Key.AgentId, Destination = group.Key.Destination, Port = group.Key.Port,
+                    AllowPrivateNetwork = group.First().AllowPrivateNetwork })];
+            return [.. unmatchedBootstrap.Where(grant => !IsSharedAgentGrant(grant)), .. agentDefaults, .. explicitGrants];
         }
     }
 
@@ -256,18 +283,9 @@ public sealed class NetworkAccessPolicyStore
 
         lock (gate)
         {
-            NetworkAccessRule[] decisions = [.. Load().Rules.Where(rule => IsSharedAgentIdentity(rule.Identity)
-                && rule.Identity.UserId == identity.UserId && rule.Identity.AgentId == identity.AgentId
-                && rule.Destination == destination && rule.Port == port)];
-            if (decisions.Length == 0) return AgentScopeNetworkDecision.None;
-            bool hasAllow = decisions.Any(static rule => rule.Allowed);
-            bool hasBlock = decisions.Any(static rule => !rule.Allowed);
-            if (hasAllow && hasBlock) return AgentScopeNetworkDecision.Conflict;
-            if (hasBlock) return AgentScopeNetworkDecision.Blocked;
-            if (decisions.Select(static rule => rule.AllowPrivateNetwork).Distinct().Skip(1).Any()
-                || (NetworkDestinationPolicy.IsNonPublic(destination) && decisions.Any(static rule => !rule.AllowPrivateNetwork)))
-                return AgentScopeNetworkDecision.Conflict;
-            return AgentScopeNetworkDecision.Allowed;
+            NetworkAccessRule? decision = Load().Rules.SingleOrDefault(rule => rule.Id == Key(identity, destination, port));
+            if (decision is null) return AgentScopeNetworkDecision.None;
+            return IsEffectiveAllow(decision) ? AgentScopeNetworkDecision.Allowed : AgentScopeNetworkDecision.Blocked;
         }
     }
 
@@ -284,12 +302,6 @@ public sealed class NetworkAccessPolicyStore
         => IsSharedAgentIdentity(identity)
             ? new NetworkAccessIdentity("agent", identity.UserId, identity.AgentId, "agent", identity.AgentId)
             : identity;
-
-    private static bool IsSameAgentEndpoint(NetworkAccessIdentity candidate, string candidateDestination, int candidatePort,
-        NetworkAccessIdentity canonical, string destination, int port)
-        => IsSharedAgentIdentity(candidate) && candidate.ScopeType == canonical.ScopeType
-            && candidate.UserId == canonical.UserId && candidate.AgentId == canonical.AgentId
-            && candidateDestination == destination && candidatePort == port;
 
     internal static NetworkAccessIdentity Identity(ContainerEgressGrant grant)
         => new(grant.ScopeType, grant.UserId, grant.AgentId, grant.Role, grant.ComponentId);
@@ -320,6 +332,8 @@ public sealed class NetworkAccessPolicyStore
         foreach (NetworkAccessRule rule in loaded.Rules)
         {
             ValidateIdentity(rule.Identity);
+            if (IsSharedAgentIdentity(rule.Identity) && !IsCanonicalAgentIdentity(rule.Identity))
+                throw new InvalidDataException("Unreleased component-scoped network policy is unsupported; reset the development policy file.");
             EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", rule.Destination, rule.Port));
             if (normalized.Destination != rule.Destination || rule.Id != Key(rule.Identity, rule.Destination, rule.Port))
                 throw new InvalidDataException("Network policy contains an invalid rule identity.");
@@ -327,12 +341,17 @@ public sealed class NetworkAccessPolicyStore
         foreach (NetworkAccessRequest request in loaded.Requests)
         {
             ValidateIdentity(request.Identity);
+            if (IsSharedAgentIdentity(request.Identity) && !IsCanonicalAgentIdentity(request.Identity))
+                throw new InvalidDataException("Unreleased component-scoped network policy is unsupported; reset the development policy file.");
             EgressTcpRule normalized = EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", request.Destination, request.Port));
+            if (request.GatewayDestination is { } outer && (EnvoyEgressConfiguration.Normalize(new EgressTcpRule("192.0.2.1", outer, request.Port)).Destination != outer
+                || NetworkDestinationPolicy.IsMetadata(outer) || outer == NetworkDestinationPolicy.PlatformControlAddress || outer == NetworkDestinationPolicy.PrivateSourceAddress))
+                throw new InvalidDataException("Network policy contains an invalid Gateway destination.");
             NetworkAccessRule? decision = loaded.Rules.SingleOrDefault(rule => rule.Id == request.Id);
             if (normalized.Destination != request.Destination || request.Id != Key(request.Identity, normalized.Destination, request.Port) || request.Attempts < 1
                 || request.Status is not ("pending" or "allowed" or "blocked"))
                 throw new InvalidDataException("Network policy contains an invalid request.");
-            if (request.Status == "pending" ? decision is not null && (!decision.Allowed || IsEffectiveAllow(decision))
+            if (request.Status == "pending" ? decision is not null && (!decision.Allowed || (request.GatewayDestination is null && IsEffectiveAllow(decision)))
                 : decision is null || decision.Allowed != (request.Status == "allowed"))
                 throw new InvalidDataException("Network policy request and decision disagree.");
         }

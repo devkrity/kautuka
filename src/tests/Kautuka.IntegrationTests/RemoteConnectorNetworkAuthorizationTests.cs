@@ -16,16 +16,90 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
     private const string host = "mcp.example.com";
 
     [Fact]
+    public void OneAdministratorDecisionPersistsBothRulesAndRejectsOwner()
+    {
+        using var fixture = new Fixture([], []);
+        Assert.Equal("missing_permission", fixture.Check().Decision);
+        var store = (NetworkAccessPolicyStore)typeof(ContainerEgressRuntime)
+            .GetField("networkPolicy", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Runtime)!;
+        NetworkAccessRequest request = Assert.Single(store.Read(new("owner", true)).Requests);
+        Assert.Throws<UnauthorizedAccessException>(() => store.DecideRequest(new("owner", false), request.Id, true, store.Revision));
+        Assert.Empty(store.Read(new("owner", true)).Rules);
+        store.DecideRequest(new("owner", true), request.Id, true, store.Revision);
+        NetworkAccessPolicyState persisted = new NetworkAccessPolicyStore(fixture.PolicyPath).Read(new("owner", true));
+        Assert.Equal(2, persisted.Rules.Count);
+        Assert.Contains(persisted.Rules, rule => rule.Identity == subject && rule.Destination == host && rule.Allowed);
+        Assert.Contains(persisted.Rules, rule => rule.Identity == gateway && rule.Destination == host && rule.Allowed);
+        Assert.Equal("allowed", Assert.Single(persisted.Requests).Status);
+        fixture.Runtime.CompleteAuthorizationTransition(fixture.Snapshot([new(source, host, 443)]) with
+        {
+            RemotePermissions = ContainerEgressRuntime.RemotePermissions(store.EffectiveGrants([])),
+            PolicyRevision = persisted.Revision,
+        });
+        Assert.Equal("allowed", fixture.Check().Decision);
+    }
+
+    [Fact]
+    public void ChangedHttpPinInvalidatesPreviouslyDisplayedDecision()
+    {
+        using var fixture = new Fixture([], []);
+        Assert.Equal("missing_permission", fixture.Check("http", "93.184.216.34").Decision);
+        var store = (NetworkAccessPolicyStore)typeof(ContainerEgressRuntime)
+            .GetField("networkPolicy", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Runtime)!;
+        NetworkAccessRequest first = Assert.Single(store.Read(new("owner", true)).Requests);
+        long revision = store.Revision;
+        Assert.Equal("missing_permission", fixture.Check("http", "93.184.216.35").Decision);
+        Assert.Throws<InvalidOperationException>(() => store.DecideRequest(new("owner", true), first.Id, true, revision));
+        Assert.Empty(store.Read(new("owner", true)).Rules);
+        NetworkAccessRequest updated = Assert.Single(store.Read(new("owner", true)).Requests);
+        Assert.Equal("93.184.216.35", updated.GatewayDestination);
+        store.DecideRequest(new("owner", true), updated.Id, true, store.Revision);
+        Assert.Contains(store.Read(new("owner", true)).Rules, rule => rule.Identity == gateway && rule.Destination == "93.184.216.35");
+    }
+
+    [Fact]
+    public void CombinedDecisionCannotOverrideExistingGatewayBlock()
+    {
+        using var fixture = new Fixture([], []);
+        Assert.Equal("missing_permission", fixture.Check().Decision);
+        var store = (NetworkAccessPolicyStore)typeof(ContainerEgressRuntime)
+            .GetField("networkPolicy", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Runtime)!;
+        NetworkAccessRequest request = Assert.Single(store.Read(new("owner", true)).Requests);
+        store.SetRule(new("owner", true), gateway, host, 443, false, store.Revision);
+        Assert.Throws<InvalidOperationException>(() => store.DecideRequest(new("owner", true), request.Id, true, store.Revision));
+        NetworkAccessPolicyState state = new NetworkAccessPolicyStore(fixture.PolicyPath).Read(new("owner", true));
+        Assert.Single(state.Rules);
+        Assert.False(state.Rules[0].Allowed);
+        Assert.Equal("pending", Assert.Single(state.Requests).Status);
+    }
+
+    [Fact]
+    public void CombinedPrivateDestinationRequiresAnExplicitChoice()
+    {
+        using var fixture = new Fixture([], []);
+        Assert.Equal("missing_permission", fixture.Check("http", "192.168.1.12").Decision);
+        var store = (NetworkAccessPolicyStore)typeof(ContainerEgressRuntime)
+            .GetField("networkPolicy", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Runtime)!;
+        NetworkAccessRequest request = Assert.Single(store.Read(new("owner", true)).Requests);
+        Assert.Throws<UnauthorizedAccessException>(() => store.DecideRequest(new("owner", true), request.Id, true, store.Revision));
+        Assert.Empty(store.Read(new("owner", true)).Rules);
+        store.DecideRequest(new("owner", true), request.Id, true, store.Revision, allowPrivateNetwork: true);
+        Assert.All(store.Read(new("owner", true)).Rules, rule => Assert.True(rule.AllowPrivateNetwork && rule.PrivateNetworkApprovalExplicit));
+    }
+
+    [Fact]
     public void SharedGatewayGrantDoesNotReplaceDurableCallerApproval()
     {
         using var fixture = new Fixture([], [new(source, host, 443)]);
         Assert.Equal("missing_permission", fixture.Check().Decision);
-        NetworkAccessRequest request = Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+        NetworkAccessRequest request = Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests);
+        Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+        Assert.Equal(host, request.GatewayDestination);
         Assert.Equal(subject, request.Identity);
         var reloaded = new NetworkAccessPolicyStore(fixture.PolicyPath);
-        Assert.Equal(request.Id, Assert.Single(reloaded.Read(new("owner", false)).Requests).Id);
+        Assert.Equal(request.Id, Assert.Single(reloaded.Read(new("owner", true)).Requests).Id);
         Assert.Equal("missing_permission", fixture.Check().Decision);
-        Assert.Equal(2, Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests).Attempts);
+        Assert.Equal(2, Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests).Attempts);
     }
 
     [Theory]
@@ -75,43 +149,12 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
     }
 
     [Fact]
-    public void ConflictingComponentBlockAndAllowFailClosedAcrossAgentScope()
+    public void UnreleasedComponentPolicyIsRejectedRatherThanMerged()
     {
         NetworkAccessIdentity connector = new("agent", "owner", "workspace-alpha", "connector", "owner::mail");
-        using var fixture = new Fixture([], [new(source, host, 443)], store =>
+        Assert.Throws<InvalidDataException>(() => new Fixture([], [new(source, host, 443)], store =>
             store.SetRule(new("owner", false), subject, host, 443, true, 0),
-            path => AddLegacyRule(path, connector, allowed: false));
-
-        Assert.Empty(new NetworkAccessPolicyStore(fixture.PolicyPath).EffectiveGrants([]));
-        Assert.Equal("blocked", fixture.Check().Decision);
-        Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
-    }
-
-    [Fact]
-    public void LegacyAgentScopedRemoteConnectorBlockCannotBeBypassedByConnectorAllow()
-    {
-        NetworkAccessIdentity legacyRemote = new("agent", "owner", "workspace-alpha", "remote-connector", "owner::mail");
-        NetworkAccessIdentity connector = new("agent", "owner", "workspace-alpha", "connector", "owner::mail");
-        using var fixture = new Fixture([], [new(source, host, 443)], store =>
-            store.SetRule(new("owner", false), subject, host, 443, true, 0),
-            path => AddLegacyRule(path, legacyRemote, allowed: false));
-
-        Assert.Empty(new NetworkAccessPolicyStore(fixture.PolicyPath).EffectiveGrants([]));
-        Assert.Equal("blocked", fixture.Check().Decision);
-        Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
-    }
-
-    [Fact]
-    public void ConflictingPublicAndPrivateApprovalsDoNotCreatePrivateAgentEntitlement()
-    {
-        NetworkAccessIdentity connector = new("agent", "owner", "workspace-alpha", "connector", "owner::mail");
-        using var fixture = new Fixture([], [new(source, host, 443, true)], store =>
-            store.SetRule(new("owner", false), subject, host, 443, true, 0),
-            path => AddLegacyRule(path, connector, allowed: true, privateNetwork: true));
-
-        Assert.Empty(new NetworkAccessPolicyStore(fixture.PolicyPath).EffectiveGrants([]));
-        Assert.Equal("blocked", fixture.Check().Decision);
-        Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+            path => AddLegacyRule(path, connector, allowed: false)));
     }
 
     [Fact]
@@ -143,6 +186,7 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
         Assert.Equal("private_route_conflict", denied.Decision);
         Assert.False(denied.AllowPrivateNetwork);
         Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+        Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests);
         using var privateApproved = new Fixture([Grant(subject, true)], [new(source, host, 443, true)]);
         RemoteConnectorNetworkDecision allowed = privateApproved.Check("https", "192.168.1.12");
         Assert.Equal("allowed", allowed.Decision);
@@ -180,6 +224,7 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
         using var fixture = new Fixture([Grant(subject, logicalPrivate)], [new(source, host, 443, outerPrivate)]);
         Assert.Equal("private_route_conflict", fixture.Check().Decision);
         Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
+        Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests);
     }
 
     [Fact]
@@ -188,10 +233,11 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
         using var fixture = new Fixture([Grant(subject)], []);
         RemoteConnectorNetworkDecision decision = fixture.Check();
         Assert.Equal("outer_route_required", decision.Decision);
-        Assert.Contains("separate administrator route approval", decision.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("administrator", decision.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Empty(fixture.Runtime.GetNetworkAccessPolicy(new("owner", false)).Policy.Requests);
         NetworkAccessRequest request = Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests);
-        Assert.Equal(gateway, request.Identity);
+        Assert.Equal(subject, request.Identity);
+        Assert.Equal(host, request.GatewayDestination);
         Assert.Equal(host, request.Destination);
         Assert.Equal(443, request.Port);
         Assert.Equal("pending", request.Status);
@@ -246,8 +292,9 @@ public sealed class RemoteConnectorNetworkAuthorizationTests
         Assert.Equal("pin_required", fixture.Check("http").Decision);
         Assert.Equal("outer_route_required", fixture.Check("http", "93.184.216.34").Decision);
         NetworkAccessRequest request = Assert.Single(fixture.Runtime.GetNetworkAccessPolicy(new("owner", true)).Policy.Requests);
-        Assert.Equal(gateway, request.Identity);
-        Assert.Equal("93.184.216.34", request.Destination);
+        Assert.Equal(subject, request.Identity);
+        Assert.Equal(host, request.Destination);
+        Assert.Equal("93.184.216.34", request.GatewayDestination);
         Assert.Equal(443, request.Port);
         fixture.Accept([new(source, "93.184.216.34", 443)]);
         Assert.Equal("allowed", fixture.Check("http", "93.184.216.34").Decision);

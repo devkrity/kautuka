@@ -155,28 +155,23 @@ candidate representing the desired revision permits unchanged logical grants,
 selected outer routes and allocations to continue; incompatible changes require
 a retry.
 
-For agent scope, connector and sandbox source decisions are evaluated together
-by user and canonical workspace, while source identities remain separate in
-allocation and audit data. Existing records are not rewritten. Contradictory
-component-level Allows and Blocks, or conflicting public/private choices, fail
-closed and may require an administrator to reconcile or re-approve the agent
-permission. There is no automatic policy migration.
+For agent scope, connector and sandbox permissions use one canonical user-agent
+identity while source identities remain separate in allocation and audit data.
+Unreleased component-scoped policy files are rejected; development installations
+using those files must reset their development policy rather than migrate it.
 
-Agent logical grants apply to sources owned by that user and canonical workspace;
-they never create a shared Gateway source route. A remote connector needs both its
-user-agent logical permission and a separate explicit core Gateway route. When the
-logical permission is accepted but its Gateway route is absent, Manager records a
-core Gateway approval request. An explicit core Block remains authoritative and
-does not create a new request. The logical and selected outer route must agree on
-private-source privilege. Metadata remains forbidden, and the Linux firewall still
-enforces actual upstream destination ranges.
+A remote connector needs its user-agent permission and a separate shared Gateway
+route. One administrator-only approval request describes both and writes both
+rules in one durable policy update. The Gateway route is shared with other
+Gateway traffic. An explicit Gateway Block remains authoritative. The logical
+and selected route must agree on private-source privilege, which requires an
+explicit administrator choice. Metadata remains forbidden and the Linux firewall
+still enforces actual upstream destination ranges.
 
-Plain HTTP hostname calls retain a logical hostname permission but require a
-transport-pinned IPv4 address and a separately approved compatible core Gateway
-IP route. HTTP has no TLS SNI, so a hostname rule alone cannot select that route.
-HTTPS calls require a separately approved core route for the normalized hostname
-or literal address, including public destinations. Sandbox permissions therefore
-cannot open provider or other Gateway traffic to the same destination.
+Plain HTTP hostname calls require a transport-pinned IPv4 address; the request
+shows that exact Gateway destination, and a changed pin invalidates an older
+decision. HTTPS uses the normalized hostname or literal address. A sandbox-only
+approval never creates a Gateway route.
 This application check does not reproduce the native listener's literal-IP
 fallback for HTTPS hostnames.
 
