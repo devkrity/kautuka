@@ -1516,6 +1516,17 @@ allowed flow or changing Envoy/DNS PIDs. This was a fresh Manager against a
 running pod, not a host reboot or cold pod start. These loaded-host timings are
 material availability observations, not performance guarantees.
 
+On 9 November a separate rootless Fedora 45 WSL fixture, using a Native AOT
+snapshot containing the batched recovery change, admitted 20 agent scopes plus
+core and management uninterrupted in 130.2 seconds, rejected a 23rd private
+scope, and verified approved and denied traffic. A fresh Manager recovered the
+retained topology in 25.1 seconds; Envoy and DNS process identities were unchanged,
+and first/last agent DNS and approved traffic remained available after a middle
+scope was retired. A repeat after readmission recovered in 11.8 seconds and
+passed an injected inspection-timeout check without restarting Envoy or DNS.
+These are test-host observations, not cold-host-reboot or platform guarantees;
+the fixture snapshot predates the subsequent agent-scope policy edits.
+
 The actual Manager and UpdateService executables also published as Native AOT
 ELF binaries with the pinned 10.0.403 SDK. No production deployment or merge was
 performed. Physical LAN, separate bare-metal Linux, future Mac deployment and

@@ -584,25 +584,11 @@ public sealed partial class ContainerEgressRuntime(
         try
         {
             // The already-installed boundary covers every inventoried subnet before any attachment.
-            foreach (ScopeNetwork network in networks.Values.OrderBy(static item => item.Name, StringComparer.Ordinal))
-            {
-                using JsonDocument inspected = JsonDocument.Parse((await RunAsync(["inspect", infraId!], cancellationToken).ConfigureAwait(false)).StdOut);
-                JsonElement attachments = inspected.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
-                if (!attachments.TryGetProperty(network.Name, out JsonElement attached))
-                {
-                    _ = await RunAsync(["network", "connect", "--ip", network.Gateway, network.Name, infraId!], cancellationToken).ConfigureAwait(false);
-                    using JsonDocument connected = JsonDocument.Parse((await RunAsync(["inspect", infraId!], cancellationToken).ConfigureAwait(false)).StdOut);
-                    JsonElement current = connected.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
-                    if (!current.TryGetProperty(network.Name, out JsonElement verified) || verified.GetProperty("IPAddress").GetString() != network.Gateway)
-                        throw new InvalidOperationException("Recovered egress scope attachment could not be verified.");
-                }
-                else if (attached.GetProperty("IPAddress").GetString() != network.Gateway)
-                    throw new InvalidOperationException("Egress scope address does not match its managed attachment.");
-                PodmanCommandResult routes = await HelperAsync("/usr/sbin/ip", ["-j", "-4", "route", "show", "default"], cancellationToken).ConfigureAwait(false);
-                using JsonDocument defaults = JsonDocument.Parse(routes.StdOut);
-                if (defaults.RootElement.GetArrayLength() != 1 || defaults.RootElement[0].GetProperty("gateway").GetString() != outsideDefaultGateway)
-                    throw new InvalidOperationException("The egress namespace lost its sole outside default route during recovery.");
-            }
+            var expected = networks.Values.ToDictionary(static network => network.Name, static network => network.Gateway, StringComparer.Ordinal);
+            await ReconcileRecoveredAttachmentsAsync(expected,
+                async token => JsonDocument.Parse((await RunAsync(["inspect", infraId!], token).ConfigureAwait(false)).StdOut),
+                async (name, gateway, token) => { _ = await RunAsync(["network", "connect", "--ip", gateway, name, infraId!], token).ConfigureAwait(false); },
+                cancellationToken).ConfigureAwait(false);
             // No package or collector source exception exists until RestoreSources validates allocations.
             await ApplyBoundaryAsync(cancellationToken).ConfigureAwait(false);
             foreach (string name in networks.Keys.ToArray()) networks[name] = networks[name] with { Prepared = true };
@@ -614,6 +600,35 @@ public sealed partial class ContainerEgressRuntime(
             await StopProxyAsync(CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    internal static async Task ReconcileRecoveredAttachmentsAsync(IReadOnlyDictionary<string, string> expected,
+        Func<CancellationToken, Task<JsonDocument>> inspect, Func<string, string, CancellationToken, Task> connect,
+        CancellationToken cancellationToken)
+    {
+        using JsonDocument initial = await inspect(cancellationToken).ConfigureAwait(false);
+        JsonElement attachments = initial.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
+        foreach (string name in MissingRecoveredAttachments(attachments, expected, requireComplete: false))
+            await connect(name, expected[name], cancellationToken).ConfigureAwait(false);
+        using JsonDocument final = await inspect(cancellationToken).ConfigureAwait(false);
+        JsonElement current = final.RootElement[0].GetProperty("NetworkSettings").GetProperty("Networks");
+        _ = MissingRecoveredAttachments(current, expected, requireComplete: true);
+    }
+
+    internal static string[] MissingRecoveredAttachments(JsonElement attachments, IReadOnlyDictionary<string, string> expected, bool requireComplete)
+    {
+        var missing = new List<string>();
+        foreach ((string name, string gateway) in expected.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (!attachments.TryGetProperty(name, out JsonElement attached))
+            {
+                if (requireComplete) throw new InvalidOperationException("Recovered egress scope attachment could not be verified.");
+                missing.Add(name);
+            }
+            else if (attached.GetProperty("IPAddress").GetString() != gateway)
+                throw new InvalidOperationException("Egress scope address does not match its managed attachment.");
+        }
+        return [.. missing];
     }
 
     private async Task<ScopeNetwork> EnsureNetworkAsync(string name, string scopeKey, bool isPrivate, CancellationToken cancellationToken)
