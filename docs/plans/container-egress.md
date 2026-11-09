@@ -44,9 +44,9 @@ operational-default and usability work, not a reason to replace the enforcement 
   Manager reports the effective Allow value using the same evaluation as its
   Envoy configuration; the UI does not derive a second policy or create synthetic
   approval requests. Explicitly blocked rules stay resolved. Subsequent captured
-  denials may reopen an inadequate Allow. Chat and provider tests use the normal
-  outbound path; Manager records missing permissions. After a transport failure,
-  a recent matching pending request can inform the diagnostic. Exceptions
+  denials may reopen an inadequate Allow. Chat checks
+  the accepted provider policy before provider initialization and explains an
+  incomplete LAN permission instead of reporting a generic send error. Exceptions
   after a run starts must publish a durable terminal error, without replaying work.
 - **Approval delivery:** stock Envoy network authorization now records missing
   permissions directly in Manager before Deny; outcome logs do not create requests.

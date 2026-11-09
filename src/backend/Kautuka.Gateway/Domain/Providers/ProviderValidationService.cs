@@ -36,6 +36,8 @@ internal sealed class ProviderValidationService : IProviderValidationService
 
         try
         {
+            GatewayProviderTestResult? blocked = manager is null ? null : await ProviderNetworkAccessCheck.CheckAsync(manager.GetNetworkAccessPolicyAsync, settings, cancellationToken).ConfigureAwait(false);
+            if (blocked is not null) return blocked;
             return await ValidateProviderConnectivityAsync(providerId, providerType, settings, cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)
@@ -118,13 +120,12 @@ internal sealed class ProviderValidationService : IProviderValidationService
         return true;
     }
 
-    internal async Task<GatewayProviderTestResult> ValidateProviderConnectivityAsync(
+    private async Task<GatewayProviderTestResult> ValidateProviderConnectivityAsync(
         string providerId,
         string providerType,
         JsonObject settings,
         CancellationToken ct)
     {
-        DateTimeOffset started = DateTimeOffset.UtcNow;
         try
         {
             IReadOnlyList<DiscoveredModelDefinition> discoveredModels = await aiClientFactory
@@ -138,9 +139,7 @@ internal sealed class ProviderValidationService : IProviderValidationService
         catch (HttpRequestException ex)
         {
             ProviderValidationServiceLog.GenericConnectivityCheckFailed(logger, ex, providerId);
-            if (ex.StatusCode is not null)
-                return new GatewayProviderTestResult(false, $"Provider '{providerId}' connectivity check failed: {ex.Message}");
-            return await DescribeFailureAsync(settings, started, $"Provider '{providerId}' connectivity check failed: {ex.Message}", ct).ConfigureAwait(false);
+            return new GatewayProviderTestResult(false, $"Provider '{providerId}' connectivity check failed: {ex.Message}");
         }
         catch (InvalidOperationException ex)
         {
@@ -155,7 +154,7 @@ internal sealed class ProviderValidationService : IProviderValidationService
         catch (IOException ex)
         {
             ProviderValidationServiceLog.GenericConnectivityCheckFailed(logger, ex, providerId);
-            return await DescribeFailureAsync(settings, started, $"Provider '{providerId}' connectivity check failed: {ex.Message}", ct).ConfigureAwait(false);
+            return new GatewayProviderTestResult(false, $"Provider '{providerId}' connectivity check failed: {ex.Message}");
         }
         catch (System.ClientModel.ClientResultException ex)
         {
@@ -163,10 +162,6 @@ internal sealed class ProviderValidationService : IProviderValidationService
             return new GatewayProviderTestResult(false, $"Provider '{providerId}' returned an error: {ex.Message}");
         }
     }
-
-    private async Task<GatewayProviderTestResult> DescribeFailureAsync(JsonObject settings, DateTimeOffset started, string fallback, CancellationToken ct)
-        => (manager is null ? null : await ProviderNetworkAccessCheck.CheckRecordedDenialAsync(manager.GetNetworkAccessPolicyAsync, settings, started, ct).ConfigureAwait(false))
-            ?? new GatewayProviderTestResult(false, fallback);
 }
 
 internal static partial class ProviderValidationServiceLog

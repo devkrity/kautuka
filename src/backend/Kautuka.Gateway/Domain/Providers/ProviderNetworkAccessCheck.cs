@@ -1,5 +1,5 @@
-using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.Json.Nodes;
 
 using Grpc.Core;
@@ -8,74 +8,73 @@ using Kautuka.Manager.Protos;
 
 namespace Kautuka.Gateway.Domain.Providers;
 
-// Diagnostics only: Manager's recorded denial is evidence, never a second policy decision.
 internal static class ProviderNetworkAccessCheck
 {
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "Best-effort diagnostics must never replace the original durable terminal error.")]
-    internal static async Task<string> DescribeChatFailureAsync(
-        Func<NetworkAccessReadRequest, CancellationToken, Task<NetworkAccessPolicyResponse>> readPolicy,
-        string endpoint, DateTimeOffset started, Exception failure, CancellationToken ct)
-    {
-        bool transport = false;
-        for (Exception? current = failure; current is not null; current = current.InnerException)
-        {
-            if (current is System.ClientModel.ClientResultException response && response.Status > 0) return failure.Message;
-            if (current is HttpRequestException http)
-            {
-                if (http.StatusCode is not null) return failure.Message;
-                transport = true;
-            }
-            if (current is System.Net.Sockets.SocketException) transport = true;
-        }
-        if (!transport) return failure.Message;
-        try
-        {
-            using var diagnosticCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            diagnosticCancellation.CancelAfter(TimeSpan.FromSeconds(2));
-            GatewayProviderTestResult? diagnosis = await CheckRecordedDenialAsync(readPolicy,
-                new JsonObject { ["base_url"] = endpoint }, started, diagnosticCancellation.Token)
-                .WaitAsync(diagnosticCancellation.Token).ConfigureAwait(false);
-            return diagnosis?.Message ?? failure.Message;
-        }
-        catch (Exception)
-        {
-            return failure.Message;
-        }
-    }
-
-    internal static async Task<GatewayProviderTestResult?> CheckRecordedDenialAsync(
-        Func<NetworkAccessReadRequest, CancellationToken, Task<NetworkAccessPolicyResponse>> readPolicy,
-        JsonObject settings, DateTimeOffset started, CancellationToken ct)
+    internal static async Task<GatewayProviderTestResult?> CheckAsync(
+        Func<NetworkAccessReadRequest, CancellationToken, Task<NetworkAccessPolicyResponse>> readPolicy, JsonObject settings, CancellationToken ct)
     {
         if (!Uri.TryCreate((settings["base_url"] ?? settings["endpoint"])?.GetValue<string>(), UriKind.Absolute, out Uri? target)
             || target.Scheme is not ("http" or "https")) return null;
-        if (target.IsLoopback) return null;
-        // Plain HTTP hostnames are authorized by the connected IP, which may differ from DNS now.
-        if (target.Scheme == Uri.UriSchemeHttp && !IPAddress.TryParse(target.IdnHost, out _)) return null;
-        string destination = target.IdnHost.TrimEnd('.');
         try
         {
             var request = new NetworkAccessReadRequest { Actor = new NetworkAccessActorMessage { UserId = "gateway-provider-validation", IsAdmin = true } };
             NetworkAccessPolicyResponse policy = await readPolicy(request, ct).ConfigureAwait(false);
-            for (int pages = 0; ; pages++)
+            if (!policy.Enabled) return null;
+            if (target.IsLoopback)
+                return new(false, "This address points to localhost inside the Gateway container, not your computer. Use a host address reachable from the development appliance for Ollama, then test again. Allowing network access cannot redirect localhost to your computer.");
+            // Every page must describe the same accepted policy; incomplete or
+            // pending data is not evidence that a connectivity failure is a deny.
+            for (int pages = 0; policy.NextOffset != 0; pages++)
             {
-                NetworkAccessRequestMessage? observed = policy.Requests.FirstOrDefault(item => IsGateway(item.Identity)
-                    && item.Status == "pending" && item.Port == target.Port
-                    && string.Equals(item.Destination, destination, StringComparison.OrdinalIgnoreCase)
-                    && DateTimeOffset.TryParse(item.LastSeenAtUtc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTimeOffset lastSeen)
-                    && lastSeen >= started);
-                if (observed is not null)
-                    return new(false, $"Manager recorded a recent network access denial for Gateway to {destination}:{target.Port}. Review the request in Network access > Permissions; local-network access requires administrator approval.",
-                        new GatewayProviderNetworkBlock(destination, target.Port, observed.Id));
-                if (policy.NextOffset == 0 || pages >= 220 || policy.NextOffset <= request.Offset) return null;
+                if (pages >= 220 || policy.NextOffset <= request.Offset) return null;
                 request.Offset = policy.NextOffset;
                 request.EnforceRevision = true;
                 request.ExpectedRevision = policy.Revision;
-                policy = await readPolicy(request, ct).ConfigureAwait(false);
+                NetworkAccessPolicyResponse next = await readPolicy(request, ct).ConfigureAwait(false);
+                if (next.Revision != policy.Revision || next.ActiveRevision != policy.ActiveRevision
+                    || next.ActiveVersion != policy.ActiveVersion || next.ActivationState != policy.ActivationState) return null;
+                policy.Rules.Add(next.Rules);
+                policy.Defaults.Add(next.Defaults);
+                policy.Sources.Add(next.Sources);
+                policy.NextOffset = next.NextOffset;
             }
+            string destination = target.IdnHost.TrimEnd('.');
+            if (target.Scheme == Uri.UriSchemeHttp && !IPAddress.TryParse(destination, out _))
+            {
+                IPAddress[] addresses = await Dns.GetHostAddressesAsync(target.DnsSafeHost, AddressFamily.InterNetwork, ct).ConfigureAwait(false);
+                IPAddress[] unique = [.. addresses.Distinct()];
+                if (unique.Length != 1) return null;
+                destination = unique[0].ToString();
+            }
+            return Evaluate(policy, destination, target.Port);
         }
-        catch (RpcException) when (!ct.IsCancellationRequested) { return null; }
+        catch (RpcException) { return null; }
+        catch (SocketException) { return null; }
         catch (NotSupportedException) { return null; }
+    }
+
+    internal static GatewayProviderTestResult? Evaluate(NetworkAccessPolicyResponse policy, string destination, int port)
+    {
+        if (!policy.Enabled || policy.ActivationState != "active" || policy.Revision != policy.ActiveRevision
+            || string.IsNullOrEmpty(policy.ActiveVersion) || !policy.Sources.Any(IsGateway)) return null;
+        if (KautukaNetworkDestinationPolicy.IsMetadata(destination) || destination == KautukaNetworkDestinationPolicy.PlatformControlAddress
+            || destination == KautukaNetworkDestinationPolicy.PrivateSourceAddress)
+            return new(false, "This is a protected metadata, platform-control or reserved proxy address. It cannot be allowed for a provider, including by an administrator. Use the provider's normal service endpoint.");
+        var overrides = policy.Rules.Where(rule => IsGateway(rule.Identity) && rule.Port == port).ToArray();
+        if (KautukaNetworkDestinationPolicy.IsNonPublic(destination) && overrides.Any(rule => rule.Allowed && !rule.AllowPrivateNetwork
+            && string.Equals(rule.Destination, destination, StringComparison.OrdinalIgnoreCase)))
+            return new(false, $"Network policy blocks Gateway from reaching {destination}:{port}. An Allow rule exists, but it does not include local-network access. An administrator must open Network access > Permissions, edit this rule, select Allow local-network access, and save it. Wait for the policy to become active, then retry your message or provider test.",
+                new GatewayProviderNetworkBlock(destination, port));
+        var effective = policy.Defaults.Where(rule => IsGateway(rule.Identity) && rule.Port == port
+            && !overrides.Any(other => string.Equals(other.Destination, rule.Destination, StringComparison.OrdinalIgnoreCase)))
+            .Concat(overrides.Where(static rule => rule.Allowed))
+            .Where(rule => !KautukaNetworkDestinationPolicy.IsNonPublic(rule.Destination) || rule.AllowPrivateNetwork).ToArray();
+        if (effective.Any(rule => string.Equals(rule.Destination, destination, StringComparison.OrdinalIgnoreCase))) return null;
+        // TLS hostname matching can fall back to a permitted original IP. Do not
+        // diagnose a deny without knowing which address the HTTP client will use.
+        if (!IPAddress.TryParse(destination, out _) && effective.Any(rule => IPAddress.TryParse(rule.Destination, out _))) return null;
+        return new(false, $"Network access to {destination}:{port} is blocked for Gateway. Open Network access > Permissions to review the rule for this destination. LAN access requires an explicit administrator approval. Wait for the policy to become active, then retry your message or provider test.",
+            new GatewayProviderNetworkBlock(destination, port));
     }
 
     private static bool IsGateway(NetworkAccessIdentityMessage? identity)
