@@ -43,6 +43,7 @@ public sealed class WorkloadPostStartVerifier
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
 
         var stopwatch = Stopwatch.StartNew();
+        string registeredId = containerId;
         try
         {
             // 1. Inspect container
@@ -59,6 +60,16 @@ public sealed class WorkloadPostStartVerifier
             JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
                 ? doc.RootElement[0]
                 : doc.RootElement;
+
+            if (container.TryGetProperty("Id", out JsonElement inspectedIdElem))
+            {
+                string? inspectedId = inspectedIdElem.GetString();
+                if (!string.IsNullOrWhiteSpace(inspectedId)
+                    && registry?.UpdateContainerId(allocatedIp, containerId, inspectedId) == true)
+                {
+                    registeredId = inspectedId;
+                }
+            }
 
             JsonElement hostConfig = container.GetProperty("HostConfig");
             JsonElement config = container.GetProperty("Config");
@@ -92,17 +103,26 @@ public sealed class WorkloadPostStartVerifier
                 }
             }
 
-            bool capDropAll = false;
-            if (hostConfig.TryGetProperty("CapDrop", out JsonElement capDropElem) && capDropElem.ValueKind == JsonValueKind.Array)
+            bool capDropAll;
+            if (allowFileCaps)
             {
-                foreach (JsonElement capElem in capDropElem.EnumerateArray())
+                capDropAll = true;
+                if (container.TryGetProperty("EffectiveCaps", out JsonElement effElem) && effElem.ValueKind == JsonValueKind.Array)
                 {
-                    if (string.Equals(capElem.GetString(), "ALL", StringComparison.OrdinalIgnoreCase))
+                    foreach (JsonElement cap in effElem.EnumerateArray())
                     {
-                        capDropAll = true;
-                        break;
+                        string? name = cap.GetString();
+                        if (!string.IsNullOrWhiteSpace(name) && !WorkloadContainerSpec.AllowedFileOwnershipCaps.Contains(name))
+                        {
+                            capDropAll = false;
+                            break;
+                        }
                     }
                 }
+            }
+            else
+            {
+                capDropAll = Sandbox.LiveContainerSpec.CapDropIncludesAll(container, hostConfig);
             }
 
             if (!capDropAll)
@@ -252,7 +272,10 @@ public sealed class WorkloadPostStartVerifier
             }
 
             // Deregister if registry provided:
-            registry?.Deregister(allocatedIp, containerId);
+            if (registry is not null && !registry.Deregister(allocatedIp, registeredId))
+            {
+                registry.Deregister(allocatedIp, containerId);
+            }
 
             throw new InvalidOperationException(
                 $"WorkloadPostStartVerifier failed for '{containerId}' at '{allocatedIp}' after {exposureMs} ms: {ex.Message}",
@@ -260,32 +283,53 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    private static async Task VerifyNetnsRulesetAsync(
+    internal async Task VerifyNetnsRulesetAsync(
         int pid,
         string allocatedIp,
         CancellationToken cancellationToken)
     {
-        using var process = new Process
+        string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string stdOut;
+        if (!Environment.IsPrivilegedProcess)
         {
-            StartInfo = new ProcessStartInfo
+            // Rootless Podman places container netns inside the user namespace; direct nsenter fails with EPERM.
+            PodmanCommandResult nftResult = await podmanRunner
+                .RunAsync(
+                    ["unshare", "nsenter", "-t", pidText, "-n", "nft", "-j", "list", "table", "inet", WorkloadRulesetRenderer.WorkloadTableName],
+                    10,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (nftResult.ExitCode != 0)
             {
-                FileName = "nsenter",
-                Arguments = $"-t {pid} -n nft -j list table inet {WorkloadRulesetRenderer.WorkloadTableName}",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
+                throw new InvalidOperationException($"podman unshare nsenter nft -j list table failed (rc {nftResult.ExitCode}): {nftResult.StdErr}");
             }
-        };
 
-        process.Start();
-        string stdOut = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        string stdErr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-
-        if (process.ExitCode != 0)
+            stdOut = nftResult.StdOut;
+        }
+        else
         {
-            throw new InvalidOperationException($"nsenter nft -j list table failed (rc {process.ExitCode}): {stdErr}");
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "nsenter",
+                    Arguments = $"-t {pidText} -n nft -j list table inet {WorkloadRulesetRenderer.WorkloadTableName}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                }
+            };
+
+            process.Start();
+            stdOut = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            string stdErr = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"nsenter nft -j list table failed (rc {process.ExitCode}): {stdErr}");
+            }
         }
 
         string liveHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(

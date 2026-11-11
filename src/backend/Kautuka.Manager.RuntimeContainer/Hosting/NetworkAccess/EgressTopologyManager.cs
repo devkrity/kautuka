@@ -629,7 +629,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
         CancellationToken cancellationToken)
     {
         // Render boundary and configs
-        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp);
+        IReadOnlyList<string> upstreamDnsIps = await DiscoverUpstreamDnsIpsAsync(cancellationToken).ConfigureAwait(false);
+        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, upstreamDnsIps);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(isWindowsMtls: isWindowsHostNativeDev);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
 
@@ -677,21 +678,24 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
             .ConfigureAwait(false);
 
         var allowlistEntries = new List<InfraAllowlistEntry>();
-        if (podInspect.ExitCode == 0)
+        if (podInspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(podInspect.StdOut))
         {
             try
             {
                 using JsonDocument doc = JsonDocument.Parse(podInspect.StdOut);
-                string infraId = doc.RootElement.TryGetProperty("InfraContainerID", out JsonElement infElem) ? infElem.GetString() ?? string.Empty : string.Empty;
+                JsonElement podElem = doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
+                    ? doc.RootElement[0]
+                    : doc.RootElement;
+                string infraId = podElem.TryGetProperty("InfraContainerID", out JsonElement infElem) ? infElem.GetString() ?? string.Empty : string.Empty;
                 if (!string.IsNullOrWhiteSpace(infraId))
                 {
                     knownInfraContainerIds.Add(infraId);
                     allowlistEntries.Add(new(infraId, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"));
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore parse errors
+                logger.LogWarning(ex, "Failed to parse InfraContainerID from pod inspect output.");
             }
         }
 
@@ -762,7 +766,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
-        await podmanRunner.RunAsync(["pod", "start", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+        PodmanCommandResult podStart = await podmanRunner.RunAsync(["pod", "start", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+        if (podStart.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Failed to start egress pod '{EgressPodName}' (rc {podStart.ExitCode}): {podStart.StdErr}");
+        }
     }
 
     private async Task EnsureInfraContainerCreatedAsync(
@@ -870,7 +878,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
         }, token);
     }
 
-    private async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    internal async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
         // 1. Compare running containers to registry
         PodmanCommandResult psResult = await podmanRunner
@@ -882,7 +890,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
             return;
         }
 
-        var liveCids = new HashSet<string>(StringComparer.Ordinal);
+        var liveCids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cidByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(psResult.StdOut))
         {
             try
@@ -892,12 +901,34 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
                 {
                     foreach (JsonElement container in doc.RootElement.EnumerateArray())
                     {
-                        if (container.TryGetProperty("Id", out JsonElement idElem))
+                        string? cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() : null;
+                        if (string.IsNullOrWhiteSpace(cid))
                         {
-                            string? cid = idElem.GetString();
-                            if (!string.IsNullOrWhiteSpace(cid))
+                            continue;
+                        }
+
+                        liveCids.Add(cid);
+
+                        if (container.TryGetProperty("Names", out JsonElement namesElem))
+                        {
+                            if (namesElem.ValueKind == JsonValueKind.Array)
                             {
-                                liveCids.Add(cid);
+                                foreach (JsonElement nameItem in namesElem.EnumerateArray())
+                                {
+                                    string? name = nameItem.GetString();
+                                    if (!string.IsNullOrWhiteSpace(name))
+                                    {
+                                        cidByName[name.TrimStart('/')] = cid;
+                                    }
+                                }
+                            }
+                            else if (namesElem.ValueKind == JsonValueKind.String)
+                            {
+                                string? name = namesElem.GetString();
+                                if (!string.IsNullOrWhiteSpace(name))
+                                {
+                                    cidByName[name.TrimStart('/')] = cid;
+                                }
                             }
                         }
                     }
@@ -909,15 +940,124 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
             }
         }
 
-        // Deregister dead containers
+        // Deregister dead containers (matching both canonical hex container IDs and pre-start registered names).
         foreach (RegistryEntry entry in registry.GetAll())
         {
-            if (!liveCids.Contains(entry.ContainerId))
+            if (liveCids.Contains(entry.ContainerId))
             {
-                logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
-                registry.Deregister(entry.Ip, entry.ContainerId);
+                continue;
+            }
+
+            if (cidByName.TryGetValue(entry.ContainerId, out string? actualCid))
+            {
+                registry.UpdateContainerId(entry.Ip, entry.ContainerId, actualCid);
+                continue;
+            }
+
+            logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
+            registry.Deregister(entry.Ip, entry.ContainerId);
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> DiscoverUpstreamDnsIpsAsync(CancellationToken cancellationToken)
+    {
+        var results = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void TryAddCandidate(string? ipText)
+        {
+            if (string.IsNullOrWhiteSpace(ipText))
+            {
+                return;
+            }
+
+            if (!System.Net.IPAddress.TryParse(ipText.Trim(), out System.Net.IPAddress? parsed)
+                || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                return;
+            }
+
+            byte[] b = parsed.GetAddressBytes();
+            if (b[0] == 127 || (b[0] == 10 && b[1] == 247) || (b[0] == 169 && b[1] == 254))
+            {
+                return;
+            }
+
+            string normalized = parsed.ToString();
+            if (seen.Add(normalized))
+            {
+                results.Add(normalized);
             }
         }
+
+        try
+        {
+            PodmanCommandResult netInspect = await podmanRunner
+                .RunAsync(["network", "inspect", OutsideNetworkName], 10, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (netInspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(netInspect.StdOut))
+            {
+                using JsonDocument doc = JsonDocument.Parse(netInspect.StdOut);
+                JsonElement netElem = doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
+                    ? doc.RootElement[0]
+                    : doc.RootElement;
+
+                if (netElem.TryGetProperty("subnets", out JsonElement subnets) && subnets.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement subnet in subnets.EnumerateArray())
+                    {
+                        if (subnet.TryGetProperty("gateway", out JsonElement gwElem))
+                        {
+                            TryAddCandidate(gwElem.GetString());
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort network gateway inspection
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            foreach (string resolvPath in new[] { "/run/systemd/resolve/resolv.conf", "/etc/resolv.conf" })
+            {
+                try
+                {
+                    if (!File.Exists(resolvPath))
+                    {
+                        continue;
+                    }
+
+                    string[] lines = await File.ReadAllLinesAsync(resolvPath, cancellationToken).ConfigureAwait(false);
+                    foreach (string line in lines)
+                    {
+                        string trimmed = line.Trim();
+                        if (trimmed.StartsWith("nameserver", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string[] parts = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                            if (parts.Length >= 2)
+                            {
+                                TryAddCandidate(parts[1]);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort host resolver read
+                }
+            }
+        }
+
+        if (results.Count == 0)
+        {
+            TryAddCandidate("10.248.0.1");
+        }
+
+        return results;
     }
 
     private static string GetStringProperty(JsonElement element, string propertyName)

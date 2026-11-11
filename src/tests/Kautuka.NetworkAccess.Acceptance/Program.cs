@@ -7,7 +7,7 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
-using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 
 using NacController = Kautuka.NetworkAccessController.NetworkAccessController;
 
@@ -26,7 +26,26 @@ public sealed record AcceptanceObservation(
 [JsonSerializable(typeof(AcceptanceObservation))]
 [JsonSerializable(typeof(List<AcceptanceObservation>))]
 [JsonSerializable(typeof(InfraAllowlistDocument))]
+[JsonSerializable(typeof(ProductionProofReport))]
 internal sealed partial class AcceptanceJsonContext : JsonSerializerContext;
+
+public sealed record ProductionProofReport(
+    [property: JsonPropertyName("generatedAtUtc")] DateTimeOffset GeneratedAtUtc,
+    [property: JsonPropertyName("gitSha")] string GitSha,
+    [property: JsonPropertyName("platform")] string Platform,
+    [property: JsonPropertyName("podmanVersion")] string PodmanVersion,
+    [property: JsonPropertyName("envoyVersion")] string EnvoyVersion,
+    [property: JsonPropertyName("corednsVersion")] string CoreDnsVersion,
+    [property: JsonPropertyName("kernelVersion")] string KernelVersion,
+    [property: JsonPropertyName("egressManagerGateOpen")] bool EgressManagerGateOpen,
+    [property: JsonPropertyName("canaryVerificationPassed")] bool CanaryVerificationPassed,
+    [property: JsonPropertyName("upstreamDnsRule")] string UpstreamDnsRule,
+    [property: JsonPropertyName("pendingCardId")] string PendingCardId,
+    [property: JsonPropertyName("pendingCardDestination")] string PendingCardDestination,
+    [property: JsonPropertyName("createdRuleId")] string CreatedRuleId,
+    [property: JsonPropertyName("createdRuleDestination")] string CreatedRuleDestination,
+    [property: JsonPropertyName("observations")] IReadOnlyList<AcceptanceObservation> Observations,
+    [property: JsonPropertyName("summary")] string Summary);
 
 public static class AcceptanceHarness
 {
@@ -94,6 +113,7 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        ArgumentNullException.ThrowIfNull(args);
         Console.WriteLine("Kautuka NAC v7 Acceptance Suite");
         Console.WriteLine("Enforcing Ground Rule G9: observed values and computed negative-control flips only.");
 
@@ -105,6 +125,19 @@ public static class Program
         }
 
         AcceptanceHarness.GetAll();
+        int prodIdx = Array.FindIndex(args, a => string.Equals(a, "--prod-run", StringComparison.OrdinalIgnoreCase));
+        if (prodIdx >= 0)
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                await Console.Error.WriteLineAsync("--prod-run mode requires Linux with rootless Podman.").ConfigureAwait(false);
+                return 1;
+            }
+
+            string? outPath = prodIdx + 1 < args.Length ? args[prodIdx + 1] : null;
+            return await RunProductionTopologyProofAsync(outPath).ConfigureAwait(false);
+        }
+
         if (!args.Contains("--live", StringComparer.OrdinalIgnoreCase))
         {
             Console.WriteLine("Harness self-test verified G9 enforcement. Pass --live on Linux rootless Podman to execute live container & Envoy v1.40.2 proofs.");
@@ -207,13 +240,14 @@ public static class Program
 
         var allocator = new WorkloadAddressAllocator(Path.Combine(stateDir, "ip-cursor.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
+        using ILoggerFactory loggerFactory = LoggerFactory.Create(static b => b.AddSimpleConsole());
         var topology = new EgressTopologyManager(
             podman,
             allocator,
             verifier,
             registry,
             stateDir,
-            NullLogger<EgressTopologyManager>.Instance,
+            loggerFactory.CreateLogger<EgressTopologyManager>(),
             envoySocketHostDir: socketDir,
             hookStateDirectory: nacStateDir);
         await using var topologyScope = topology.ConfigureAwait(false);
@@ -563,6 +597,54 @@ public static class Program
         return stdOut;
     }
 
+    private static async Task<string> RunPodNftListEgressAsync(string containerName)
+    {
+        int pid = await InspectContainerPidAsync(containerName).ConfigureAwait(false);
+        var (code, stdOut, stdErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", pid.ToString(CultureInfo.InvariantCulture), "-n", "nft", "-j", "list", "table", "ip", "kautuka_egress"]).ConfigureAwait(false);
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"nsenter egress nft failed (rc {code}): {stdErr}");
+        }
+        return stdOut;
+    }
+
+    private static long ExtractNftCommentCounterPackets(string nftJson, string commentTag)
+    {
+        using JsonDocument doc = JsonDocument.Parse(nftJson);
+        if (!doc.RootElement.TryGetProperty("nftables", out JsonElement arr) || arr.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+
+        long packets = 0;
+        foreach (JsonElement item in arr.EnumerateArray())
+        {
+            if (!item.TryGetProperty("rule", out JsonElement rule))
+            {
+                continue;
+            }
+
+            if (!rule.TryGetProperty("comment", out JsonElement cElem)
+                || !string.Equals(cElem.GetString(), commentTag, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (rule.TryGetProperty("expr", out JsonElement expr) && expr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement e in expr.EnumerateArray())
+                {
+                    if (e.TryGetProperty("counter", out JsonElement cnt) && cnt.TryGetProperty("packets", out JsonElement pkts))
+                    {
+                        packets += pkts.GetInt64();
+                    }
+                }
+            }
+        }
+
+        return packets;
+    }
+
     private static async Task RunBashAsync(string script)
     {
         var (code, _, stdErr) = await ExecAsync("bash", ["-lc", script]).ConfigureAwait(false);
@@ -574,6 +656,278 @@ public static class Program
 
     private static int CountLines(string path)
         => File.Exists(path) ? File.ReadAllLines(path).Count(l => !string.IsNullOrWhiteSpace(l)) : 0;
+
+    private static async Task<int> RunProductionTopologyProofAsync(string? outputReportPath)
+    {
+        string repoRoot = FindRepoRoot();
+        string baseTmp = Directory.Exists("/var/tmp") ? "/var/tmp" : Path.GetTempPath();
+        string tempRoot = Path.Combine(baseTmp, $"kautuka-nac-prod-{Guid.NewGuid():N}"[..24]);
+        string xdgState = Path.Combine(tempRoot, "xdg-state");
+        string stateDir = Path.Combine(tempRoot, "manager-nac");
+        string socketDir = Path.Combine(tempRoot, "sock");
+        string hooksDir = Path.Combine(tempRoot, "hooks.d");
+        Directory.CreateDirectory(xdgState);
+        Directory.CreateDirectory(stateDir);
+        Directory.CreateDirectory(socketDir);
+        Directory.CreateDirectory(hooksDir);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(socketDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        Environment.SetEnvironmentVariable("XDG_STATE_HOME", xdgState);
+        string nacStateDir = Path.Combine(xdgState, "kautuka", "nac");
+        Directory.CreateDirectory(nacStateDir);
+
+        string hookSrc = Path.Combine(repoRoot, "scripts", "nac", "kautuka_hook.py");
+        string hookPath = Path.Combine(hooksDir, "kautuka_hook.py");
+        File.Copy(hookSrc, hookPath, overwrite: true);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(hookPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        string hookWrapper = Path.Combine(hooksDir, "kautuka_hook_wrapper.sh");
+        await File.WriteAllTextAsync(hookWrapper, $"#!/bin/bash\nexport XDG_STATE_HOME='{xdgState}'\nexec python3 '{hookPath}' \"$@\"\n").ConfigureAwait(false);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(hookWrapper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        string hookJson = $$"""
+        {
+          "version": "1.0.0",
+          "hook": { "path": "{{hookWrapper}}" },
+          "when": { "always": true },
+          "stages": ["createRuntime"]
+        }
+        """;
+        await File.WriteAllTextAsync(Path.Combine(hooksDir, "kautuka_hook.json"), hookJson).ConfigureAwait(false);
+
+        string homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        string containersConfDir = Path.Combine(homeDir, ".config", "containers", "containers.conf.d");
+        Directory.CreateDirectory(containersConfDir);
+        string dropInPath = Path.Combine(containersConfDir, "50-kautuka-nac.conf");
+        string? previousDropIn = File.Exists(dropInPath) ? await File.ReadAllTextAsync(dropInPath).ConfigureAwait(false) : null;
+        await File.WriteAllTextAsync(dropInPath, $"[engine]\nhooks_dir = [\"{hooksDir}\"]\n").ConfigureAwait(false);
+
+        string wlName = $"kautuka-prod-wl-{Guid.NewGuid():N}"[..22];
+        var podman = new PodmanCommandRunner();
+        var registry = new WorkloadRegistry();
+        using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
+        using var auditRing = new NetworkAccessAuditRing(Path.Combine(stateDir, "audit.jsonl"));
+        var controller = new NacController(policyStore, registry, auditRing);
+        var allocator = new WorkloadAddressAllocator(Path.Combine(stateDir, "ip-cursor.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        using ILoggerFactory loggerFactory = LoggerFactory.Create(static b => b.AddSimpleConsole());
+        var topology = new EgressTopologyManager(
+            podman,
+            allocator,
+            verifier,
+            registry,
+            stateDir,
+            loggerFactory.CreateLogger<EgressTopologyManager>(),
+            envoySocketHostDir: socketDir,
+            hookStateDirectory: nacStateDir);
+        await using var topologyScope = topology.ConfigureAwait(false);
+
+        string sockPath = Path.Combine(socketDir, "envoy.sock");
+        string lockPath = Path.Combine(socketDir, "networkaccess.lock");
+        var authHost = EnvoyAuthorizationHost.Create(
+            controller,
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = sockPath,
+                LockFilePath = lockPath,
+            });
+        await using var authHostScope = authHost.ConfigureAwait(false);
+
+        try
+        {
+            // Clean any leftover production-named pod/networks before initializing fresh topology
+            await ExecAsync("podman", ["rm", "-f", wlName]).ConfigureAwait(false);
+            await ExecAsync("podman", ["pod", "rm", "-f", EgressTopologyManager.EgressPodName]).ConfigureAwait(false);
+            await ExecAsync("podman", ["network", "rm", "-f", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName]).ConfigureAwait(false);
+
+            await authHost.StartAsync(CancellationToken.None).ConfigureAwait(false);
+            await topology.InitializeAsync(registry, isWindowsHostNativeDev: false, decisionEndpointIp: null, includeLanGrants: false, CancellationToken.None).ConfigureAwait(false);
+
+            if (!topology.IsStartupGateOpen)
+            {
+                throw new InvalidOperationException("EgressTopologyManager startup gate remained closed after InitializeAsync.");
+            }
+
+            string boundaryPath = Path.Combine(stateDir, "nac", "boundary.nft");
+            string boundaryText = await File.ReadAllTextAsync(boundaryPath).ConfigureAwait(false);
+            string dnsUpstreamLine = boundaryText
+                .Split('\n')
+                .Select(static l => l.Trim())
+                .FirstOrDefault(static l => l.Contains("comment \"dns_upstream\"", StringComparison.Ordinal))
+                ?? string.Empty;
+
+            // Launch real hardened workload container via WorkloadContainerSpec.Render()
+            string wlIp = allocator.AllocateNextIp(registry);
+            const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+            var wlSpec = new WorkloadContainerSpec(wlName, baseImage, wlIp)
+            {
+                UserId = "u1",
+                AgentId = "a1",
+                ConnectorId = "conn-web",
+                ExecContext = "isolated",
+                Kind = "connector",
+                Systemwide = false,
+                Egress = "normal",
+                Persistent = true,
+                StartupGateOpen = topology.IsStartupGateOpen,
+                IsBraked = policyStore.GetBrakeSnapshot().IsUserBraked("u1"),
+            };
+
+            registry.Register(new RegistryEntry(wlIp, "u1", "a1", wlName, "connector", "conn-web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            PodmanCommandResult startRes = await podman.RunAsync(wlSpec.Render(), 30, CancellationToken.None).ConfigureAwait(false);
+            if (startRes.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to start production workload '{wlName}': {startRes.StdErr}");
+            }
+
+            // v7-29: Post-start verifier via rootless podman unshare nsenter
+            WorkloadVerificationResult verResult = await verifier.VerifyWorkloadAsync(wlName, wlIp, null, registry, CancellationToken.None).ConfigureAwait(false);
+
+            // v7-28: ReconcileOnceAsync preserves running container (even if previously registered by name, now promoted to hex ID)
+            await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
+            bool stillRegisteredWhileRunning = registry.TryGetByIp(wlIp, out RegistryEntry? afterReconcileEntry);
+
+            // Production flow Step A: Denied request -> Envoy asks Manager -> pending card created!
+            var (denyRc, denyOut, denyErr) = await ExecAsync("podman", ["exec", wlName, "curl", "-v", "--max-time", "8", "https://example.com/"]).ConfigureAwait(false);
+            string deniedOutput = denyRc == 0 ? $"ALLOWED:{denyOut.Trim()}" : "BLOCKED";
+            await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
+
+            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            NetworkAccessRequest? card = policyStore.ListRequests(admin).Requests
+                .Select(static v => v.Request)
+                .FirstOrDefault(r => r.Status == "pending" && string.Equals(r.Destination, "example.com", StringComparison.OrdinalIgnoreCase));
+            if (card is null)
+            {
+                var (_, psOut, _) = await ExecAsync("podman", ["ps", "-a", "--format", "{{.Names}} {{.Status}}"]).ConfigureAwait(false);
+                var (_, envState, _) = await ExecAsync("podman", ["inspect", "kautuka-egress-envoy", "--format", "State={{json .State}} Cmd={{json .Config.Cmd}}"]).ConfigureAwait(false);
+                var (_, envLogs, envErr) = await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                var (_, dnsLogs, dnsErr) = await ExecAsync("podman", ["logs", "kautuka-egress-dns"]).ConfigureAwait(false);
+                string hookLogTail = File.Exists(Path.Combine(nacStateDir, "hook.log")) ? await File.ReadAllTextAsync(Path.Combine(nacStateDir, "hook.log")).ConfigureAwait(false) : "<no hook.log>";
+                throw new InvalidOperationException($"Expected pending approval card for 'example.com' was not recorded by Manager. denyRc={denyRc} denyOut={denyOut} denyErr={denyErr}\nps:\n{psOut}\nenvoyInspect:{envState}\nenvoy:{envLogs}\nenvoyErr:{envErr}\ndns:{dnsLogs}\ndnsErr:{dnsErr}\nhook.log:\n{hookLogTail}");
+            }
+
+            // Production flow Step B: Decide card -> rule created -> retry through Envoy + CoreDNS upstream succeeds!
+            string dnsCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            DecideRequestResult decision = policyStore.DecideRequest(admin, card.Id, allow: true, scope: "agent", allowLan: false, expectedRevision: policyStore.Revision);
+            var (allowRc, allowOut, allowErr) = await ExecAsync("podman", ["exec", wlName, "curl", "-v", "--max-time", "12", "https://example.com/"]).ConfigureAwait(false);
+            if (allowRc != 0)
+            {
+                var (_, envLogs, envLogErr) = await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                var (_, dnsLogs, dnsLogErr) = await ExecAsync("podman", ["logs", "kautuka-egress-dns"]).ConfigureAwait(false);
+                var (_, dnsResolv, _) = await ExecAsync("podman", ["exec", "kautuka-egress-dns", "cat", "/etc/resolv.conf"]).ConfigureAwait(false);
+                string nftAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                throw new InvalidOperationException($"Retry after Allow failed (rc {allowRc}): {allowErr}\ndnsResolv:\n{dnsResolv}\nenvoyLogs:\n{envLogs}{envLogErr}\ndnsLogs:\n{dnsLogs}{dnsLogErr}\nnft:\n{nftAfter}");
+            }
+            string allowedBody = allowOut;
+            string dnsCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            bool hasExampleDomain = allowedBody.Contains("Example Domain", StringComparison.OrdinalIgnoreCase);
+            long dnsPacketsBefore = ExtractNftCommentCounterPackets(dnsCountersBefore, "dns_upstream");
+            long dnsPacketsAfter = ExtractNftCommentCounterPackets(dnsCountersAfter, "dns_upstream");
+            long dnsDelta = dnsPacketsAfter - dnsPacketsBefore;
+
+            // v7-28 NC: Stop & remove workload container -> ReconcileOnceAsync deregisters it
+            await ExecPodmanAsync(["rm", "-f", wlName]).ConfigureAwait(false);
+            await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
+            bool deregisteredAfterRm = !registry.TryGetByIp(wlIp, out _);
+
+            string allowedObs = $"ALLOWED:card={card.Destination}:{card.Port}:rule={decision.Rule.Destination}:body={hasExampleDomain}";
+            var observations = new List<AcceptanceObservation>
+            {
+                AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
+                AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"{stillRegisteredWhileRunning}:{afterReconcileEntry?.ContainerId?.Length == 64}", "True:True", deregisteredAfterRm ? "DEREGISTERED_ON_RM" : "STILL_PRESENT", "DEREGISTERED_ON_RM"),
+                AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", "TAMPER_PENDING", "TAMPER_CAUGHT_AND_KILLED"),
+                AcceptanceHarness.Record("PROD_V7_33_DNS_UPSTREAM", $"rule={!string.IsNullOrEmpty(dnsUpstreamLine)}:delta_gt0={dnsDelta > 0}:body={hasExampleDomain}", "rule=True:delta_gt0=True:body=True", dnsPacketsBefore == 0 ? "NO_UPSTREAM_PACKETS_BEFORE_RULE" : $"PRE_RULE_PACKETS={dnsPacketsBefore}", "NO_UPSTREAM_PACKETS_BEFORE_RULE"),
+            };
+
+            // Run real tampering negative control for v7-29 verifier (C6)
+            string wl2Name = wlName + "-nc";
+            string wl2Ip = allocator.AllocateNextIp(registry);
+            var wl2Spec = wlSpec with { ContainerName = wl2Name, AllocatedIp = wl2Ip };
+            registry.Register(new RegistryEntry(wl2Ip, "u1", "a1", wl2Name, "connector", "conn-web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            PodmanCommandResult start2Res = await podman.RunAsync(wl2Spec.Render(), 30, CancellationToken.None).ConfigureAwait(false);
+            if (start2Res.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to start NC workload '{wl2Name}': {start2Res.StdErr}");
+            }
+            int pid2 = await InspectContainerPidAsync(wl2Name).ConfigureAwait(false);
+            await RunBashAsync($"podman unshare nsenter -t {pid2} -n nft add rule inet kautuka_workload output accept").ConfigureAwait(false);
+            bool verifierCaughtTamper = false;
+            try
+            {
+                await verifier.VerifyWorkloadAsync(wl2Name, wl2Ip, null, registry, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException)
+            {
+                verifierCaughtTamper = true;
+            }
+            observations[2] = AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED");
+
+            var (_, podmanVer, _) = await ExecAsync("podman", ["--version"]).ConfigureAwait(false);
+            var (_, kernelVer, _) = await ExecAsync("uname", ["-r"]).ConfigureAwait(false);
+            var (_, envoyVer, _) = await ExecAsync("podman", ["run", "--rm", EgressTopologyManager.EnvoyPinnedImage, "--version"]).ConfigureAwait(false);
+            var (_, corednsVer, _) = await ExecAsync("podman", ["run", "--rm", EgressTopologyManager.CoreDnsPinnedImage, "-version"]).ConfigureAwait(false);
+            var (_, gitSha, _) = await ExecAsync("git", ["-C", repoRoot, "rev-parse", "--short", "HEAD"]).ConfigureAwait(false);
+
+            int failedCount = observations.Count(o => o.Outcome != "PASS");
+            var report = new ProductionProofReport(
+                DateTimeOffset.UtcNow,
+                gitSha.Trim(),
+                Environment.OSVersion.VersionString,
+                podmanVer.Trim(),
+                envoyVer.Trim().Split('\n')[0].Trim(),
+                corednsVer.Trim().Replace('\n', ' '),
+                kernelVer.Trim(),
+                topology.IsStartupGateOpen,
+                verResult.Passed,
+                dnsUpstreamLine,
+                card.Id,
+                $"{card.Destination}:{card.Port}",
+                decision.Rule.Id,
+                $"{decision.Rule.Destination}:{decision.Rule.Port}",
+                observations,
+                $"{observations.Count - failedCount}/{observations.Count} PASS, {failedCount} FAIL");
+
+            string targetReport = string.IsNullOrWhiteSpace(outputReportPath)
+                ? Path.Combine(tempRoot, "nac-prod-report.json")
+                : Path.GetFullPath(outputReportPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(targetReport)!);
+            await File.WriteAllTextAsync(targetReport, JsonSerializer.Serialize(report, AcceptanceJsonContext.Default.ProductionProofReport)).ConfigureAwait(false);
+            Console.WriteLine($"Production rootless Podman proof report written to {targetReport}");
+            Console.WriteLine($"SUMMARY: {report.Summary}");
+            return failedCount == 0 ? 0 : 1;
+        }
+        finally
+        {
+            await ExecAsync("podman", ["rm", "-f", wlName, wlName + "-nc"]).ConfigureAwait(false);
+            await ExecAsync("podman", ["pod", "rm", "-f", EgressTopologyManager.EgressPodName]).ConfigureAwait(false);
+            await ExecAsync("podman", ["network", "rm", "-f", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName]).ConfigureAwait(false);
+            if (previousDropIn is not null)
+            {
+                await File.WriteAllTextAsync(dropInPath, previousDropIn).ConfigureAwait(false);
+            }
+            else if (File.Exists(dropInPath))
+            {
+                File.Delete(dropInPath);
+            }
+            try
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+            catch
+            {
+                // Best effort cleanup
+            }
+        }
+    }
 
     private static async Task BestEffortCleanupAsync(string podName, string[] containers, string[] networks)
     {

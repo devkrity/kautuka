@@ -31,6 +31,8 @@ public interface IWorkloadRegistry
 
     bool Deregister(string ip, string? containerId = null);
 
+    bool UpdateContainerId(string ip, string previousContainerId, string actualContainerId) => false;
+
     void Rebuild(IEnumerable<RegistryEntry> entries);
 
     bool TryGetByIp(string? ip, out RegistryEntry? entry);
@@ -96,6 +98,38 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             return entriesByIp.TryRemove(normalizedIp, out _);
+        }
+    }
+
+    public bool UpdateContainerId(string ip, string previousContainerId, string actualContainerId)
+    {
+        if (string.IsNullOrWhiteSpace(previousContainerId)
+            || string.IsNullOrWhiteSpace(actualContainerId)
+            || !NetworkDestinationNormalizer.TryNormalizeIpv4(ip, out string normalizedIp, out _))
+        {
+            return false;
+        }
+
+        string trimmedActual = actualContainerId.Trim();
+        lock (writeLock)
+        {
+            if (!entriesByIp.TryGetValue(normalizedIp, out RegistryEntry? existing))
+            {
+                return false;
+            }
+
+            if (string.Equals(existing.ContainerId, trimmedActual, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!string.Equals(existing.ContainerId, previousContainerId.Trim(), StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            entriesByIp[normalizedIp] = existing with { ContainerId = trimmedActual };
+            return true;
         }
     }
 

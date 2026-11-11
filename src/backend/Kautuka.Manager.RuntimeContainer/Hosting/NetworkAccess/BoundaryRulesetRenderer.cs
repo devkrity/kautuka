@@ -71,11 +71,14 @@ public static class BoundaryRulesetRenderer
     /// </summary>
     public static string RenderBoundaryNft(
         bool includeLanGrants = false,
-        string? decisionEndpointIp = null)
+        string? decisionEndpointIp = null,
+        IEnumerable<string>? upstreamDnsIps = null)
     {
         string decisionEndpointRule = !string.IsNullOrWhiteSpace(decisionEndpointIp)
             ? $"    ip daddr {decisionEndpointIp.Trim()} tcp dport 50051 counter accept comment \"decision_endpoint\""
             : string.Empty;
+
+        string dnsUpstreamRule = BuildUpstreamDnsNftRule(upstreamDnsIps);
 
         string lanApprovedRule = includeLanGrants
             ? "    ip saddr 192.0.0.8 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != 10.247.0.0/16 counter accept comment \"lan_approved\""
@@ -109,6 +112,10 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ct state established,related accept");
         sb.AppendLine("    oifname \"lo\" ip daddr 127.0.0.1 meta l4proto { tcp, udp } th dport 10053 accept");
         sb.AppendLine("    oifname \"lo\" ip daddr 127.0.0.1 tcp dport { 15002, 15003 } accept");
+        if (!string.IsNullOrEmpty(dnsUpstreamRule))
+        {
+            sb.AppendLine(dnsUpstreamRule);
+        }
         if (!string.IsNullOrEmpty(decisionEndpointRule))
         {
             sb.AppendLine(decisionEndpointRule);
@@ -132,6 +139,49 @@ public static class BoundaryRulesetRenderer
         sb.Append("}\n");
 
         return sb.ToString();
+    }
+
+    private static string BuildUpstreamDnsNftRule(IEnumerable<string>? upstreamDnsIps)
+    {
+        if (upstreamDnsIps is null)
+        {
+            return string.Empty;
+        }
+
+        var validated = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string raw in upstreamDnsIps)
+        {
+            if (string.IsNullOrWhiteSpace(raw)
+                || !System.Net.IPAddress.TryParse(raw.Trim(), out System.Net.IPAddress? parsed)
+                || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                continue;
+            }
+
+            byte[] b = parsed.GetAddressBytes();
+            if (b[0] == 127 || (b[0] == 10 && b[1] == 247) || (b[0] == 169 && b[1] == 254))
+            {
+                continue;
+            }
+
+            string normalized = parsed.ToString();
+            if (seen.Add(normalized))
+            {
+                validated.Add(normalized);
+            }
+        }
+
+        if (validated.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        string daddrExpr = validated.Count == 1
+            ? validated[0]
+            : "{ " + string.Join(", ", validated) + " }";
+
+        return $"    ip daddr {daddrExpr} meta l4proto {{ tcp, udp }} th dport 53 counter accept comment \"dns_upstream\"";
     }
 
     /// <summary>

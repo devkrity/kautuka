@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 
+using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
@@ -442,5 +443,132 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         string mutatedConfig = envoyConfig.Replace("failure_mode_allow: false", "failure_mode_allow: true", StringComparison.Ordinal);
         Assert.Contains("failure_mode_allow: true", mutatedConfig, StringComparison.Ordinal);
         Assert.NotEqual(envoyConfig, mutatedConfig);
+    }
+
+    [Fact]
+    public async Task V7_28_ReconcileOnce_PreservesContainersRegisteredByNameAndPromotesToHexId_WithNegativeControl()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"nac-v728-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var registry = new WorkloadRegistry();
+            string containerName = "kautuka-sandbox-u1-a1";
+            string hexCid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            registry.Register(new RegistryEntry(
+                "10.247.1.10",
+                "u1",
+                "a1",
+                containerName,
+                "agent-sandbox",
+                null,
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            bool containerStillExists = true;
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                if (args.Count >= 2 && args[0] == "ps")
+                {
+                    string json = containerStillExists
+                        ? "[{\"Id\":\"" + hexCid + "\",\"Names\":[\"" + containerName + "\"]}]"
+                        : "[]";
+                    return Task.FromResult(new PodmanCommandResult(0, json, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+
+            var allocator = new WorkloadAddressAllocator(Path.Combine(tempRoot, "ip.json"));
+            var verifier = new WorkloadPostStartVerifier(podman);
+            await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempRoot);
+
+            await manager.ReconcileOnceAsync(registry, CancellationToken.None);
+
+            // Live workload registered by containerName MUST stay registered and promote to canonical hex ID without conflict.
+            Assert.True(registry.TryGetByIp("10.247.1.10", out RegistryEntry? promoted));
+            Assert.NotNull(promoted);
+            Assert.Equal(hexCid, promoted.ContainerId);
+            Assert.Equal(0, registry.RegistryConflicts);
+
+            // Negative Control (.NC): once Podman reports the container no longer exists, reconcile deregisters it.
+            containerStillExists = false;
+            await manager.ReconcileOnceAsync(registry, CancellationToken.None);
+            Assert.False(registry.TryGetByIp("10.247.1.10", out _));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
+    {
+        if (Environment.IsPrivilegedProcess)
+        {
+            return;
+        }
+
+        IReadOnlyList<string>? capturedArgs = null;
+        string goldenJson = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash("10.247.1.12");
+        string tmplJson = BoundaryRulesetRenderer.ResolveTemplate(null, "kautuka_workload.nft.json.tmpl")
+            .Replace("{{IP}}", "10.247.1.12", StringComparison.Ordinal);
+
+        bool returnMismatch = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            capturedArgs = args;
+            if (args.Count >= 2 && args[0] == "unshare" && args[1] == "nsenter")
+            {
+                string payload = returnMismatch
+                    ? "{\"nftables\":[{\"table\":{\"family\":\"inet\",\"name\":\"kautuka_workload\"}}]}"
+                    : tmplJson;
+                return Task.FromResult(new PodmanCommandResult(0, payload, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, "unexpected", ProcessTerminationReason.NonZeroExit));
+        });
+
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await verifier.VerifyNetnsRulesetAsync(4242, "10.247.1.12", CancellationToken.None);
+
+        Assert.NotNull(capturedArgs);
+        Assert.Equal(["unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "inet", "kautuka_workload"], capturedArgs);
+        Assert.False(string.IsNullOrEmpty(goldenJson));
+
+        // Negative Control (.NC): tampered/partial ruleset returned from podman unshare nsenter throws.
+        returnMismatch = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => verifier.VerifyNetnsRulesetAsync(4242, "10.247.1.12", CancellationToken.None));
+    }
+
+    [Fact]
+    public void V7_33_BoundaryNft_AllowsUpstreamDnsIpsBeforePrivateReject_WithNegativeControl()
+    {
+        string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(
+            includeLanGrants: false,
+            decisionEndpointIp: null,
+            upstreamDnsIps: ["10.248.0.1", "10.247.0.2", "127.0.0.1", "169.254.169.254"]);
+
+        int dnsRuleIdx = rendered.IndexOf("ip daddr 10.248.0.1 meta l4proto { tcp, udp } th dport 53 counter accept comment \"dns_upstream\"", StringComparison.Ordinal);
+        int privateRejectIdx = rendered.IndexOf("counter reject comment \"private_reject\"", StringComparison.Ordinal);
+
+        Assert.True(dnsRuleIdx > 0);
+        Assert.True(privateRejectIdx > dnsRuleIdx);
+        Assert.DoesNotContain("10.247.0.2 meta l4proto { tcp, udp } th dport 53 counter accept comment \"dns_upstream\"", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("127.0.0.1 meta l4proto { tcp, udp } th dport 53", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("169.254.169.254", rendered.Substring(0, privateRejectIdx), StringComparison.Ordinal);
+
+        // Negative Control (.NC): without upstreamDnsIps, dns_upstream rule is omitted and 10.248.0.1 hits private_reject (10.0.0.0/8).
+        string withoutDns = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, decisionEndpointIp: null, upstreamDnsIps: null);
+        Assert.DoesNotContain("comment \"dns_upstream\"", withoutDns, StringComparison.Ordinal);
     }
 }

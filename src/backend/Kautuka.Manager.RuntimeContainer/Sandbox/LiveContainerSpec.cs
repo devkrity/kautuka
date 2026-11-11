@@ -478,7 +478,7 @@ internal static class LiveContainerSpec
             && value.ValueKind == JsonValueKind.String
             && string.Equals(value.GetString(), "host", StringComparison.OrdinalIgnoreCase);
 
-    private static bool CapDropIncludesAll(JsonElement container, JsonElement host)
+    internal static bool CapDropIncludesAll(JsonElement container, JsonElement host)
     {
         // Podman expands --cap-drop ALL into its default capability names. Its
         // resolved sets are authoritative; an empty Go slice can serialize as null.
