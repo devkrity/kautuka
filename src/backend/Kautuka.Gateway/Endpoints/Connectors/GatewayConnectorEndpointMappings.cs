@@ -130,6 +130,7 @@ internal static class GatewayConnectorEndpointMappings
                 request = await MergeResolvedCredentialsAsync(request, user, savedConnector ? saved : null, credentialResolver, connectorOAuth, ct).ConfigureAwait(false);
             }
 
+            request.UserId ??= user.Id;
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
             if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
                 RemoteMcpAudit.Write(context, "connection.tested", user.Id,

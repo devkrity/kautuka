@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishAot>true</PublishAot>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
-    <NoWarn>$(NoWarn);CA1515;CA1848;CA1873;CA1031;CA1822;CA1054;CA1056</NoWarn>
+    <NoWarn>$(NoWarn);CA1515;CA1848;CA1873;CA1031;CA1822;CA1054;CA1056;CA1308</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,9 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Hosting\NetworkAccess\*.tmpl">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
+    <EmbeddedResource Include="Hosting\NetworkAccess\*.tmpl" />
   </ItemGroup>
 
   <ItemGroup>

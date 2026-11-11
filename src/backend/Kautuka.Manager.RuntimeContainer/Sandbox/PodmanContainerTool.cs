@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Globalization;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -14,16 +13,18 @@ namespace Kautuka.Manager.RuntimeContainer.Sandbox;
 /// Podman-backed sandbox tool for Linux appliance agent workspaces.
 /// </summary>
 public sealed class PodmanContainerTool(
-    PodmanCommandRunner podmanCommandRunner) : IContainerTool
+    PodmanCommandRunner podmanCommandRunner,
+    Hosting.NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
+    Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
+    Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null) : IContainerTool
 {
     private readonly ConcurrentDictionary<string, byte> primedWorkspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> driftNotes = new();
     private readonly AsyncKeyedLockPool containerLocks = new();
-    private const string managedLabel = "kautuka.managed=manager";
-    private const string roleLabel = "kautuka.role=agent";
-    private const string desiredVersionLabel = "kautuka.desired-version";
-    private const string specFingerprintLabel = "kautuka.spec-fingerprint";
     private readonly PodmanCommandRunner podmanCommandRunner = podmanCommandRunner;
+    private readonly Hosting.NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
+    private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
+    private readonly Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -217,8 +218,27 @@ public sealed class PodmanContainerTool(
             }
         }
 
+        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+
+        if (workloadRegistry is not null)
+        {
+            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+                allocatedIp,
+                context.UserId,
+                context.ScopeId,
+                containerName,
+                "agent-sandbox",
+                null,
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+        }
+
         ContainerExecutionResult createResult = await RunPodmanAsync(
-            BuildRunArguments(context, containerName),
+            BuildRunArguments(context, containerName, allocatedIp),
             context.DefaultTimeoutSeconds,
             cancellationToken,
             containerName,
@@ -226,11 +246,17 @@ public sealed class PodmanContainerTool(
 
         if (createResult.ExitCode != 0)
         {
+            workloadRegistry?.Deregister(allocatedIp, containerName);
             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
                 $"Podman run for container '{containerName}'",
                 createResult.ExitCode,
                 createResult.StdOut,
                 createResult.StdErr));
+        }
+
+        if (postStartVerifier is not null)
+        {
+            await postStartVerifier.VerifyWorkloadAsync(containerName, allocatedIp, compatProfile: null, registry: workloadRegistry, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);
@@ -480,6 +506,15 @@ public sealed class PodmanContainerTool(
                 removeResult.StdOut,
                 removeResult.StdErr));
         }
+
+        if (workloadRegistry is not null)
+        {
+            var existing = workloadRegistry.GetAll().FirstOrDefault(e => string.Equals(e.ContainerId, inspection.Session.ContainerName, StringComparison.Ordinal));
+            if (existing is not null)
+            {
+                workloadRegistry.Deregister(existing.Ip, inspection.Session.ContainerName);
+            }
+        }
     }
 
     private async Task<OciSandboxSession?> TryStartExistingContainerAsync(
@@ -533,73 +568,52 @@ public sealed class PodmanContainerTool(
         return current;
     }
 
-    private static List<string> BuildRunArguments(
+    private static List<string> BuildRunArguments(ContainerContext context, string containerName)
+        => BuildRunArguments(context, containerName, allocatedIp: null).ToList();
+
+    public static IReadOnlyList<string> BuildRunArguments(
         ContainerContext context,
-        string containerName)
+        string containerName,
+        string? allocatedIp = null)
     {
-        List<string> args =
-        [
-            "run",
-            "-d",
-            "--name", containerName,
-            "--label", managedLabel,
-            "--label", roleLabel,
-            "--label", $"{desiredVersionLabel}={context.DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
-            "--label", $"{specFingerprintLabel}={context.SpecFingerprint}",
-            "--cap-drop", "ALL",
-            "--workdir", context.ContainerWorkspacePath,
-            "--volume", $"{context.HostWorkspacePath}:{context.ContainerWorkspacePath}",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", "256",
-            "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid",
-            "--tmpfs", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777",
-            "--network", "kautuka-workload:ip=10.247.1.1",
-            "--dns", "10.247.0.2",
-            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
-            "--annotation", "io.kautuka.role=workload",
-            "--label", $"io.kautuka.user={context.UserId ?? string.Empty}",
-            "--label", $"io.kautuka.agent={context.ScopeId ?? string.Empty}",
-            "--label", "io.kautuka.connector=",
-            "--label", "io.kautuka.exec-context=agent-sandbox",
-            "--label", "io.kautuka.kind=agent-sandbox",
-            "--label", "io.kautuka.systemwide=false",
-            "--label", "io.kautuka.egress=normal",
-            "--label", "io.kautuka.compat=",
-            "--add-host", "kautuka-pkgs-proxy:10.247.0.3"
-        ];
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
 
-        Hosting.NetworkAccess.WorkloadContainerSpec.AssertAllowedOptions(args, null, null);
-
-        if (context.DefaultCpuLimit > 0)
-        {
-            args.Add("--cpus");
-            args.Add(context.DefaultCpuLimit.ToString(CultureInfo.InvariantCulture));
-        }
-
-        if (!string.IsNullOrWhiteSpace(context.DefaultMemoryLimit))
-        {
-            args.Add("--memory");
-            args.Add(context.DefaultMemoryLimit);
-        }
-
+        string ip = allocatedIp ?? "10.247.1.1";
+        var envList = new List<KeyValuePair<string, string>>();
         foreach (KeyValuePair<string, string> kv in context.ContainerEnvironment)
         {
             if (!string.IsNullOrWhiteSpace(kv.Value))
             {
-                args.Add("--env");
-                args.Add(kv.Key);
+                // Pass --env KEY (without value) so Podman inherits values from ProcessStartInfo.Environment without CLI exposure.
+                envList.Add(new KeyValuePair<string, string>(kv.Key, string.Empty));
             }
         }
 
-        // Qualify short-name images with 'localhost/' so Podman resolves them from local
-        // storage without requiring unqualified-search-registries in registries.conf.
-        args.Add(QualifyLocalImage(context.Image));
-        args.Add("sh");
-        args.Add("-lc");
-        args.Add("tail -f /dev/null");
+        string image = QualifyLocalImage(context.Image);
 
-        return args;
+        var spec = new Hosting.NetworkAccess.WorkloadContainerSpec(containerName, image, ip)
+        {
+            UserId = context.UserId ?? string.Empty,
+            AgentId = context.ScopeId ?? string.Empty,
+            ExecContext = "agent-sandbox",
+            Kind = "agent-sandbox",
+            Systemwide = false,
+            Egress = "normal",
+            Persistent = true,
+            WorkingDirectory = context.ContainerWorkspacePath,
+            Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath)],
+            TmpfsMounts = ["/tmp:rw,noexec,nosuid", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777"],
+            DesiredStateVersion = context.DesiredStateVersion,
+            SpecFingerprint = context.SpecFingerprint,
+            ManagerRole = "agent",
+            CpuLimit = context.DefaultCpuLimit,
+            MemoryLimit = !string.IsNullOrWhiteSpace(context.DefaultMemoryLimit) ? context.DefaultMemoryLimit : null,
+            PidsLimit = 256,
+            Environment = envList,
+        };
+
+        return spec.Render().ToList();
     }
 
     /// <summary>

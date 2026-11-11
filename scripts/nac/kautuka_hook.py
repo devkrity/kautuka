@@ -66,7 +66,7 @@ def is_owner_live(entry):
     pid = entry.get("pid")
     expected_inode = entry.get("inode")
     expected_ticks = entry.get("start_ticks")
-    if not pid or pid <= 0:
+    if not pid or not isinstance(pid, int) or pid <= 0:
         return False
     try:
         st_net = os.stat(f"/proc/{pid}/ns/net")
@@ -78,6 +78,31 @@ def is_owner_live(entry):
                 return False
         return True
     except Exception:
+        if not os.path.exists("/proc"):
+            if sys.platform == "win32":
+                # Never call os.kill(pid, 0) on Windows: signal 0 maps to CTRL_C_EVENT / process termination.
+                try:
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                    STILL_ACTIVE = 259
+                    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+                    if not handle:
+                        return False
+                    try:
+                        exit_code = ctypes.c_uint(0)
+                        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+                            return False
+                        return exit_code.value == STILL_ACTIVE
+                    finally:
+                        kernel32.CloseHandle(handle)
+                except Exception:
+                    return False
+            try:
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                return False
         return False
 
 
@@ -142,10 +167,8 @@ def read_owners_file(owners_path=OWNERS_FILE):
 
         live_owners = {}
         for ino, entry in owners.items():
-            if entry.get("pid"):
-                if is_owner_live(entry):
-                    live_owners[ino] = entry
-            else:
+            pid = entry.get("pid")
+            if pid and is_owner_live(entry):
                 live_owners[ino] = entry
 
         return live_owners, True, None
@@ -372,7 +395,78 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
     return ("allow", "workload_rules")
 
 
-def render_ruleset(ip, include_pkgs_proxy=True):
+def canonicalize_nft_json(nft_json_data, required_comments=None, required_workload_ip=None):
+    """
+    Strips transient runtime state (handle, metainfo, dynamic counter packet/byte counts),
+    verifies that all required comment tags and the workload IP are present,
+    and returns (canonical_json_string, canonical_hash).
+    """
+    if isinstance(nft_json_data, str):
+        root = json.loads(nft_json_data)
+    else:
+        root = nft_json_data
+
+    if isinstance(root, dict) and "nftables" in root:
+        nftables_list = root["nftables"]
+    elif isinstance(root, list):
+        nftables_list = root
+    else:
+        raise ValueError("Unexpected nftables JSON format")
+
+    found_comments = set()
+    found_workload_ip = [False]
+
+    def _canonicalize_item(item):
+        if isinstance(item, dict):
+            if "metainfo" in item:
+                return None
+            res = {}
+            for k in sorted(item.keys()):
+                if k == "handle":
+                    continue
+                v = item[k]
+                if k == "comment" and isinstance(v, str):
+                    found_comments.add(v.strip())
+                if k == "counter":
+                    res[k] = {"packets": 0, "bytes": 0}
+                    continue
+                if isinstance(v, str) and required_workload_ip and required_workload_ip in v:
+                    found_workload_ip[0] = True
+                canon_v = _canonicalize_item(v)
+                res[k] = canon_v
+            return res
+        elif isinstance(item, list):
+            res = []
+            for elem in item:
+                canon_elem = _canonicalize_item(elem)
+                if canon_elem is not None:
+                    res.append(canon_elem)
+            return res
+        else:
+            if isinstance(item, str) and required_workload_ip and required_workload_ip in item:
+                found_workload_ip[0] = True
+            return item
+
+    canonical_list = []
+    for elem in nftables_list:
+        c = _canonicalize_item(elem)
+        if c is not None:
+            canonical_list.append(c)
+
+    if required_comments:
+        for req in required_comments:
+            if req not in found_comments:
+                raise ValueError(f"Missing required comment tag '{req}'")
+
+    if required_workload_ip and not found_workload_ip[0]:
+        raise ValueError(f"Workload IP '{required_workload_ip}' not found in ruleset")
+
+    canonical_json = json.dumps(canonical_list, sort_keys=True, separators=(",", ":"))
+    canonical_hash = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return canonical_json, canonical_hash
+
+
+def render_ruleset(ip, include_pkgs_proxy=False):
     """
     Renders idempotent, atomic table inet kautuka_workload ruleset (Section 4.3.2).
     """
@@ -498,7 +592,7 @@ def main():
             sys.exit(0)
 
         workload_ip = ips[0]
-        rules_text = render_ruleset(workload_ip, include_pkgs_proxy=True)
+        rules_text = render_ruleset(workload_ip, include_pkgs_proxy=False)
         rules_sha = hashlib.sha256(rules_text.encode("utf-8")).hexdigest()
 
         apply_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-f", "-"]
@@ -515,7 +609,6 @@ def main():
             log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
             sys.exit(1)
 
-        output_str = vp.stdout
         expected_comments = [
             "input_drop",
             "ipv6_drop",
@@ -525,7 +618,15 @@ def main():
             "udp_drop",
             "final_drop",
         ]
-        if not all(comment in output_str for comment in expected_comments) or workload_ip not in output_str:
+
+        try:
+            _, canonical_hash = canonicalize_nft_json(
+                vp.stdout,
+                required_comments=expected_comments,
+                required_workload_ip=workload_ip,
+            )
+            rules_sha = canonical_hash
+        except Exception:
             dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
             log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
             sys.exit(1)
@@ -541,7 +642,9 @@ def main():
             try:
                 write_owners_file({str(inode): owner_entry})
             except Exception:
-                pass
+                dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+                log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "owners_write_failed", rules_sha, annotations)
+                sys.exit(1)
 
         dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
         log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "allow", "workload_rules", rules_sha, annotations)

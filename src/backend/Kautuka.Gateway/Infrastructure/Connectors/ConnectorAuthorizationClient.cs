@@ -1,6 +1,7 @@
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
+using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
@@ -19,7 +20,12 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
     private readonly HttpClient http;
     private readonly HttpMessageHandler? ownedHandler;
 
-    public ConnectorAuthorizationClient(HttpMessageHandler? handler = null)
+    public ConnectorAuthorizationClient(HttpMessageHandler handler)
+        : this(checker: null, handler)
+    {
+    }
+
+    public ConnectorAuthorizationClient(INetworkAccessChecker? checker = null, HttpMessageHandler? handler = null)
     {
         if (handler is null)
         {
@@ -27,8 +33,10 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
             {
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             };
-            ownedHandler = sockets;
-            http = new HttpClient(sockets, disposeHandler: false);
+            ownedHandler = checker is not null
+                ? new NetworkAccessCheckHandler(checker, sockets)
+                : sockets;
+            http = new HttpClient(ownedHandler, disposeHandler: false);
         }
         else
         {

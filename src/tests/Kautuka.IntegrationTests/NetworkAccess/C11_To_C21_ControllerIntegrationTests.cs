@@ -2,6 +2,7 @@ using Grpc.Core;
 
 using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging.Abstractions;
@@ -822,7 +823,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
     }
 
     [Fact]
-    public async Task C20_OpenInternetConnectorRuleAndNonPublicV4_RejectsEveryPrivateRange_WithNegativeControl()
+    public async Task C20a_OpenInternetConnectorRuleAndNonPublicV4_RejectsEveryPrivateRange_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
         try
@@ -1090,7 +1091,21 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             }, ctx);
             Assert.Contains(adminLockA.Users, u => u.UserId == "user-a" && u.LockedByAdmin);
 
-            RpcException exLocked = await Assert.ThrowsAsync<RpcException>(async () =>
+            // v7-5 NC: Locked user attempts bypass by toggling On then Off -> both are rejected with brake_locked!
+            RpcException exLockedOn = await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.SetBrake(new NetworkAccessSetBrakeRequest
+                {
+                    Actor = userA,
+                    Scope = "user",
+                    UserId = "user-a",
+                    On = true,
+                }, ctx);
+            });
+            Assert.Equal(StatusCode.PermissionDenied, exLockedOn.StatusCode);
+            Assert.Contains("brake_locked", exLockedOn.Status.Detail, StringComparison.Ordinal);
+
+            RpcException exLockedOff = await Assert.ThrowsAsync<RpcException>(async () =>
             {
                 _ = await svc.SetBrake(new NetworkAccessSetBrakeRequest
                 {
@@ -1100,8 +1115,12 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     On = false,
                 }, ctx);
             });
-            Assert.Equal(StatusCode.PermissionDenied, exLocked.StatusCode);
-            Assert.Contains("brake_locked", exLocked.Status.Detail, StringComparison.Ordinal);
+            Assert.Equal(StatusCode.PermissionDenied, exLockedOff.StatusCode);
+            Assert.Contains("brake_locked", exLockedOff.Status.Detail, StringComparison.Ordinal);
+
+            // User A is still locked by admin
+            NetworkAccessBrakeMessage checkStillLocked = await svc.GetBrake(new NetworkAccessGetBrakeRequest { Actor = admin }, ctx);
+            Assert.Contains(checkStillLocked.Users, u => u.UserId == "user-a" && u.LockedByAdmin);
 
             _ = await svc.SetBrake(new NetworkAccessSetBrakeRequest
             {
@@ -1154,6 +1173,194 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         }
     }
 
+
+
+    [Fact]
+    public void C22_WorkloadRegistry_ContainerWithoutAgentOrProbeLabel_GetsDenyAll_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NacController(store, registry);
+
+            // Container with user, no agentId, and no purpose="probe" (when not systemwide/system::) gets deny-all (v7-26)
+            registry.Register(new RegistryEntry(
+                "10.247.1.100",
+                "user-x",
+                null,
+                "orphan-ctr",
+                "connector",
+                "conn-orphan",
+                "isolated",
+                Systemwide: false,
+                Egress: "normal",
+                Attribution: "user",
+                CompatProfile: null,
+                DateTimeOffset.UtcNow,
+                Purpose: null));
+
+            RegistryEntry? reg = registry.FindByIp("10.247.1.100");
+            Assert.NotNull(reg);
+            Assert.Equal("deny-all", reg.Egress);
+
+            NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.100", "93.184.216.34", 443, "example.com"));
+            Assert.False(decision.Allowed);
+            Assert.Equal("deny_all", decision.Reason);
+
+            // v7-26.NC: Container WITH Purpose="probe" receives normal egress and is not forced to deny-all
+            registry.Register(new RegistryEntry(
+                "10.247.1.101",
+                "user-x",
+                null,
+                "probe-ctr",
+                "connector",
+                "conn-probe",
+                "isolated",
+                Systemwide: false,
+                Egress: "normal",
+                Attribution: "user",
+                CompatProfile: null,
+                DateTimeOffset.UtcNow,
+                Purpose: "probe"));
+
+            RegistryEntry? probeReg = registry.FindByIp("10.247.1.101");
+            Assert.NotNull(probeReg);
+            Assert.Equal("normal", probeReg.Egress);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+
+
+    [Fact]
+    public async Task C23_ConnectorProbes_UserProbeVsSystemwideProbe_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out IWorkloadRegistry registry);
+            ServerCallContext ctx = CreateCallContext();
+
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+            var userX = new NetworkAccessActorMessage { UserId = "user-x", IsAdmin = false };
+
+            // Set user-x privileges: canApproveOwn = true
+            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "user-x",
+                CanApproveOwn = true,
+                CanAllowAllAgents = false,
+            }, ctx);
+
+            // 1. User's own connector probe container (user-x, conn-probe, purpose="probe")
+            registry.Register(new RegistryEntry(
+                "10.247.1.110",
+                "user-x",
+                "a1",
+                "user-probe-ctr",
+                "connector",
+                "conn-user",
+                "isolated",
+                Systemwide: false,
+                Egress: "normal",
+                Attribution: "user-agent",
+                CompatProfile: null,
+                DateTimeOffset.UtcNow,
+                Purpose: "probe"));
+
+            // Probe connection attempt -> creates pending request
+            NetworkAccessDecisionResult userProbeTry = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com"));
+            Assert.False(userProbeTry.Allowed);
+            Assert.Equal("no_rule", userProbeTry.Reason);
+
+            // User-x can see the request and waitingForAdmin is false (canApproveOwn = true)
+            NetworkAccessListRequestsResponse userList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            NetworkAccessRequestMessage? userReq = userList.Requests.FirstOrDefault(r => r.Destination == "user-probe.example.com");
+            Assert.NotNull(userReq);
+            Assert.False(userReq.WaitingForAdmin);
+
+            // User-x can approve the probe request under standard canApproveOwn
+            NetworkAccessDecideResponse decideUser = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userX,
+                RequestId = userReq.Id,
+                Allow = true,
+                Scope = "agent",
+                ExpectedRevision = userList.Revision,
+            }, ctx);
+            Assert.NotNull(decideUser.Rule);
+            Assert.True(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
+
+            // 2. Systemwide connector probe container (systemwide = true)
+            registry.Register(new RegistryEntry(
+                "10.247.1.120",
+                null,
+                null,
+                "sys-probe-ctr",
+                "connector",
+                "conn-sys",
+                "isolated",
+                Systemwide: true,
+                Egress: "normal",
+                Attribution: "none",
+                CompatProfile: null,
+                DateTimeOffset.UtcNow,
+                Purpose: "probe"));
+
+            NetworkAccessDecisionResult sysProbeTry = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.120", "93.184.216.34", 443, "sys-probe.example.com"));
+            Assert.False(sysProbeTry.Allowed);
+
+            // User-x CANNOT see or approve the systemwide probe request
+            NetworkAccessListRequestsResponse userListAfterSys = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            Assert.DoesNotContain(userListAfterSys.Requests, r => r.Destination == "sys-probe.example.com");
+
+            // Admin sees the systemwide request and approves it
+            NetworkAccessListRequestsResponse adminList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            NetworkAccessRequestMessage? sysReq = adminList.Requests.FirstOrDefault(r => r.Destination == "sys-probe.example.com");
+            Assert.NotNull(sysReq);
+
+            // User-x attempting to decide systemwide request throws PermissionDenied
+            await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.DecideRequest(new NetworkAccessDecideRequest
+                {
+                    Actor = userX,
+                    RequestId = sysReq.Id,
+                    Allow = true,
+                    Scope = "connector-system",
+                    ExpectedRevision = adminList.Revision,
+                }, ctx);
+            });
+
+            // Admin approves with connector-system scope (v7-14)
+            _ = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = admin,
+                RequestId = sysReq.Id,
+                Allow = true,
+                Scope = "connector-system",
+                ExpectedRevision = adminList.Revision,
+            }, ctx);
+
+            Assert.True(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.120", "93.184.216.34", 443, "sys-probe.example.com")).Allowed);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
     private static void RegisterAgent(IWorkloadRegistry registry, string ip, string userId, string agentId)
     {
         registry.Register(new RegistryEntry(
@@ -1180,7 +1387,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         registry = new WorkloadRegistry();
         var audit = new NetworkAccessAuditRing(Path.Combine(stateDir, "audit", "decisions.jsonl"));
         var compat = new ImageCompatibilityStore(Path.Combine(stateDir, "compat", "image-compatibility.json"));
-        controller = new NacController(store, registry, audit, compat);
+        controller = new NacController(store, registry, audit);
 
         return new WorkspaceGrpcService(
             null!,
@@ -1192,7 +1399,8 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             null!,
             null!,
             NullLogger<WorkspaceGrpcService>.Instance,
-            controller);
+            controller,
+            compat);
     }
 
     private static ServerCallContext CreateCallContext()

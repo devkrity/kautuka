@@ -1,7 +1,13 @@
+using System.Security.Cryptography.X509Certificates;
+
+using Grpc.Net.Client;
+
 using Kautuka.ChannelHost;
 using Kautuka.ChannelHost.Grpc;
 using Kautuka.ChannelHost.Providers.Slack;
 using Kautuka.ChannelHost.Providers.Telegram;
+using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Telemetry.Security;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -64,6 +70,58 @@ builder.Services.AddSingleton<ChannelOutboundAssetStore>();
 builder.Services.AddSingleton<ChannelProviderTransportProfile>();
 builder.Services.AddTransient<ChannelProviderTransportRewriteHandler>();
 
+builder.Services.AddSingleton<ChannelHostManagerMtlsCerts>();
+builder.Services.AddSingleton<ManagerService.ManagerServiceClient>(sp =>
+{
+    KautukaEndpoint manager = KautukaHostNetworkPolicy.Resolve(sp.GetRequiredService<IConfiguration>()).Manager;
+    string baseAddress = manager.BaseUri.AbsoluteUri;
+    var mtlsCerts = sp.GetRequiredService<ChannelHostManagerMtlsCerts>();
+
+    SocketsHttpHandler handler = new()
+    {
+        ConnectCallback = KautukaHostNetworkPolicy.CreateConnectCallback(manager),
+        EnableMultipleHttp2Connections = true,
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(15),
+        KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+        SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+        {
+            ClientCertificates = [mtlsCerts.ClientCert],
+            TargetHost = "localhost",
+            RemoteCertificateValidationCallback = (_, cert, _, _) =>
+            {
+                if (cert is null) return false;
+                using var cert2 = new X509Certificate2(cert);
+                if (cert2.GetNameInfo(X509NameType.SimpleName, false) != "Manager Server") return false;
+                using var chain = new X509Chain();
+                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                chain.ChainPolicy.CustomTrustStore.Add(mtlsCerts.CaCert);
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                return chain.Build(cert2);
+            }
+        }
+    };
+
+    var channel = GrpcChannel.ForAddress(baseAddress, new GrpcChannelOptions
+    {
+        HttpHandler = handler,
+        ThrowOperationCanceledOnCancellation = true,
+    });
+    return new ManagerService.ManagerServiceClient(channel);
+});
+builder.Services.AddSingleton<INetworkAccessChecker>(sp =>
+{
+    return new GrpcNetworkAccessChecker(() => sp.GetRequiredService<ManagerService.ManagerServiceClient>(), sp.GetService<ILogger<GrpcNetworkAccessChecker>>());
+});
+builder.Services.AddTransient(sp => new NetworkAccessCheckHandler(
+    sp.GetRequiredService<INetworkAccessChecker>(),
+    sp.GetService<ILogger<NetworkAccessCheckHandler>>(),
+    defaultExecutionContext: "channelhost"));
+builder.Services.AddSingleton(sp => new NetworkAccessWebSocketChecker(
+    sp.GetRequiredService<INetworkAccessChecker>(),
+    sp.GetService<ILogger<NetworkAccessWebSocketChecker>>(),
+    defaultExecutionContext: "channelhost"));
+
 builder.Services.AddSingleton(sp => new TelegramLongPollingWorker(
     sp.GetRequiredService<ChannelAttachmentStore>(),
     sp.GetRequiredService<ChannelIngressStore>(),
@@ -78,7 +136,9 @@ builder.Services.AddSingleton(sp => new SlackSocketModeWorker(
     sp.GetRequiredService<ChannelOutboundAssetStore>(),
     sp.GetRequiredService<IHttpClientFactory>(),
     sp.GetRequiredService<ILogger<SlackSocketModeWorker>>(),
-    sp.GetRequiredService<ChannelResourceGovernor>()));
+    sp.GetRequiredService<ChannelResourceGovernor>(),
+    transportProfile: sp.GetRequiredService<ChannelProviderTransportProfile>(),
+    webSocketChecker: sp.GetRequiredService<NetworkAccessWebSocketChecker>()));
 builder.Services.AddSingleton(sp => new ChannelHostGrpcService(
     sp.GetRequiredService<ChannelAttachmentStore>(),
     sp.GetRequiredService<ChannelProviderRegistry>(),
@@ -102,8 +162,13 @@ builder.Services.AddHttpClient("telegram-api", client =>
     // Max Telegram long-poll server timeout is clamped at 25 s (well under typical NAT
     // idle TCP timeout of ~30 s). Allow 15 s headroom for TLS + network overhead.
     client.Timeout = TimeSpan.FromSeconds(40);
-}).AddHttpMessageHandler<ChannelProviderTransportRewriteHandler>();
-builder.Services.AddHttpClient("slack-api", client => client.Timeout = TimeSpan.FromSeconds(30)).AddHttpMessageHandler<ChannelProviderTransportRewriteHandler>();
+})
+.AddHttpMessageHandler<NetworkAccessCheckHandler>()
+.AddHttpMessageHandler<ChannelProviderTransportRewriteHandler>();
+
+builder.Services.AddHttpClient("slack-api", client => client.Timeout = TimeSpan.FromSeconds(30))
+.AddHttpMessageHandler<NetworkAccessCheckHandler>()
+.AddHttpMessageHandler<ChannelProviderTransportRewriteHandler>();
 
 // -----------------------------------------------------------------------
 // Resolve canonical channel data root.
@@ -259,3 +324,30 @@ app.MapDefaultEndpoints();
 app.MapGrpcService<ChannelHostGrpcService>();
 
 await app.RunAsync().ConfigureAwait(false);
+
+internal sealed class ChannelHostManagerMtlsCerts
+{
+    private const string caCertFile = ".ca.cer";
+    private const string clientPfxFile = ManagerClientIdentities.ChannelHostCertificateFileName;
+
+    public X509Certificate2 CaCert { get; }
+    public X509Certificate2 ClientCert { get; }
+
+    public ChannelHostManagerMtlsCerts(IConfiguration configuration)
+    {
+        string dataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(configuration, "manager");
+        dataRoot = Path.GetFullPath(dataRoot);
+
+        string caPath = Path.Combine(dataRoot, caCertFile);
+        string pfxPath = Path.Combine(dataRoot, clientPfxFile);
+
+        if (!File.Exists(caPath))
+            throw new InvalidOperationException($"Manager CA cert not found at '{caPath}'. Start Kautuka.Manager before ChannelHost.");
+
+        if (!File.Exists(pfxPath))
+            throw new InvalidOperationException($"Manager client cert not found at '{pfxPath}'. Start Kautuka.Manager before ChannelHost.");
+
+        CaCert = X509CertificateLoader.LoadCertificateFromFile(caPath);
+        ClientCert = X509CertificateLoader.LoadPkcs12FromFile(pfxPath, password: null);
+    }
+}

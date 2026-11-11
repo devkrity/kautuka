@@ -15,6 +15,7 @@ internal sealed record ManagerDesiredStateUpdateRequest(
 /// </summary>
 internal interface IManagerGrpcService
 {
+    ManagerService.ManagerServiceClient Client => throw new NotSupportedException();
     Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerStatusResponse> GetHostStatusAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerRuntimeContainersResponse> ListRuntimeContainersAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);

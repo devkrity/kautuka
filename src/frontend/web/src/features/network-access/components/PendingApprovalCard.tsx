@@ -32,10 +32,12 @@ export function PendingApprovalCard({
   // Privileges check:
   // For ordinary agent requests:
   // - canApproveOwn: If user holds canApproveOwn, or viewer is admin
-  // - canAllowAllAgents: If request's user holds both canApproveOwn and canAllowAllAgents
-  const canApproveOwn = isAdmin || (isOwner && Boolean(userPrivileges?.canApproveOwn));
+  // - canAllowAllAgents: Based on request's owner privileges (v7-12)
+  const canApproveOwn = isAdmin || (isOwner && Boolean(request.ownerCanApproveOwn ?? userPrivileges?.canApproveOwn));
   const canAllowAllAgents = Boolean(
-    userPrivileges?.canApproveOwn && userPrivileges?.canAllowAllAgents
+    request.ownerCanAllowAllAgents !== undefined
+      ? request.ownerCanAllowAllAgents
+      : (userPrivileges?.canApproveOwn && userPrivileges?.canAllowAllAgents)
   );
 
   const [allowLan, setAllowLan] = React.useState(false);

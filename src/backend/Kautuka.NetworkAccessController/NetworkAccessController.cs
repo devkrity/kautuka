@@ -16,7 +16,6 @@ public sealed class NetworkAccessController
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
-    private readonly ImageCompatibilityStore? compatStore;
 
     private long checks;
     private long allowed;
@@ -28,15 +27,13 @@ public sealed class NetworkAccessController
     public NetworkAccessController(
         NetworkAccessPolicyStore policyStore,
         IWorkloadRegistry registry,
-        NetworkAccessAuditRing? auditRing = null,
-        ImageCompatibilityStore? compatStore = null)
+        NetworkAccessAuditRing? auditRing = null)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
         this.policyStore = policyStore;
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
-        this.compatStore = compatStore;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -47,8 +44,6 @@ public sealed class NetworkAccessController
     public IWorkloadRegistry Registry => registry;
 
     public NetworkAccessAuditRing AuditRing => auditRing;
-
-    public ImageCompatibilityStore? CompatStore => compatStore;
 
     public long Checks => Interlocked.Read(ref checks);
 
@@ -231,7 +226,12 @@ public sealed class NetworkAccessController
         Interlocked.Increment(ref checks);
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        string userId = string.IsNullOrWhiteSpace(input.UserId) ? "system" : input.UserId.Trim();
+        if (string.IsNullOrWhiteSpace(input.UserId))
+        {
+            return RecordOutboundDeny(now, string.Empty, input.AgentId, input.ConnectorId, input.Host, input.Port, "unknown_source");
+        }
+
+        string userId = input.UserId.Trim();
         string agentId = string.IsNullOrWhiteSpace(input.AgentId) ? "gateway" : input.AgentId.Trim();
         string? connectorId = string.IsNullOrWhiteSpace(input.ConnectorId) ? null : input.ConnectorId.Trim();
         string origin = string.IsNullOrWhiteSpace(input.Origin) ? "gateway" : input.Origin.Trim();
@@ -328,7 +328,7 @@ public sealed class NetworkAccessController
             ContainerId: origin,
             Kind: input.Systemwide || !string.IsNullOrEmpty(connectorId) ? "connector" : "agent-sandbox",
             ConnectorId: connectorId,
-            ExecContext: "isolated",
+            ExecContext: "app",
             Systemwide: input.Systemwide,
             Egress: "normal",
             Attribution: input.Systemwide ? "user" : "user-agent",

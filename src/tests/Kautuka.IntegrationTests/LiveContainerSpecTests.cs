@@ -140,7 +140,7 @@ public sealed class LiveContainerSpecTests
 
     [Theory]
     [InlineData("bridge")]
-    [InlineData("kautuka-sandbox")]
+    [InlineData("kautuka-workload")]
     public void NamedNetworkAttachmentIsAcceptedForSandboxAndConnector(string mode)
     {
         string inspect = Inspect(networkMode: mode);
@@ -161,11 +161,10 @@ public sealed class LiveContainerSpecTests
     }
 
     [Theory]
-    [InlineData("host", "kautuka-sandbox", null, "its network is host")]
-    [InlineData("none", "kautuka-sandbox", null, "its network is none")]
+    [InlineData("host", "kautuka-workload", null, "its network is host")]
+    [InlineData("none", "kautuka-workload", null, "its network is none")]
     [InlineData("bridge", "podman", null, "its network attachments do not match the spec")]
-    [InlineData("bridge", "kautuka-sandbox", "podman", "its network attachments do not match the spec")]
-    [InlineData("kautuka-sandbox", "podman", null, "its network attachments do not match the spec")]
+    [InlineData("bridge", "kautuka-workload", "podman", "its network attachments do not match the spec")]
     [InlineData("bridge", null, null, "its network attachments do not match the spec")]
     public void IncorrectOrMissingNetworkAttachmentsRemainDrift(string mode, string? network, string? extraNetwork, string drift)
     {
@@ -214,7 +213,7 @@ public sealed class LiveContainerSpecTests
 
     private static string Inspect(
         string imageId = "sha256:current",
-        string? network = "kautuka-sandbox",
+        string? network = "kautuka-workload",
         string mount = "/tmp/kautuka/alpha:/workspace",
         string env = "TOKEN=secret",
         string? injected = null,

@@ -18,7 +18,8 @@ public sealed record RegistryEntry(
     string Egress,
     string Attribution,
     string? CompatProfile,
-    DateTimeOffset RegisteredUtc);
+    DateTimeOffset RegisteredUtc,
+    string? Purpose = null);
 
 public interface IWorkloadRegistry
 {
@@ -33,6 +34,8 @@ public interface IWorkloadRegistry
     void Rebuild(IEnumerable<RegistryEntry> entries);
 
     bool TryGetByIp(string? ip, out RegistryEntry? entry);
+
+    RegistryEntry? FindByIp(string? ip) => TryGetByIp(ip, out var entry) ? entry : null;
 
     IReadOnlyList<RegistryEntry> GetAll();
 }
@@ -137,6 +140,8 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         return entriesByIp.TryGetValue(normalizedIp, out entry);
     }
 
+    public RegistryEntry? FindByIp(string? ip) => TryGetByIp(ip, out var entry) ? entry : null;
+
     public IReadOnlyList<RegistryEntry> GetAll()
         => [.. entriesByIp.Values];
 
@@ -156,6 +161,14 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         if (entry.Kind is not ("agent-sandbox" or "connector" or "builder" or "system"))
         {
             throw new ArgumentException($"Unsupported workload kind '{entry.Kind}'.", nameof(entry));
+        }
+
+        if (entry.Kind == "system")
+        {
+            if (entry.Egress != "deny-all")
+            {
+                throw new ArgumentException("System workload kind is restricted strictly to system:: containers with deny-all egress.", nameof(entry));
+            }
         }
 
         if (entry.ExecContext is not ("isolated" or "isolated-with-agent-files" or "agent-sandbox" or "builder" or "system"))
@@ -182,9 +195,19 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             throw new ArgumentException("Placeholder '-' identities are not allowed.", nameof(entry));
         }
 
-        if (entry.Egress is "deny-all" or "proxy-only")
+        string egress = entry.Egress;
+        string attribution = entry.Attribution;
+
+        if (entry.ContainerId.StartsWith("system::", StringComparison.Ordinal)
+            || (!entry.Systemwide && string.IsNullOrEmpty(agentId) && !string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
         {
-            if (entry.Attribution != "none")
+            egress = "deny-all";
+            attribution = "none";
+        }
+
+        if (egress is "deny-all" or "proxy-only")
+        {
+            if (attribution != "none")
             {
                 throw new ArgumentException("deny-all and proxy-only workloads must have attribution = 'none'.", nameof(entry));
             }
@@ -196,7 +219,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
                 throw new ArgumentException("Systemwide connector requires a connectorId.", nameof(entry));
             }
 
-            if (entry.Attribution == "user")
+            if (attribution == "user")
             {
                 if (string.IsNullOrEmpty(userId))
                 {
@@ -208,7 +231,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
                     throw new ArgumentException("Systemwide connector entry cannot carry an agentId.", nameof(entry));
                 }
             }
-            else if (entry.Attribution == "none")
+            else if (attribution == "none")
             {
                 if (!string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
                 {
@@ -222,15 +245,14 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         }
         else
         {
-            // Non-systemwide normal egress container:
-            if (entry.Attribution == "user-agent")
+            if (attribution == "user-agent")
             {
                 if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId))
                 {
                     throw new ArgumentException("Ordinary container requires both userId and agentId.", nameof(entry));
                 }
             }
-            else if (entry.Attribution == "user")
+            else if (attribution == "user")
             {
                 // Connector probe running under requesting user's identity (A1)
                 if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(connectorId))
@@ -250,7 +272,10 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             UserId = userId,
             AgentId = agentId,
             ConnectorId = connectorId,
+            Egress = egress,
+            Attribution = attribution,
             CompatProfile = NormalizeOptional(entry.CompatProfile),
+            Purpose = NormalizeOptional(entry.Purpose),
         };
     }
 

@@ -3,6 +3,7 @@ using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.NetworkAccessController;
 using Kautuka.Telemetry.DependencyInjection;
@@ -49,6 +50,55 @@ builder.Services.AddSingleton(static sp =>
         requirePresent: !environment.IsDevelopment(),
         logger);
 });
+
+// -----------------------------------------------------------------------
+// Network Access Controller (NAC v7) module & Egress infrastructure
+// -----------------------------------------------------------------------
+builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
+    new WorkloadRegistry(sp.GetRequiredService<ILogger<WorkloadRegistry>>()));
+builder.Services.AddSingleton(_ =>
+    new NetworkAccessPolicyStore(Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json")));
+builder.Services.AddSingleton(_ =>
+    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl")));
+builder.Services.AddSingleton(_ =>
+    new ImageCompatibilityStore(Path.Combine(managerDataRoot, "networkAccess", "compat", "image-compat.json")));
+builder.Services.AddSingleton(_ =>
+    new WorkloadAddressAllocator(Path.Combine(managerDataRoot, "networkAccess", "ip-cursor.json")));
+builder.Services.AddSingleton<WorkloadPostStartVerifier>();
+string envoySocketDir = Path.Combine(socketRoot, "networkaccess-envoy");
+string hookStateDir = Environment.GetEnvironmentVariable("XDG_STATE_HOME") is { Length: > 0 } xdgState
+    ? Path.Combine(xdgState, "kautuka", "nac")
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "state", "kautuka", "nac");
+builder.Services.AddSingleton(sp =>
+    new EgressTopologyManager(
+        sp.GetRequiredService<PodmanCommandRunner>(),
+        sp.GetRequiredService<WorkloadAddressAllocator>(),
+        sp.GetRequiredService<WorkloadPostStartVerifier>(),
+        sp.GetRequiredService<IWorkloadRegistry>(),
+        Path.Combine(managerDataRoot, "networkAccess"),
+        sp.GetService<ILogger<EgressTopologyManager>>(),
+        envoySocketHostDir: envoySocketDir,
+        hookStateDirectory: hookStateDir));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton(sp =>
+    new Kautuka.NetworkAccessController.NetworkAccessController(
+        sp.GetRequiredService<NetworkAccessPolicyStore>(),
+        sp.GetRequiredService<IWorkloadRegistry>(),
+        sp.GetRequiredService<NetworkAccessAuditRing>()));
+
+if (OperatingSystem.IsLinux())
+{
+    builder.Services.AddSingleton<IHostedService>(sp =>
+        EnvoyAuthorizationHost.Create(
+            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
+                SocketPath = Path.Combine(socketRoot, "networkaccess-envoy", "envoy.sock"),
+            }));
+}
+
 builder.Services.AddSingleton<PodmanImageArchiveStore>();
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();
@@ -76,38 +126,8 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceReadinessGate>(),
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
-    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>()));
-
-// -----------------------------------------------------------------------
-// Network Access Controller (NAC v7) module & second Kestrel Envoy host
-// -----------------------------------------------------------------------
-builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
-    new WorkloadRegistry(sp.GetRequiredService<ILogger<WorkloadRegistry>>()));
-builder.Services.AddSingleton(_ =>
-    new NetworkAccessPolicyStore(Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json")));
-builder.Services.AddSingleton(_ =>
-    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl")));
-builder.Services.AddSingleton(_ =>
-    new ImageCompatibilityStore(Path.Combine(managerDataRoot, "networkAccess", "compat", "image-compat.json")));
-builder.Services.AddSingleton(sp =>
-    new Kautuka.NetworkAccessController.NetworkAccessController(
-        sp.GetRequiredService<NetworkAccessPolicyStore>(),
-        sp.GetRequiredService<IWorkloadRegistry>(),
-        sp.GetRequiredService<NetworkAccessAuditRing>(),
-        sp.GetRequiredService<ImageCompatibilityStore>()));
-
-if (OperatingSystem.IsLinux())
-{
-    builder.Services.AddSingleton<IHostedService>(sp =>
-        EnvoyAuthorizationHost.Create(
-            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
-            new EnvoyAuthorizationHostOptions
-            {
-                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
-                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
-                SocketPath = Path.Combine(socketRoot, "networkaccess-envoy", "envoy.sock"),
-            }));
-}
+    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>(),
+    sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>()));
 
 builder.Services.AddGrpc(options =>
 {

@@ -526,10 +526,29 @@ EOF
 }
 
 ensure_nac_prerequisites() {
+    local missing=0
+    command -v nft >/dev/null 2>&1 || missing=1
+    command -v nsenter >/dev/null 2>&1 || missing=1
+    command -v unshare >/dev/null 2>&1 || missing=1
+    command -v python3 >/dev/null 2>&1 || missing=1
+    if ! command -v pasta >/dev/null 2>&1 && ! command -v slirp4netns >/dev/null 2>&1; then
+        missing=1
+    fi
+
+    if (( missing == 1 )); then
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y nftables util-linux python3 passt >/dev/null 2>&1 || dnf install -y nftables util-linux python3 slirp4netns >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables util-linux python3 passt >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables util-linux python3 slirp4netns >/dev/null 2>&1 || true
+        fi
+    fi
+
     command -v nft >/dev/null 2>&1 || fail "nftables (nft) is required for network access control. Please install nftables."
     command -v nsenter >/dev/null 2>&1 || fail "util-linux (nsenter) is required for network access control. Please install util-linux."
     command -v unshare >/dev/null 2>&1 || fail "util-linux (unshare) is required for network access control. Please install util-linux."
     command -v python3 >/dev/null 2>&1 || fail "python3 is required for the OCI network access hook. Please install python3."
+    command -v pasta >/dev/null 2>&1 || command -v slirp4netns >/dev/null 2>&1 || fail "pasta or slirp4netns is required for rootless container networking. Please install pasta or slirp4netns."
 }
 
 ensure_rootless_podman_ready() {
@@ -540,6 +559,8 @@ ensure_rootless_podman_ready() {
     local graph_root="$service_home/.local/share/containers/storage"
     local run_root="$xdg_runtime_dir/containers"
     local storage_conf_path="$service_home/.config/containers/storage.conf"
+    local hooks_dir="$service_home/.config/containers/hooks.d"
+    local containers_conf_dir="$service_home/.config/containers/containers.conf.d"
 
     ensure_subid_entry /etc/subuid "$service_user"
     ensure_subid_entry /etc/subgid "$service_user"
@@ -549,6 +570,8 @@ ensure_rootless_podman_ready() {
     mkdir -p \
         "$service_home" \
         "$service_home/.config/containers" \
+        "$hooks_dir" \
+        "$containers_conf_dir" \
         "$service_home/.local/share/containers" \
         "$graph_root"
     chown "$service_user:$service_group" "$service_home"
@@ -561,6 +584,28 @@ ensure_rootless_podman_ready() {
         "$service_home/.local/share" \
         "$service_home/.local/share/containers" \
         "$graph_root"
+
+    cat > "$containers_conf_dir/99-kautuka-hooks.conf" <<EOF
+[engine]
+hooks_dir = ["$hooks_dir"]
+EOF
+    chmod 0644 "$containers_conf_dir/99-kautuka-hooks.conf"
+    chown "$service_user:$service_group" "$containers_conf_dir/99-kautuka-hooks.conf"
+
+    cat > "$hooks_dir/kautuka_hook.json" <<EOF
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "$hooks_dir/kautuka_hook.py"
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["createRuntime"]
+}
+EOF
+    chmod 0644 "$hooks_dir/kautuka_hook.json"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.json"
 
     loginctl enable-linger "$service_user"
     validate_linger_enabled "$service_user"
@@ -2064,6 +2109,13 @@ uninstall_release() {
             best_effort_remove_file "$user_unit_dir/$unit"
         done
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" daemon-reload
+        best_effort_run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman pod rm -f kautuka-egress >/dev/null 2>&1 || true
+        best_effort_run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman network rm -f kautuka-workload kautuka-outside >/dev/null 2>&1 || true
+        best_effort_remove_file "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.json"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.py"
+        best_effort_remove_dir_if_empty "$service_home/.config/containers/hooks.d"
+        best_effort_remove_dir_if_empty "$service_home/.config/containers/containers.conf.d"
         best_effort_remove_dir_if_empty "$user_unit_dir/kautuka.target.wants"
         best_effort_remove_dir_if_empty "$user_unit_dir/default.target.wants"
         best_effort_remove_dir_if_empty "$user_unit_dir"
@@ -2791,6 +2843,13 @@ PY
     mkdir -p "$version_root"
     copy_runtime_payload "$content_root" "$version_root"
     chmod +x "$version_root/kautuka-manager"
+
+    local hooks_dir="$service_home/.config/containers/hooks.d"
+    if [[ -f "$version_root/scripts/kautuka_hook.py" ]]; then
+        cp -p "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
+        chmod 0755 "$hooks_dir/kautuka_hook.py"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
+    fi
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"

@@ -565,6 +565,8 @@ internal sealed class GatewayConnectorTestRequest
 
     public string? Id { get; init; }
 
+    public string? UserId { get; set; }
+
     [JsonIgnore]
     public RemoteMcpRequestContext? RemoteContext { get; init; }
 

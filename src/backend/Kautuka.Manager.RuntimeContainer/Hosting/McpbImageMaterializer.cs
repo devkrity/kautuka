@@ -11,8 +11,12 @@ public sealed class McpbImageMaterializer(
     PodmanCommandRunner podmanCommandRunner,
     ILogger<McpbImageMaterializer> logger,
     RuntimeImageAllowlist? allowlist = null,
-    PodmanImageArchiveStore? imageArchives = null)
+    PodmanImageArchiveStore? imageArchives = null,
+    NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
+    Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null)
 {
+    private readonly NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
+    private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
@@ -569,53 +573,40 @@ public sealed class McpbImageMaterializer(
         string containerName,
         string systemImage,
         IReadOnlyList<KeyValuePair<string, string>> indexEnvironment,
-        string installScript)
+        string installScript,
+        string? allocatedIp = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(systemImage);
         ArgumentNullException.ThrowIfNull(indexEnvironment);
         ArgumentException.ThrowIfNullOrWhiteSpace(installScript);
 
-        var arguments = new List<string>
+        string effectiveIp = allocatedIp ?? "10.247.1.1";
+        var builderCompat = new NetworkAccess.ImageCompatProfile(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            null,
+            null,
+            [NetworkAccess.ImageCompatibilityStore.WritableRootfs, NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps],
+            "system",
+            DateTimeOffset.UtcNow,
+            "builder profile");
+
+        var spec = new NetworkAccess.WorkloadContainerSpec(containerName, systemImage, effectiveIp)
         {
-            "run",
-            "--replace",
-            "--name", containerName,
-            "--network", "kautuka-workload:ip=10.247.1.1",
-            "--dns", "10.247.0.2",
-            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
-            "--annotation", "io.kautuka.role=workload",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--label", "kautuka.managed=manager",
-            "--label", "kautuka.role=builder",
-            "--label", "io.kautuka.user=",
-            "--label", "io.kautuka.agent=",
-            "--label", "io.kautuka.connector=",
-            "--label", "io.kautuka.exec-context=builder",
-            "--label", "io.kautuka.kind=builder",
-            "--label", "io.kautuka.systemwide=false",
-            "--label", "io.kautuka.egress=proxy-only",
-            "--label", "io.kautuka.compat=",
-            "--add-host", "kautuka-pkgs-proxy:10.247.0.3",
+            Kind = "builder",
+            ExecContext = "builder",
+            Egress = "proxy-only",
+            Systemwide = false,
+            Persistent = false,
+            Replace = true,
+            ManagerRole = "builder",
+            Environment = indexEnvironment,
+            CompatibilityProfile = builderCompat,
+            Command = "/bin/sh",
+            Args = ["-lc", installScript],
         };
 
-        NetworkAccess.WorkloadContainerSpec.AssertAllowedOptions(arguments, null, null);
-
-        foreach (KeyValuePair<string, string> pair in indexEnvironment)
-        {
-            arguments.Add("--env");
-            arguments.Add($"{pair.Key}={pair.Value}");
-        }
-
-        // Do not use --entrypoint: podman commit snapshots it. A baked
-        // ENTRYPOINT /bin/sh turns connector `sh -lc` into `sh sh -lc` (exit 126),
-        // then probe exec fails with 125 on the stopped container.
-        arguments.Add(systemImage);
-        arguments.Add("/bin/sh");
-        arguments.Add("-lc");
-        arguments.Add(installScript);
-        return arguments;
+        return spec.Render().ToList();
     }
 
     private async Task CommitLanguagePackagesAsync(
@@ -648,11 +639,31 @@ public sealed class McpbImageMaterializer(
             serverType);
         string installScript = BuildLanguagePackageInstallScript(serverType, forSandboxArtifact);
         string containerName = "kautuka-mcpb-pkg-" + Guid.NewGuid().ToString("N")[..12];
+        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+
+        if (workloadRegistry is not null)
+        {
+            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+                allocatedIp,
+                null,
+                null,
+                containerName,
+                "builder",
+                null,
+                "builder",
+                false,
+                "proxy-only",
+                "none",
+                $"{NetworkAccess.ImageCompatibilityStore.WritableRootfs},{NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps}",
+                DateTimeOffset.UtcNow));
+        }
+
         List<string> arguments = BuildLanguagePackageRunArguments(
             containerName,
             systemImage,
             indexEnvironment,
-            installScript);
+            installScript,
+            allocatedIp);
 
         try
         {
@@ -678,6 +689,7 @@ public sealed class McpbImageMaterializer(
         }
         finally
         {
+            workloadRegistry?.Deregister(allocatedIp, containerName);
             await TryRemoveContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
         }
     }

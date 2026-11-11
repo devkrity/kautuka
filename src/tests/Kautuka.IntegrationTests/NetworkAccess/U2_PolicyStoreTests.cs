@@ -14,9 +14,16 @@ public sealed class U2_PolicyStoreTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(tempDir))
+        try
         {
-            Directory.Delete(tempDir, recursive: true);
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+            // Best effort on Windows
         }
     }
 
@@ -81,7 +88,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
     }
 
     [Fact]
-    public void U2_RequestDedupe_100AttemptsProduceOneRequestAndOneDiskWrite_AndCapBehaviour_WithNegativeControl()
+    public async Task U2_RequestDedupe_100AttemptsProduceOneRequestAndOneDiskWrite_AndCapBehaviour_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "dedupe", "state.json");
         var store = new NetworkAccessPolicyStore(statePath);
@@ -104,12 +111,15 @@ public sealed class U2_PolicyStoreTests : IDisposable
             Assert.NotNull(reqId);
         }
 
+        // Hot-path pending request writes coalesce asynchronously; no synchronous blocking write occurred yet.
+        Assert.Equal(0, store.DiskWriteCount);
+        await store.FlushPendingWritesAsync();
         Assert.Equal(1, store.DiskWriteCount);
         IReadOnlyList<NetworkAccessRequestView> requests = store.ListRequests(user).Requests;
         Assert.Single(requests);
         Assert.Equal(100, requests[0].Request.Attempts);
 
-        // Negative control (.NC): a different destination triggers a 2nd disk write and a 2nd request
+        // Negative control (.NC): a different destination triggers a 2nd coalesced write and a 2nd request
         store.RecordOrUpdatePendingRequest(
             "user-1",
             "agent-1",
@@ -121,6 +131,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
             port: 443,
             actorKind: "agent",
             origin: "container");
+        await store.FlushPendingWritesAsync();
         Assert.Equal(2, store.DiskWriteCount);
         Assert.Equal(2, store.ListRequests(user).Requests.Count);
 

@@ -74,4 +74,12 @@ public static class WorkloadRulesetRenderer
 
         return sb.ToString();
     }
+
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        string tmpl = BoundaryRulesetRenderer.ResolveTemplate(null, "kautuka_workload.nft.json.tmpl");
+        string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);
+        return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(goldenJson, RequiredWorkloadComments, allocatedIp.Trim());
+    }
 }

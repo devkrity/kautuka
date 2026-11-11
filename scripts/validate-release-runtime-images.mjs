@@ -21,7 +21,8 @@ export function validateReleaseRuntimeImages(runtimeImages, components, selected
     }
   }
 
-  if (sidecarImages.length !== 2 || !componentsById.has('openobserve') || !componentsById.has('git-pkgs-proxy')) {
+  const expectedSidecarIds = ['openobserve', 'git-pkgs-proxy', 'envoy', 'coredns'];
+  if (sidecarImages.length !== expectedSidecarIds.length || !expectedSidecarIds.every((id) => componentsById.has(id))) {
     throw new Error('Runtime image inventory changed; review and update the third-party component catalog.');
   }
 

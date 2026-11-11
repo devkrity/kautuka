@@ -23,7 +23,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     PodmanCommandRunner podmanCommandRunner,
     McpbImageMaterializer mcpbImageMaterializer,
     IContainerTool containerTool,
-    ILogger<WorkspaceContainerConnectorExecutionService> logger) : IAsyncDisposable
+    ILogger<WorkspaceContainerConnectorExecutionService> logger,
+    NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
+    Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
+    NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null,
+    NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -34,6 +38,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private readonly AsyncKeyedLockPool connectorLocks = new();
     private readonly AsyncKeyedLockPool sandboxProvisionLocks = new();
     private readonly IContainerTool containerTool = containerTool;
+    private readonly NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
+    private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
+    private readonly NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
+    private readonly NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = imageCompatibilityStore;
 
     public IReadOnlyCollection<string> TrackedContainerNames
         => [.. trackedConnectorContainers.Values.Distinct(StringComparer.OrdinalIgnoreCase)];
@@ -198,23 +206,28 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> ProbeConnectorAsync(
         string connectorId,
         int timeoutSeconds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? userId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
 
         WorkspaceMcpContainerConnectorDefinition connector = ResolveConnectorDefinition(connectorId);
-        return await ProbeConnectorAsync(connector, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        return await ProbeConnectorAsync(connector, timeoutSeconds, cancellationToken, userId).ConfigureAwait(false);
     }
 
     public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> ProbeConnectorAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         int timeoutSeconds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? userId = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
 
         string connectorId = connector.ConnectorId;
         bool containerPrepared = false;
+        ContainerContext? probeContext = !string.IsNullOrWhiteSpace(userId)
+            ? new ContainerContext("user", userId, userId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>())
+            : null;
 
         try
         {
@@ -234,7 +247,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "probe-start");
 
-            var transport = await CreateTransportAsync(effectiveConnector, requireEnabled: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var transport = await CreateTransportAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = true;
             var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(effectiveConnector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
 
@@ -268,8 +281,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             {
                 await ResetConnectorCooldownAsync(
                     connector,
-                    BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null),
-                    BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null)).ConfigureAwait(false);
+                    BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext),
+                    BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext)).ConfigureAwait(false);
             }
         }
     }
@@ -309,7 +322,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "list-start");
 
-            var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
+            var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
 
@@ -385,7 +398,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "call-start");
 
-            var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, cancellationToken).ConfigureAwait(false);
+            var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             McpClient client = await McpClient.CreateAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: cancellationToken).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
@@ -547,6 +560,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool allowInternalSystemConnector = false,
         ContainerContext? workspaceContext = null,
         WorkspaceMcpExecutionContext executionContext = WorkspaceMcpExecutionContext.Unspecified,
+        bool isProbe = false,
         CancellationToken cancellationToken = default)
     {
         bool canExecute = connector.Enabled || (allowInternalSystemConnector && connector.IsInternalSystemConnector);
@@ -601,12 +615,52 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         List<string> arguments;
         if (UsesImageDefaultCommand(connector))
         {
+            string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+            NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+            string effectiveUserId = workspaceContext?.UserId ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(effectiveUserId))
+            {
+                int sep = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
+                if (sep > 0)
+                {
+                    effectiveUserId = connector.ConnectorId[..sep];
+                }
+            }
+            string effectiveAgentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+                ? (workspaceContext?.ScopeId ?? string.Empty)
+                : string.Empty;
+            bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(effectiveUserId);
+            string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
+            string kind = connector.IsInternalSystemConnector ? "system" : "connector";
+            string attribution = egress == "deny-all" ? "none" : (systemwide ? "user" : (isProbe ? "user" : "user-agent"));
+
+            if (workloadRegistry is not null)
+            {
+                workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+                    allocatedIp,
+                    string.IsNullOrWhiteSpace(effectiveUserId) ? null : effectiveUserId,
+                    string.IsNullOrWhiteSpace(effectiveAgentId) ? null : effectiveAgentId,
+                    containerName,
+                    kind,
+                    connector.ConnectorId,
+                    NormalizeExecutionContext(effectiveExecutionContext).ToString().ToLowerInvariant(),
+                    systemwide,
+                    egress,
+                    attribution,
+                    compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
+                    DateTimeOffset.UtcNow,
+                    isProbe ? "probe" : null));
+            }
+
             arguments = ConnectorContainerSpecBuilder.BuildRun(
                 connector,
                 containerName,
                 effectiveExecutionContext,
                 ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
-                persistent: false);
+                persistent: false,
+                allocatedIp: allocatedIp,
+                purpose: isProbe ? "probe" : null,
+                compatProfile: compatProfile);
         }
         else
         {
@@ -616,7 +670,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 containerName,
                 effectiveExecutionContext,
                 ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                isProbe: isProbe).ConfigureAwait(false);
             arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
         }
 
@@ -851,7 +906,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string containerName,
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool isProbe = false)
     {
         await using var connectorLease = (await connectorLocks
             .AcquireAsync(runtimeKey, cancellationToken)
@@ -872,9 +928,56 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
         }
 
+        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+        NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+        string effectiveUserId = workspaceContext?.UserId ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(effectiveUserId))
+        {
+            int sep = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
+            if (sep > 0)
+            {
+                effectiveUserId = connector.ConnectorId[..sep];
+            }
+        }
+        string effectiveAgentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            ? (workspaceContext?.ScopeId ?? string.Empty)
+            : string.Empty;
+        bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(effectiveUserId);
+        string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
+        string kind = connector.IsInternalSystemConnector ? "system" : "connector";
+        string attribution = egress == "deny-all" ? "none" : (systemwide ? "user" : (isProbe ? "user" : "user-agent"));
+
+        if (workloadRegistry is not null)
+        {
+            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+                allocatedIp,
+                string.IsNullOrWhiteSpace(effectiveUserId) ? null : effectiveUserId,
+                string.IsNullOrWhiteSpace(effectiveAgentId) ? null : effectiveAgentId,
+                containerName,
+                kind,
+                connector.ConnectorId,
+                NormalizeExecutionContext(executionContext).ToString().ToLowerInvariant(),
+                systemwide,
+                egress,
+                attribution,
+                compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
+                DateTimeOffset.UtcNow,
+                isProbe ? "probe" : null));
+        }
+
+        var runArgs = ConnectorContainerSpecBuilder.BuildRun(
+            connector,
+            containerName,
+            executionContext,
+            workspaceContext,
+            persistent: true,
+            allocatedIp: allocatedIp,
+            purpose: isProbe ? "probe" : null,
+            compatProfile: compatProfile);
+
         PodmanCommandResult result = await podmanCommandRunner
             .RunAsync(
-                ConnectorContainerSpecBuilder.BuildRun(connector, containerName, executionContext, workspaceContext, persistent: true),
+                runArgs,
                 Math.Max(10, connector.ReadinessTimeoutSeconds),
                 cancellationToken,
                 BuildPodmanEnvironment(connector))
@@ -882,9 +985,27 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         if (result.ExitCode != 0)
         {
+            if (workloadRegistry is not null)
+            {
+                workloadRegistry.Deregister(allocatedIp, containerName);
+            }
             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
                 $"Start container connector '{connector.ConnectorId}'",
                 result));
+        }
+
+        if (postStartVerifier is not null)
+        {
+            try
+            {
+                await postStartVerifier.VerifyWorkloadAsync(containerName, allocatedIp, compatProfile, workloadRegistry, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await podmanCommandRunner.RunAsync(["rm", "-f", containerName], 15, CancellationToken.None).ConfigureAwait(false);
+                workloadRegistry?.Deregister(allocatedIp, containerName);
+                throw;
+            }
         }
 
         trackedConnectorContainers[runtimeKey] = containerName;
@@ -1027,6 +1148,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         if (result.ExitCode == 0)
         {
+            if (workloadRegistry is not null)
+            {
+                var entry = workloadRegistry.GetAll().FirstOrDefault(e => string.Equals(e.ContainerId, containerName, StringComparison.OrdinalIgnoreCase));
+                if (entry is not null)
+                {
+                    workloadRegistry.Deregister(entry.Ip, entry.ContainerId);
+                }
+            }
             return true;
         }
 

@@ -9,14 +9,18 @@ const runtimeImages = [
   { id: 'kautuka-base', image: baseImage, archive: 'kautuka-base.tar' },
   { id: 'openobserve', image: 'ghcr.io/devkrity/kautuka-observability@sha256:openobserve', archive: 'openobserve.tar' },
   { id: 'git-pkgs-proxy', image: 'ghcr.io/devkrity/kautuka-package-proxy@sha256:proxy', archive: 'git-pkgs-proxy.tar' },
+  { id: 'envoy', image: 'docker.io/envoyproxy/envoy@sha256:envoy', archive: null },
+  { id: 'coredns', image: 'docker.io/coredns/coredns@sha256:coredns', archive: null },
 ];
 const components = [
   { id: 'openobserve', image: runtimeImages[1].image },
   { id: 'git-pkgs-proxy', image: runtimeImages[2].image },
+  { id: 'envoy', image: runtimeImages[3].image },
+  { id: 'coredns', image: runtimeImages[4].image },
 ];
 
 const sidecars = validateReleaseRuntimeImages(runtimeImages, components, baseImage);
-assert.deepEqual(sidecars.map((image) => image.id), ['openobserve', 'git-pkgs-proxy'],
+assert.deepEqual(sidecars.map((image) => image.id), ['openobserve', 'git-pkgs-proxy', 'envoy', 'coredns'],
   'the pinned base appliance image is tracked separately from cataloged sidecars');
 
 assert.throws(

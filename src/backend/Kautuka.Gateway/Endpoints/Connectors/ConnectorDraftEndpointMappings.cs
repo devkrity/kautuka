@@ -175,6 +175,7 @@ internal static class ConnectorDraftEndpointMappings
                     HttpUrl = endpoint.AbsoluteUri,
                     McpProtocolVersion = candidate.McpProtocolVersion,
                     AllowPrivateDestination = allowPrivate,
+                    UserId = user.Id,
                     RemoteContext = remote,
                 }, ct).ConfigureAwait(false);
                 RemoteMcpAudit.Write(context, "draft.tested", user.Id, draft.ConnectorId, draft.CredentialScope, result.Success ? "succeeded" : "failed", draftId);

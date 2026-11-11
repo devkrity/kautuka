@@ -28,6 +28,7 @@ using Kautuka.Gateway.Infrastructure.Auth;
 using Kautuka.Gateway.Infrastructure.Catalog;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Connectors;
+using Kautuka.NetworkAccess.Client;
 
 using Mediator;
 
@@ -116,7 +117,7 @@ internal static class GatewaySecurityModule
         builder.Services.AddSingleton<SetupPossession>();
         builder.Services.AddSingleton<IGatewayUserStore, GatewayUserStore>();
         builder.Services.AddSingleton<IGatewayAuthGuard, GatewayAuthGuard>();
-        builder.Services.AddHttpClient(HttpExternalIdentityClient.HttpClientName);
+        builder.Services.AddHttpClient(HttpExternalIdentityClient.HttpClientName).AddHttpMessageHandler<NetworkAccessCheckHandler>();
         builder.Services.AddSingleton(static provider => ExternalLoginProviders.Create(
             provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>(),
             provider.GetRequiredService<ConnectorAuthEndpoint>(), provider.GetRequiredService<GatewayState>().SystemSettings));
@@ -145,7 +146,7 @@ internal static class GatewayCatalogModule
             ?? provider.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>()["Kautuka:ConnectorAuth:Host"]));
         services.AddSingleton(static provider => ConnectorAuthCatalog.Load(provider.GetRequiredService<IWebHostEnvironment>().ContentRootPath));
         services.AddSingleton<ConnectorOAuthSessionStore>();
-        services.AddSingleton(static _ => new ConnectorAuthorizationClient());
+        services.AddSingleton(static provider => new ConnectorAuthorizationClient(provider.GetRequiredService<INetworkAccessChecker>()));
         services.AddSingleton<IConnectorRefreshTokenStore, CredentialsHostConnectorRefreshTokenStore>();
         services.AddSingleton<IBrokerMailCredentialStorage, CredentialsHostBrokerMailCredentialStorage>();
         services.AddSingleton<BrokerMailCredentialStore>();
@@ -156,11 +157,11 @@ internal static class GatewayCatalogModule
         services.AddSingleton<BrokerInstallationIdentityProvider>();
         services.AddSingleton(static provider => new BrokerInstallationRegistration(
             provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
-            new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })));
+            new HttpClient(new NetworkAccessCheckHandler(provider.GetRequiredService<INetworkAccessChecker>(), new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true)));
         services.AddSingleton(static provider => new BrokerHandoffClient(
             provider.GetRequiredService<BrokerInstallationIdentityProvider>(),
             provider.GetRequiredService<BrokerInstallationRegistration>(),
-            new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false })));
+            new HttpClient(new NetworkAccessCheckHandler(provider.GetRequiredService<INetworkAccessChecker>(), new SocketsHttpHandler { AllowAutoRedirect = false }), disposeHandler: true)));
         services.AddSingleton<ConnectorOAuthService>();
         services.AddHostedService<BuiltInConnectorCatalogService>();
         services.AddHostedService<RemoteMcpPresetBootstrapService>();
@@ -374,6 +375,7 @@ internal static class GatewayOperationsModule
     public static void AddServices(IServiceCollection services)
     {
         services.AddHttpClient();
+        services.ConfigureHttpClientDefaults(clientBuilder => clientBuilder.AddHttpMessageHandler<NetworkAccessCheckHandler>());
         services.AddSingleton<IWorkspaceRuntimeTool, GrpcWorkspaceRuntimeTool>();
         services.AddSingleton<IWorkspaceUserIdentityResolver, GatewayWorkspaceUserIdentityResolver>();
         services.AddSingleton(static provider => GatewayState.FromDatabase(

@@ -1,6 +1,7 @@
 using Grpc.Core;
 
 using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccess.Client;
 
 using ModelContextProtocol.Client;
 
@@ -21,13 +22,16 @@ internal sealed class McpConnectorTestService(
             return new McpConnectorTestResult(false, "Too many connector probes are already running.");
         }
 
-        try
+        using (NetworkAccessContext.BeginScope(userId: request.UserId, connectorId: request.Id, purpose: "connector-test", service: "connector-probe"))
         {
-            return await TestCoreAsync(request, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            probeSlots.Release();
+            try
+            {
+                return await TestCoreAsync(request, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                probeSlots.Release();
+            }
         }
     }
 
@@ -115,6 +119,7 @@ internal sealed class McpConnectorTestService(
                 BundlePath = string.IsNullOrWhiteSpace(request.BundlePath) ? string.Empty : request.BundlePath.Trim(),
                 ServerType = string.IsNullOrWhiteSpace(request.ServerType) ? string.Empty : request.ServerType.Trim(),
                 McpProtocolVersion = string.IsNullOrWhiteSpace(request.McpProtocolVersion) ? string.Empty : request.McpProtocolVersion.Trim(),
+                UserId = request.UserId ?? string.Empty,
             };
             probeRequest.Args.AddRange(args);
             probeRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));

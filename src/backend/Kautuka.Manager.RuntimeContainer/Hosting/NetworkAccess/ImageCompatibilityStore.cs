@@ -1,6 +1,37 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
-namespace Kautuka.NetworkAccessController;
+using Kautuka.NetworkAccessController;
+
+namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+
+public sealed record ImageCompatProfile(
+    [property: JsonPropertyName("imageDigest")] string ImageDigest,
+    [property: JsonPropertyName("connectorId")] string? ConnectorId,
+    [property: JsonPropertyName("connectorDisplayName")] string? ConnectorDisplayName,
+    [property: JsonPropertyName("relaxations")] IReadOnlyList<string> Relaxations,
+    [property: JsonPropertyName("grantedBy")] string GrantedBy,
+    [property: JsonPropertyName("grantedAtUtc")] DateTimeOffset GrantedAtUtc,
+    [property: JsonPropertyName("reason")] string? Reason);
+
+public sealed record ImageCompatRequest(
+    [property: JsonPropertyName("imageDigest")] string ImageDigest,
+    [property: JsonPropertyName("connectorId")] string ConnectorId,
+    [property: JsonPropertyName("connectorDisplayName")] string? ConnectorDisplayName,
+    [property: JsonPropertyName("failureReason")] string FailureReason,
+    [property: JsonPropertyName("firstSeenUtc")] DateTimeOffset FirstSeenUtc,
+    [property: JsonPropertyName("lastSeenUtc")] DateTimeOffset LastSeenUtc);
+
+public sealed record ImageCompatState(
+    [property: JsonPropertyName("schemaVersion")] int SchemaVersion,
+    [property: JsonPropertyName("profiles")] IReadOnlyList<ImageCompatProfile> Profiles,
+    [property: JsonPropertyName("pendingRequests")] IReadOnlyList<ImageCompatRequest> PendingRequests);
+
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, WriteIndented = true)]
+[JsonSerializable(typeof(ImageCompatState))]
+internal sealed partial class ImageCompatJsonContext : JsonSerializerContext
+{
+}
 
 /// <summary>
 /// Stores administrator-approved image compatibility profiles (<c>image-compat.json</c>)
@@ -151,7 +182,9 @@ public sealed class ImageCompatibilityStore
             throw new ArgumentException("invalid_digest: Image digest is required.", nameof(imageDigest));
         }
 
+#pragma warning disable CA1308 // Digest normalization requires lowercase sha256 hex string
         string trimmed = imageDigest.Trim().ToLowerInvariant();
+#pragma warning restore CA1308
         if (!trimmed.StartsWith("sha256:", StringComparison.Ordinal) || trimmed.Length != 71)
         {
             throw new ArgumentException("invalid_digest: Compatibility profile must be keyed by a sha256:<64-hex> image digest, never by tag or name.", nameof(imageDigest));
@@ -228,7 +261,7 @@ public sealed class ImageCompatibilityStore
             return state = new ImageCompatState(1, [], []);
         }
 
-        ImageCompatState loaded = JsonSerializer.Deserialize(bytes, NetworkAccessJsonContext.Default.ImageCompatState)
+        ImageCompatState loaded = JsonSerializer.Deserialize(bytes, ImageCompatJsonContext.Default.ImageCompatState)
             ?? throw new InvalidDataException("Image compatibility state file is empty.");
         if (loaded.SchemaVersion != 1 || loaded.Profiles is null || loaded.PendingRequests is null)
         {
@@ -263,7 +296,7 @@ public sealed class ImageCompatibilityStore
                     File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                 }
 
-                JsonSerializer.Serialize(stream, next, NetworkAccessJsonContext.Default.ImageCompatState);
+                JsonSerializer.Serialize(stream, next, ImageCompatJsonContext.Default.ImageCompatState);
                 stream.Flush(flushToDisk: true);
             }
 

@@ -1,6 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+
 using Kautuka.NetworkAccessController;
+
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -30,22 +33,31 @@ internal sealed partial class InfraAllowlistJsonContext : JsonSerializerContext;
 /// 7. Startup canary self-test gating workload creation.
 /// 8. 30s background reconcile loop and emergency brake container stops.
 /// </summary>
-public sealed class EgressTopologyManager : IAsyncDisposable
+public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
 {
     public const string WorkloadNetworkName = "kautuka-workload";
     public const string OutsideNetworkName = "kautuka-outside";
     public const string EgressPodName = "kautuka-egress";
     public const string PackageProxyContainerName = "kautuka-pkgs-proxy";
     public const string EgressPodIp = "10.247.0.2";
+    public const string OutsidePodIp = "10.248.0.2";
+    public const string OutsideSubnet = "10.248.0.0/24";
     public const string PackageProxyIp = "10.247.0.3";
     public const string WorkloadSubnet = "10.247.0.0/16";
+
+    public const string EnvoyPinnedImage = "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded";
+    public const string CoreDnsPinnedImage = "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea";
+    public const string BoundaryInitImage = "localhost/kautuka-egress-boundary:local";
 
     private readonly PodmanCommandRunner podmanRunner;
     private readonly WorkloadAddressAllocator addressAllocator;
     private readonly WorkloadPostStartVerifier postStartVerifier;
+    private readonly IWorkloadRegistry registry;
     private readonly string stateDirectory;
+    private readonly string envoySocketHostDir;
     private readonly string allowlistFilePath;
     private readonly string startupGateFilePath;
+    private readonly string hookLogFilePath;
     private readonly ILogger<EgressTopologyManager> logger;
 
     private readonly object gateLock = new();
@@ -53,6 +65,46 @@ public sealed class EgressTopologyManager : IAsyncDisposable
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
+    private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
+
+    public EgressTopologyManager(
+        PodmanCommandRunner podmanRunner,
+        WorkloadAddressAllocator addressAllocator,
+        WorkloadPostStartVerifier postStartVerifier,
+        IWorkloadRegistry registry,
+        string stateDirectory,
+        ILogger<EgressTopologyManager>? logger = null,
+        string? envoySocketHostDir = null,
+        string? hookStateDirectory = null)
+    {
+        ArgumentNullException.ThrowIfNull(podmanRunner);
+        ArgumentNullException.ThrowIfNull(addressAllocator);
+        ArgumentNullException.ThrowIfNull(postStartVerifier);
+        ArgumentNullException.ThrowIfNull(registry);
+        ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
+
+        this.podmanRunner = podmanRunner;
+        this.addressAllocator = addressAllocator;
+        this.postStartVerifier = postStartVerifier;
+        this.registry = registry;
+        this.stateDirectory = Path.GetFullPath(stateDirectory);
+        this.logger = logger ?? NullLogger<EgressTopologyManager>.Instance;
+        this.envoySocketHostDir = Path.GetFullPath(string.IsNullOrWhiteSpace(envoySocketHostDir)
+            ? Path.Combine(this.stateDirectory, "sockets")
+            : envoySocketHostDir);
+
+        string nacDir = Path.Combine(this.stateDirectory, "nac");
+        Directory.CreateDirectory(nacDir);
+        string resolvedHookDir = !string.IsNullOrWhiteSpace(hookStateDirectory)
+            ? Path.GetFullPath(hookStateDirectory)
+            : (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("XDG_STATE_HOME"))
+                ? Path.Combine(Environment.GetEnvironmentVariable("XDG_STATE_HOME")!, "kautuka", "nac")
+                : nacDir);
+        Directory.CreateDirectory(resolvedHookDir);
+        allowlistFilePath = Path.Combine(resolvedHookDir, "infra-allowlist.json");
+        startupGateFilePath = Path.Combine(nacDir, "startup-gate.status");
+        hookLogFilePath = Path.Combine(resolvedHookDir, "hook.log");
+    }
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -60,22 +112,8 @@ public sealed class EgressTopologyManager : IAsyncDisposable
         WorkloadPostStartVerifier postStartVerifier,
         string stateDirectory,
         ILogger<EgressTopologyManager>? logger = null)
+        : this(podmanRunner, addressAllocator, postStartVerifier, new WorkloadRegistry(), stateDirectory, logger, null, null)
     {
-        ArgumentNullException.ThrowIfNull(podmanRunner);
-        ArgumentNullException.ThrowIfNull(addressAllocator);
-        ArgumentNullException.ThrowIfNull(postStartVerifier);
-        ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
-
-        this.podmanRunner = podmanRunner;
-        this.addressAllocator = addressAllocator;
-        this.postStartVerifier = postStartVerifier;
-        this.stateDirectory = Path.GetFullPath(stateDirectory);
-        this.logger = logger ?? NullLogger<EgressTopologyManager>.Instance;
-
-        string nacDir = Path.Combine(this.stateDirectory, "nac");
-        Directory.CreateDirectory(nacDir);
-        allowlistFilePath = Path.Combine(nacDir, "infra-allowlist.json");
-        startupGateFilePath = Path.Combine(nacDir, "startup-gate.status");
     }
 
     public bool IsStartupGateOpen
@@ -106,6 +144,25 @@ public sealed class EgressTopologyManager : IAsyncDisposable
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await InitializeAsync(registry, isWindowsHostNativeDev: !OperatingSystem.IsLinux(), cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            IsStartupGateOpen = false;
+            logger.LogError(ex, "Failed to initialize EgressTopologyManager; closed startup gate.");
+        }
+    }
+
+    public async Task StopAsync(CancellationToken cancellationToken)
+    {
+        IsStartupGateOpen = false;
+        await DisposeAsync().ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Ensures networks and allowlist are provisioned, egress pod is live with boundary rules,
     /// registry is rebuilt from container labels, startup canary passes, and reconcile loop starts.
@@ -121,31 +178,40 @@ public sealed class EgressTopologyManager : IAsyncDisposable
 
         logger.LogInformation("Initializing Kautuka egress topology...");
 
+        // 0. Verify prerequisites (Podman info)
+        PodmanCommandResult infoResult = await podmanRunner
+            .RunAsync(["info", "--format", "{{.Host.Distribution.Distribution}}"], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (infoResult.ExitCode != 0)
+        {
+            IsStartupGateOpen = false;
+            logger.LogError("Prerequisite check failed: Podman is not operational: {StdErr}", infoResult.StdErr);
+            throw new InvalidOperationException($"Podman prerequisite check failed: {infoResult.StdErr}");
+        }
+
         // 1. Ensure networks exist
         await EnsureNetworksAsync(cancellationToken).ConfigureAwait(false);
 
-        // 2. Write infra-allowlist.json
-        WriteInfraAllowlist();
-
-        // 3. Ensure egress pod and infra containers are running
+        // 2. Ensure egress pod and containers exist, and write infra allowlist before start
         await EnsureEgressPodAsync(isWindowsHostNativeDev, decisionEndpointIp, includeLanGrants, cancellationToken).ConfigureAwait(false);
 
-        // 4. Rebuild registry from live containers before opening listener (Section 4.3.4 item 6)
+        // 3. Rebuild registry from live containers before opening listener (Section 4.3.4 item 6)
         await RebuildRegistryFromLiveContainersAsync(registry, cancellationToken).ConfigureAwait(false);
 
-        // 5. Run startup self-test canary (Section 4.3.4 item 5)
+        // 4. Run startup self-test canary (Section 4.3.4 item 5)
         bool canaryPassed = await RunStartupSelfTestAsync(cancellationToken).ConfigureAwait(false);
         if (!canaryPassed)
         {
             IsStartupGateOpen = false;
             logger.LogError("Startup canary self-test failed; startup gate closed.");
-            throw new InvalidOperationException("Network access startup canary self-test failed.");
+            throw new InvalidOperationException("Network access control self-test failed.");
         }
 
         IsStartupGateOpen = true;
         logger.LogInformation("Startup canary self-test passed; startup gate open.");
 
-        // 6. Start 30s reconcile loop
+        // 5. Start 30s reconcile loop
         StartReconcileLoop(registry);
     }
 
@@ -161,7 +227,7 @@ public sealed class EgressTopologyManager : IAsyncDisposable
 
         logger.LogInformation("Rebuilding workload registry from live container labels...");
         PodmanCommandResult psResult = await podmanRunner
-            .RunAsync(["ps", "-a", "--filter", "label=kautuka.managed=manager", "--format", "json"], 30, cancellationToken)
+            .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
             .ConfigureAwait(false);
 
         if (psResult.ExitCode != 0)
@@ -183,6 +249,12 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                     {
                         string cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() ?? string.Empty : string.Empty;
                         if (string.IsNullOrWhiteSpace(cid))
+                        {
+                            continue;
+                        }
+
+                        // Skip allowlisted infra containers
+                        if (knownInfraContainerIds.Contains(cid))
                         {
                             continue;
                         }
@@ -213,8 +285,10 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                         string systemwideStr = GetStringProperty(labels, "io.kautuka.systemwide");
                         string egress = GetStringProperty(labels, "io.kautuka.egress");
                         string compat = GetStringProperty(labels, "io.kautuka.compat");
+                        string purpose = GetStringProperty(labels, "io.kautuka.purpose");
 
                         bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
+                        bool isProbe = string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase);
 
                         // Find IP on kautuka-workload
                         string ip = string.Empty;
@@ -226,14 +300,19 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                             ip = ipElem.GetString() ?? string.Empty;
                         }
 
+                        // Skip sidecars (openobserve, etc.) if not on workload network
+                        if (string.IsNullOrWhiteSpace(ip))
+                        {
+                            continue;
+                        }
+
                         // Validation of required labels:
-                        bool isValid = !string.IsNullOrWhiteSpace(ip)
-                            && !string.IsNullOrWhiteSpace(kind)
+                        bool isValid = !string.IsNullOrWhiteSpace(kind)
                             && !string.IsNullOrWhiteSpace(execContext);
 
                         if (isValid && kind is "connector" or "agent-sandbox")
                         {
-                            if (!systemwide && string.IsNullOrWhiteSpace(user))
+                            if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user))
                             {
                                 isValid = false;
                             }
@@ -255,7 +334,7 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                             continue;
                         }
 
-                        string attribution = "user-agent";
+                        string attribution;
                         if (egress is "deny-all" or "proxy-only")
                         {
                             attribution = "none";
@@ -264,9 +343,19 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                         {
                             attribution = string.IsNullOrWhiteSpace(user) ? "none" : "user";
                         }
-                        else if (string.IsNullOrWhiteSpace(agent))
+                        else if (isProbe)
                         {
                             attribution = "user";
+                        }
+                        else if (string.IsNullOrWhiteSpace(agent))
+                        {
+                            // v7-26: Non-probe container missing agentId cannot have normal egress
+                            egress = "deny-all";
+                            attribution = "none";
+                        }
+                        else
+                        {
+                            attribution = "user-agent";
                         }
 
                         var entry = new RegistryEntry(
@@ -281,7 +370,8 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                             string.IsNullOrWhiteSpace(egress) ? "normal" : egress,
                             attribution,
                             string.IsNullOrWhiteSpace(compat) ? null : compat,
-                            DateTimeOffset.UtcNow);
+                            DateTimeOffset.UtcNow,
+                            string.IsNullOrWhiteSpace(purpose) ? null : purpose);
 
                         rebuiltEntries.Add(entry);
                     }
@@ -301,15 +391,17 @@ public sealed class EgressTopologyManager : IAsyncDisposable
     /// Executes the startup canary test (Section 4.3.4 item 5).
     /// Starts a canary workload, verifies the hook log entry and live ruleset, and removes the canary.
     /// </summary>
+    private const string CanaryBasePinnedImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+
     public async Task<bool> RunStartupSelfTestAsync(CancellationToken cancellationToken = default)
     {
         string canaryName = $"kautuka-canary-{Guid.NewGuid():N}"[..24];
-        string canaryIp = addressAllocator.AllocateNextIp();
+        string canaryIp = addressAllocator.AllocateNextIp(registry);
 
         logger.LogInformation("Running startup canary self-test '{CanaryName}' at IP {CanaryIp}...", canaryName, canaryIp);
         try
         {
-            var spec = new WorkloadContainerSpec(canaryName, "ghcr.io/devkrity/kautuka-base", canaryIp)
+            var spec = new WorkloadContainerSpec(canaryName, CanaryBasePinnedImage, canaryIp)
             {
                 UserId = "system",
                 AgentId = "system",
@@ -336,7 +428,22 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                 .VerifyWorkloadAsync(canaryName, canaryIp, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
-            return verification.Passed;
+            if (!verification.Passed)
+            {
+                return false;
+            }
+
+            // Verify hook log has entry
+            if (File.Exists(hookLogFilePath))
+            {
+                string logContent = await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false);
+                if (!logContent.Contains("action", StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogWarning("Hook log does not contain action entries.");
+                }
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -374,13 +481,27 @@ public sealed class EgressTopologyManager : IAsyncDisposable
         foreach (RegistryEntry entry in affected)
         {
             logger.LogWarning("Emergency brake stopping container '{ContainerId}' (IP: {Ip}, User: {User})...", entry.ContainerId, entry.Ip, entry.UserId);
+            bool stopped = false;
             try
             {
-                await podmanRunner.RunAsync(["stop", "-t", "2", entry.ContainerId], 10, cancellationToken).ConfigureAwait(false);
+                PodmanCommandResult stopResult = await podmanRunner.RunAsync(["stop", "-t", "2", entry.ContainerId], 10, cancellationToken).ConfigureAwait(false);
+                stopped = stopResult.ExitCode == 0;
             }
             catch
             {
-                // Ignore stop error
+                stopped = false;
+            }
+
+            if (!stopped)
+            {
+                try
+                {
+                    await podmanRunner.RunAsync(["kill", entry.ContainerId], 10, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort kill fallback
+                }
             }
 
             registry.Deregister(entry.Ip, entry.ContainerId);
@@ -394,7 +515,24 @@ public sealed class EgressTopologyManager : IAsyncDisposable
             .RunAsync(["network", "inspect", WorkloadNetworkName], 10, cancellationToken)
             .ConfigureAwait(false);
 
-        if (inspectWl.ExitCode != 0)
+        if (inspectWl.ExitCode == 0)
+        {
+            if (OperatingSystem.IsLinux() && !string.IsNullOrWhiteSpace(inspectWl.StdOut))
+            {
+                using JsonDocument netDoc = JsonDocument.Parse(inspectWl.StdOut);
+                JsonElement netElem = netDoc.RootElement.ValueKind == JsonValueKind.Array && netDoc.RootElement.GetArrayLength() > 0
+                    ? netDoc.RootElement[0]
+                    : netDoc.RootElement;
+                bool isInternal = netElem.TryGetProperty("internal", out JsonElement intElem) && intElem.GetBoolean();
+                bool dnsEnabled = netElem.TryGetProperty("dns_enabled", out JsonElement dnsElem) && dnsElem.GetBoolean();
+                if (!isInternal || dnsEnabled)
+                {
+                    IsStartupGateOpen = false;
+                    throw new InvalidOperationException($"Existing network '{WorkloadNetworkName}' drifted (internal={isInternal}, dns_enabled={dnsEnabled}).");
+                }
+            }
+        }
+        else
         {
             logger.LogInformation("Creating {NetworkName}...", WorkloadNetworkName);
             List<string> createArgs =
@@ -427,7 +565,7 @@ public sealed class EgressTopologyManager : IAsyncDisposable
         {
             logger.LogInformation("Creating {NetworkName}...", OutsideNetworkName);
             PodmanCommandResult createOut = await podmanRunner
-                .RunAsync(["network", "create", OutsideNetworkName], 30, cancellationToken)
+                .RunAsync(["network", "create", "--subnet", OutsideSubnet, "--gateway", "10.248.0.1", OutsideNetworkName], 30, cancellationToken)
                 .ConfigureAwait(false);
 
             if (createOut.ExitCode != 0)
@@ -437,15 +575,15 @@ public sealed class EgressTopologyManager : IAsyncDisposable
         }
     }
 
-    private void WriteInfraAllowlist()
+    public void WriteInfraAllowlist(IReadOnlyList<InfraAllowlistEntry>? entries = null)
     {
-        var entries = new List<InfraAllowlistEntry>
-        {
+        entries ??=
+        [
             new(EgressPodName, "egress-pod", [EgressPodIp], "pinned"),
-            new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp], "docker.io/envoyproxy/envoy:v1.40.2"),
-            new("kautuka-egress-dns", "egress-dns", [EgressPodIp], "docker.io/coredns/coredns:1.14.6"),
-            new(PackageProxyContainerName, "pkgs-proxy", [PackageProxyIp], "ghcr.io/devkrity/kautuka-package-proxy:v1"),
-        };
+            new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp], EnvoyPinnedImage),
+            new("kautuka-egress-dns", "egress-dns", [EgressPodIp], CoreDnsPinnedImage),
+            new(PackageProxyContainerName, "pkgs-proxy", [PackageProxyIp], "pinned"),
+        ];
 
         var doc = new InfraAllowlistDocument(1, entries);
         string directory = Path.GetDirectoryName(allowlistFilePath)!;
@@ -517,7 +655,7 @@ public sealed class EgressTopologyManager : IAsyncDisposable
                 "pod", "create",
                 "--name", EgressPodName,
                 "--network", $"{WorkloadNetworkName}:ip={EgressPodIp}",
-                "--network", OutsideNetworkName,
+                "--network", $"{OutsideNetworkName}:ip={OutsidePodIp}",
                 "--sysctl", "net.ipv4.ip_forward=0",
                 "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"
             ];
@@ -529,7 +667,179 @@ public sealed class EgressTopologyManager : IAsyncDisposable
             if (podResult.ExitCode != 0)
             {
                 logger.LogError("Failed to create egress pod: {StdErr}", podResult.StdErr);
+                throw new InvalidOperationException($"Failed to create egress pod: {podResult.StdErr}");
             }
+        }
+
+        // Get Pod infra container ID and populate allowlist
+        PodmanCommandResult podInspect = await podmanRunner
+            .RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        var allowlistEntries = new List<InfraAllowlistEntry>();
+        if (podInspect.ExitCode == 0)
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(podInspect.StdOut);
+                string infraId = doc.RootElement.TryGetProperty("InfraContainerID", out JsonElement infElem) ? infElem.GetString() ?? string.Empty : string.Empty;
+                if (!string.IsNullOrWhiteSpace(infraId))
+                {
+                    knownInfraContainerIds.Add(infraId);
+                    allowlistEntries.Add(new(infraId, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"));
+                }
+            }
+            catch
+            {
+                // Ignore parse errors
+            }
+        }
+
+        // Write infra allowlist BEFORE starting containers
+        WriteInfraAllowlist(allowlistEntries);
+
+        await EnsureBoundaryImageAsync(cancellationToken).ConfigureAwait(false);
+
+        // 1. Create all pod containers first so every container ID is allowlisted before podman pod start.
+        await EnsureInfraContainerCreatedAsync(
+            "kautuka-egress-boundary",
+            "egress-boundary",
+            BoundaryInitImage,
+            [
+                "create",
+                "--pod", EgressPodName,
+                "--name", "kautuka-egress-boundary",
+                "--init-ctr=always",
+                "--cap-add", "NET_ADMIN",
+                "--user", "0:0",
+                "--entrypoint", "/bin/sh",
+                "-v", $"{boundaryPath}:/etc/nftables.conf:ro",
+                BoundaryInitImage,
+                "-c", "ip route replace local 192.0.0.8 dev lo 2>/dev/null || true; exec /usr/sbin/nft -f /etc/nftables.conf"
+            ],
+            allowlistEntries,
+            cancellationToken).ConfigureAwait(false);
+
+        // 2. CoreDNS container
+        await EnsureInfraContainerCreatedAsync(
+            "kautuka-egress-dns",
+            "egress-dns",
+            CoreDnsPinnedImage,
+            [
+                "create",
+                "--pod", EgressPodName,
+                "--name", "kautuka-egress-dns",
+                "--cap-add", "NET_BIND_SERVICE",
+                "--user", "0:0",
+                "-v", $"{corefilePath}:/etc/coredns/Corefile:ro",
+                CoreDnsPinnedImage,
+                "-conf", "/etc/coredns/Corefile"
+            ],
+            allowlistEntries,
+            cancellationToken).ConfigureAwait(false);
+
+        // 3. Envoy container (runs natively as uid 65532 mapped via pod keep-id to host user)
+        Directory.CreateDirectory(envoySocketHostDir);
+        string adminSocketDir = Path.Combine(stateDirectory, "admin-socket");
+        Directory.CreateDirectory(adminSocketDir);
+        List<string> envoyCreateArgs =
+        [
+            "create",
+            "--pod", EgressPodName,
+            "--name", "kautuka-egress-envoy",
+            "--user", "0:0",
+            "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro",
+            "-v", $"{envoySocketHostDir}:/run/kautuka-nac:z",
+            "-v", $"{adminSocketDir}:/run/kautuka-admin:z",
+            EnvoyPinnedImage,
+            "-c", "/etc/envoy/envoy.yaml"
+        ];
+        await EnsureInfraContainerCreatedAsync(
+            "kautuka-egress-envoy",
+            "egress-envoy",
+            EnvoyPinnedImage,
+            envoyCreateArgs,
+            allowlistEntries,
+            cancellationToken).ConfigureAwait(false);
+
+        await podmanRunner.RunAsync(["pod", "start", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureInfraContainerCreatedAsync(
+        string containerName,
+        string role,
+        string imageDigest,
+        IReadOnlyList<string> createArgs,
+        List<InfraAllowlistEntry> allowlistEntries,
+        CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspect = await podmanRunner
+            .RunAsync(["inspect", containerName], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (inspect.ExitCode != 0)
+        {
+            PodmanCommandResult createRes = await podmanRunner
+                .RunAsync(createArgs, 30, cancellationToken)
+                .ConfigureAwait(false);
+            if (createRes.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to create infrastructure container '{containerName}': {createRes.StdErr}");
+            }
+
+            inspect = await podmanRunner
+                .RunAsync(["inspect", containerName], 10, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        string? containerId = null;
+        if (inspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(inspect.StdOut))
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspect.StdOut);
+            JsonElement elem = doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
+                ? doc.RootElement[0]
+                : doc.RootElement;
+            if (elem.TryGetProperty("Id", out JsonElement idElem))
+            {
+                containerId = idElem.GetString();
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(containerId))
+        {
+            knownInfraContainerIds.Add(containerId);
+            if (!allowlistEntries.Any(e => string.Equals(e.Id, containerId, StringComparison.OrdinalIgnoreCase)))
+            {
+                allowlistEntries.Add(new(containerId, role, [EgressPodIp, OutsidePodIp], imageDigest));
+            }
+            WriteInfraAllowlist(allowlistEntries);
+        }
+    }
+
+    private async Task EnsureBoundaryImageAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspect = await podmanRunner
+            .RunAsync(["image", "exists", BoundaryInitImage], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (inspect.ExitCode == 0)
+        {
+            return;
+        }
+
+        string dockerfilePath = Path.Combine(AppContext.BaseDirectory, "sidecar-assets", "egress-boundary", "Dockerfile");
+        if (!File.Exists(dockerfilePath))
+        {
+            dockerfilePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "images", "kautuka-egress-boundary", "Dockerfile"));
+        }
+
+        if (File.Exists(dockerfilePath))
+        {
+            string contextDir = Path.GetDirectoryName(dockerfilePath)!;
+            logger.LogInformation("Building boundary init image '{Image}' from {Path}...", BoundaryInitImage, dockerfilePath);
+            await podmanRunner
+                .RunAsync(["build", "-t", BoundaryInitImage, "-f", dockerfilePath, contextDir], 120, cancellationToken)
+                .ConfigureAwait(false);
         }
     }
 
@@ -564,7 +874,7 @@ public sealed class EgressTopologyManager : IAsyncDisposable
     {
         // 1. Compare running containers to registry
         PodmanCommandResult psResult = await podmanRunner
-            .RunAsync(["ps", "-a", "--filter", "label=kautuka.managed=manager", "--format", "json"], 30, cancellationToken)
+            .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
             .ConfigureAwait(false);
 
         if (psResult.ExitCode != 0)

@@ -37,6 +37,7 @@
     <ProjectReference Include="..\..\backend\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.UpdateService\Kautuka.UpdateService.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.WebHost\Kautuka.WebHost.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.NetworkAccess.Client\Kautuka.NetworkAccess.Client.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.NetworkAccess.Protos\Kautuka.NetworkAccess.Protos.csproj" />
   </ItemGroup>
 

@@ -12,6 +12,8 @@ using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Infrastructure.Observability;
+using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -613,6 +615,8 @@ internal sealed partial class AgentChatService
             continuationRequest?.ActiveElapsed ?? TimeSpan.Zero,
             ct);
         ct = runBudget.Token;
+        using IDisposable nacScope = NetworkAccessContext.BeginScope(userId: userId, agentId: agentId, purpose: "agent-run", service: "ai-model");
+        NetworkAccessDeniedException? aiCallNacDenial = null;
 
         var eventWriter = CreateExecutionEventWriter();
         messageLifecycle ??= new AssistantMessageLifecycle(
@@ -1149,23 +1153,92 @@ internal sealed partial class AgentChatService
         }
         catch (Exception ex)
         {
+            NetworkAccessDeniedException? nacEx = ex as NetworkAccessDeniedException
+                ?? ex.InnerException as NetworkAccessDeniedException
+                ?? (ex is AggregateException agg ? agg.InnerExceptions.OfType<NetworkAccessDeniedException>().FirstOrDefault() : null);
+
             if (!string.IsNullOrWhiteSpace(activeToolCallId)
                 && wireEmittedToolCallIds.Contains(activeToolCallId))
             {
+                string outcome = "failed";
+                string code = nacEx?.NaradReason ?? "tool_execution_failed";
+                string toolFailureMessage = ex.Message;
+                string? destination = nacEx?.Destination;
+                int? port = nacEx?.Port;
+                string? requestId = nacEx?.RequestId;
+                string? approvalUrl = nacEx is not null ? "/network-access" : null;
+
+                if (nacEx is null && managerGrpcService is not null)
+                {
+                    try
+                    {
+                        var listResp = await managerGrpcService.Client.ListRequestsAsync(
+                            new NetworkAccessListRequestsRequest
+                            {
+                                Actor = new NetworkAccessActorMessage { UserId = userId ?? string.Empty, IsAdmin = true },
+                            },
+                            deadline: DateTime.UtcNow.AddSeconds(1),
+                            cancellationToken: CancellationToken.None).ConfigureAwait(false);
+
+                        var recent = listResp.Requests.FirstOrDefault(r =>
+                            r.Status == "pending"
+                            && (string.IsNullOrWhiteSpace(r.UserId) || string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase))
+                            && (string.IsNullOrWhiteSpace(r.AgentId) || string.Equals(r.AgentId, agentId, StringComparison.OrdinalIgnoreCase)));
+
+                        if (recent is not null)
+                        {
+                            code = "network_access_required";
+                            destination = recent.Destination;
+                            port = recent.Port;
+                            requestId = recent.Id;
+                            approvalUrl = "/network-access";
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore lookup errors
+                    }
+                }
+
+                var toolFinishedPayload = new JsonObject
+                {
+                    ["toolCallId"] = activeToolCallId,
+                    ["toolName"] = activeToolName,
+                    ["response"] = null,
+                    ["outcome"] = outcome,
+                    ["code"] = code,
+                    ["message"] = toolFailureMessage,
+                };
+                if (!string.IsNullOrWhiteSpace(destination))
+                {
+                    toolFinishedPayload["destination"] = destination;
+                    toolFinishedPayload["reason"] = code;
+                }
+                if (port.HasValue)
+                {
+                    toolFinishedPayload["port"] = port.Value;
+                }
+                if (!string.IsNullOrWhiteSpace(requestId))
+                {
+                    toolFinishedPayload["requestId"] = requestId;
+                }
+                if (!string.IsNullOrWhiteSpace(approvalUrl))
+                {
+                    toolFinishedPayload["approvalUrl"] = approvalUrl;
+                }
+
                 await eventWriter.WriteRuntimeAsync(
                     writer,
                     NaradEventTypes.ToolCallFinished,
-                    JsonSerializer.SerializeToElement(new JsonObject
-                    {
-                        ["toolCallId"] = activeToolCallId,
-                        ["toolName"] = activeToolName,
-                        ["response"] = null,
-                        ["message"] = ex.Message,
-                        ["outcome"] = "error",
-                    }, KautukaJsonContext.Default.JsonObject),
+                    JsonSerializer.SerializeToElement(toolFinishedPayload, KautukaJsonContext.Default.JsonObject),
                     runtimeEventContext!,
                     CancellationToken.None).ConfigureAwait(false);
             }
+            else if (nacEx is not null)
+            {
+                aiCallNacDenial = nacEx;
+            }
+
             result = "failed";
             errorMsg = ex.Message;
             AgentChatServiceLog.AgentStreamFailed(logger, ex, agentId);
@@ -1179,7 +1252,23 @@ internal sealed partial class AgentChatService
                     if (errorMsg is not null)
                     {
                         await eventWriter.WriteAsync(writer, new GatewayChatTokenDelta($"[Error: {errorMsg}]", false), runtimeEventContext!, messageLifecycle, CancellationToken.None).ConfigureAwait(false);
-                        await eventWriter.WriteAsync(writer, new GatewayChatStreamDone(Error("agent", agentId, sessionId, errorMsg)), runtimeEventContext!, messageLifecycle, CancellationToken.None).ConfigureAwait(false);
+                        GatewayRunState terminalRunState = aiCallNacDenial is not null
+                            ? new GatewayRunState(
+                                GatewayRunPhases.Failed,
+                                ErrorCode: aiCallNacDenial.NaradReason,
+                                ErrorMessage: errorMsg,
+                                Destination: aiCallNacDenial.Destination,
+                                Port: aiCallNacDenial.Port,
+                                RequestId: aiCallNacDenial.RequestId,
+                                ApprovalUrl: "/network-access")
+                            : new GatewayRunState(GatewayRunPhases.Failed);
+
+                        await eventWriter.WriteAsync(
+                            writer,
+                            new GatewayChatStreamDone(new GatewayChatResult("agent", agentId, sessionId, $"[{errorMsg}]", false, new GatewayMetrics(0, 0, 0), null, null, [], Run: terminalRunState)),
+                            runtimeEventContext!,
+                            messageLifecycle,
+                            CancellationToken.None).ConfigureAwait(false);
                     }
                     else
                     {

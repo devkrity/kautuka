@@ -17,6 +17,8 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
     internal static readonly TimeSpan DesiredStateMaterializationDeadline = TimeSpan.FromMinutes(31);
     private readonly ManagerService.ManagerServiceClient client = new(callInvoker);
 
+    public ManagerService.ManagerServiceClient Client => client;
+
     public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
         => Call("Ping", () => client.PingAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), cancellationToken: cancellationToken).ResponseAsync);
 

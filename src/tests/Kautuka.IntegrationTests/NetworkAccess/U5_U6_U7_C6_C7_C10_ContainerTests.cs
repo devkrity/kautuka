@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
@@ -32,55 +33,44 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public void U5_SpecBuilder_RejectsProhibitedFlagsAndHardensDefaults_WithNegativeControl()
     {
-        // 1. Prohibited flags rejection
-        string[] prohibitedFlags =
-        [
-            "--privileged",
-            "--privileged=true",
-            "--device",
-            "--device=/dev/fuse",
-            "--userns=host",
-            "--hooks-dir=/custom/hooks",
-            "--runtime=runc",
-            "--volumes-from=container1",
-            "--pod=otherpod",
-            "--infra=true",
-            "--init-ctr=always",
-            "--ip=10.247.1.99",
-            "--mac-address=00:11:22:33:44:55",
-            "--network=host",
-            "--network=bridge",
-            "--network=container:xyz",
-            "--cap-add=NET_RAW",
-            "--cap-add=NET_ADMIN",
-            "--cap-add=SYS_ADMIN",
-            "--security-opt=seccomp=unconfined",
-            "--pid=host",
-            "--ipc=host",
-            "--uts=host",
-            "--cgroupns=host",
-            "--sysctl=net.ipv4.ip_forward=1"
-        ];
+        // 1. IP validation (10.247.1.1 to 10.247.255.254 only, never 10.247.0.0/24, never .0 or .255)
+        const string pinnedImage = "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        Assert.Throws<ArgumentException>(() => new WorkloadContainerSpec("test", pinnedImage, "192.168.1.1"));
+        Assert.Throws<ArgumentException>(() => new WorkloadContainerSpec("test", pinnedImage, "10.247.0.5"));
+        Assert.Throws<ArgumentException>(() => new WorkloadContainerSpec("test", pinnedImage, "10.247.1.0"));
+        Assert.Throws<ArgumentException>(() => new WorkloadContainerSpec("test", pinnedImage, "10.247.1.255"));
 
-        foreach (string flag in prohibitedFlags)
+        // 2. Prohibited proxy env rejection
+        var specWithProxyEnv = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
         {
-            var ex = Assert.Throws<ArgumentException>(() =>
-                WorkloadContainerSpec.AssertAllowedOptions([flag], null, null));
-            Assert.Contains("rejected", ex.Message, StringComparison.OrdinalIgnoreCase);
-        }
+            UserId = "user-1",
+            AgentId = "agent-1",
+            Environment = [new KeyValuePair<string, string>("HTTP_PROXY", "http://evil:8080")]
+        };
+        Assert.Throws<ArgumentException>(() => specWithProxyEnv.Render());
 
-        // 2. Reserved labels & annotations rejection
-        Assert.Throws<ArgumentException>(() =>
-            WorkloadContainerSpec.AssertAllowedOptions(null, new Dictionary<string, string> { ["io.kautuka.custom"] = "val" }, null));
-        Assert.Throws<ArgumentException>(() =>
-            WorkloadContainerSpec.AssertAllowedOptions(null, new Dictionary<string, string> { ["run.oci.custom"] = "val" }, null));
-        Assert.Throws<ArgumentException>(() =>
-            WorkloadContainerSpec.AssertAllowedOptions(null, new Dictionary<string, string> { ["io.podman.custom"] = "val" }, null));
-        Assert.Throws<ArgumentException>(() =>
-            WorkloadContainerSpec.AssertAllowedOptions(null, null, new Dictionary<string, string> { ["io.kautuka.attacker"] = "val" }));
+        // 3. Non-probe connector without AgentId rejected under normal egress (v7-26)
+        var specMissingAgent = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "",
+            ConnectorId = "search",
+            Egress = "normal",
+            Systemwide = false
+        };
+        Assert.Throws<ArgumentException>(() => specMissingAgent.Render());
 
-        // 3. Mounts validation
-        var specWithBadMount = new WorkloadContainerSpec("test-workload", "ghcr.io/devkrity/kautuka-base", "10.247.1.10")
+        // 4. Closed startup gate blocks rendering
+        var specGateClosed = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            StartupGateOpen = false
+        };
+        Assert.Throws<InvalidOperationException>(() => specGateClosed.Render());
+
+        // 5. Mounts validation
+        var specWithBadMount = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
         {
             UserId = "user-1",
             AgentId = "agent-1",
@@ -88,8 +78,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         };
         Assert.Throws<ArgumentException>(() => specWithBadMount.Render());
 
-        // 4. Proper rendering with default hardening
-        var validSpec = new WorkloadContainerSpec("test-workload", "ghcr.io/devkrity/kautuka-base", "10.247.1.10")
+        // 6. Proper rendering with default hardening
+        var validSpec = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
         {
             UserId = "user-1",
             AgentId = "agent-1",
@@ -140,8 +130,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         // Negative Control (.NC):
         // (a) Profile asking for prohibited cap like NET_ADMIN is still rejected:
-        Assert.Throws<ArgumentException>(() =>
-            WorkloadContainerSpec.AssertAllowedOptions(["--cap-add=NET_ADMIN"], null, null, compatProfile));
+        var badProfile = new ImageCompatProfile(
+            "sha256:" + new string('b', 64),
+            "bad",
+            "Bad",
+            ["cap-net-admin"],
+            "admin-1",
+            DateTimeOffset.UtcNow,
+            Reason: null);
+        var specWithBadProfile = validSpec with { CompatibilityProfile = badProfile };
+        Assert.Throws<ArgumentException>(() => specWithBadProfile.Render());
 
         // (b) Same spec without profile renders read-only and non-root:
         Assert.Contains("--read-only", args);

@@ -4,7 +4,7 @@ This guide describes the architecture, approval workflows, operational procedure
 
 ---
 
-## 1. Architecture Overview
+## 1. Architecture Overview `[Built]` `[Tested]`
 
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 
@@ -67,9 +67,9 @@ flowchart LR
 
 ---
 
-## 2. User & Approval Workflows
+## 2. User & Approval Workflows `[Built]` `[Tested]`
 
-### 2.1 Approval Cards
+### 2.1 Approval Cards `[Built]` `[Tested]`
 When an agent or connector attempts an outbound connection to an unapproved destination:
 1. Envoy or Gateway blocks the connection and registers a pending access request in `NetworkAccessController`.
 2. A single approval card appears in the **Network Approvals** section of the Kautuka Web UI.
@@ -77,28 +77,31 @@ When an agent or connector attempts an outbound connection to an unapproved dest
    - **Who/What**: "{User}'s {Agent} ({Connector}) wants to reach {destination}:{port}".
    - **Attempts**: "First tried {time}, tried {n} times."
    - **Action Buttons**:
-     - **Allow**: Grants an active rule scoped specifically to that `(user, agent, connector, destination, port)`.
+     - **Allow**: Grants an active rule scoped specifically to `(userId, agentId, destination, port)`. Agent-scoped rules apply to all tools and connectors executed by that agent; rule records do not store a connector ID.
      - **Keep blocked**: Rejects the request.
-     - **Allow for all my agents, including new ones**: (Visible only if the user possesses `canApproveOwn` and `canAllowAllAgents` privileges). Writes a `user`-scope rule covering all existing and future agents owned by this user for this destination.
+     - **Allow for all my agents, including new ones**: (Visible only if the request's owner possesses `canApproveOwn` and `canAllowAllAgents` privileges). Writes a `user`-scope rule `(userId, destination, port)` covering all existing and future agents owned by this user for this destination.
+4. **Connector Probes**:
+   - A user's own connector probe creates an ordinary `agent`/`user` pending request subject to standard `canApproveOwn` privileges.
+   - Systemwide connector probes (`systemwide=true` or unowned connector) route exclusively to administrators.
 
-### 2.2 User Privileges
+### 2.2 User Privileges `[Built]` `[Tested]`
 Administrators manage per-user network privileges under User Settings:
 - `canApproveOwn` (Default: **OFF** for standard users, **ON** for administrators):
   When enabled, the user can approve or deny network requests originating from their own agents. When disabled, requests escalate to administrators with a notice ("Waiting for an administrator to approve").
 - `canAllowAllAgents` (Default: **OFF** for standard users, **ON** for administrators):
   Allows the user to create `user`-scope rules applying across all their agents. Unticking this privilege pauses all `user`-scope rules created by that user without deleting them; re-ticking restores them.
 
-### 2.3 Administrator Grants
+### 2.3 Administrator Grants `[Built]` `[Tested]`
 - **Open Internet Grant (`any-public`)**:
   Administrators can grant open internet access to isolated containerized connectors (`scopeKind = user`, `destKind = any-public`, `port = 0`). This allows public internet egress while non-public IPv4 ranges (`NonPublicV4`) remain strictly enforced by kernel boundary rejection.
 - **LAN Grants (`allowLan`)**:
   When LAN grants are enabled, connections to RFC1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) route through Envoy's dedicated `dfp_lan` / `orig_dst_lan` clusters bound to `192.0.0.8`. The kernel boundary rule `lan_approved` permits this traffic while blocking access to `10.247.0.0/16` and metadata.
 
-### 2.4 Emergency Brake
+### 2.4 Emergency Brake `[Built]` `[Tested]`
 - **User Emergency Brake**: Immediately pauses network access for all containers owned by the user, stops running workload containers, and blocks new container creation.
 - **System Emergency Brake (Admin Only)**: Halts all workload network egress across the entire instance and shuts down all running agent containers. Rules remain intact and are restored upon releasing the brake.
 
-### 2.5 Image Compatibility Profiles
+### 2.5 Image Compatibility Profiles `[Built]` `[Tested]`
 Third-party containerized MCP tools that cannot operate under hardened security defaults may be granted an admin compatibility profile keyed by image digest (`sha256:...`). The profile selectively relaxes:
 - `writable-rootfs`: Permits a writable container filesystem.
 - `root-user`: Permits execution as container UID 0.
@@ -171,7 +174,7 @@ Verify the following rule comments are present:
 - `udp_drop`
 - `final_drop`
 
-### 3.4 Validating Static Templates
+### 3.4 Validating Static Templates `[Built]` `[Tested]`
 
 #### Envoy Static Configuration
 Validate the rendered Envoy bootstrap configuration using the official Envoy container:
@@ -188,9 +191,12 @@ Validate the rendered boundary ruleset:
 nft -c -f /path/to/rendered/boundary.nft
 ```
 
+### 3.5 Live Container Acceptance `[Pending live Linux acceptance]`
+End-to-end container acceptance tests (`U5-U7`, `C6-C7`, `C10`) execute against rootless Podman on Linux environments with `nf_tables` and `crun` enabled.
+
 ---
 
-## 4. Troubleshooting Hook Refusal Reasons
+## 4. Troubleshooting Hook Refusal Reasons `[Built]`
 
 When container startup fails with exit code 126 or 1, check the `reason` field in `hook.log`:
 

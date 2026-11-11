@@ -1,3 +1,4 @@
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
 using NacController = Kautuka.NetworkAccessController.NetworkAccessController;
@@ -31,9 +32,18 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(tempDir))
+        try
         {
-            Directory.Delete(tempDir, recursive: true);
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -51,6 +61,15 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
         Assert.Equal(goldenNonPublicV4, notPublicRanges);
         Assert.Equal(goldenNonPublicV4, envoyRanges);
         Assert.Equal(goldenNonPublicV4, nftRanges);
+
+        // Also verify rendered BoundaryRulesetRenderer templates
+        string renderedBoundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false);
+        IReadOnlyList<string> boundaryNftRanges = NetworkAddressClassifier.ExtractRangesFromNftPrivateReject(renderedBoundaryNft);
+        Assert.Equal(goldenNonPublicV4, boundaryNftRanges);
+
+        string renderedEnvoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig();
+        IReadOnlyList<string> renderedEnvoyRanges = NetworkAddressClassifier.ExtractRangesFromEnvoyFilterYaml(renderedEnvoyConfig);
+        Assert.Equal(goldenNonPublicV4, renderedEnvoyRanges);
 
         // Negative control (.NC): remove one range from the Envoy rendering only -> golden comparison fails
         string incompleteEnvoyYaml = NetworkAddressClassifier.RenderEnvoyResolvedAddressFilterYaml(

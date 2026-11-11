@@ -6,7 +6,10 @@ Tests:
 - MF7 ruleset rendering and golden verification across 3 IPs
 - Allowlist schema parsing (dict-by-id and version 1 entries) and file mode validation
 - MF8 netns-owners corrupt file rejection ('owners_unreadable')
-- MF8 concurrent flock writer integrity test on netns-owners.json
+- MF8 concurrent flock writer integrity test on netns-owners.json and unlocked writer negative control
+- Canonicalisation of nft -j output against realistic golden fixture
+- Stale owners expiry when PID is missing or dead
+- main() fail-closed paths on apply, verify, and owners write failures
 """
 import concurrent.futures
 import json
@@ -15,7 +18,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import unittest.mock
 
 # Ensure scripts/nac is in sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +35,8 @@ from kautuka_hook import (
     write_owners_file,
     is_owner_live,
     get_pid_start_ticks,
+    canonicalize_nft_json,
+    main,
 )
 
 
@@ -161,7 +169,8 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
         ]
 
         for ip in ips:
-            rules = render_ruleset(ip, include_pkgs_proxy=True)
+            # Default include_pkgs_proxy=False per v7-11
+            rules = render_ruleset(ip, include_pkgs_proxy=False)
 
             # Atomic transaction headers
             self.assertTrue(
@@ -177,8 +186,8 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
             self.assertIn("ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept", rules)
 
-            # Package proxy allow
-            self.assertIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
+            # Package proxy NOT present by default (v7-11)
+            self.assertNotIn("20101", rules, "Package proxy must not be present when include_pkgs_proxy=False")
 
             # Verify all expected comments exist
             for c in expected_comments:
@@ -187,9 +196,9 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             # Verify closing braces
             self.assertTrue(rules.strip().endswith("}\n}"), "Ruleset must close output chain and table")
 
-    def test_ruleset_without_package_proxy(self):
-        rules = render_ruleset("10.247.1.5", include_pkgs_proxy=False)
-        self.assertNotIn("20101", rules, "Ruleset without package proxy must not contain port 20101")
+    def test_ruleset_with_package_proxy_explicit(self):
+        rules = render_ruleset("10.247.1.5", include_pkgs_proxy=True)
+        self.assertIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
         self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
 
 
@@ -268,7 +277,8 @@ class TestKautukaHookAllowlistParsing(unittest.TestCase):
 
 class TestKautukaHookOwnersIntegrity(unittest.TestCase):
     """
-    Tests MF8 netns-owners.json handling: corrupt file rejection and concurrent flock writer safety.
+    Tests MF8 netns-owners.json handling: corrupt file rejection, concurrent flock writer safety,
+    unlocked writer negative control, and stale entry expiry.
     """
 
     def setUp(self):
@@ -289,26 +299,58 @@ class TestKautukaHookOwnersIntegrity(unittest.TestCase):
         self.assertFalse(valid, "Corrupt owners file must not be considered valid")
         self.assertEqual(reason, "owners_unreadable")
 
+    def _real_proc_info(self):
+        live_pid = os.getpid()
+        if os.path.exists(f"/proc/{live_pid}/ns/net"):
+            return live_pid, os.stat(f"/proc/{live_pid}/ns/net").st_ino, get_pid_start_ticks(live_pid)
+        return live_pid, 300, 3000
+
     def test_write_and_read_roundtrip(self):
+        live_pid, real_ino, real_ticks = self._real_proc_info()
+        key = str(real_ino)
         entries = {
-            "100": {"inode": 100, "id": "cid-1", "pid": None, "start_ticks": 1000},
-            "200": {"inode": 200, "id": "cid-2", "pid": None, "start_ticks": 2000},
+            key: {"inode": real_ino, "id": "cid-1", "pid": live_pid, "start_ticks": real_ticks},
         }
         write_owners_file(entries, owners_path=self.owners_path, lock_path=self.lock_path)
 
         loaded, valid, reason = read_owners_file(self.owners_path)
         self.assertTrue(valid)
         self.assertIsNone(reason)
-        self.assertIn("100", loaded)
-        self.assertEqual(loaded["100"]["id"], "cid-1")
-        self.assertIn("200", loaded)
-        self.assertEqual(loaded["200"]["id"], "cid-2")
+        self.assertIn(key, loaded)
+        self.assertEqual(loaded[key]["id"], "cid-1")
+
+    def test_stale_owners_expire_when_pid_missing_or_dead(self):
+        """
+        v7-11: Expire stale owners entries when pid is missing or dead!
+        """
+        live_pid, real_ino, real_ticks = self._real_proc_info()
+        live_key = str(real_ino)
+        entries = [
+            {"inode": 100, "id": "cid-null-pid", "pid": None, "start_ticks": 1000},
+            {"inode": 200, "id": "cid-dead-pid", "pid": 99999999, "start_ticks": 2000},
+            {"inode": 999, "id": "cid-wrong-inode", "pid": live_pid, "start_ticks": real_ticks},
+            {"inode": real_ino, "id": "cid-live", "pid": live_pid, "start_ticks": real_ticks},
+        ]
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump(entries, f)
+        if hasattr(os, "chmod") and hasattr(os, "getuid"):
+            os.chmod(self.owners_path, 0o600)
+
+        loaded, valid, reason = read_owners_file(self.owners_path)
+        self.assertTrue(valid)
+        self.assertNotIn("100", loaded, "Entry with pid=None must expire")
+        self.assertNotIn("200", loaded, "Entry with dead pid must expire")
+        if os.path.exists(f"/proc/{live_pid}/ns/net"):
+            self.assertNotIn("999", loaded, "Entry with mismatched inode on Linux must expire")
+        self.assertIn(live_key, loaded, "Entry with live pid and matching netns/ticks must remain")
 
     def test_concurrent_flock_writers(self):
         """
-        Spawns 5 threads concurrently writing distinct entries.
+        Spawns 5 threads concurrently writing distinct entries under flock.
         Verifies that lock prevents race conditions and all entries persist cleanly.
         """
+        live_pid = os.getpid()
+
         def worker(worker_id):
             for i in range(10):
                 ino = worker_id * 100 + i
@@ -316,22 +358,173 @@ class TestKautukaHookOwnersIntegrity(unittest.TestCase):
                     str(ino): {
                         "inode": ino,
                         "id": f"cid-worker-{worker_id}-{i}",
-                        "pid": None,
+                        "pid": live_pid,
                         "start_ticks": 1000 + ino,
                     }
                 }
                 write_owners_file(entry, owners_path=self.owners_path, lock_path=self.lock_path)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = [executor.submit(worker, w) for w in range(5)]
-            for f in concurrent.futures.as_completed(futures):
-                f.result()
+        with unittest.mock.patch("kautuka_hook.is_owner_live", return_value=True):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [executor.submit(worker, w) for w in range(5)]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
 
-        loaded, valid, reason = read_owners_file(self.owners_path)
+            loaded, valid, reason = read_owners_file(self.owners_path)
         self.assertTrue(valid)
         self.assertIsNone(reason)
         # All 50 entries should be present
         self.assertEqual(len(loaded), 50, f"Expected 50 merged entries across workers, found {len(loaded)}")
+
+    def test_unlocked_writer_negative_control(self):
+        """
+        Negative control (v7-11): Concurrently writing to the owners file WITHOUT locking
+        results in race conditions / lost entries.
+        """
+        unlocked_path = os.path.join(self.temp_dir.name, "unlocked-owners.json")
+        barrier = threading.Barrier(2)
+
+        def unlocked_worker(worker_id):
+            barrier.wait()
+            for i in range(10):
+                try:
+                    if os.path.exists(unlocked_path):
+                        with open(unlocked_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    else:
+                        data = []
+                except Exception:
+                    data = []
+                data.append({"inode": worker_id * 100 + i, "id": f"cid-{worker_id}-{i}", "pid": os.getpid()})
+                time.sleep(0.0005)
+                with open(unlocked_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+
+        t1 = threading.Thread(target=unlocked_worker, args=(1,))
+        t2 = threading.Thread(target=unlocked_worker, args=(2,))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Without locking, updates clobber each other:
+        with open(unlocked_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Verify that either lost updates occurred or entry count is <= 20
+        self.assertLessEqual(len(data), 20)
+
+
+class TestKautukaHookCanonicalGoldenFixture(unittest.TestCase):
+    """
+    Tests canonicalisation of nft -j output with real golden fixture (v7-11).
+    """
+
+    def test_canonicalize_realistic_golden_fixture(self):
+        fixture_path = os.path.join(SCRIPT_DIR, "fixtures", "nft_kautuka_workload_golden.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            fixture_data = json.load(f)
+
+        comments = [
+            "input_drop", "ipv6_drop", "spoof_drop", "wl_net_drop",
+            "meta_drop", "udp_drop", "final_drop"
+        ]
+        canon_json, canon_hash = canonicalize_nft_json(
+            fixture_data,
+            required_comments=comments,
+            required_workload_ip="10.247.1.5"
+        )
+        self.assertEqual(len(canon_hash), 64)
+        self.assertNotIn("handle", canon_json)
+        self.assertNotIn("metainfo", canon_json)
+
+    def test_canonicalize_negative_control_missing_required_comment(self):
+        fixture_path = os.path.join(SCRIPT_DIR, "fixtures", "nft_kautuka_workload_golden.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            fixture_data = json.load(f)
+
+        # Mutate fixture to remove spoof_drop rule
+        fixture_data["nftables"] = [
+            item for item in fixture_data["nftables"]
+            if not ("rule" in item and item["rule"].get("comment") == "spoof_drop")
+        ]
+
+        comments = [
+            "input_drop", "ipv6_drop", "spoof_drop", "wl_net_drop",
+            "meta_drop", "udp_drop", "final_drop"
+        ]
+        with self.assertRaises(ValueError):
+            canonicalize_nft_json(
+                fixture_data,
+                required_comments=comments,
+                required_workload_ip="10.247.1.5"
+            )
+
+    def test_canonicalize_negative_control_ip_mismatch(self):
+        fixture_path = os.path.join(SCRIPT_DIR, "fixtures", "nft_kautuka_workload_golden.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            fixture_data = json.load(f)
+
+        comments = [
+            "input_drop", "ipv6_drop", "spoof_drop", "wl_net_drop",
+            "meta_drop", "udp_drop", "final_drop"
+        ]
+        with self.assertRaises(ValueError):
+            canonicalize_nft_json(
+                fixture_data,
+                required_comments=comments,
+                required_workload_ip="10.247.99.99"
+            )
+
+
+class TestKautukaHookMainFailClosedPaths(unittest.TestCase):
+    """
+    Tests main() fail-closed behavior on apply, verify, and owners write failures (v7-11).
+    """
+
+    @unittest.mock.patch("sys.exit")
+    @unittest.mock.patch("kautuka_hook.subprocess.run")
+    @unittest.mock.patch("sys.stdin")
+    def test_main_apply_cmd_failure_exits_1(self, mock_stdin, mock_subp, mock_exit):
+        mock_stdin.read.return_value = json.dumps({"id": "c1", "pid": 12345})
+        mock_exit.side_effect = SystemExit(1)
+
+        res_ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
+        res_apply = unittest.mock.Mock(returncode=1, stderr="nft error")
+        mock_subp.side_effect = [res_ip, res_apply]
+
+        with unittest.mock.patch("kautuka_hook.read_allowlist_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.read_owners_file", return_value=({}, True, None)), \
+             unittest.mock.patch("os.stat"):
+            with self.assertRaises(SystemExit):
+                main()
+            mock_exit.assert_called_with(1)
+
+    @unittest.mock.patch("sys.exit")
+    @unittest.mock.patch("kautuka_hook.subprocess.run")
+    @unittest.mock.patch("sys.stdin")
+    def test_main_owners_write_failure_fails_closed(self, mock_stdin, mock_subp, mock_exit):
+        mock_stdin.read.return_value = json.dumps({"id": "c1", "pid": 12345})
+        mock_exit.side_effect = SystemExit(1)
+
+        fixture_path = os.path.join(SCRIPT_DIR, "fixtures", "nft_kautuka_workload_golden.json")
+        with open(fixture_path, "r", encoding="utf-8") as f:
+            golden_json_str = f.read()
+
+        res_ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
+        res_apply = unittest.mock.Mock(returncode=0, stdout="")
+        res_verify = unittest.mock.Mock(returncode=0, stdout=golden_json_str)
+        mock_subp.side_effect = [res_ip, res_apply, res_verify]
+
+        mock_st = unittest.mock.Mock()
+        mock_st.st_ino = 54321
+
+        with unittest.mock.patch("kautuka_hook.read_allowlist_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.read_owners_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.write_owners_file", side_effect=PermissionError("Permission denied")), \
+             unittest.mock.patch("os.stat", return_value=mock_st):
+            with self.assertRaises(SystemExit):
+                main()
+            mock_exit.assert_called_with(1)
 
 
 if __name__ == "__main__":

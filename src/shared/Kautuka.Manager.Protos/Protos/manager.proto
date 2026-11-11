@@ -557,6 +557,7 @@ message NetworkAccessSetUserPrivilegesRequest {
   string user_id = 2;
   bool can_approve_own = 3;
   bool can_allow_all_agents = 4;
+  optional bool target_is_admin = 5;
 }
 
 message NetworkAccessGetBrakeRequest {

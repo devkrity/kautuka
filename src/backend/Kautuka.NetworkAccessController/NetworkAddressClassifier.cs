@@ -193,6 +193,10 @@ public static class NetworkAddressClassifier
                     currentPrefix = null;
                 }
             }
+            else if (results.Count > 0 && currentPrefix is null && !line.StartsWith('#'))
+            {
+                break;
+            }
         }
 
         return results;
@@ -214,14 +218,27 @@ public static class NetworkAddressClassifier
     public static IReadOnlyList<string> ExtractRangesFromNftPrivateReject(string nftRule)
     {
         ArgumentNullException.ThrowIfNull(nftRule);
-        int openBrace = nftRule.IndexOf('{', StringComparison.Ordinal);
-        int closeBrace = nftRule.IndexOf('}', StringComparison.Ordinal);
+        string target = nftRule;
+        if (nftRule.Contains('\n', StringComparison.Ordinal))
+        {
+            foreach (string rawLine in nftRule.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (rawLine.Contains("private_reject", StringComparison.OrdinalIgnoreCase))
+                {
+                    target = rawLine;
+                    break;
+                }
+            }
+        }
+
+        int openBrace = target.IndexOf('{', StringComparison.Ordinal);
+        int closeBrace = target.IndexOf('}', StringComparison.Ordinal);
         if (openBrace < 0 || closeBrace <= openBrace)
         {
             return [];
         }
 
-        string body = nftRule[(openBrace + 1)..closeBrace];
+        string body = target[(openBrace + 1)..closeBrace];
         var results = new List<string>();
         foreach (string part in body.Split(',', StringSplitOptions.RemoveEmptyEntries))
         {

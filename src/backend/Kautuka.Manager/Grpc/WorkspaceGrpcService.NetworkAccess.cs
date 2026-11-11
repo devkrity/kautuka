@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
 using NacController = Kautuka.NetworkAccessController.NetworkAccessController;
@@ -24,31 +25,54 @@ public sealed partial class WorkspaceGrpcService
         using IDisposable scope = BeginGrpcScope(context, "CheckOutbound", ("Host", request.Host), ("Port", request.Port));
         TagCurrentActivity(("rpc.method", "CheckOutbound"));
 
-        string origin = ResolveClientOrigin(context);
-        string effectiveUserId = origin == "channelhost" && string.IsNullOrWhiteSpace(request.UserId)
-            ? "system"
-            : request.UserId;
-        string effectiveAgentId = origin == "channelhost" && string.IsNullOrWhiteSpace(request.AgentId)
-            ? "channelhost"
-            : request.AgentId;
-
-        NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
-            effectiveUserId,
-            effectiveAgentId,
-            string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId,
-            request.Systemwide,
-            request.Host,
-            request.Port,
-            string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,
-            string.IsNullOrWhiteSpace(request.CorrelationId) ? null : request.CorrelationId,
-            origin));
-
-        return Task.FromResult(new NetworkAccessCheckOutboundResponse
+        return ExecuteNacRpc(() =>
         {
-            Allowed = decision.Allowed,
-            Reason = decision.Reason,
-            RequestId = decision.RequestId ?? string.Empty,
-            OpenInternetBadge = decision.OpenInternetBadge,
+            string origin = ResolveClientOrigin(context);
+            string effectiveUserId;
+            string effectiveAgentId;
+            bool effectiveSystemwide;
+
+            if (origin == "channelhost")
+            {
+                if (!string.IsNullOrWhiteSpace(request.UserId) || !string.IsNullOrWhiteSpace(request.AgentId) || request.Systemwide)
+                {
+                    throw new UnauthorizedAccessException("PermissionDenied: ChannelHost identity is pinned to system/channelhost and cannot specify custom userId, agentId, or systemwide.");
+                }
+
+                effectiveUserId = "system";
+                effectiveAgentId = "channelhost";
+                effectiveSystemwide = false;
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(request.UserId))
+                {
+                    throw new ArgumentException("UserId is required for outbound check.", nameof(request));
+                }
+
+                effectiveUserId = request.UserId.Trim();
+                effectiveAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? "gateway" : request.AgentId.Trim();
+                effectiveSystemwide = request.Systemwide;
+            }
+
+            NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
+                effectiveUserId,
+                effectiveAgentId,
+                string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim(),
+                effectiveSystemwide,
+                request.Host,
+                request.Port,
+                string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,
+                string.IsNullOrWhiteSpace(request.CorrelationId) ? null : request.CorrelationId,
+                origin));
+
+            return new NetworkAccessCheckOutboundResponse
+            {
+                Allowed = decision.Allowed,
+                Reason = decision.Reason,
+                RequestId = decision.RequestId ?? string.Empty,
+                OpenInternetBadge = decision.OpenInternetBadge,
+            };
         });
     }
 
@@ -270,7 +294,7 @@ public sealed partial class WorkspaceGrpcService
         });
     }
 
-    public override Task<NetworkAccessBrakeMessage> SetBrake(
+    public override async Task<NetworkAccessBrakeMessage> SetBrake(
         NetworkAccessSetBrakeRequest request,
         ServerCallContext context)
     {
@@ -278,15 +302,24 @@ public sealed partial class WorkspaceGrpcService
         ArgumentNullException.ThrowIfNull(context);
         using IDisposable scope = BeginGrpcScope(context, "SetBrake");
 
-        return ExecuteNacRpc(() =>
+        BrakeState brake = await ExecuteNacRpc(() =>
         {
-            BrakeState brake = Nac.PolicyStore.SetBrake(
+            return Nac.PolicyStore.SetBrake(
                 ToActor(request.Actor),
                 request.Scope,
                 string.IsNullOrWhiteSpace(request.UserId) ? null : request.UserId,
                 request.On);
-            return ToMessage(brake);
-        });
+        }).ConfigureAwait(false);
+
+        if (request.On && egressTopologyManager is not null)
+        {
+            string? targetUser = string.Equals(request.Scope, "system", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : (string.IsNullOrWhiteSpace(request.UserId) ? request.Actor.UserId : request.UserId);
+            await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, context.CancellationToken).ConfigureAwait(false);
+        }
+
+        return ToMessage(brake);
     }
 
     public override Task<NetworkAccessStatusResponse> GetNetworkAccessStatus(
@@ -325,7 +358,7 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
-            ImageCompatibilityStore store = Nac.CompatStore
+            ImageCompatibilityStore store = this.imageCompatibilityStore
                 ?? throw new RpcException(new Status(StatusCode.Unavailable, "Image compatibility store is not configured."));
             ImageCompatState state = store.GetState(ToActor(request));
             var response = new ImageCompatStateResponse();
@@ -353,7 +386,7 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
-            ImageCompatibilityStore store = Nac.CompatStore
+            ImageCompatibilityStore store = this.imageCompatibilityStore
                 ?? throw new RpcException(new Status(StatusCode.Unavailable, "Image compatibility store is not configured."));
             ImageCompatProfile profile = store.SetProfile(
                 ToActor(request.Actor),
@@ -376,7 +409,7 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
-            ImageCompatibilityStore store = Nac.CompatStore
+            ImageCompatibilityStore store = this.imageCompatibilityStore
                 ?? throw new RpcException(new Status(StatusCode.Unavailable, "Image compatibility store is not configured."));
             bool deleted = store.DeleteProfile(ToActor(request.Actor), request.ImageDigest);
             return new WorkspaceBoolResponse

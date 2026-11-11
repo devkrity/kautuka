@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Runtime;
+using Kautuka.NetworkAccess.Client;
 
 using OpenAI;
 
@@ -41,7 +42,9 @@ internal static class OpenAiCompatibleEndpoint
         string? defaultBaseUrl,
         IRunLimitResolver? runLimitResolver,
         bool throwOnFailure,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HttpMessageHandler? transportHandler = null,
+        INetworkAccessChecker? checker = null)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -62,13 +65,17 @@ internal static class OpenAiCompatibleEndpoint
 
         try
         {
-            using var http = new HttpClient
-            {
-                Timeout = AiProviderSettings.GetTimeout(
-                    settings,
-                    HttpTimeoutSettingKey,
-                    runLimitResolver?.GetModelTimeout() ?? AiProviderSettings.DefaultHttpTimeout),
-            };
+#pragma warning disable CA2000 // Owned and disposed by HttpClient when transportHandler is null
+            HttpMessageHandler handler = transportHandler
+                ?? (checker is not null
+                    ? new NetworkAccessCheckHandler(checker, new SocketsHttpHandler())
+                    : new SocketsHttpHandler());
+            using var http = new HttpClient(handler, disposeHandler: transportHandler is null);
+#pragma warning restore CA2000
+            http.Timeout = AiProviderSettings.GetTimeout(
+                settings,
+                HttpTimeoutSettingKey,
+                runLimitResolver?.GetModelTimeout() ?? AiProviderSettings.DefaultHttpTimeout);
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
             using HttpResponseMessage response = await http.GetAsync(
                 new Uri($"{baseUrl.TrimEnd('/')}/models", UriKind.Absolute), cancellationToken).ConfigureAwait(false);

@@ -168,7 +168,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
         Assert.DoesNotContain("--entrypoint", arguments, StringComparer.Ordinal);
         Assert.Contains("--network", arguments, StringComparer.Ordinal);
-        Assert.Contains(ConnectorContainerSpecBuilder.SandboxNetworkName, arguments, StringComparer.Ordinal);
+        Assert.Contains(arguments, static argument => argument.StartsWith(ConnectorContainerSpecBuilder.WorkloadNetworkName, StringComparison.Ordinal));
         Assert.Equal("/bin/sh", arguments[^3]);
         Assert.Equal("-lc", arguments[^2]);
         Assert.Equal("uv sync --no-dev", arguments[^1]);
@@ -267,7 +267,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
         int networkIndex = arguments.IndexOf("--network");
         Assert.True(networkIndex >= 0);
-        Assert.Equal(ConnectorContainerSpecBuilder.SandboxNetworkName, arguments[networkIndex + 1]);
+        Assert.StartsWith(ConnectorContainerSpecBuilder.WorkloadNetworkName, arguments[networkIndex + 1], StringComparison.Ordinal);
         Assert.DoesNotContain("/Users/username/Desktop:/opt/kautuka/hostpaths/0:ro", arguments, StringComparer.Ordinal);
         Assert.Contains("/Users/username/Desktop", arguments, StringComparer.Ordinal);
     }

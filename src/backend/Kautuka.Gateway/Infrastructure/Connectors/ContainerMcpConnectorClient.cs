@@ -119,6 +119,7 @@ internal sealed class ContainerMcpConnectorClient(
                 TimeoutSeconds = timeoutSeconds > 0 ? timeoutSeconds : 30,
                 BundlePath = string.IsNullOrWhiteSpace(bundlePath) ? string.Empty : bundlePath.Trim(),
                 ServerType = string.IsNullOrWhiteSpace(serverType) ? string.Empty : serverType.Trim(),
+                UserId = userId ?? string.Empty,
             };
 
             request.Args.AddRange(args);

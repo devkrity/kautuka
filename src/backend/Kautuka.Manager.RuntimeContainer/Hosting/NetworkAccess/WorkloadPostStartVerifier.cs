@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+
 using Kautuka.NetworkAccessController;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
@@ -129,7 +130,9 @@ public sealed class WorkloadPostStartVerifier
             if (hostConfig.TryGetProperty("NetworkMode", out JsonElement netModeElem))
             {
                 string? netMode = netModeElem.GetString();
-                if (netMode is not null && !netMode.StartsWith("kautuka-workload", StringComparison.OrdinalIgnoreCase))
+                if (netMode is not null
+                    && !netMode.StartsWith("kautuka-workload", StringComparison.OrdinalIgnoreCase)
+                    && !netMode.Equals("bridge", StringComparison.OrdinalIgnoreCase))
                 {
                     throw new InvalidOperationException($"Network check failed: unexpected NetworkMode '{netMode}'.");
                 }
@@ -210,9 +213,14 @@ public sealed class WorkloadPostStartVerifier
                 }
             }
 
-            // 2. In-netns ruleset verification (when PID > 0 on Linux)
-            if (pid > 0 && OperatingSystem.IsLinux())
+            // 2. In-netns ruleset verification (when on Linux)
+            if (OperatingSystem.IsLinux())
             {
+                if (pid <= 0)
+                {
+                    throw new InvalidOperationException($"Process check failed: invalid or non-positive PID ({pid}) on Linux.");
+                }
+
                 await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken).ConfigureAwait(false);
             }
 
@@ -285,12 +293,10 @@ public sealed class WorkloadPostStartVerifier
             WorkloadRulesetRenderer.RequiredWorkloadComments,
             allocatedIp);
 
-        // Compute expected hash by parsing the rendered ruleset
-        // If nft is installed locally, we can run `nft -j -f -` or compare rule hashes:
-        // Here we verify liveHash is non-empty and all required comments/IP were proven during canonicalization.
-        if (string.IsNullOrWhiteSpace(liveHash))
+        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp);
+        if (!string.Equals(liveHash, expectedHash, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException("Failed to compute canonical hash of live workload ruleset.");
+            throw new InvalidOperationException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");
         }
     }
 }

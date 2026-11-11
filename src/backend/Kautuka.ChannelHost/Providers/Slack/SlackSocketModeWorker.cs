@@ -10,6 +10,7 @@ using Google.Protobuf;
 using Grpc.Core;
 
 using Kautuka.ChannelHost.Grpc;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 namespace Kautuka.ChannelHost.Providers.Slack;
@@ -55,7 +56,8 @@ internal sealed class SlackSocketModeWorker(
     TimeSpan? supervisorPollInterval = null,
     Func<int, TimeSpan>? identitySyncRetryDelay = null,
     TimeProvider? connectionTimeProvider = null,
-    TimeSpan? connectionStabilityThreshold = null) : IChannelAdapter
+    TimeSpan? connectionStabilityThreshold = null,
+    NetworkAccessWebSocketChecker? webSocketChecker = null) : IChannelAdapter
 {
     private static readonly ConcurrentDictionary<string, DateTimeOffset> nonOwnerNoticeTimes = new(StringComparer.Ordinal);
     private const string eventsApiEnvelopeType = "events_api";
@@ -65,7 +67,7 @@ internal sealed class SlackSocketModeWorker(
 
     private readonly ConcurrentDictionary<string, ActiveSlackConnection> activeConnections = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, IdentitySyncFailure> identitySyncFailures = new(StringComparer.Ordinal);
-    private readonly Func<Uri, CancellationToken, Task<WebSocket>> connectSocket = socketConnector ?? ConnectSocketAsync;
+    private readonly Func<Uri, CancellationToken, Task<WebSocket>> connectSocket = socketConnector ?? CreateSocketConnector(webSocketChecker);
     private readonly Func<int, TimeSpan> getConnectionBackoffDelay = connectionBackoffDelay ?? GetConnectionBackoffDelay;
     private readonly Func<int, TimeSpan> getIdentitySyncRetryDelay = identitySyncRetryDelay ?? GetIdentitySyncRetryDelay;
     private readonly Func<string, string, string, CancellationToken, Task>? testConnectionLoopRunner = connectionLoopRunner;
@@ -702,19 +704,31 @@ internal sealed class SlackSocketModeWorker(
         }
     }
 
-    private static async Task<WebSocket> ConnectSocketAsync(Uri uri, CancellationToken cancellationToken)
+    private static Func<Uri, CancellationToken, Task<WebSocket>> CreateSocketConnector(
+        NetworkAccessWebSocketChecker? webSocketChecker)
     {
-        ClientWebSocket socket = new();
-        try
+        return async (uri, ct) =>
         {
-            await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
-            return socket;
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
+            ClientWebSocket socket = new();
+            try
+            {
+                if (webSocketChecker is not null)
+                {
+                    await webSocketChecker.ConnectAsync(socket, uri, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    await socket.ConnectAsync(uri, ct).ConfigureAwait(false);
+                }
+
+                return socket;
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
     }
 
     private async Task SendSlackResponseUrlEphemeralAsync(JsonElement payload, string text, CancellationToken cancellationToken)

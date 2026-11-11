@@ -54,7 +54,14 @@ internal sealed record AgentExecutionTerminalEvent(string EventType, JsonElement
                 ?? (phase == GatewayRunPhases.Aborted ? "Run aborted." : "Run failed.");
             return new AgentExecutionTerminalEvent(
                 NaradEventTypes.RunError,
-                NaradEventBodies.RunError(code, message, usage),
+                NaradEventBodies.RunError(
+                    code,
+                    message,
+                    usage,
+                    done.Result.Run?.Destination,
+                    done.Result.Run?.Port,
+                    done.Result.Run?.RequestId,
+                    done.Result.Run?.ApprovalUrl),
                 GatewayRuntimeResumePhases.Completed);
         }
 

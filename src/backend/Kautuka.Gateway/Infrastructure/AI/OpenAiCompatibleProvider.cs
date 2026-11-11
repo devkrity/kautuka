@@ -2,6 +2,7 @@ using System.ClientModel;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Runtime;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -9,7 +10,11 @@ using OpenAI;
 
 namespace Kautuka.Gateway.Infrastructure.AI;
 
-internal sealed class OpenAiCompatibleProvider(string providerType, string? defaultBaseUrl = null, IRunLimitResolver? runLimitResolver = null) : IAiClientProvider
+internal sealed class OpenAiCompatibleProvider(
+    string providerType,
+    string? defaultBaseUrl = null,
+    IRunLimitResolver? runLimitResolver = null,
+    INetworkAccessChecker? checker = null) : IAiClientProvider
 {
     public string ProviderType { get; } = providerType;
 
@@ -26,9 +31,15 @@ internal sealed class OpenAiCompatibleProvider(string providerType, string? defa
             return null;
         }
 
-        return new OpenAIClient(new ApiKeyCredential(apiKey), OpenAiCompatibleEndpoint.CreateClientOptions(baseUrl, transportHandler: null))
+#pragma warning disable CA2000 // Owned by chat client
+        HttpMessageHandler? transportHandler = checker is not null
+            ? new NetworkAccessCheckHandler(checker, new SocketsHttpHandler())
+            : null;
+
+        return new OpenAIClient(new ApiKeyCredential(apiKey), OpenAiCompatibleEndpoint.CreateClientOptions(baseUrl, transportHandler))
             .GetChatClient(modelName)
             .AsIChatClient();
+#pragma warning restore CA2000
     }
 
     public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(
@@ -36,11 +47,20 @@ internal sealed class OpenAiCompatibleProvider(string providerType, string? defa
         string? apiKey,
         bool throwOnFailure = false,
         CancellationToken cancellationToken = default)
-        => OpenAiCompatibleEndpoint.DiscoverModelsAsync(
+    {
+#pragma warning disable CA2000 // Passed to DiscoverModelsAsync
+        HttpMessageHandler? transportHandler = checker is not null
+            ? new NetworkAccessCheckHandler(checker, new SocketsHttpHandler())
+            : null;
+
+        return OpenAiCompatibleEndpoint.DiscoverModelsAsync(
             settings,
             apiKey,
             defaultBaseUrl,
             runLimitResolver,
             throwOnFailure,
-            cancellationToken);
+            cancellationToken,
+            transportHandler);
+#pragma warning restore CA2000
+    }
 }

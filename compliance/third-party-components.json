@@ -89,7 +89,7 @@
       "id": "envoy",
       "version": "1.40.2",
       "licenseExpression": "Apache-2.0",
-      "image": "docker.io/envoyproxy/envoy:v1.40.2",
+      "image": "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded",
       "source": "https://github.com/envoyproxy/envoy/tree/v1.40.2",
       "licenseFiles": ["LICENSE-envoy.txt"],
       "noticeFiles": ["NOTICE-envoy.txt"],
@@ -99,9 +99,9 @@
       "id": "coredns",
       "version": "1.14.6",
       "licenseExpression": "Apache-2.0",
-      "image": "docker.io/coredns/coredns:1.14.6",
+      "image": "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea",
       "source": "https://github.com/coredns/coredns/tree/v1.14.6",
-      "licenseFiles": ["LICENSE-envoy.txt"],
+      "licenseFiles": ["LICENSE-coredns.txt"],
       "notes": "Static DNS resolver and sinkhole responder container pinned for egress pod."
     }
   ]

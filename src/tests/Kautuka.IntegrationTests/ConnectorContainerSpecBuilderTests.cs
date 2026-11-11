@@ -17,7 +17,7 @@ public sealed class ConnectorContainerSpecBuilderTests
             null,
             persistent: false);
 
-        AssertOption(arguments, "--network", ConnectorContainerSpecBuilder.SandboxNetworkName);
+        AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         AssertOption(arguments, "--cap-drop", "ALL");
         AssertOption(arguments, "--pids-limit", "128");
         AssertOption(arguments, "--read-only", "--tmpfs");
@@ -55,7 +55,7 @@ public sealed class ConnectorContainerSpecBuilderTests
             workspace,
             persistent: true);
 
-        AssertOption(arguments, "--network", ConnectorContainerSpecBuilder.SandboxNetworkName);
+        AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.Contains("/srv/kautuka/alpha:/workspace:ro", arguments);
     }
 
@@ -104,7 +104,7 @@ public sealed class ConnectorContainerSpecBuilderTests
             null,
             persistent: false);
 
-        AssertOption(arguments, "--network", ConnectorContainerSpecBuilder.SandboxNetworkName);
+        AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.DoesNotContain("none", arguments, StringComparer.Ordinal);
     }
 

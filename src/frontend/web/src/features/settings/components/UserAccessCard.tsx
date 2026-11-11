@@ -4,7 +4,12 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { PackageOpen, Plug, ShieldCheck } from 'lucide-react';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/apiClient';
+import {
+  UserNetworkPrivilegesForm,
+  type UserNetworkPrivilegesDto,
+} from '@/features/network-access';
 import type { AgentSettingsEntry, UserSettingsEntry } from '../types/settingsTypes';
 
 const SECRET_INPUT_TYPE: React.HTMLInputTypeAttribute = ['pass', 'word'].join('');
@@ -39,6 +44,73 @@ interface UserAccessCardProps {
   onClearExternalLogin: (userId: string, provider: string) => Promise<void>;
 }
 
+function useDirectUserPrivileges(userId: string) {
+  const [privs, setPrivs] = useState<UserNetworkPrivilegesDto | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    apiClient
+      .get<UserNetworkPrivilegesDto>(`/network-access/users/${encodeURIComponent(userId)}/privileges`)
+      .then((res) => {
+        if (active && res?.data) {
+          setPrivs(res.data);
+        }
+      })
+      .catch(() => {
+        // Ignore fetch errors in unmounted/test contexts
+      });
+    return () => {
+      active = false;
+    };
+  }, [userId]);
+
+  return [privs, setPrivs] as const;
+}
+
+function UserNetworkPrivilegesSummary({ userId, role }: { userId: string; role: string }) {
+  const [privs] = useDirectUserPrivileges(userId);
+  const canApprove = privs?.canApproveOwn ?? (role === 'admin');
+  const canAllowAll = privs?.canAllowAllAgents ?? (role === 'admin');
+  return (
+    <p>
+      Network access:{' '}
+      {canApprove
+        ? canAllowAll
+          ? 'Can approve own & all agents'
+          : 'Can approve own agents'
+        : 'Admin approval required'}
+    </p>
+  );
+}
+
+function UserNetworkPrivilegesSection({ user, disabled }: { user: UserSettingsEntry; disabled?: boolean }) {
+  const [privs, setPrivs] = useDirectUserPrivileges(user.id);
+
+  const handleSave = async (next: { canApproveOwn: boolean; canAllowAllAgents: boolean }) => {
+    const response = await apiClient.put<UserNetworkPrivilegesDto>(
+      `/network-access/users/${encodeURIComponent(user.id)}/privileges`,
+      next
+    );
+    if (response?.data) {
+      setPrivs(response.data);
+    }
+  };
+
+  return (
+    <div className="space-y-2 pt-2">
+      <UserNetworkPrivilegesForm
+        userId={user.id}
+        userDisplayName={user.username}
+        canApproveOwn={privs?.canApproveOwn ?? (user.role === 'admin')}
+        canAllowAllAgents={privs?.canAllowAllAgents ?? (user.role === 'admin')}
+        isAdminViewer={true}
+        onSave={handleSave}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 function UserAccessSummary({
   user,
   onClearExternalLogin,
@@ -59,6 +131,7 @@ function UserAccessSummary({
       {(user.channelTetherModes ?? []).map((item) => (
         <p key={`${item.registrationId}:${item.providerKey}`}>{item.providerKey} channel sync: {item.hitlTetherMode}</p>
       ))}
+      <UserNetworkPrivilegesSummary userId={user.id} role={user.role} />
       {(user.externalProviders ?? []).map((provider) => (
         <div key={provider} className="flex items-center justify-between gap-2 pt-2">
           <span>Linked {provider}</span>
@@ -182,6 +255,8 @@ function UserAccessEditor({
               />
             </div>
           </div>
+
+          <UserNetworkPrivilegesSection user={user} disabled={saving} />
         </div>
       </div>
 

@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 using Kautuka.Gateway.Domain.Runtime;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -12,7 +13,10 @@ using OllamaSharp;
 
 namespace Kautuka.Gateway.Infrastructure.AI;
 
-internal sealed class OllamaAiClientProvider(IRunLimitResolver? runLimitResolver = null, string? defaultBaseUrl = null) : IAiClientProvider
+internal sealed class OllamaAiClientProvider(
+    IRunLimitResolver? runLimitResolver = null,
+    string? defaultBaseUrl = null,
+    INetworkAccessChecker? checker = null) : IAiClientProvider
 {
     private const string httpTimeoutSettingKey = "http_timeout_seconds";
 
@@ -81,10 +85,7 @@ internal sealed class OllamaAiClientProvider(IRunLimitResolver? runLimitResolver
 
         try
         {
-            using var http = new HttpClient
-            {
-                Timeout = ResolveHttpTimeout(settings),
-            };
+            using var http = CreateHttpClient(ResolveHttpTimeout(settings));
             using HttpResponseMessage response = await http.GetAsync(
                 new Uri($"{baseUrl.TrimEnd('/')}/api/tags", UriKind.Absolute), cancellationToken).ConfigureAwait(false);
             if (throwOnFailure)
@@ -131,10 +132,7 @@ internal sealed class OllamaAiClientProvider(IRunLimitResolver? runLimitResolver
             return (new DeclaredCapabilities(), null);
         }
 
-        using var http = new HttpClient
-        {
-            Timeout = ResolveHttpTimeout(settings),
-        };
+        using var http = CreateHttpClient(ResolveHttpTimeout(settings));
         string body = JsonSerializer.Serialize(new OllamaShowRequest(modelName), KautukaJsonContext.Default.OllamaShowRequest);
         using var content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
         using HttpResponseMessage response = await http.PostAsync(
@@ -168,12 +166,27 @@ internal sealed class OllamaAiClientProvider(IRunLimitResolver? runLimitResolver
         // Chat clients are long-lived for the agent runtime; OllamaApiClient does not take
         // ownership of an externally supplied HttpClient (_disposeHttpClient stays false).
 #pragma warning disable CA2000
-        var http = new HttpClient
-        {
-            BaseAddress = new Uri(EnsureTrailingSlash(baseUrl)),
-            Timeout = ResolveHttpTimeout(settings),
-        };
+        var http = CreateHttpClient(ResolveHttpTimeout(settings), new Uri(EnsureTrailingSlash(baseUrl)));
         return new OllamaApiClient(http, modelName, ollamaJsonContext);
+#pragma warning restore CA2000
+    }
+
+    private HttpClient CreateHttpClient(TimeSpan timeout, Uri? baseAddress = null)
+    {
+#pragma warning disable CA2000 // Caller disposes or client owns
+        HttpMessageHandler handler = checker is not null
+            ? new NetworkAccessCheckHandler(checker, new SocketsHttpHandler())
+            : new SocketsHttpHandler();
+        var client = new HttpClient(handler, disposeHandler: true)
+        {
+            Timeout = timeout,
+        };
+        if (baseAddress is not null)
+        {
+            client.BaseAddress = baseAddress;
+        }
+
+        return client;
 #pragma warning restore CA2000
     }
 

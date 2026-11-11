@@ -16,9 +16,16 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(tempDir))
+        try
         {
-            Directory.Delete(tempDir, recursive: true);
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+            // Best effort on Windows
         }
     }
 

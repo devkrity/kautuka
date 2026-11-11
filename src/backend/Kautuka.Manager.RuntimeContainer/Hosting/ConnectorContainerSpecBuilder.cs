@@ -3,13 +3,13 @@ using System.Security.Cryptography;
 using System.Text;
 
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal static class ConnectorContainerSpecBuilder
 {
-    private const string nonRootUser = "65532:65532";
     internal const string SandboxNetworkName = "kautuka-sandbox";
     internal const string WorkloadNetworkName = "kautuka-workload";
 
@@ -19,11 +19,12 @@ internal static class ConnectorContainerSpecBuilder
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
         bool persistent,
-        string? allocatedIp = null)
+        string? allocatedIp = null,
+        string? purpose = null,
+        ImageCompatProfile? compatProfile = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-        ContainerImageProvenancePolicy.EnsureTrusted(connector.Image, $"Connector '{connector.ConnectorId}'");
 
         string userId = workspaceContext?.UserId ?? string.Empty;
         if (string.IsNullOrWhiteSpace(userId))
@@ -48,74 +49,73 @@ internal static class ConnectorContainerSpecBuilder
         };
 
         bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId);
-
-        var arguments = new List<string> { "run" };
-        if (persistent)
+        string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
+        if (!systemwide && string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
         {
-            arguments.Add("-d");
+            egress = "deny-all";
         }
-        else
-        {
-            arguments.AddRange(["--rm", "-i"]);
-        }
-
         string effectiveIp = allocatedIp ?? "10.247.1.1";
 
-        arguments.AddRange([
-            "--user", nonRootUser,
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", "128",
-            "--cpus", "1",
-            "--memory", "536870912",
-            "--read-only",
-            "--tmpfs", "/tmp:rw,noexec,nosuid",
-            "--name", containerName,
-            "--label", "kautuka.managed=manager",
-            "--label", "kautuka.role=connector",
-            "--label", $"kautuka.desired-version={connector.DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
-            "--label", $"kautuka.spec-fingerprint={connector.SpecFingerprint}",
-            "--network", $"{WorkloadNetworkName}:ip={effectiveIp}",
-            "--dns", "10.247.0.2",
-            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
-            "--annotation", "io.kautuka.role=workload",
-            "--label", $"io.kautuka.user={userId}",
-            "--label", $"io.kautuka.agent={agentId}",
-            "--label", $"io.kautuka.connector={connector.ConnectorId}",
-            "--label", $"io.kautuka.exec-context={execContext}",
-            "--label", "io.kautuka.kind=connector",
-            "--label", $"io.kautuka.systemwide={(systemwide ? "true" : "false")}",
-            "--label", "io.kautuka.egress=normal",
-            "--label", "io.kautuka.compat=",
-            "--add-host", "kautuka-pkgs-proxy:10.247.0.3",
-            "--env", "HOME=/tmp",
-            "--env", "NPM_CONFIG_CACHE=/tmp/.npm",
-            "--env", "PIP_CACHE_DIR=/tmp/.pip",
-            "--env", "UV_CACHE_DIR=/tmp/.uv"]);
+        var envList = new List<KeyValuePair<string, string>>
+        {
+            new("HOME", "/tmp"),
+            new("NPM_CONFIG_CACHE", "/tmp/.npm"),
+            new("PIP_CACHE_DIR", "/tmp/.pip"),
+            new("UV_CACHE_DIR", "/tmp/.uv"),
+        };
 
         foreach (KeyValuePair<string, string> pair in ForwardedEnvironment(connector))
         {
-            arguments.Add("--env");
-            arguments.Add(pair.Key);
+            envList.Add(new KeyValuePair<string, string>(pair.Key, string.Empty));
         }
 
+        var mounts = new List<WorkloadMount>();
         if (workspaceContext is not null
             && executionContext == WorkspaceMcpExecutionContext.IsolatedWithAgentFiles)
         {
-            arguments.Add("--volume");
-            arguments.Add($"{workspaceContext.HostWorkspacePath}:{workspaceContext.ContainerWorkspacePath}:ro");
+            mounts.Add(new WorkloadMount(workspaceContext.HostWorkspacePath, workspaceContext.ContainerWorkspacePath, ReadOnly: true));
         }
 
-        arguments.Add(connector.Image);
-        if (persistent)
+        var cmdArgs = new List<string>();
+        string? command = null;
+        if (!persistent)
         {
-            arguments.AddRange(["sh", "-lc", "tail -f /dev/null"]);
-        }
-        else
-        {
-            AppendCommand(arguments, connector);
+            if (!string.IsNullOrWhiteSpace(connector.Command))
+            {
+                command = connector.Command;
+                cmdArgs.AddRange(BuildIndexPinnedArguments(connector));
+            }
+            else if (connector.Args.Count > 0)
+            {
+                cmdArgs.AddRange(connector.Args);
+            }
         }
 
+        var spec = new WorkloadContainerSpec(containerName, connector.Image, effectiveIp)
+        {
+            UserId = userId,
+            AgentId = agentId,
+            ConnectorId = connector.ConnectorId,
+            ExecContext = execContext,
+            Kind = connector.IsInternalSystemConnector ? "system" : "connector",
+            Systemwide = systemwide,
+            Egress = egress,
+            Purpose = purpose,
+            Persistent = persistent,
+            DesiredStateVersion = connector.DesiredStateVersion,
+            SpecFingerprint = connector.SpecFingerprint,
+            ManagerRole = "connector",
+            Environment = envList,
+            Mounts = mounts,
+            Command = command,
+            Args = cmdArgs,
+            PidsLimit = 128,
+            CpuLimit = 1,
+            MemoryLimit = "536870912",
+            CompatibilityProfile = compatProfile,
+        };
+
+        var arguments = spec.Render().ToList();
         EnsureHostProcessArguments(arguments);
         return arguments;
     }

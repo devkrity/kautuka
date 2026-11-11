@@ -228,7 +228,7 @@ internal sealed partial class McpAgentToolProvider
 
         bool allowInternalSystemConnector = serverDef.IsInternalSystemConnector;
         string scopedConnectorId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(context.UserId, serverDef.Id);
-        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, context);
+        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, serverDef, context);
         var runtime = new ManagerRuntimeSettingsMessage();
         var listRequest = new WorkspaceMcpContainerCallRequest
         {
@@ -279,9 +279,11 @@ internal sealed partial class McpAgentToolProvider
 
     private static WorkspaceContextMessage? ResolveWorkspaceContext(
         ResolvedAgentConnectorBinding binding,
+        McpServerDefinition serverDef,
         AgentToolContext context)
     {
-        if (binding.ExecutionContext == WorkspaceMcpExecutionContext.Isolated)
+        if (binding.ExecutionContext == WorkspaceMcpExecutionContext.Isolated
+            && string.Equals(serverDef.Scope, GatewayOwnershipScopes.System, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }

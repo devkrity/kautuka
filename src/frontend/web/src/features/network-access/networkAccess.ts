@@ -24,6 +24,8 @@ export interface NetworkAccessRequestDto {
   purpose?: string;
   compatibilityMode?: boolean;
   waitingForAdmin?: boolean;
+  ownerCanApproveOwn?: boolean;
+  ownerCanAllowAllAgents?: boolean;
 }
 
 export interface UserPrivilegesSummaryDto {

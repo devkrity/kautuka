@@ -130,10 +130,31 @@ public sealed class WorkspaceDesiredStateStore
             long previousAcceptedVersion = acceptedDesiredStateVersion;
             runtimeSettings = nextRuntimeSettings;
             desiredWorkspaces = EnrichDesiredWorkspaces(nextDesiredStateVersion, nextDesiredWorkspaces, nextSandboxConnectorBindings);
-            desiredContainerConnectors = [.. nextContainerConnectors.Select(connector => connector with
+            desiredContainerConnectors = [.. nextContainerConnectors.Select(connector =>
             {
-                DesiredStateVersion = nextDesiredStateVersion,
-                SpecFingerprint = ConnectorContainerSpecBuilder.ComputeFingerprint(connector),
+                string userId = string.Empty;
+                int separatorIndex = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
+                if (separatorIndex > 0)
+                {
+                    userId = connector.ConnectorId[..separatorIndex];
+                }
+
+                bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId);
+                string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
+                string kind = connector.IsInternalSystemConnector ? "system" : "connector";
+
+                return connector with
+                {
+                    DesiredStateVersion = nextDesiredStateVersion,
+                    SpecFingerprint = ConnectorContainerSpecBuilder.ComputeFingerprint(
+                        connector,
+                        userId: userId,
+                        agentId: string.Empty,
+                        execContext: "isolated",
+                        kind: kind,
+                        systemwide: systemwide,
+                        egress: egress),
+                };
             })];
             desiredSandboxConnectorBindings = [.. nextSandboxConnectorBindings];
             acceptedPublisherEpoch = publisherEpoch;

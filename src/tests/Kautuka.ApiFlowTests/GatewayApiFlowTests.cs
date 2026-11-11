@@ -200,6 +200,8 @@ public sealed class GatewayApiFlowTests
                     new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())));
             builder.Services.RemoveAll<IChannelRegistrationProvisioningService>();
             builder.Services.AddSingleton<IChannelRegistrationProvisioningService>(new NoOpChannelRegistrationProvisioningService());
+            builder.Services.RemoveAll<Kautuka.NetworkAccess.Client.INetworkAccessChecker>();
+            builder.Services.AddSingleton<Kautuka.NetworkAccess.Client.INetworkAccessChecker>(new AllowAllNetworkAccessChecker());
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
             WebApplication app = builder.Build();
@@ -659,6 +661,14 @@ public sealed class GatewayApiFlowTests
                     Assert.Skip($"Local Ollama is reachable, but model '{modelName}' is not installed — skipping test.");
                 }
             }
+        }
+
+        private sealed class AllowAllNetworkAccessChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+        {
+            public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
+                Kautuka.NetworkAccess.Client.OutboundTarget target,
+                CancellationToken cancellationToken = default)
+                => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("api_flow_allowed"));
         }
 
         private sealed class TestWorkspaceGrpcService : IManagerGrpcService

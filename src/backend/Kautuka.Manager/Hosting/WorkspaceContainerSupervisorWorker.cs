@@ -26,7 +26,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     WorkspaceReadinessGate readinessGate,
     WorkspaceExecTracker execTracker,
     IOptions<ManagerContainerStartupOptions> startupOptions,
-    ILogger<WorkspaceContainerSupervisorWorker> logger) : BackgroundService
+    ILogger<WorkspaceContainerSupervisorWorker> logger,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : BackgroundService
 {
     /// <summary>
     /// Maximum time between drift audits when no exec activity is observed.
@@ -344,6 +345,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
     private void SignalRuntimeReady()
     {
+        if (egressTopologyManager is not null && !egressTopologyManager.IsStartupGateOpen)
+        {
+            readinessGate.Reset();
+            logger.LogError("Network access control self-test failed; refusing to open WorkspaceReadinessGate.");
+            return;
+        }
+
         if (readinessGate.IsReady)
         {
             return;

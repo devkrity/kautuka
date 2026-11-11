@@ -112,11 +112,8 @@ public sealed class EnvoyAuthorizationService : Authorization.AuthorizationBase
                 return CreateDenyResponse(decision.Reason);
             }
 
-            var clusterStruct = new Struct();
-            clusterStruct.Fields[ClusterMetadataKey] = Value.ForString(decision.Cluster ?? NetworkAccessController.ClusterDfpPublic);
-
             var dynamicMetadata = new Struct();
-            dynamicMetadata.Fields[ExtAuthzMetadataNamespace] = Value.ForStruct(clusterStruct);
+            dynamicMetadata.Fields[ClusterMetadataKey] = Value.ForString(decision.Cluster ?? NetworkAccessController.ClusterDfpPublic);
 
             return new CheckResponse
             {

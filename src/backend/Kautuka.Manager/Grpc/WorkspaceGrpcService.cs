@@ -24,7 +24,9 @@ public sealed partial class WorkspaceGrpcService(
     ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService,
     PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService,
     ILogger<WorkspaceGrpcService> logger,
-    Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null) : ManagerService.ManagerServiceBase
+    Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;
@@ -36,6 +38,8 @@ public sealed partial class WorkspaceGrpcService(
     private readonly PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService = pkgsProxyCacheDiagnosticsService;
     private readonly ILogger<WorkspaceGrpcService> logger = logger;
     private readonly Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = networkAccessController;
+    private readonly Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = imageCompatibilityStore;
+    private readonly Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = egressTopologyManager;
 
     /// <summary>
     /// Awaits machine readiness before any container operation. If the machine is reinitialising,

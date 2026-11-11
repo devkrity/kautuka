@@ -260,7 +260,7 @@ internal sealed partial class McpAgentToolProvider
 
         bool allowInternalSystemConnector = serverDef.IsInternalSystemConnector;
         string scopedConnectorId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(context.UserId, serverDef.Id);
-        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, context);
+        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, serverDef, context);
         var callRequest = new WorkspaceMcpContainerCallRequest
         {
             Runtime = new ManagerRuntimeSettingsMessage(),

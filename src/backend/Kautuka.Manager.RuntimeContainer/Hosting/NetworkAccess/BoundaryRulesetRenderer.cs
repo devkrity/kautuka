@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+
 using Kautuka.NetworkAccessController;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
@@ -105,8 +106,9 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("  }");
         sb.AppendLine("  chain output {");
         sb.AppendLine("    type filter hook output priority 0; policy accept;");
-        sb.AppendLine("    oifname \"lo\" accept");
         sb.AppendLine("    ct state established,related accept");
+        sb.AppendLine("    oifname \"lo\" ip daddr 127.0.0.1 meta l4proto { tcp, udp } th dport 10053 accept");
+        sb.AppendLine("    oifname \"lo\" ip daddr 127.0.0.1 tcp dport { 15002, 15003 } accept");
         if (!string.IsNullOrEmpty(decisionEndpointRule))
         {
             sb.AppendLine(decisionEndpointRule);
@@ -146,9 +148,69 @@ public static class BoundaryRulesetRenderer
             ? WindowsManagerAuthorizationClusterYaml
             : LinuxManagerAuthorizationClusterYaml;
 
-        return template
+        IReadOnlyList<string> publicCidrs = [.. NetworkAddressClassifier.NonPublicV4CanonicalCidrs];
+        IReadOnlyList<string> lanCidrs =
+        [
+            .. NetworkAddressClassifier.NonPublicV4CanonicalCidrs.Where(static c =>
+                !c.Equals("10.0.0.0/8", StringComparison.Ordinal)
+                && !c.Equals("172.16.0.0/12", StringComparison.Ordinal)
+                && !c.Equals("192.168.0.0/16", StringComparison.Ordinal)),
+            NetworkAddressClassifier.WorkloadSubnetCidr
+        ];
+
+        string rendered = template
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{MANAGER_AUTHORIZATION_CLUSTER}}", clusterSnippet, StringComparison.Ordinal);
+
+        rendered = ReplaceIndentedPlaceholder(rendered, "{{RESOLVED_FILTER_PUBLIC}}", publicCidrs);
+        rendered = ReplaceIndentedPlaceholder(rendered, "{{RESOLVED_FILTER_LAN}}", lanCidrs);
+
+        return rendered;
+    }
+
+    public static string RenderEnvoyAddressRangesYaml(IEnumerable<string> cidrs, string indent)
+    {
+        ArgumentNullException.ThrowIfNull(cidrs);
+        var sb = new StringBuilder();
+        bool first = true;
+        foreach (string cidr in cidrs)
+        {
+            string[] parts = cidr.Split('/');
+            string prefix = parts[0];
+            string len = parts.Length > 1 ? parts[1] : "32";
+            if (!first)
+            {
+                sb.AppendLine();
+            }
+
+            first = false;
+            sb.Append(indent).Append("- address_prefix: ").AppendLine(prefix);
+            sb.Append(indent).Append("  prefix_len: ").Append(len);
+        }
+
+        return sb.ToString();
+    }
+
+    private static string ReplaceIndentedPlaceholder(string template, string placeholder, IEnumerable<string> cidrs)
+    {
+        while (true)
+        {
+            int index = template.IndexOf(placeholder, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                break;
+            }
+
+            int lineStart = template.LastIndexOf('\n', index);
+            lineStart = lineStart < 0 ? 0 : lineStart + 1;
+            int indentLen = index - lineStart;
+            string indent = template.Substring(lineStart, indentLen);
+
+            string rendered = RenderEnvoyAddressRangesYaml(cidrs, indent);
+            template = string.Concat(template.AsSpan(0, lineStart), rendered, template.AsSpan(index + placeholder.Length));
+        }
+
+        return template;
     }
 
     /// <summary>
@@ -158,71 +220,27 @@ public static class BoundaryRulesetRenderer
         string dnsIp = "10.247.0.2",
         string? templatePath = null)
     {
-        string template;
-        try
-        {
-            template = ResolveTemplate(templatePath, "Corefile.tmpl");
-        }
-        catch (FileNotFoundException)
-        {
-            // Embedded default matching Corefile.tmpl:
-            template = """
-            .:53 {
-                bind {{DNS_IP}}
-                template IN A {
-                    answer "{{ .Name }} 60 IN A 198.18.250.250"
-                }
-                template IN AAAA {
-                    rcode NOERROR
-                }
-            }
-
-            .:10053 {
-                bind 127.0.0.1
-                forward . /etc/resolv.conf
-                cache 30
-            }
-
-            """;
-        }
-
+        string template = ResolveTemplate(templatePath, "Corefile.tmpl");
         return template.Replace("{{DNS_IP}}", dnsIp, StringComparison.Ordinal);
     }
 
-    private static string ResolveTemplate(string? templatePath, string templateFileName)
+    internal static string ResolveTemplate(string? templatePath, string templateFileName)
     {
         if (!string.IsNullOrWhiteSpace(templatePath) && File.Exists(templatePath))
         {
             return File.ReadAllText(templatePath);
         }
 
-        string[] candidates =
-        [
-            Path.Combine(AppContext.BaseDirectory, "Hosting", "NetworkAccess", templateFileName),
-            Path.Combine(AppContext.BaseDirectory, templateFileName),
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "backend", "Kautuka.Manager.RuntimeContainer", "Hosting", "NetworkAccess", templateFileName),
-            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "src", "backend", "Kautuka.Manager.RuntimeContainer", "Hosting", "NetworkAccess", templateFileName),
-            Path.Combine(Directory.GetCurrentDirectory(), "src", "backend", "Kautuka.Manager.RuntimeContainer", "Hosting", "NetworkAccess", templateFileName),
-            Path.Combine(Directory.GetCurrentDirectory(), "kautuka", "src", "backend", "Kautuka.Manager.RuntimeContainer", "Hosting", "NetworkAccess", templateFileName)
-        ];
-
-        foreach (string candidate in candidates)
+        var assembly = typeof(BoundaryRulesetRenderer).Assembly;
+        string resourceName = $"{assembly.GetName().Name}.Hosting.NetworkAccess.{templateFileName}";
+        using Stream? stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream is not null)
         {
-            try
-            {
-                string full = Path.GetFullPath(candidate);
-                if (File.Exists(full))
-                {
-                    return File.ReadAllText(full);
-                }
-            }
-            catch
-            {
-                // Continue to next candidate
-            }
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            return reader.ReadToEnd();
         }
 
-        throw new FileNotFoundException($"Template '{templateFileName}' not found.", candidates[0]);
+        throw new FileNotFoundException($"Embedded template resource '{resourceName}' not found in assembly '{assembly.FullName}'.");
     }
 
     /// <summary>

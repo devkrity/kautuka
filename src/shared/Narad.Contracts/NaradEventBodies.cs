@@ -141,12 +141,17 @@ public static class NaradEventBodies
             ["args"] = JsonNode.Parse(args.GetRawText()),
         });
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1054:URI-like parameters should not be strings", Justification = "Narad Protocol serialized event contract")]
     public static JsonElement ToolCallFinished(
         string toolCallId,
         string outcome,
         JsonElement? response = null,
         string? code = null,
-        string? message = null)
+        string? message = null,
+        string? destination = null,
+        int? port = null,
+        string? requestId = null,
+        string? approvalUrl = null)
     {
         var body = new JsonObject
         {
@@ -170,6 +175,26 @@ public static class NaradEventBodies
         if (!string.IsNullOrWhiteSpace(message))
         {
             body["message"] = message;
+        }
+
+        if (!string.IsNullOrWhiteSpace(destination))
+        {
+            body["destination"] = destination;
+        }
+
+        if (port.HasValue)
+        {
+            body["port"] = port.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestId))
+        {
+            body["requestId"] = requestId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(approvalUrl))
+        {
+            body["approvalUrl"] = approvalUrl;
         }
 
         return Serialize(body);
@@ -303,7 +328,15 @@ public static class NaradEventBodies
         return Serialize(body);
     }
 
-    public static JsonElement RunError(string code, string message, JsonElement? usage = null)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1054:URI-like parameters should not be strings", Justification = "Narad Protocol serialized event contract")]
+    public static JsonElement RunError(
+        string code,
+        string message,
+        JsonElement? usage = null,
+        string? destination = null,
+        int? port = null,
+        string? requestId = null,
+        string? approvalUrl = null)
     {
         var body = new JsonObject
         {
@@ -313,6 +346,26 @@ public static class NaradEventBodies
         if (usage.HasValue)
         {
             body["usage"] = JsonNode.Parse(usage.Value.GetRawText());
+        }
+
+        if (!string.IsNullOrWhiteSpace(destination))
+        {
+            body["destination"] = destination;
+        }
+
+        if (port.HasValue)
+        {
+            body["port"] = port.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requestId))
+        {
+            body["requestId"] = requestId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(approvalUrl))
+        {
+            body["approvalUrl"] = approvalUrl;
         }
 
         return Serialize(body);

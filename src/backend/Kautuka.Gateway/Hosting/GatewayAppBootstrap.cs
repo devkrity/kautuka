@@ -14,6 +14,7 @@ using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Gateway.Infrastructure.Grpc;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.Gateway.RuntimePlane;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Telemetry.Security;
 
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -192,6 +193,14 @@ internal static partial class GatewayAppBootstrap
                 new DeadlineCallInvoker(new LazyCallInvoker(lazyChannel)),
                 baseAddress);
         });
+        builder.Services.AddSingleton<INetworkAccessChecker>(sp =>
+        {
+            var managerGrpc = sp.GetRequiredService<IManagerGrpcService>();
+            var logger = sp.GetService<ILogger<GrpcNetworkAccessChecker>>();
+            return new GrpcNetworkAccessChecker(() => managerGrpc.Client, logger);
+        });
+        builder.Services.AddTransient<NetworkAccessCheckHandler>();
+        builder.Services.AddSingleton<NetworkAccessWebSocketChecker>();
         builder.Services.AddSingleton<IAgentExecutionDependencyProbe, ManagerExecutionDependencyProbe>();
         builder.Services.AddSingleton<IAgentExecutionDependencyProbe, CredentialsHostExecutionDependencyProbe>();
         builder.Services.AddSingleton<IAgentExecutionReadinessService, AgentExecutionReadinessService>();

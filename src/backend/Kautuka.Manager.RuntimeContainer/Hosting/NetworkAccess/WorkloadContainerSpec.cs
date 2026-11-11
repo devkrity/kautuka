@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Net;
-using Kautuka.NetworkAccessController;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 
@@ -45,6 +44,11 @@ public sealed record WorkloadContainerSpec
     public IReadOnlyList<string> AddHosts { get; init; } = [];
     public string? WorkingDirectory { get; init; }
     public bool Persistent { get; init; } = true;
+    public bool Replace { get; init; }
+    public double CpuLimit { get; init; }
+    public string? MemoryLimit { get; init; }
+    public int? PidsLimit { get; init; }
+    public string? Purpose { get; init; }
 
     // Identity labels:
     public string UserId { get; init; } = string.Empty;
@@ -126,6 +130,30 @@ public sealed record WorkloadContainerSpec
         ValidateIdentity();
         ValidateMounts();
 
+        ContainerImageProvenancePolicy.EnsureTrusted(Image, $"Workload container '{ContainerName}'");
+
+        foreach (KeyValuePair<string, string> env in Environment)
+        {
+            if (env.Key.Equals("HTTP_PROXY", StringComparison.OrdinalIgnoreCase)
+                || env.Key.Equals("HTTPS_PROXY", StringComparison.OrdinalIgnoreCase)
+                || env.Key.Equals("ALL_PROXY", StringComparison.OrdinalIgnoreCase)
+                || env.Key.Equals("NO_PROXY", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException($"Creation rejected: proxy environment variable '{env.Key}' is prohibited.", nameof(Environment));
+            }
+        }
+
+        if (CompatibilityProfile is not null)
+        {
+            foreach (string relaxation in CompatibilityProfile.Relaxations)
+            {
+                if (!ImageCompatibilityStore.AllowedRelaxations.Contains(relaxation))
+                {
+                    throw new ArgumentException($"Creation rejected: unapproved compatibility relaxation '{relaxation}'.", nameof(CompatibilityProfile));
+                }
+            }
+        }
+
         bool allowWritableRootfs = CompatibilityProfile?.Relaxations.Contains(ImageCompatibilityStore.WritableRootfs) == true;
         bool allowRootUser = CompatibilityProfile?.Relaxations.Contains(ImageCompatibilityStore.RootUser) == true;
         bool allowFileOwnershipCaps = CompatibilityProfile?.Relaxations.Contains(ImageCompatibilityStore.FileOwnershipCaps) == true;
@@ -136,6 +164,11 @@ public sealed record WorkloadContainerSpec
             : string.Empty;
 
         var args = new List<string> { "run" };
+        if (Replace)
+        {
+            args.Add("--replace");
+        }
+
         if (Persistent)
         {
             args.Add("-d");
@@ -165,9 +198,14 @@ public sealed record WorkloadContainerSpec
 
         args.AddRange([
             "--security-opt", "no-new-privileges",
-            "--pids-limit", DefaultPidsLimit.ToString(CultureInfo.InvariantCulture),
-            "--memory", DefaultMemoryLimit,
+            "--pids-limit", (PidsLimit ?? DefaultPidsLimit).ToString(CultureInfo.InvariantCulture),
+            "--memory", MemoryLimit ?? DefaultMemoryLimit,
         ]);
+
+        if (CpuLimit > 0)
+        {
+            args.AddRange(["--cpus", CpuLimit.ToString(CultureInfo.InvariantCulture)]);
+        }
 
         if (!allowWritableRootfs)
         {
@@ -192,6 +230,14 @@ public sealed record WorkloadContainerSpec
             "--label", $"io.kautuka.systemwide={(Systemwide ? "true" : "false")}",
             "--label", $"io.kautuka.egress={Egress ?? string.Empty}",
             "--label", $"io.kautuka.compat={compatLabel}",
+        ]);
+
+        if (!string.IsNullOrWhiteSpace(Purpose))
+        {
+            args.AddRange(["--label", $"io.kautuka.purpose={Purpose}"]);
+        }
+
+        args.AddRange([
             "--label", "kautuka.managed=manager",
             "--label", $"kautuka.role={ManagerRole}",
             "--label", $"kautuka.desired-version={DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
@@ -203,9 +249,19 @@ public sealed record WorkloadContainerSpec
             args.AddRange(["--workdir", WorkingDirectory]);
         }
 
+        bool hasPkgProxyHost = false;
         foreach (string host in AddHosts)
         {
+            if (host.StartsWith("kautuka-pkgs-proxy:", StringComparison.OrdinalIgnoreCase))
+            {
+                hasPkgProxyHost = true;
+            }
             args.AddRange(["--add-host", host]);
+        }
+
+        if (!hasPkgProxyHost)
+        {
+            args.AddRange(["--add-host", "kautuka-pkgs-proxy:10.247.0.3"]);
         }
 
         foreach (WorkloadMount mount in Mounts)
@@ -215,7 +271,14 @@ public sealed record WorkloadContainerSpec
 
         foreach (KeyValuePair<string, string> env in Environment)
         {
-            args.AddRange(["--env", $"{env.Key}={env.Value}"]);
+            if (string.IsNullOrEmpty(env.Value))
+            {
+                args.AddRange(["--env", env.Key]);
+            }
+            else
+            {
+                args.AddRange(["--env", $"{env.Key}={env.Value}"]);
+            }
         }
 
         args.Add(Image);
@@ -235,223 +298,6 @@ public sealed record WorkloadContainerSpec
         }
 
         return args;
-    }
-
-    /// <summary>
-    /// Validates raw arguments or specifications from external sources, ensuring no forbidden
-    /// flags or settings bypass container containment.
-    /// </summary>
-    public static void AssertAllowedOptions(
-        IReadOnlyList<string>? flags,
-        IReadOnlyDictionary<string, string>? labels,
-        IReadOnlyDictionary<string, string>? annotations,
-        ImageCompatProfile? compatProfile = null)
-    {
-        if (flags is not null)
-        {
-            for (int i = 0; i < flags.Count; i++)
-            {
-                string flag = flags[i];
-                if (flag.Equals("--privileged", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--privileged' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.StartsWith("--privileged=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--privileged' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--device", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--device=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--device' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--userns", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--userns=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--userns' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--hooks-dir", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--hooks-dir=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--hooks-dir' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--runtime", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--runtime=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--runtime' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--volumes-from", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--volumes-from=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--volumes-from' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--pod", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--pod=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--pod' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.StartsWith("--infra", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: infra flags are prohibited.", nameof(flags));
-                }
-
-                if (flag.StartsWith("--init-ctr", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: '--init-ctr' flag is prohibited.", nameof(flags));
-                }
-
-                if (flag.Equals("--ip", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--ip=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: caller cannot specify '--ip'; IP is chosen by Manager.", nameof(flags));
-                }
-
-                if (flag.Equals("--mac-address", StringComparison.OrdinalIgnoreCase) || flag.StartsWith("--mac-address=", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException("Creation rejected: caller cannot specify '--mac-address'.", nameof(flags));
-                }
-
-                if (flag.Equals("--network", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count)
-                {
-                    string networkArg = flags[i + 1];
-                    if (!networkArg.StartsWith(DefaultNetworkName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException($"Creation rejected: network '{networkArg}' is not permitted; only '{DefaultNetworkName}' is allowed.", nameof(flags));
-                    }
-                }
-                else if (flag.StartsWith("--network=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string networkArg = flag["--network=".Length..];
-                    if (!networkArg.StartsWith(DefaultNetworkName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException($"Creation rejected: network '{networkArg}' is not permitted; only '{DefaultNetworkName}' is allowed.", nameof(flags));
-                    }
-                }
-
-                if (flag.Equals("--cap-add", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count)
-                {
-                    string cap = flags[i + 1];
-                    ValidateCapAdd(cap, compatProfile, nameof(flags));
-                }
-                else if (flag.StartsWith("--cap-add=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string cap = flag["--cap-add=".Length..];
-                    ValidateCapAdd(cap, compatProfile, nameof(flags));
-                }
-
-                if (flag.Equals("--security-opt", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count)
-                {
-                    string opt = flags[i + 1];
-                    ValidateSecurityOpt(opt, nameof(flags));
-                }
-                else if (flag.StartsWith("--security-opt=", StringComparison.OrdinalIgnoreCase))
-                {
-                    string opt = flag["--security-opt=".Length..];
-                    ValidateSecurityOpt(opt, nameof(flags));
-                }
-
-                if (flag.StartsWith("--pid=", StringComparison.OrdinalIgnoreCase) || (flag.Equals("--pid", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count))
-                {
-                    string val = flag.StartsWith("--pid=", StringComparison.OrdinalIgnoreCase) ? flag["--pid=".Length..] : flags[i + 1];
-                    if (val.Equals("host", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException("Creation rejected: '--pid=host' is prohibited.", nameof(flags));
-                    }
-                }
-
-                if (flag.StartsWith("--ipc=", StringComparison.OrdinalIgnoreCase) || (flag.Equals("--ipc", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count))
-                {
-                    string val = flag.StartsWith("--ipc=", StringComparison.OrdinalIgnoreCase) ? flag["--ipc=".Length..] : flags[i + 1];
-                    if (val.Equals("host", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException("Creation rejected: '--ipc=host' is prohibited.", nameof(flags));
-                    }
-                }
-
-                if (flag.StartsWith("--uts=", StringComparison.OrdinalIgnoreCase) || (flag.Equals("--uts", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count))
-                {
-                    string val = flag.StartsWith("--uts=", StringComparison.OrdinalIgnoreCase) ? flag["--uts=".Length..] : flags[i + 1];
-                    if (val.Equals("host", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException("Creation rejected: '--uts=host' is prohibited.", nameof(flags));
-                    }
-                }
-
-                if (flag.StartsWith("--cgroupns=", StringComparison.OrdinalIgnoreCase) || (flag.Equals("--cgroupns", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count))
-                {
-                    string val = flag.StartsWith("--cgroupns=", StringComparison.OrdinalIgnoreCase) ? flag["--cgroupns=".Length..] : flags[i + 1];
-                    if (val.Equals("host", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException("Creation rejected: '--cgroupns=host' is prohibited.", nameof(flags));
-                    }
-                }
-
-                if (flag.StartsWith("--sysctl=", StringComparison.OrdinalIgnoreCase) || (flag.Equals("--sysctl", StringComparison.OrdinalIgnoreCase) && i + 1 < flags.Count))
-                {
-                    string val = flag.StartsWith("--sysctl=", StringComparison.OrdinalIgnoreCase) ? flag["--sysctl=".Length..] : flags[i + 1];
-                    if (!val.Equals("net.ipv6.conf.all.disable_ipv6=1", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ArgumentException($"Creation rejected: sysctl '{val}' is prohibited.", nameof(flags));
-                    }
-                }
-            }
-        }
-
-        if (labels is not null)
-        {
-            foreach (string labelKey in labels.Keys)
-            {
-                if (labelKey.StartsWith("io.kautuka.", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException($"Creation rejected: caller cannot specify reserved label '{labelKey}'.", nameof(labels));
-                }
-
-                if (labelKey.StartsWith("run.oci.", StringComparison.OrdinalIgnoreCase) || labelKey.StartsWith("io.podman.", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException($"Creation rejected: caller cannot specify OCI/Podman label '{labelKey}'.", nameof(labels));
-                }
-            }
-        }
-
-        if (annotations is not null)
-        {
-            foreach (string annoKey in annotations.Keys)
-            {
-                if (annoKey.StartsWith("io.kautuka.", StringComparison.OrdinalIgnoreCase) && !annoKey.Equals("io.kautuka.role", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException($"Creation rejected: caller cannot specify reserved annotation '{annoKey}'.", nameof(annotations));
-                }
-
-                if (annoKey.StartsWith("run.oci.", StringComparison.OrdinalIgnoreCase) || annoKey.StartsWith("io.podman.", StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new ArgumentException($"Creation rejected: caller cannot specify OCI/Podman annotation '{annoKey}'.", nameof(annotations));
-                }
-            }
-        }
-    }
-
-    private static void ValidateCapAdd(string cap, ImageCompatProfile? compatProfile, string paramName)
-    {
-        bool hasFileCapsCompat = compatProfile?.Relaxations.Contains(ImageCompatibilityStore.FileOwnershipCaps) == true;
-        if (!hasFileCapsCompat)
-        {
-            throw new ArgumentException($"Creation rejected: '--cap-add {cap}' is prohibited.", paramName);
-        }
-
-        if (!AllowedFileOwnershipCaps.Contains(cap))
-        {
-            throw new ArgumentException($"Creation rejected: capability '{cap}' is prohibited even under compatibility profile.", paramName);
-        }
-    }
-
-    private static void ValidateSecurityOpt(string opt, string paramName)
-    {
-        if (!opt.Equals("no-new-privileges", StringComparison.OrdinalIgnoreCase)
-            && !opt.Equals("no-new-privileges=true", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException($"Creation rejected: security-opt '{opt}' is prohibited.", paramName);
-        }
     }
 
     private void ValidateIdentity()
@@ -492,12 +338,11 @@ public sealed record WorkloadContainerSpec
                     throw new ArgumentException("Ordinary workload requires a userId.", nameof(UserId));
                 }
 
-                // If not a user-level probe, require agentId
-                if (ExecContext is "isolated" or "isolated-with-agent-files" or "agent-sandbox")
+                if (!string.Equals(Purpose, "probe", StringComparison.OrdinalIgnoreCase))
                 {
                     if (string.IsNullOrWhiteSpace(AgentId))
                     {
-                        throw new ArgumentException("Ordinary agent workload requires an agentId.", nameof(AgentId));
+                        throw new ArgumentException("Ordinary non-probe workload requires an agentId.", nameof(AgentId));
                     }
                 }
             }

@@ -121,9 +121,11 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             }
 
             // C2.NC: Calling KautukaHostNetworkPolicy.ClearStaleSocket directly without acquiring networkaccess.lock
-            // unlinks a live socket file on disk.
+            // unlinks a live socket file on disk even while bound and listening on a real AF_UNIX stream socket.
             string ncSocketPath = Path.Combine(tempDir, "nc.sock");
-            await File.WriteAllTextAsync(ncSocketPath, "live-socket-simulation", TestContext.Current.CancellationToken);
+            using var realSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            realSocket.Bind(new UnixDomainSocketEndPoint(ncSocketPath));
+            realSocket.Listen(1);
             Assert.True(File.Exists(ncSocketPath));
             KautukaHostNetworkPolicy.ClearStaleSocket(new KautukaEndpoint
             {
@@ -489,6 +491,102 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     }
 
     [Fact]
+    public async Task C14b_DynamicMetadata_TopLevelCluster_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            string socketPath = Path.Combine(tempDir, "sock", "networkaccess.sock");
+            string lockPath = Path.Combine(tempDir, "sock", "networkaccess.lock");
+
+            NacController controller = CreateController(Path.Combine(tempDir, "state"), out IWorkloadRegistry registry);
+
+            // Register container
+            registry.Register(new RegistryEntry(
+                "10.247.1.10",
+                "u1",
+                "a1",
+                "c1",
+                "agent-sandbox",
+                null,
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            // Set up rules:
+            // 1. Public hostname -> cluster = dfp_public
+            // 2. Public IP -> cluster = orig_dst_public
+            // 3. LAN hostname -> cluster = dfp_lan
+            // 4. LAN IP -> cluster = orig_dst_lan
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            controller.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "u1", "a1", null, "example.com", "host", 443, Allowed: true, AllowLan: false), controller.PolicyStore.Revision);
+            controller.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "u1", "a1", null, "93.184.216.34", "ip", 443, Allowed: true, AllowLan: false), controller.PolicyStore.Revision);
+            controller.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "u1", "a1", null, "internal.lan", "host", 443, Allowed: true, AllowLan: true), controller.PolicyStore.Revision);
+            controller.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "u1", "a1", null, "192.168.1.10", "ip", 443, Allowed: true, AllowLan: true), controller.PolicyStore.Revision);
+
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socketPath,
+                LockFilePath = lockPath,
+            });
+
+            await host.StartAsync(TestContext.Current.CancellationToken);
+            using GrpcChannel channel = CreateUdsChannel(socketPath);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+
+            // 1. Test dfp_public
+            CheckResponse resp1 = await client.CheckAsync(
+                BuildCheckRequest("10.247.1.10", "93.184.216.34", 443, "example.com"),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(0, resp1.Status.Code);
+            Assert.True(resp1.DynamicMetadata.Fields.ContainsKey("cluster"), "DynamicMetadata must contain top-level 'cluster' key");
+            Assert.Equal("dfp_public", resp1.DynamicMetadata.Fields["cluster"].StringValue);
+            Assert.False(resp1.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"), "Must NOT be nested under envoy.filters.network.ext_authz");
+
+            // 2. Test orig_dst_public
+            CheckResponse resp2 = await client.CheckAsync(
+                BuildCheckRequest("10.247.1.10", "93.184.216.34", 443, null),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(0, resp2.Status.Code);
+            Assert.True(resp2.DynamicMetadata.Fields.ContainsKey("cluster"));
+            Assert.Equal("orig_dst_public", resp2.DynamicMetadata.Fields["cluster"].StringValue);
+            Assert.False(resp2.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+
+            // 3. Test dfp_lan
+            CheckResponse resp3 = await client.CheckAsync(
+                BuildCheckRequest("10.247.1.10", "192.168.1.10", 443, "internal.lan"),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(0, resp3.Status.Code);
+            Assert.True(resp3.DynamicMetadata.Fields.ContainsKey("cluster"));
+            Assert.Equal("dfp_lan", resp3.DynamicMetadata.Fields["cluster"].StringValue);
+            Assert.False(resp3.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+
+            // 4. Test orig_dst_lan
+            CheckResponse resp4 = await client.CheckAsync(
+                BuildCheckRequest("10.247.1.10", "192.168.1.10", 443, null),
+                cancellationToken: TestContext.Current.CancellationToken);
+            Assert.Equal(0, resp4.Status.Code);
+            Assert.True(resp4.DynamicMetadata.Fields.ContainsKey("cluster"));
+            Assert.Equal("orig_dst_lan", resp4.DynamicMetadata.Fields["cluster"].StringValue);
+            Assert.False(resp4.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+
+            // C14b.NC: If an unauthorized nested key were present or top-level 'cluster' missing, fail-closed assertion flips
+            Assert.False(resp1.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+            Assert.False(resp2.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+            Assert.False(resp3.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+            Assert.False(resp4.DynamicMetadata.Fields.ContainsKey("envoy.filters.network.ext_authz"));
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task C16_ServiceIsolation_EnvoyListenerRejectsAllManagerRpcsWithUnimplemented_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
@@ -774,8 +872,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
         var store = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy", "state.json"));
         registry = new WorkloadRegistry();
         var audit = new NetworkAccessAuditRing(Path.Combine(stateDir, "audit", "decisions.jsonl"));
-        var compat = new ImageCompatibilityStore(Path.Combine(stateDir, "compat", "image-compatibility.json"));
-        return new NacController(store, registry, audit, compat);
+        return new NacController(store, registry, audit);
     }
 
     private static string CreateTempDir()

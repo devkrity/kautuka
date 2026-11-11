@@ -190,28 +190,6 @@ public sealed record SeedRulesFile(
     int SchemaVersion,
     IReadOnlyList<SeedRuleConfigEntry> Seeds);
 
-public sealed record ImageCompatProfile(
-    string ImageDigest,
-    string? ConnectorId,
-    string? ConnectorDisplayName,
-    IReadOnlyList<string> Relaxations,
-    string GrantedBy,
-    DateTimeOffset GrantedAtUtc,
-    string? Reason);
-
-public sealed record ImageCompatRequest(
-    string ImageDigest,
-    string ConnectorId,
-    string? ConnectorDisplayName,
-    string FailureReason,
-    DateTimeOffset FirstSeenUtc,
-    DateTimeOffset LastSeenUtc);
-
-public sealed record ImageCompatState(
-    int SchemaVersion,
-    IReadOnlyList<ImageCompatProfile> Profiles,
-    IReadOnlyList<ImageCompatRequest> PendingRequests);
-
 public sealed record NetworkAccessStatusSnapshot(
     long Revision,
     int RegistrySize,
@@ -270,7 +248,6 @@ public static class NetworkAccessIdGenerator
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase, WriteIndented = true)]
 [JsonSerializable(typeof(NetworkAccessPolicyState))]
 [JsonSerializable(typeof(SeedRulesFile))]
-[JsonSerializable(typeof(ImageCompatState))]
 [JsonSerializable(typeof(NetworkAccessActivityEntry))]
 internal sealed partial class NetworkAccessJsonContext : JsonSerializerContext
 {
