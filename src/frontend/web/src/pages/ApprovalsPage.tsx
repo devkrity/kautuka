@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import {
   useApprovalsPage,
   ApprovalsToolbar,
@@ -47,6 +48,11 @@ export const ApprovalsPage: React.FC = () => {
         kicker="Human Approval"
         title="Approvals"
         description="Review things waiting for your OK, or browse past decisions."
+        actions={
+          <Button asChild variant="outline">
+            <Link to="/network-access">Network approvals</Link>
+          </Button>
+        }
       />
 
       <div className="workspace-panel">

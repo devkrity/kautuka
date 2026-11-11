@@ -1,0 +1,208 @@
+admin:
+  address:
+    pipe:
+      path: {{ADMIN_SOCKET_PATH}}
+      mode: 384
+layered_runtime:
+  layers:
+    - name: static_layer
+      static_layer:
+        envoy.reloadable_features.tcp_proxy_delay_route_selection: true
+static_resources:
+  listeners:
+    - name: workload_tcp
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 15001
+      listener_filters:
+        - name: envoy.filters.listener.original_dst
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.original_dst.v3.OriginalDst
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+      access_log:
+        - name: envoy.access_loggers.stderr
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StderrAccessLog
+            log_format:
+              text_format_source:
+                inline_string: "[nac] sni=%REQUESTED_SERVER_NAME% src=%DOWNSTREAM_REMOTE_ADDRESS% dst=%DOWNSTREAM_LOCAL_ADDRESS% flags=%RESPONSE_FLAGS% dur=%DURATION%\n"
+      filter_chains:
+        - filter_chain_match:
+            transport_protocol: tls
+          filters:
+            - name: envoy.filters.network.ext_authz
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz
+                stat_prefix: nac_tls
+                transport_api_version: V3
+                failure_mode_allow: false
+                include_tls_session: true
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: manager-authorization
+                    authority: kautuka-decision.internal
+                  timeout: 2s
+            - name: envoy.filters.network.set_filter_state
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
+                on_new_connection:
+                  - object_key: envoy.upstream.dynamic_port
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DOWNSTREAM_LOCAL_PORT%"
+                on_downstream_data:
+                  - object_key: envoy.tcp_proxy.cluster
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(envoy.filters.network.ext_authz:cluster)%"
+            - name: envoy.filters.network.sni_dynamic_forward_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.sni_dynamic_forward_proxy.v3.FilterConfig
+                dns_cache_config:
+                  name: dfp_cache
+                  dns_lookup_family: V4_ONLY
+                  resolved_address_filter:
+                    ranges:
+                      - address_prefix: 127.0.0.0
+                        prefix_len: 8
+                      - address_prefix: 169.254.0.0
+                        prefix_len: 16
+                      - address_prefix: 168.63.129.16
+                        prefix_len: 32
+                      - address_prefix: 100.64.0.0
+                        prefix_len: 10
+                      - address_prefix: 0.0.0.0
+                        prefix_len: 8
+                      - address_prefix: 192.0.0.0
+                        prefix_len: 24
+                      - address_prefix: 198.18.0.0
+                        prefix_len: 15
+                      - address_prefix: 224.0.0.0
+                        prefix_len: 3
+                      - address_prefix: 10.247.0.0
+                        prefix_len: 16
+                  typed_dns_resolver_config:
+                    name: envoy.network.dns_resolver.cares
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+                      resolvers:
+                        - socket_address:
+                            address: 127.0.0.1
+                            port_value: 10053
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: tcp_tls
+                cluster: dfp_public
+                upstream_connect_mode: ON_DOWNSTREAM_DATA
+                max_early_data_bytes: 8192
+        - filter_chain_match: {}
+          filters:
+            - name: envoy.filters.network.ext_authz
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz
+                stat_prefix: nac_plain
+                transport_api_version: V3
+                failure_mode_allow: false
+                grpc_service:
+                  envoy_grpc:
+                    cluster_name: manager-authorization
+                    authority: kautuka-decision.internal
+                  timeout: 2s
+            - name: envoy.filters.network.set_filter_state
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
+                on_downstream_data:
+                  - object_key: envoy.tcp_proxy.cluster
+                    format_string:
+                      text_format_source:
+                        inline_string: "%DYNAMIC_METADATA(envoy.filters.network.ext_authz:cluster)%"
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: tcp_plain
+                cluster: orig_dst_public
+                upstream_connect_mode: ON_DOWNSTREAM_DATA
+                max_early_data_bytes: 8192
+  clusters:
+    - name: manager-authorization
+      connect_timeout: 0.5s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+{{MANAGER_AUTHORIZATION_CLUSTER}}
+    - name: dfp_public
+      lb_policy: CLUSTER_PROVIDED
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: dfp_cache
+            dns_lookup_family: V4_ONLY
+            resolved_address_filter:
+              ranges:
+                - address_prefix: 127.0.0.0
+                  prefix_len: 8
+                - address_prefix: 169.254.0.0
+                  prefix_len: 16
+                - address_prefix: 168.63.129.16
+                  prefix_len: 32
+                - address_prefix: 100.64.0.0
+                  prefix_len: 10
+                - address_prefix: 0.0.0.0
+                  prefix_len: 8
+                - address_prefix: 192.0.0.0
+                  prefix_len: 24
+                - address_prefix: 198.18.0.0
+                  prefix_len: 15
+                - address_prefix: 224.0.0.0
+                  prefix_len: 3
+                - address_prefix: 10.247.0.0
+                  prefix_len: 16
+            typed_dns_resolver_config:
+              name: envoy.network.dns_resolver.cares
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+                resolvers:
+                  - socket_address:
+                      address: 127.0.0.1
+                      port_value: 10053
+    - name: orig_dst_public
+      type: ORIGINAL_DST
+      lb_policy: CLUSTER_PROVIDED
+      connect_timeout: 2s
+    - name: dfp_lan
+      lb_policy: CLUSTER_PROVIDED
+      upstream_bind_config:
+        source_address:
+          address: 192.0.0.8
+          port_value: 0
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: dfp_cache_lan
+            dns_lookup_family: V4_ONLY
+            typed_dns_resolver_config:
+              name: envoy.network.dns_resolver.cares
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+                resolvers:
+                  - socket_address:
+                      address: 127.0.0.1
+                      port_value: 10053
+    - name: orig_dst_lan
+      type: ORIGINAL_DST
+      lb_policy: CLUSTER_PROVIDED
+      connect_timeout: 2s
+      upstream_bind_config:
+        source_address:
+          address: 192.0.0.8
+          port_value: 0

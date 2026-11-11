@@ -14,7 +14,7 @@ using ModelContextProtocol.Client;
 
 namespace Kautuka.Manager.Grpc;
 
-public sealed class WorkspaceGrpcService(
+public sealed partial class WorkspaceGrpcService(
     IContainerTool workspaceTool,
     WorkspaceDesiredStateStore desiredStateStore,
     WorkspaceReadinessGate readinessGate,
@@ -23,7 +23,8 @@ public sealed class WorkspaceGrpcService(
     WorkspaceContainerConnectorExecutionService connectorExecutionService,
     ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService,
     PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService,
-    ILogger<WorkspaceGrpcService> logger) : ManagerService.ManagerServiceBase
+    ILogger<WorkspaceGrpcService> logger,
+    Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;
@@ -34,6 +35,7 @@ public sealed class WorkspaceGrpcService(
     private readonly ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService = runtimeContainerDiagnosticsService;
     private readonly PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService = pkgsProxyCacheDiagnosticsService;
     private readonly ILogger<WorkspaceGrpcService> logger = logger;
+    private readonly Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = networkAccessController;
 
     /// <summary>
     /// Awaits machine readiness before any container operation. If the machine is reinitialising,

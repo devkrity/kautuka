@@ -12,6 +12,7 @@
     <Project Path="backend/Kautuka.Manager/Kautuka.Manager.csproj" />
     <Project Path="backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj" />
     <Project Path="backend/Kautuka.Manager.RuntimeContainer/Kautuka.Manager.RuntimeContainer.csproj" />
+    <Project Path="backend/Kautuka.NetworkAccessController/Kautuka.NetworkAccessController.csproj" />
     <Project Path="backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj" />
     <Project Path="backend/Kautuka.WebHost/Kautuka.WebHost.csproj" />
   </Folder>
@@ -24,6 +25,7 @@
     <Project Path="shared/Kautuka.ChannelContracts/Kautuka.ChannelContracts.csproj" />
     <Project Path="shared/Kautuka.ChannelHost.Protos/Kautuka.ChannelHost.Protos.csproj" />
     <Project Path="shared/Kautuka.Manager.Protos/Kautuka.Manager.Protos.csproj" />
+    <Project Path="shared/Kautuka.NetworkAccess.Protos/Kautuka.NetworkAccess.Protos.csproj" />
     <Project Path="shared/Kautuka.UpdateService.Protos/Kautuka.UpdateService.Protos.csproj" />
     <Project Path="shared/Kautuka.CredentialsHost.Protos/Kautuka.CredentialsHost.Protos.csproj" />
   </Folder>

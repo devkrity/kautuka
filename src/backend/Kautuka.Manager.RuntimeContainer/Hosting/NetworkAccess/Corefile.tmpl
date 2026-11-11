@@ -1,0 +1,15 @@
+.:53 {
+    bind {{DNS_IP}}
+    template IN A {
+        answer "{{ .Name }} 60 IN A 198.18.250.250"
+    }
+    template IN AAAA {
+        rcode NOERROR
+    }
+}
+
+.:10053 {
+    bind 127.0.0.1
+    forward . /etc/resolv.conf
+    cache 30
+}

@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""
+Kautuka OCI Runtime Hook v7
+Enforces network access control boundaries on container creation.
+Implements Sections 4.3.2 and 4.3.3 of Kautuka NAC v7 specification.
+"""
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+_MODULE_THREAD_LOCK = threading.Lock()
+HOOK_VERSION = "7.0.0"
+
+
+def get_xdg_state_home():
+    base = os.environ.get("XDG_STATE_HOME")
+    if not base:
+        base = os.path.expanduser("~/.local/state")
+    return os.path.join(base, "kautuka", "nac")
+
+
+STATE_DIR = get_xdg_state_home()
+HOOK_LOG_FILE = os.path.join(STATE_DIR, "hook.log")
+ALLOWLIST_FILE = os.path.join(STATE_DIR, "infra-allowlist.json")
+OWNERS_FILE = os.path.join(STATE_DIR, "netns-owners.json")
+OWNERS_LOCK_FILE = os.path.join(STATE_DIR, "netns-owners.lock")
+
+
+def get_pid_start_ticks(pid):
+    """
+    Reads start_ticks (field 22) from /proc/<pid>/stat when available.
+    Returns int start_ticks or None.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+            data = f.read()
+        rparen = data.rfind(")")
+        if rparen != -1:
+            rest = data[rparen + 2:].split()
+            if len(rest) > 19:
+                return int(rest[19])
+    except Exception:
+        pass
+    return None
+
+
+def is_owner_live(entry):
+    """
+    Checks if an owner entry is still live.
+    An entry is live only while /proc/<pid>/ns/net still has that inode
+    and /proc/<pid>/stat has the same start_ticks.
+    """
+    if not isinstance(entry, dict):
+        return False
+    pid = entry.get("pid")
+    expected_inode = entry.get("inode")
+    expected_ticks = entry.get("start_ticks")
+    if not pid or pid <= 0:
+        return False
+    try:
+        st_net = os.stat(f"/proc/{pid}/ns/net")
+        if expected_inode is not None and st_net.st_ino != int(expected_inode):
+            return False
+        if expected_ticks is not None:
+            ticks = get_pid_start_ticks(pid)
+            if ticks is None or ticks != int(expected_ticks):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def read_owners_file(owners_path=OWNERS_FILE):
+    """
+    Reads and validates netns-owners.json.
+    Returns (owners_dict, owners_valid, owners_reason).
+    owners_dict maps str(inode) -> entry dict.
+    If the file exists and has a JSON parse error, unreadable permissions,
+    or wrong mode (st_mode & 0o077 != 0 or st_uid != os.geteuid()),
+    returns ({}, False, "owners_unreadable").
+    """
+    if not os.path.exists(owners_path):
+        return {}, True, None
+
+    try:
+        st = os.stat(owners_path)
+        if hasattr(os, "getuid"):
+            if (st.st_mode & 0o077) != 0:
+                return {}, False, "owners_unreadable"
+            if st.st_uid != os.geteuid():
+                return {}, False, "owners_unreadable"
+
+        raw = None
+        for attempt in range(5):
+            try:
+                with open(owners_path, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01)
+
+        if not raw or not raw.strip():
+            return {}, True, None
+        data = json.loads(raw)
+
+        owners = {}
+        if isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict):
+                    ino = entry.get("inode")
+                    if ino is not None:
+                        owners[str(ino)] = entry
+        elif isinstance(data, dict):
+            for ino, val in data.items():
+                if isinstance(val, dict):
+                    entry = dict(val)
+                    if "inode" not in entry:
+                        entry["inode"] = int(ino) if str(ino).isdigit() else ino
+                    owners[str(ino)] = entry
+                else:
+                    owners[str(ino)] = {
+                        "inode": int(ino) if str(ino).isdigit() else ino,
+                        "id": val,
+                        "pid": None,
+                        "start_ticks": None,
+                    }
+        else:
+            return {}, False, "owners_unreadable"
+
+        live_owners = {}
+        for ino, entry in owners.items():
+            if entry.get("pid"):
+                if is_owner_live(entry):
+                    live_owners[ino] = entry
+            else:
+                live_owners[ino] = entry
+
+        return live_owners, True, None
+    except Exception:
+        return {}, False, "owners_unreadable"
+
+
+def write_owners_file(new_owners, owners_path=OWNERS_FILE, lock_path=OWNERS_LOCK_FILE):
+    """
+    Reads and writes netns-owners.json under an exclusive flock on lock_path
+    and replaces via temp file + os.replace.
+    """
+    os.makedirs(os.path.dirname(owners_path), exist_ok=True)
+    lock_fd = None
+    lock_acquired_thread = False
+    try:
+        if fcntl:
+            lock_fd = open(lock_path, "a+")
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        else:
+            _MODULE_THREAD_LOCK.acquire()
+            lock_acquired_thread = True
+
+        existing_owners, valid, _ = read_owners_file(owners_path)
+        if valid:
+            existing_owners.update(new_owners)
+            merged = existing_owners
+        else:
+            merged = new_owners
+
+        entries = list(merged.values())
+
+        temp_dir = os.path.dirname(owners_path)
+        fd, temp_path = tempfile.mkstemp(dir=temp_dir, prefix="owners-", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if hasattr(os, "chmod") and hasattr(os, "getuid"):
+            os.chmod(temp_path, 0o600)
+
+        for attempt in range(5):
+            try:
+                os.replace(temp_path, owners_path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01)
+    finally:
+        if lock_fd:
+            try:
+                if fcntl:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_fd.close()
+        if lock_acquired_thread:
+            _MODULE_THREAD_LOCK.release()
+
+
+def read_allowlist_file(allowlist_path=ALLOWLIST_FILE):
+    """
+    Reads infra-allowlist.json.
+    Returns (allowlist_map, allowlist_valid, allowlist_reason).
+    Supports both {"version": 1, "entries": [...]} and dict-by-id formats.
+    """
+    if not os.path.exists(allowlist_path):
+        return {}, False, "missing_allowlist"
+
+    try:
+        st = os.stat(allowlist_path)
+        if hasattr(os, "getuid"):
+            if (st.st_mode & 0o077) != 0:
+                return {}, False, "bad_allowlist_mode"
+            if st.st_uid != os.geteuid():
+                return {}, False, "bad_allowlist_owner"
+
+        with open(allowlist_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        allowlist = {}
+        if isinstance(data, dict):
+            if "entries" in data and isinstance(data["entries"], list):
+                for entry in data["entries"]:
+                    if isinstance(entry, dict) and "id" in entry:
+                        allowlist[entry["id"]] = entry
+            else:
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        allowlist[k] = v
+                    elif isinstance(v, list):
+                        allowlist[k] = {"expected_ipv4": v}
+                    else:
+                        allowlist[k] = {"expected_ipv4": []}
+        elif isinstance(data, list):
+            for entry in data:
+                if isinstance(entry, dict) and "id" in entry:
+                    allowlist[entry["id"]] = entry
+        else:
+            return {}, False, "bad_allowlist_format"
+
+        return allowlist, True, None
+    except Exception as ex:
+        return {}, False, f"allowlist_read_error: {ex}"
+
+
+def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=True, allowlist_reason=None, owners_valid=True, owners_reason=None):
+    """
+    Pure decision function unit-testable without Podman.
+    Returns (action, reason) where action in ('allow', 'refuse').
+    """
+    if not state or not isinstance(state, dict):
+        return ("refuse", "missing_pid")
+
+    pid = state.get("pid")
+    if pid is None or not isinstance(pid, (int, float)) or int(pid) <= 0:
+        return ("refuse", "missing_pid")
+
+    if ips is None or not isinstance(ips, list) or len(ips) == 0:
+        return ("refuse", "no_ip")
+
+    cid = state.get("id", "")
+    annotations = state.get("annotations", {}) or {}
+
+    in_nac = False
+    for ip in ips:
+        if isinstance(ip, str) and (ip.startswith("10.247.") or ip == "10.247"):
+            in_nac = True
+            break
+
+    # MF9: Container not on NAC network
+    if not in_nac:
+        if annotations.get("io.kautuka.role") == "workload":
+            if not owners_valid:
+                return ("refuse", owners_reason or "owners_unreadable")
+            return ("refuse", "workload_off_network")
+        return ("allow", "outside_boundary")
+
+    # In NAC: Allowlist validation check
+    if not allowlist_valid:
+        return ("refuse", allowlist_reason or "missing_allowlist")
+
+    # Normalize allowlist format
+    normalized_allowlist = {}
+    if allowlist is not None:
+        if isinstance(allowlist, dict):
+            if "entries" in allowlist and isinstance(allowlist["entries"], list):
+                for entry in allowlist["entries"]:
+                    if isinstance(entry, dict) and "id" in entry:
+                        normalized_allowlist[entry["id"]] = entry
+            else:
+                for k, v in allowlist.items():
+                    if isinstance(v, dict):
+                        normalized_allowlist[k] = v
+                    elif isinstance(v, list):
+                        normalized_allowlist[k] = {"expected_ipv4": v}
+        elif isinstance(allowlist, list):
+            for entry in allowlist:
+                if isinstance(entry, dict) and "id" in entry:
+                    normalized_allowlist[entry["id"]] = entry
+
+    if cid in normalized_allowlist:
+        expected = normalized_allowlist[cid].get("expected_ipv4", [])
+        if set(ips) == set(expected):
+            return ("allow", "infra_allowlisted")
+        else:
+            return ("refuse", "infra_ip_mismatch")
+
+    # MF8: Corrupt or unreadable owners file refuses every NAC container
+    if not owners_valid:
+        return ("refuse", owners_reason or "owners_unreadable")
+
+    # Step 6: In NAC and not allowlisted
+    # 1. Reserved range 10.247.0.0/24
+    for ip in ips:
+        if isinstance(ip, str):
+            parts = ip.split(".")
+            if len(parts) == 4 and parts[0] == "10" and parts[1] == "247" and parts[2] == "0":
+                return ("refuse", "reserved_range")
+
+    # 2. More than 1 IPv4 or outside 10.247.1.0 - 10.247.255.254
+    if len(ips) != 1:
+        return ("refuse", "bad_workload_ip")
+
+    ip = ips[0]
+    if not isinstance(ip, str):
+        return ("refuse", "bad_workload_ip")
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return ("refuse", "bad_workload_ip")
+    try:
+        p0, p1, p2, p3 = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+    except ValueError:
+        return ("refuse", "bad_workload_ip")
+
+    if p0 != 10 or p1 != 247:
+        return ("refuse", "bad_workload_ip")
+    if p2 < 1 or p2 > 255:
+        return ("refuse", "bad_workload_ip")
+    if p3 < 0 or p3 > 254:
+        return ("refuse", "bad_workload_ip")
+
+    # 3. Shared netns check
+    if netns_inode is not None and owners is not None:
+        sinode = str(netns_inode)
+        norm_owners = {}
+        if isinstance(owners, dict):
+            for k, v in owners.items():
+                if isinstance(v, dict):
+                    norm_owners[str(k)] = v.get("id") or v.get("cid")
+                else:
+                    norm_owners[str(k)] = v
+        elif isinstance(owners, list):
+            for entry in owners:
+                if isinstance(entry, dict) and "inode" in entry:
+                    norm_owners[str(entry["inode"])] = entry.get("id") or entry.get("cid")
+
+        if sinode in norm_owners:
+            owner_cid = norm_owners[sinode]
+            if owner_cid != cid:
+                return ("refuse", "shared_netns")
+
+    return ("allow", "workload_rules")
+
+
+def render_ruleset(ip, include_pkgs_proxy=True):
+    """
+    Renders idempotent, atomic table inet kautuka_workload ruleset (Section 4.3.2).
+    """
+    pkg_rule = "    ip daddr 10.247.0.3 tcp dport 20101 accept\n" if include_pkgs_proxy else ""
+    return f"""table inet kautuka_workload
+delete table inet kautuka_workload
+table inet kautuka_workload {{
+  chain input {{ type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    counter drop comment "input_drop"
+  }}
+  chain output {{ type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+    meta nfproto ipv6 counter drop comment "ipv6_drop"
+    oifname != "lo" ip saddr != {ip} counter drop comment "spoof_drop"
+    ip daddr 10.247.0.2 tcp dport 15001 accept
+    ip daddr 10.247.0.2 meta l4proto {{ udp, tcp }} th dport 53 accept
+{pkg_rule}    ip daddr 10.247.0.0/16 counter drop comment "wl_net_drop"
+    ip daddr {{ 169.254.0.0/16, 168.63.129.16 }} counter drop comment "meta_drop"
+    meta l4proto udp counter drop comment "udp_drop"
+    meta l4proto tcp accept
+    counter drop comment "final_drop"
+  }}
+}}
+"""
+
+
+def log_hook(ts_ns, dur_ms, cid, pid, ips, inode, action, reason, rules_sha, annotations):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        rec = {
+            "ts_ns": ts_ns,
+            "duration_ms": round(dur_ms, 3),
+            "id": cid,
+            "pid": pid,
+            "hook_version": HOOK_VERSION,
+            "ips": ips,
+            "netns_inode": inode,
+            "action": action,
+            "reason": reason,
+            "rules_sha256": rules_sha,
+            "annotations": annotations or {},
+        }
+        with open(HOOK_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
+def main():
+    t_start = time.perf_counter_ns()
+    ts_ns = time.time_ns()
+    cid = ""
+    pid = 0
+    annotations = {}
+    ips = []
+    inode = None
+    rules_sha = ""
+
+    try:
+        try:
+            raw_in = sys.stdin.read()
+            state = json.loads(raw_in) if raw_in.strip() else {}
+        except Exception:
+            state = {}
+
+        cid = state.get("id", "")
+        pid = state.get("pid", 0)
+        annotations = state.get("annotations", {}) or {}
+
+        if not pid or pid <= 0:
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "missing_pid", rules_sha, annotations)
+            sys.exit(1)
+
+        try:
+            cmd = ["nsenter", "-t", str(pid), "-n", "ip", "-j", "-4", "addr", "show"]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            addr_data = json.loads(res.stdout)
+            for iface in addr_data:
+                for a in iface.get("addr_info", []):
+                    local = a.get("local")
+                    if local and local != "127.0.0.1":
+                        ips.append(local)
+        except Exception:
+            ips = []
+
+        if not ips:
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "no_ip", rules_sha, annotations)
+            sys.exit(1)
+
+        try:
+            st = os.stat(f"/proc/{pid}/ns/net")
+            inode = st.st_ino
+        except Exception:
+            inode = None
+
+        allowlist, allowlist_valid, allowlist_reason = read_allowlist_file(ALLOWLIST_FILE)
+        owners, owners_valid, owners_reason = read_owners_file(OWNERS_FILE)
+
+        action, reason = decide(
+            state,
+            ips,
+            allowlist,
+            owners,
+            netns_inode=inode,
+            allowlist_valid=allowlist_valid,
+            allowlist_reason=allowlist_reason,
+            owners_valid=owners_valid,
+            owners_reason=owners_reason,
+        )
+
+        if action == "refuse":
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", reason, rules_sha, annotations)
+            sys.exit(1)
+
+        if reason in ("infra_allowlisted", "outside_boundary"):
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "allow", reason, rules_sha, annotations)
+            sys.exit(0)
+
+        workload_ip = ips[0]
+        rules_text = render_ruleset(workload_ip, include_pkgs_proxy=True)
+        rules_sha = hashlib.sha256(rules_text.encode("utf-8")).hexdigest()
+
+        apply_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-f", "-"]
+        p = subprocess.run(apply_cmd, input=rules_text, capture_output=True, text=True)
+        if p.returncode != 0:
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
+            sys.exit(1)
+
+        verify_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-j", "list", "table", "inet", "kautuka_workload"]
+        vp = subprocess.run(verify_cmd, capture_output=True, text=True)
+        if vp.returncode != 0:
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
+            sys.exit(1)
+
+        output_str = vp.stdout
+        expected_comments = [
+            "input_drop",
+            "ipv6_drop",
+            "spoof_drop",
+            "wl_net_drop",
+            "meta_drop",
+            "udp_drop",
+            "final_drop",
+        ]
+        if not all(comment in output_str for comment in expected_comments) or workload_ip not in output_str:
+            dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+            log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
+            sys.exit(1)
+
+        if inode is not None:
+            ticks = get_pid_start_ticks(pid)
+            owner_entry = {
+                "inode": int(inode) if str(inode).isdigit() else inode,
+                "id": cid,
+                "pid": pid,
+                "start_ticks": ticks,
+            }
+            try:
+                write_owners_file({str(inode): owner_entry})
+            except Exception:
+                pass
+
+        dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+        log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "allow", "workload_rules", rules_sha, annotations)
+        sys.exit(0)
+
+    except SystemExit:
+        raise
+    except BaseException as ex:
+        dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
+        log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", f"exception_{type(ex).__name__}", rules_sha, annotations)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

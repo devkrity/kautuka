@@ -21,6 +21,21 @@ service ManagerService {
   rpc ProbeMcpContainer   (WorkspaceMcpContainerProbeRequest) returns (WorkspaceMcpProbeResponse);
   rpc ListMcpContainerTools (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerListToolsResponse);
   rpc CallMcpContainerTool  (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerCallResponse);
+  rpc CheckOutbound       (NetworkAccessCheckOutboundRequest) returns (NetworkAccessCheckOutboundResponse);
+  rpc ListRequests        (NetworkAccessListRequestsRequest)  returns (NetworkAccessListRequestsResponse);
+  rpc DecideRequest       (NetworkAccessDecideRequest)        returns (NetworkAccessDecideResponse);
+  rpc ListRules           (NetworkAccessListRulesRequest)     returns (NetworkAccessListRulesResponse);
+  rpc SetRule             (NetworkAccessSetRuleRequest)       returns (NetworkAccessSetRuleResponse);
+  rpc DeleteRule          (NetworkAccessDeleteRuleRequest)    returns (NetworkAccessDeleteRuleResponse);
+  rpc ListActivity        (NetworkAccessListActivityRequest)  returns (NetworkAccessListActivityResponse);
+  rpc GetUserPrivileges   (NetworkAccessGetUserPrivilegesRequest) returns (NetworkAccessUserPrivilegesMessage);
+  rpc SetUserPrivileges   (NetworkAccessSetUserPrivilegesRequest) returns (NetworkAccessUserPrivilegesMessage);
+  rpc GetBrake            (NetworkAccessGetBrakeRequest)      returns (NetworkAccessBrakeMessage);
+  rpc SetBrake            (NetworkAccessSetBrakeRequest)      returns (NetworkAccessBrakeMessage);
+  rpc GetNetworkAccessStatus (WorkspacePingRequest)           returns (NetworkAccessStatusResponse);
+  rpc GetImageCompatibility (NetworkAccessActorMessage)       returns (ImageCompatStateResponse);
+  rpc SetImageCompatibility (ImageCompatSetProfileRequest)    returns (ImageCompatProfileMessage);
+  rpc DeleteImageCompatibility (ImageCompatDeleteProfileRequest) returns (WorkspaceBoolResponse);
 }
 
 message WorkspacePingRequest {
@@ -312,6 +327,7 @@ message WorkspaceMcpContainerProbeRequest {
   string bundle_path = 8;
   string server_type = 9;
   string mcp_protocol_version = 10;
+  string user_id = 11;
 }
 
 message WorkspaceMcpContainerCallRequest {
@@ -350,4 +366,256 @@ message WorkspaceMcpContainerCallResponse {
   string result_json = 3;
   WorkspaceMcpConnectorUnavailabilityReason unavailability_reason = 4;
   WorkspaceOperationOutcome outcome = 5;
+}
+
+// Network Access Control (NAC v7) messages
+message NetworkAccessActorMessage {
+  string user_id = 1;
+  bool is_admin = 2;
+}
+
+message NetworkAccessCheckOutboundRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  string connector_id = 3;
+  bool systemwide = 4;
+  string host = 5;
+  int32 port = 6;
+  string purpose = 7;
+  string correlation_id = 8;
+}
+
+message NetworkAccessCheckOutboundResponse {
+  bool allowed = 1;
+  string reason = 2;
+  string request_id = 3;
+  bool open_internet_badge = 4;
+}
+
+message NetworkAccessRequestMessage {
+  string id = 1;
+  string user_id = 2;
+  string agent_id = 3;
+  string connector_id = 4;
+  bool systemwide = 5;
+  string attribution = 6;
+  string destination = 7;
+  string dest_kind = 8;
+  int32 port = 9;
+  string actor_kind = 10;
+  string first_seen_utc = 11;
+  string last_seen_utc = 12;
+  int64 attempts = 13;
+  string status = 14;
+  string origin = 15;
+  string purpose = 16;
+  string compat_profile = 17;
+  bool waiting_for_admin = 18;
+  bool compatibility_mode = 19;
+}
+
+message NetworkAccessRuleMessage {
+  string id = 1;
+  string scope_kind = 2;
+  string user_id = 3;
+  string agent_id = 4;
+  string connector_id = 5;
+  string destination = 6;
+  string dest_kind = 7;
+  int32 port = 8;
+  bool allowed = 9;
+  bool allow_lan = 10;
+  string decided_by = 11;
+  string decided_at_utc = 12;
+  string source = 13;
+  bool paused = 14;
+  bool open_internet_badge = 15;
+}
+
+message NetworkAccessUserPrivilegesMessage {
+  string user_id = 1;
+  bool can_approve_own = 2;
+  bool can_allow_all_agents = 3;
+  string set_by = 4;
+  string set_at_utc = 5;
+}
+
+message NetworkAccessUserBrakeMessage {
+  string user_id = 1;
+  string set_by = 2;
+  string set_at_utc = 3;
+  bool locked_by_admin = 4;
+}
+
+message NetworkAccessBrakeMessage {
+  bool system = 1;
+  string system_set_by = 2;
+  string system_set_at_utc = 3;
+  repeated NetworkAccessUserBrakeMessage users = 4;
+}
+
+message NetworkAccessListRequestsRequest {
+  NetworkAccessActorMessage actor = 1;
+  int64 since_revision = 2;
+  bool has_since_revision = 3;
+}
+
+message NetworkAccessListRequestsResponse {
+  int64 revision = 1;
+  repeated NetworkAccessRequestMessage requests = 2;
+  NetworkAccessUserPrivilegesMessage privileges = 3;
+  NetworkAccessBrakeMessage brake = 4;
+}
+
+message NetworkAccessDecideRequest {
+  NetworkAccessActorMessage actor = 1;
+  string request_id = 2;
+  bool allow = 3;
+  string scope = 4;
+  bool allow_lan = 5;
+  int64 expected_revision = 6;
+}
+
+message NetworkAccessDecideResponse {
+  int64 revision = 1;
+  NetworkAccessRuleMessage rule = 2;
+  NetworkAccessRequestMessage request = 3;
+}
+
+message NetworkAccessListRulesRequest {
+  NetworkAccessActorMessage actor = 1;
+  string filter_user_id = 2;
+}
+
+message NetworkAccessListRulesResponse {
+  int64 revision = 1;
+  repeated NetworkAccessRuleMessage rules = 2;
+}
+
+message NetworkAccessSetRuleRequest {
+  NetworkAccessActorMessage actor = 1;
+  string scope_kind = 2;
+  string user_id = 3;
+  string agent_id = 4;
+  string connector_id = 5;
+  string destination = 6;
+  string dest_kind = 7;
+  int32 port = 8;
+  bool allowed = 9;
+  bool allow_lan = 10;
+  int64 expected_revision = 11;
+  string exec_context = 12;
+  string attribution = 13;
+}
+
+message NetworkAccessSetRuleResponse {
+  int64 revision = 1;
+  NetworkAccessRuleMessage rule = 2;
+}
+
+message NetworkAccessDeleteRuleRequest {
+  NetworkAccessActorMessage actor = 1;
+  string rule_id = 2;
+  int64 expected_revision = 3;
+}
+
+message NetworkAccessDeleteRuleResponse {
+  int64 revision = 1;
+}
+
+message NetworkAccessActivityEntryMessage {
+  string timestamp_utc = 1;
+  string source_ip = 2;
+  string user_id = 3;
+  string agent_id = 4;
+  string connector_id = 5;
+  string destination = 6;
+  int32 port = 7;
+  string decision = 8;
+  string reason = 9;
+  string cluster = 10;
+  bool open_internet_badge = 11;
+  bool compatibility_mode = 12;
+}
+
+message NetworkAccessListActivityRequest {
+  NetworkAccessActorMessage actor = 1;
+}
+
+message NetworkAccessListActivityResponse {
+  repeated NetworkAccessActivityEntryMessage entries = 1;
+}
+
+message NetworkAccessGetUserPrivilegesRequest {
+  NetworkAccessActorMessage actor = 1;
+  string user_id = 2;
+  bool target_is_admin = 3;
+}
+
+message NetworkAccessSetUserPrivilegesRequest {
+  NetworkAccessActorMessage actor = 1;
+  string user_id = 2;
+  bool can_approve_own = 3;
+  bool can_allow_all_agents = 4;
+}
+
+message NetworkAccessGetBrakeRequest {
+  NetworkAccessActorMessage actor = 1;
+}
+
+message NetworkAccessSetBrakeRequest {
+  NetworkAccessActorMessage actor = 1;
+  string scope = 2;
+  string user_id = 3;
+  bool on = 4;
+}
+
+message NetworkAccessStatusResponse {
+  int64 revision = 1;
+  int32 registry_size = 2;
+  int64 checks = 3;
+  int64 allowed = 4;
+  int64 denied = 5;
+  int64 errors = 6;
+  int64 request_overflow = 7;
+  int64 registry_conflicts = 8;
+  bool envoy_listener_healthy = 9;
+}
+
+message ImageCompatProfileMessage {
+  string image_digest = 1;
+  string connector_id = 2;
+  string connector_display_name = 3;
+  repeated string relaxations = 4;
+  string granted_by = 5;
+  string granted_at_utc = 6;
+  string reason = 7;
+}
+
+message ImageCompatRequestMessage {
+  string image_digest = 1;
+  string connector_id = 2;
+  string connector_display_name = 3;
+  string failure_reason = 4;
+  string first_seen_utc = 5;
+  string last_seen_utc = 6;
+}
+
+message ImageCompatStateResponse {
+  repeated ImageCompatRequestMessage pending_requests = 1;
+  repeated ImageCompatProfileMessage profiles = 2;
+}
+
+message ImageCompatSetProfileRequest {
+  NetworkAccessActorMessage actor = 1;
+  string image_digest = 2;
+  string connector_id = 3;
+  string connector_display_name = 4;
+  repeated string relaxations = 5;
+  string reason = 6;
+}
+
+message ImageCompatDeleteProfileRequest {
+  NetworkAccessActorMessage actor = 1;
+  string image_digest = 2;
 }

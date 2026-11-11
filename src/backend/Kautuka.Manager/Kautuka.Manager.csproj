@@ -15,7 +15,9 @@
     <ProjectReference Include="..\..\shared\Kautuka.Hosting\Kautuka.Hosting.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.NetworkAccess.Protos\Kautuka.NetworkAccess.Protos.csproj" />
     <ProjectReference Include="..\Kautuka.Manager.RuntimeContainer\Kautuka.Manager.RuntimeContainer.csproj" />
+    <ProjectReference Include="..\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
   </ItemGroup>
 
   <ItemGroup>

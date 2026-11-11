@@ -4,6 +4,7 @@ using Kautuka.Manager.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
+using Kautuka.NetworkAccessController;
 using Kautuka.Telemetry.DependencyInjection;
 using Kautuka.Telemetry.Security;
 using Kautuka.Telemetry.Telemetry;
@@ -23,6 +24,16 @@ builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
     KautukaActivitySources.ProcessKind.Manager,
     KautukaActivitySources.Component.Manager);
+
+// -----------------------------------------------------------------------
+// Resolve canonical shared data root.
+// All mutable state is anchored through the shared host path policy.
+// -----------------------------------------------------------------------
+string managerDataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
+managerDataRoot = Path.GetFullPath(managerDataRoot);
+KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
+string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
+
 builder.Services.AddSingleton<WorkspaceRuntimePaths>();
 builder.Services.AddSingleton<PodmanCommandRunner>();
 builder.Services.AddSingleton(static sp => WorkspaceSidecarCatalogLoader.Load(
@@ -66,6 +77,38 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
     sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>()));
+
+// -----------------------------------------------------------------------
+// Network Access Controller (NAC v7) module & second Kestrel Envoy host
+// -----------------------------------------------------------------------
+builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
+    new WorkloadRegistry(sp.GetRequiredService<ILogger<WorkloadRegistry>>()));
+builder.Services.AddSingleton(_ =>
+    new NetworkAccessPolicyStore(Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json")));
+builder.Services.AddSingleton(_ =>
+    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl")));
+builder.Services.AddSingleton(_ =>
+    new ImageCompatibilityStore(Path.Combine(managerDataRoot, "networkAccess", "compat", "image-compat.json")));
+builder.Services.AddSingleton(sp =>
+    new Kautuka.NetworkAccessController.NetworkAccessController(
+        sp.GetRequiredService<NetworkAccessPolicyStore>(),
+        sp.GetRequiredService<IWorkloadRegistry>(),
+        sp.GetRequiredService<NetworkAccessAuditRing>(),
+        sp.GetRequiredService<ImageCompatibilityStore>()));
+
+if (OperatingSystem.IsLinux())
+{
+    builder.Services.AddSingleton<IHostedService>(sp =>
+        EnvoyAuthorizationHost.Create(
+            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
+                SocketPath = Path.Combine(socketRoot, "networkaccess-envoy", "envoy.sock"),
+            }));
+}
+
 builder.Services.AddGrpc(options =>
 {
     options.MaxReceiveMessageSize = GrpcMaxMessageSizeBytes;
@@ -77,14 +120,6 @@ KautukaMaintenanceMode.SuppressApplicationHostedServices(
     builder.Services,
     typeof(ManagerRuntimeHealthWarmWorker));
 
-// -----------------------------------------------------------------------
-// Resolve canonical shared data root.
-// All mutable state is anchored through the shared host path policy.
-// -----------------------------------------------------------------------
-string managerDataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
-managerDataRoot = Path.GetFullPath(managerDataRoot);
-KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
-
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
     managerDataRoot,
     "Manager",
@@ -95,6 +130,9 @@ var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
         new LocalMtlsClientCertificate(
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCommonName,
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCertificateFileName),
+        new LocalMtlsClientCertificate(
+            Kautuka.Manager.Protos.ManagerClientIdentities.ChannelHostCommonName,
+            Kautuka.Manager.Protos.ManagerClientIdentities.ChannelHostCertificateFileName),
     ]);
 
 builder.WebHost.ConfigureKestrel(options =>

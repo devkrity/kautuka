@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "@HOOK_PATH@",
+    "args": ["kautuka_hook.py"],
+    "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["createRuntime"]
+}

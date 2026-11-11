@@ -45,4 +45,58 @@ public sealed class ManagerRpcAuthorizationTests
         Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized("Kautuka Unknown Client", service + "GetHostStatus"));
         Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(ManagerClientIdentities.GatewayCommonName, service + "FutureMethod"));
     }
+
+    [Fact]
+    public void NetworkAccessRpcAuthorization_EnforcesChannelHostGatewayAndUpdateServiceBoundaries()
+    {
+        // ChannelHost may call CheckOutbound ONLY
+        Assert.True(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "CheckOutbound"));
+        Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "DecideRequest"));
+        Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "SetRule"));
+        Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "SetUserPrivileges"));
+        Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "SetBrake"));
+        Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+            ManagerClientIdentities.ChannelHostCommonName,
+            service + "Exec"));
+
+        // Gateway can call all NAC and ImageCompatibility RPCs
+        string[] nacRpcs =
+        [
+            "CheckOutbound",
+            "ListRequests",
+            "DecideRequest",
+            "ListRules",
+            "SetRule",
+            "DeleteRule",
+            "ListActivity",
+            "GetUserPrivileges",
+            "SetUserPrivileges",
+            "GetBrake",
+            "SetBrake",
+            "GetNetworkAccessStatus",
+            "GetImageCompatibility",
+            "SetImageCompatibility",
+            "DeleteImageCompatibility",
+        ];
+
+        foreach (string rpc in nacRpcs)
+        {
+            Assert.True(ManagerRpcAuthorizationPolicy.IsAuthorized(
+                ManagerClientIdentities.GatewayCommonName,
+                service + rpc));
+            Assert.False(ManagerRpcAuthorizationPolicy.IsAuthorized(
+                ManagerClientIdentities.UpdateServiceCommonName,
+                service + rpc));
+        }
+    }
 }

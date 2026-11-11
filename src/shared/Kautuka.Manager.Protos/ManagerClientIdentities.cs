@@ -4,7 +4,9 @@ public static class ManagerClientIdentities
 {
     public const string GatewayCommonName = "Kautuka Gateway Manager Client";
     public const string UpdateServiceCommonName = "Kautuka UpdateService Manager Client";
+    public const string ChannelHostCommonName = "kautuka-channelhost-client";
 
     public const string GatewayCertificateFileName = ".manager-gateway-client.pfx";
     public const string UpdateServiceCertificateFileName = ".manager-updateservice-client.pfx";
+    public const string ChannelHostCertificateFileName = "channelhost-client.pfx";
 }
