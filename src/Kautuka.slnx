@@ -37,6 +37,7 @@
     <Project Path="tests/Kautuka.WindowsInstaller.Tests/Kautuka.WindowsInstaller.Tests.csproj" />
     <Project Path="tests/Kautuka.ChannelHost.Tests/Kautuka.ChannelHost.Tests.csproj" />
     <Project Path="tests/Kautuka.ProviderSimulator.Tests/Kautuka.ProviderSimulator.Tests.csproj" />
+    <Project Path="tests/Kautuka.NetworkAccess.Acceptance/Kautuka.NetworkAccess.Acceptance.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Kautuka.ProviderSimulator/Kautuka.ProviderSimulator.csproj" />

@@ -15,6 +15,21 @@
       "id": "git-pkgs-proxy",
       "image": "ghcr.io/devkrity/kautuka-package-proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
       "archive": "git-pkgs-proxy.tar"
+    },
+    {
+      "id": "envoy",
+      "image": "docker.io/envoyproxy/envoy:v1.40.2",
+      "archive": null
+    },
+    {
+      "id": "coredns",
+      "image": "docker.io/coredns/coredns:1.14.6",
+      "archive": null
+    },
+    {
+      "id": "netadmin",
+      "image": "ghcr.io/devkrity/kautuka-netadmin:v1",
+      "archive": null
     }
   ]
 }

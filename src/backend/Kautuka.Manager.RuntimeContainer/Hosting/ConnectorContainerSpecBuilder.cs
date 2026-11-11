@@ -11,17 +11,44 @@ internal static class ConnectorContainerSpecBuilder
 {
     private const string nonRootUser = "65532:65532";
     internal const string SandboxNetworkName = "kautuka-sandbox";
+    internal const string WorkloadNetworkName = "kautuka-workload";
 
     public static List<string> BuildRun(
         WorkspaceMcpContainerConnectorDefinition connector,
         string containerName,
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
-        bool persistent)
+        bool persistent,
+        string? allocatedIp = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ContainerImageProvenancePolicy.EnsureTrusted(connector.Image, $"Connector '{connector.ConnectorId}'");
+
+        string userId = workspaceContext?.UserId ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            int separatorIndex = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
+            if (separatorIndex > 0)
+            {
+                userId = connector.ConnectorId[..separatorIndex];
+            }
+        }
+
+        string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            ? (workspaceContext?.ScopeId ?? string.Empty)
+            : string.Empty;
+
+        string execContext = executionContext switch
+        {
+            WorkspaceMcpExecutionContext.Isolated => "isolated",
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles => "isolated-with-agent-files",
+            WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
+            _ => "isolated"
+        };
+
+        bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId);
+
         var arguments = new List<string> { "run" };
         if (persistent)
         {
@@ -32,6 +59,8 @@ internal static class ConnectorContainerSpecBuilder
             arguments.AddRange(["--rm", "-i"]);
         }
 
+        string effectiveIp = allocatedIp ?? "10.247.1.1";
+
         arguments.AddRange([
             "--user", nonRootUser,
             "--cap-drop", "ALL",
@@ -40,19 +69,25 @@ internal static class ConnectorContainerSpecBuilder
             "--cpus", "1",
             "--memory", "536870912",
             "--read-only",
-            // tmpfs pages are charged to the container's memory cgroup. Do not add a
-            // mount-level size option: crun on Podman Machine/WSL rejects sized tmpfs
-            // mounts with ENOSPC before the process starts.
             "--tmpfs", "/tmp:rw,noexec,nosuid",
             "--name", containerName,
             "--label", "kautuka.managed=manager",
             "--label", "kautuka.role=connector",
             "--label", $"kautuka.desired-version={connector.DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
             "--label", $"kautuka.spec-fingerprint={connector.SpecFingerprint}",
-            // Isolation is a private container plus optional read-only agent-file
-            // mounts. Every connector still joins kautuka-sandbox so aardvark can
-            // resolve sidecar aliases (kautuka-pkgs-proxy) and public DNS.
-            "--network", SandboxNetworkName,
+            "--network", $"{WorkloadNetworkName}:ip={effectiveIp}",
+            "--dns", "10.247.0.2",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+            "--annotation", "io.kautuka.role=workload",
+            "--label", $"io.kautuka.user={userId}",
+            "--label", $"io.kautuka.agent={agentId}",
+            "--label", $"io.kautuka.connector={connector.ConnectorId}",
+            "--label", $"io.kautuka.exec-context={execContext}",
+            "--label", "io.kautuka.kind=connector",
+            "--label", $"io.kautuka.systemwide={(systemwide ? "true" : "false")}",
+            "--label", "io.kautuka.egress=normal",
+            "--label", "io.kautuka.compat=",
+            "--add-host", "kautuka-pkgs-proxy:10.247.0.3",
             "--env", "HOME=/tmp",
             "--env", "NPM_CONFIG_CACHE=/tmp/.npm",
             "--env", "PIP_CACHE_DIR=/tmp/.pip",
@@ -164,7 +199,15 @@ internal static class ConnectorContainerSpecBuilder
             || key.Equals("PIP_CONFIG_FILE", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static string ComputeFingerprint(WorkspaceMcpContainerConnectorDefinition connector)
+    public static string ComputeFingerprint(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string? userId = null,
+        string? agentId = null,
+        string? execContext = null,
+        string? kind = null,
+        bool systemwide = false,
+        string? egress = null,
+        string? compat = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         var builder = new StringBuilder();
@@ -177,7 +220,15 @@ internal static class ConnectorContainerSpecBuilder
         Append(builder, connector.ServerType ?? string.Empty);
         Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));
         Append(builder, connector.JitCooldownSeconds.ToString(CultureInfo.InvariantCulture));
-        Append(builder, SandboxNetworkName);
+        Append(builder, WorkloadNetworkName);
+        Append(builder, userId ?? string.Empty);
+        Append(builder, agentId ?? string.Empty);
+        Append(builder, connector.ConnectorId);
+        Append(builder, execContext ?? "isolated");
+        Append(builder, kind ?? "connector");
+        Append(builder, systemwide ? "true" : "false");
+        Append(builder, egress ?? "normal");
+        Append(builder, compat ?? string.Empty);
         foreach (string argument in connector.Args)
         {
             Append(builder, argument);

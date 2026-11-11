@@ -581,8 +581,26 @@ public sealed class McpbImageMaterializer(
             "run",
             "--replace",
             "--name", containerName,
-            "--network", ConnectorContainerSpecBuilder.SandboxNetworkName,
+            "--network", "kautuka-workload:ip=10.247.1.1",
+            "--dns", "10.247.0.2",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+            "--annotation", "io.kautuka.role=workload",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--label", "kautuka.managed=manager",
+            "--label", "kautuka.role=builder",
+            "--label", "io.kautuka.user=",
+            "--label", "io.kautuka.agent=",
+            "--label", "io.kautuka.connector=",
+            "--label", "io.kautuka.exec-context=builder",
+            "--label", "io.kautuka.kind=builder",
+            "--label", "io.kautuka.systemwide=false",
+            "--label", "io.kautuka.egress=proxy-only",
+            "--label", "io.kautuka.compat=",
+            "--add-host", "kautuka-pkgs-proxy:10.247.0.3",
         };
+
+        NetworkAccess.WorkloadContainerSpec.AssertAllowedOptions(arguments, null, null);
 
         foreach (KeyValuePair<string, string> pair in indexEnvironment)
         {

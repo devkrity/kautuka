@@ -16,10 +16,17 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\Kautuka.Hosting\Kautuka.Hosting.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
+    <ProjectReference Include="..\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Hosting\NetworkAccess\*.tmpl">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>

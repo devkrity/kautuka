@@ -84,6 +84,25 @@
       "licenseFiles": ["LICENSE-APACHE-Photino-Native.txt"],
       "embeddedFiles": ["Photino.Native.dll", "WebView2Loader.dll"],
       "notes": "The Windows installer embeds the loader DLL from this package. The WebView2 Runtime is not bundled; users rely on the installed Windows runtime."
+    },
+    {
+      "id": "envoy",
+      "version": "1.40.2",
+      "licenseExpression": "Apache-2.0",
+      "image": "docker.io/envoyproxy/envoy:v1.40.2",
+      "source": "https://github.com/envoyproxy/envoy/tree/v1.40.2",
+      "licenseFiles": ["LICENSE-envoy.txt"],
+      "noticeFiles": ["NOTICE-envoy.txt"],
+      "notes": "Static egress proxy image pinned for rootless container network access control."
+    },
+    {
+      "id": "coredns",
+      "version": "1.14.6",
+      "licenseExpression": "Apache-2.0",
+      "image": "docker.io/coredns/coredns:1.14.6",
+      "source": "https://github.com/coredns/coredns/tree/v1.14.6",
+      "licenseFiles": ["LICENSE-envoy.txt"],
+      "notes": "Static DNS resolver and sinkhole responder container pinned for egress pod."
     }
   ]
 }

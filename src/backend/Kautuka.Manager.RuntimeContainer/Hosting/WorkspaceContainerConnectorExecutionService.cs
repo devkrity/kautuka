@@ -1242,14 +1242,27 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             userSegment = connectorId[..separatorIndex];
             connectorSegment = connectorId[(separatorIndex + separator.Length)..];
         }
+        else if (!string.IsNullOrWhiteSpace(workspaceContext?.UserId))
+        {
+            userSegment = workspaceContext.UserId;
+        }
 
         string normalizedUser = NormalizeSegment(userSegment, segmentLimit, "user");
         string normalizedConnector = NormalizeSegment(connectorSegment, segmentLimit, "connector");
         WorkspaceMcpExecutionContext effectiveExecutionContext = NormalizeExecutionContext(executionContext);
         string hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(BuildRuntimeKey(connectorId, executionContext, workspaceContext))))[..8];
 
+        string? agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            ? workspaceContext?.ScopeId
+            : null;
+        string normalizedAgent = !string.IsNullOrWhiteSpace(agentId)
+            ? NormalizeSegment(agentId, segmentLimit, "agent")
+            : string.Empty;
+
         return effectiveExecutionContext switch
         {
+            WorkspaceMcpExecutionContext.Isolated when !string.IsNullOrEmpty(normalizedAgent) =>
+                $"kautuka-mcp-{normalizedUser}-{normalizedAgent}-{normalizedConnector}-isolated-{hash}",
             WorkspaceMcpExecutionContext.Isolated =>
                 $"kautuka-mcp-{normalizedUser}-{normalizedConnector}-isolated-{hash}",
             WorkspaceMcpExecutionContext.IsolatedWithAgentFiles =>

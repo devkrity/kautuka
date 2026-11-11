@@ -17,14 +17,14 @@ internal sealed record LiveContainerExpectation(
 
 internal static class LiveContainerSpec
 {
-    internal static LiveContainerExpectation ForSandbox(ContainerContext context, string? currentImageId)
+    internal static LiveContainerExpectation ForSandbox(ContainerContext context, string? currentImageId, string networkName = "kautuka-workload")
     {
         ArgumentNullException.ThrowIfNull(context);
         string[] env = [.. context.ContainerEnvironment
             .Where(static pair => !string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
             .Select(static pair => pair.Key + "=" + pair.Value)];
         return new LiveContainerExpectation(
-            "kautuka-sandbox",
+            networkName,
             context.HostWorkspacePath,
             context.ContainerWorkspacePath,
             MountReadOnly: false,
@@ -37,22 +37,25 @@ internal static class LiveContainerSpec
     internal static LiveContainerExpectation ForConnector(
         ContainerContext? mountedWorkspace,
         IReadOnlyList<string> envAssignments,
-        string? currentImageId)
+        string? currentImageId,
+        string networkName = "kautuka-workload")
         => ForConnector(
             mountedWorkspace?.HostWorkspacePath,
             mountedWorkspace?.ContainerWorkspacePath ?? string.Empty,
             mountedWorkspace is not null,
             envAssignments,
-            currentImageId);
+            currentImageId,
+            networkName);
 
     internal static LiveContainerExpectation ForConnector(
         string? hostMountPath,
         string containerMountPath,
         bool mountReadOnly,
         IReadOnlyList<string> envAssignments,
-        string? currentImageId)
+        string? currentImageId,
+        string networkName = "kautuka-workload")
         => new(
-            "kautuka-sandbox",
+            networkName,
             hostMountPath,
             containerMountPath,
             mountReadOnly,

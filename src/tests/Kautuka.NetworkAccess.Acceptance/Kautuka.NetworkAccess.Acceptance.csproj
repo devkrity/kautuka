@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CA1515;CA1848;CA1873;CA1031;CA1822;CA1303;IDE0060</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\backend\Kautuka.Manager.RuntimeContainer\Kautuka.Manager.RuntimeContainer.csproj" />
+    <ProjectReference Include="..\..\backend\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
+  </ItemGroup>
+
+</Project>

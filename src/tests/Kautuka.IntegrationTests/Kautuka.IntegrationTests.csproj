@@ -33,6 +33,7 @@
     <ProjectReference Include="..\..\backend\connectors\m365-mail\kautuka-m365-mail.csproj" />
     <ProjectReference Include="..\..\backend\connectors\google-mail\kautuka-google-mail.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.Manager\Kautuka.Manager.csproj" />
+    <ProjectReference Include="..\..\backend\Kautuka.Manager.RuntimeContainer\Kautuka.Manager.RuntimeContainer.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.UpdateService\Kautuka.UpdateService.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.WebHost\Kautuka.WebHost.csproj" />

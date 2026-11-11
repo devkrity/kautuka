@@ -552,17 +552,24 @@ public sealed class PodmanContainerTool(
             "--security-opt", "no-new-privileges",
             "--pids-limit", "256",
             "--read-only",
-            // tmpfs usage remains bounded by the sandbox memory cgroup. Sized tmpfs
-            // mount options fail at OCI startup under crun on Podman Machine/WSL.
             "--tmpfs", "/tmp:rw,noexec,nosuid",
-            // Connector installations are derived per-sandbox state. Keep the image root
-            // immutable while providing a container-private executable filesystem bounded
-            // by the sandbox memory cgroup
-            // for virtual environments and connector launch artifacts. Sticky mode prevents
-            // cross-user deletion if a future sandbox introduces additional identities.
             "--tmpfs", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777",
-            "--network", "kautuka-sandbox"
+            "--network", "kautuka-workload:ip=10.247.1.1",
+            "--dns", "10.247.0.2",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1",
+            "--annotation", "io.kautuka.role=workload",
+            "--label", $"io.kautuka.user={context.UserId ?? string.Empty}",
+            "--label", $"io.kautuka.agent={context.ScopeId ?? string.Empty}",
+            "--label", "io.kautuka.connector=",
+            "--label", "io.kautuka.exec-context=agent-sandbox",
+            "--label", "io.kautuka.kind=agent-sandbox",
+            "--label", "io.kautuka.systemwide=false",
+            "--label", "io.kautuka.egress=normal",
+            "--label", "io.kautuka.compat=",
+            "--add-host", "kautuka-pkgs-proxy:10.247.0.3"
         ];
+
+        Hosting.NetworkAccess.WorkloadContainerSpec.AssertAllowedOptions(args, null, null);
 
         if (context.DefaultCpuLimit > 0)
         {

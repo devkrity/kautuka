@@ -525,6 +525,13 @@ EOF
     systemctl enable --now kautuka-root-rshared.service >/dev/null
 }
 
+ensure_nac_prerequisites() {
+    command -v nft >/dev/null 2>&1 || fail "nftables (nft) is required for network access control. Please install nftables."
+    command -v nsenter >/dev/null 2>&1 || fail "util-linux (nsenter) is required for network access control. Please install util-linux."
+    command -v unshare >/dev/null 2>&1 || fail "util-linux (unshare) is required for network access control. Please install util-linux."
+    command -v python3 >/dev/null 2>&1 || fail "python3 is required for the OCI network access hook. Please install python3."
+}
+
 ensure_rootless_podman_ready() {
     local service_user="$1"
     local service_group="$2"
@@ -537,6 +544,7 @@ ensure_rootless_podman_ready() {
     ensure_subid_entry /etc/subuid "$service_user"
     ensure_subid_entry /etc/subgid "$service_user"
     ensure_rootless_idmap_helpers
+    ensure_nac_prerequisites
 
     mkdir -p \
         "$service_home" \

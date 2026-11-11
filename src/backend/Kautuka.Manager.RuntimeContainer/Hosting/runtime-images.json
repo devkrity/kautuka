@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "images": [
+    {
+      "id": "kautuka-base",
+      "image": "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+      "archive": null
+    },
+    {
+      "id": "openobserve",
+      "image": "ghcr.io/devkrity/kautuka-observability@sha256:88fb692ac791d3eaff69653a4a4686f1c7eceb9e105491d58d29ac2739560b3b",
+      "archive": "openobserve.tar"
+    },
+    {
+      "id": "git-pkgs-proxy",
+      "image": "ghcr.io/devkrity/kautuka-package-proxy@sha256:3165aeeb7fbdd2160b4caf6f7022b1498ed564deb95b21bbd19ecc7c6e6f89a5",
+      "archive": "git-pkgs-proxy.tar"
+    },
+    {
+      "id": "envoy",
+      "image": "docker.io/envoyproxy/envoy:v1.40.2",
+      "archive": null
+    },
+    {
+      "id": "coredns",
+      "image": "docker.io/coredns/coredns:1.14.6",
+      "archive": null
+    },
+    {
+      "id": "netadmin",
+      "image": "ghcr.io/devkrity/kautuka-netadmin:v1",
+      "archive": null
+    }
+  ]
+}
