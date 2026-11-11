@@ -240,4 +240,149 @@ public sealed class U2_PolicyStoreTests : IDisposable
             new RuleWriteSpec("agent", "user-1", "agent-1", null, "93.184.216.34", "ip", 443, Allowed: true, AllowLan: false),
             store.Revision);
     }
+
+    [Fact]
+    public async Task V7_27_BackgroundWriter_NeverOverwritesNewerSyncSave_WithNegativeControl()
+    {
+        string statePath = Path.Combine(tempDir, "v7-27-race", "state.json");
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        using var enteredHook = new ManualResetEventSlim(false);
+        using var releaseBackground = new ManualResetEventSlim(false);
+        int hookCalls = 0;
+
+        using var store = new NetworkAccessPolicyStore(
+            statePath,
+            _ => { },
+            beforeBackgroundDiskLockHook: () =>
+            {
+                if (Interlocked.Increment(ref hookCalls) == 1)
+                {
+                    enteredHook.Set();
+                    Assert.True(releaseBackground.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+                }
+            });
+
+        // 1. Trigger a background pending-request write (captures seq = 1 and pauses before diskWriteLock).
+        store.RecordOrUpdatePendingRequest(
+            "user-1",
+            "agent-1",
+            connectorId: null,
+            systemwide: false,
+            attribution: "user-agent",
+            destKind: "host",
+            destination: "race1.example.com",
+            port: 443,
+            actorKind: "agent",
+            origin: "container");
+
+        Assert.True(enteredHook.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        // 2. While the stale seq=1 background write waits to acquire diskWriteLock, perform sync writes (brake + rule).
+        store.SetBrake(admin, scope: "system", targetUserId: null, on: true);
+        store.SetRule(
+            admin,
+            new RuleWriteSpec("agent", "user-1", "agent-1", null, "approved.example.com", "host", 443, Allowed: true),
+            store.Revision);
+        long writesAfterSync = store.DiskWriteCount;
+        Assert.Equal(2, writesAfterSync);
+
+        // 3. Release the older background write; seq guard must drop the stale write so DiskWriteCount stays at 2.
+        releaseBackground.Set();
+        await store.FlushPendingWritesAsync();
+        Assert.Equal(writesAfterSync, store.DiskWriteCount);
+
+        using (var reopened = new NetworkAccessPolicyStore(statePath))
+        {
+            Assert.True(reopened.GetBrake(admin).System);
+            Assert.Contains(
+                reopened.ListRules(admin).Rules,
+                r => r.Rule.Destination == "approved.example.com" && r.Rule.Allowed);
+        }
+
+        // Negative control (.NC): background saving is not suppressed afterward — a newer request DOES persist cleanly.
+        store.RecordOrUpdatePendingRequest(
+            "user-1",
+            "agent-1",
+            connectorId: null,
+            systemwide: false,
+            attribution: "user-agent",
+            destKind: "host",
+            destination: "race2.example.com",
+            port: 443,
+            actorKind: "agent",
+            origin: "container");
+        await store.FlushPendingWritesAsync();
+        Assert.Equal(writesAfterSync + 1, store.DiskWriteCount);
+
+        using var reopenedAfterNext = new NetworkAccessPolicyStore(statePath);
+        Assert.True(reopenedAfterNext.GetBrake(admin).System);
+        Assert.Contains(
+            reopenedAfterNext.ListRequests(admin).Requests,
+            r => r.Request.Destination == "race2.example.com");
+    }
+
+    [Fact]
+    public async Task V7_27_BackgroundWriter_SurvivesDiskErrorAndCleansTempFiles_WithNegativeControl()
+    {
+        string dir = Path.Combine(tempDir, "v7-27-error");
+        string statePath = Path.Combine(dir, "state.json");
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        int failRemaining = 1;
+
+        using var store = new NetworkAccessPolicyStore(
+            statePath,
+            _ => { },
+            beforeRenameHook: _ =>
+            {
+                if (Interlocked.Decrement(ref failRemaining) >= 0)
+                {
+                    throw new IOException("Simulated transient disk failure");
+                }
+            });
+
+        // 1. First background write hits transient error; error is counted and .tmp file is cleaned up.
+        store.RecordOrUpdatePendingRequest(
+            "user-1",
+            "agent-1",
+            connectorId: null,
+            systemwide: false,
+            attribution: "user-agent",
+            destKind: "host",
+            destination: "err1.example.com",
+            port: 443,
+            actorKind: "agent",
+            origin: "container");
+        await store.FlushPendingWritesAsync();
+        Assert.Equal(1, store.BackgroundWriteErrorCount);
+        Assert.Equal(0, store.DiskWriteCount);
+        Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+
+        // 2. Subsequent background write continues working and flushes both err1 and err2 to disk.
+        store.RecordOrUpdatePendingRequest(
+            "user-1",
+            "agent-1",
+            connectorId: null,
+            systemwide: false,
+            attribution: "user-agent",
+            destKind: "host",
+            destination: "err2.example.com",
+            port: 443,
+            actorKind: "agent",
+            origin: "container");
+        await store.FlushPendingWritesAsync();
+        Assert.Equal(1, store.DiskWriteCount);
+        Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+
+        using (var reopened = new NetworkAccessPolicyStore(statePath))
+        {
+            var destinations = reopened.ListRequests(admin).Requests.Select(r => r.Request.Destination).ToHashSet();
+            Assert.Contains("err1.example.com", destinations);
+            Assert.Contains("err2.example.com", destinations);
+        }
+
+        // Negative control (.NC): synchronous durability writes (SetBrake) fail closed by throwing on disk error while still cleaning .tmp files.
+        Interlocked.Exchange(ref failRemaining, 1);
+        Assert.Throws<IOException>(() => store.SetBrake(admin, scope: "system", targetUserId: null, on: true));
+        Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+    }
 }

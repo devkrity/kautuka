@@ -17,15 +17,20 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private readonly string path;
     private readonly Action<string> syncDirectory;
     private readonly Action<string>? beforeRenameHook;
+    private readonly Action? beforeBackgroundDiskLockHook;
     private readonly IReadOnlyList<NetworkAccessRule> seedRules;
     private readonly NetworkAccessAuditRing? auditRing;
 
     private NetworkAccessPolicyState? state;
     private long diskWriteCount;
-    private int backgroundWritesPendingOrActive;
+    private long backgroundWriteErrorCount;
+    private long inMemoryMutationSeq;
+    private long lastWrittenMutationSeq;
+    private int pendingWriteRequested;
+    private int backgroundWriteInProgress;
 
     // Background coalescing writer for pending requests (v7-10)
-    private readonly Channel<NetworkAccessPolicyState>? pendingRequestWriterChannel;
+    private readonly Channel<byte>? pendingRequestWriterChannel;
     private readonly Task? pendingRequestWriterTask;
     private readonly CancellationTokenSource cts = new();
 
@@ -42,28 +47,32 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         Action<string> syncDirectory,
         Action<string>? beforeRenameHook = null,
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
-        NetworkAccessAuditRing? auditRing = null)
+        NetworkAccessAuditRing? auditRing = null,
+        Action? beforeBackgroundDiskLockHook = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(syncDirectory);
         this.path = Path.GetFullPath(path);
         this.syncDirectory = syncDirectory;
         this.beforeRenameHook = beforeRenameHook;
+        this.beforeBackgroundDiskLockHook = beforeBackgroundDiskLockHook;
         this.seedRules = seedRules ?? NetworkAccessDefaultSeeds.DefaultRules;
         this.auditRing = auditRing;
 
-        // Bounded channel of size 1 with DropOldest for coalescing pending request writes
+        // Bounded channel of size 1 with DropOldest for waking the coalescing writer.
         var channelOptions = new BoundedChannelOptions(1)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
             SingleWriter = false,
         };
-        pendingRequestWriterChannel = Channel.CreateBounded<NetworkAccessPolicyState>(channelOptions);
+        pendingRequestWriterChannel = Channel.CreateBounded<byte>(channelOptions);
         pendingRequestWriterTask = Task.Run(() => ProcessPendingRequestWrites(pendingRequestWriterChannel.Reader, cts.Token));
     }
 
     public long DiskWriteCount => Interlocked.Read(ref diskWriteCount);
+
+    public long BackgroundWriteErrorCount => Interlocked.Read(ref backgroundWriteErrorCount);
 
     public IReadOnlyList<NetworkAccessRule> SeedRules => seedRules;
 
@@ -89,7 +98,9 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         {
             for (int i = 0; i < 200; i++)
             {
-                if (pendingRequestWriterChannel.Reader.Count == 0 && Volatile.Read(ref backgroundWritesPendingOrActive) == 0)
+                if (pendingRequestWriterChannel.Reader.Count == 0
+                    && Volatile.Read(ref pendingWriteRequested) == 0
+                    && Volatile.Read(ref backgroundWriteInProgress) == 0)
                 {
                     break;
                 }
@@ -141,74 +152,101 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private void EnqueuePendingRequestSave(NetworkAccessPolicyState next)
     {
         state = next;
-        Interlocked.Increment(ref backgroundWritesPendingOrActive);
-        if (pendingRequestWriterChannel?.Writer.TryWrite(next) != true)
-        {
-            Interlocked.Decrement(ref backgroundWritesPendingOrActive);
-        }
+        inMemoryMutationSeq++;
+        Volatile.Write(ref pendingWriteRequested, 1);
+        pendingRequestWriterChannel?.Writer.TryWrite(0);
     }
 
-    private async Task ProcessPendingRequestWrites(ChannelReader<NetworkAccessPolicyState> reader, CancellationToken token)
+    private async Task ProcessPendingRequestWrites(ChannelReader<byte> reader, CancellationToken token)
     {
         try
         {
             while (await reader.WaitToReadAsync(token).ConfigureAwait(false))
             {
-                int drained = 0;
-                while (reader.TryRead(out NetworkAccessPolicyState? _))
+                while (reader.TryRead(out _))
                 {
-                    drained++;
                 }
 
-                try
-                {
-                    NetworkAccessPolicyState latestSnapshot;
-                    lock (gate)
-                    {
-                        latestSnapshot = Load();
-                    }
-
-                    lock (diskWriteLock)
-                    {
-                        WriteStateToDisk(latestSnapshot, syncDir: false);
-                    }
-                }
-                finally
-                {
-                    if (drained > 0)
-                    {
-                        Interlocked.Add(ref backgroundWritesPendingOrActive, -drained);
-                    }
-                }
+                DrainPendingWrites(token);
             }
         }
         catch (OperationCanceledException)
         {
-            int drained = 0;
-            while (reader.TryRead(out NetworkAccessPolicyState? _))
+            while (reader.TryRead(out _))
             {
-                drained++;
+            }
+
+            if (Volatile.Read(ref pendingWriteRequested) != 0)
+            {
+                try
+                {
+                    PersistLatestSnapshotIfNewer();
+                }
+                catch (Exception)
+                {
+                    Interlocked.Increment(ref backgroundWriteErrorCount);
+                }
+            }
+        }
+    }
+
+    private void DrainPendingWrites(CancellationToken token)
+    {
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            Interlocked.Exchange(ref backgroundWriteInProgress, 1);
+            if (Interlocked.Exchange(ref pendingWriteRequested, 0) == 0)
+            {
+                Interlocked.Exchange(ref backgroundWriteInProgress, 0);
+                if (Volatile.Read(ref pendingWriteRequested) == 1)
+                {
+                    continue;
+                }
+
+                break;
             }
 
             try
             {
-                NetworkAccessPolicyState finalSnapshot;
-                lock (gate)
-                {
-                    finalSnapshot = Load();
-                }
-
-                lock (diskWriteLock)
-                {
-                    WriteStateToDisk(finalSnapshot, syncDir: false);
-                }
+                PersistLatestSnapshotIfNewer();
+            }
+            catch (Exception)
+            {
+                Interlocked.Increment(ref backgroundWriteErrorCount);
             }
             finally
             {
-                if (drained > 0)
-                {
-                    Interlocked.Add(ref backgroundWritesPendingOrActive, -drained);
-                }
+                Interlocked.Exchange(ref backgroundWriteInProgress, 0);
+            }
+
+            if (Volatile.Read(ref pendingWriteRequested) == 0)
+            {
+                break;
+            }
+        }
+    }
+
+    private void PersistLatestSnapshotIfNewer()
+    {
+        NetworkAccessPolicyState latestSnapshot;
+        long seq;
+        lock (gate)
+        {
+            latestSnapshot = Load();
+            seq = inMemoryMutationSeq;
+        }
+
+        // Allow tests to pause after snapshot capture and before disk lock acquisition
+        // so SaveSync concurrency ordering can be exercised deterministically.
+        beforeBackgroundDiskLockHook?.Invoke();
+
+        lock (diskWriteLock)
+        {
+            if (seq > lastWrittenMutationSeq)
+            {
+                WriteStateToDisk(latestSnapshot, syncDir: false);
+                lastWrittenMutationSeq = seq;
             }
         }
     }
@@ -255,9 +293,14 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private void SaveSync(NetworkAccessPolicyState next)
     {
         state = next;
+        long seq = ++inMemoryMutationSeq;
         lock (diskWriteLock)
         {
-            WriteStateToDisk(next, syncDir: true);
+            if (seq > lastWrittenMutationSeq)
+            {
+                WriteStateToDisk(next, syncDir: true);
+                lastWrittenMutationSeq = seq;
+            }
         }
     }
 
@@ -271,37 +314,53 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         }
 
         string tempPath = Path.Combine(dir, $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-        using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+        try
         {
-            if (OperatingSystem.IsLinux())
+            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
             {
-                File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                if (OperatingSystem.IsLinux())
+                {
+                    File.SetUnixFileMode(tempPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
+
+                JsonSerializer.Serialize(stream, next, NetworkAccessJsonContext.Default.NetworkAccessPolicyState);
+                stream.Flush(flushToDisk: true);
             }
 
-            JsonSerializer.Serialize(stream, next, NetworkAccessJsonContext.Default.NetworkAccessPolicyState);
-            stream.Flush(flushToDisk: true);
-        }
-
-        beforeRenameHook?.Invoke(tempPath);
-        for (int retry = 0; retry < 10; retry++)
-        {
-            try
+            beforeRenameHook?.Invoke(tempPath);
+            for (int retry = 0; retry < 10; retry++)
             {
-                File.Move(tempPath, path, overwrite: true);
-                break;
+                try
+                {
+                    File.Move(tempPath, path, overwrite: true);
+                    break;
+                }
+                catch (Exception ex) when (retry < 9 && (ex is IOException || ex is UnauthorizedAccessException))
+                {
+                    Thread.Sleep(10 * (retry + 1));
+                }
             }
-            catch (Exception ex) when (retry < 9 && (ex is IOException || ex is UnauthorizedAccessException))
+
+            if (syncDir)
             {
-                Thread.Sleep(10 * (retry + 1));
+                syncDirectory(dir);
+            }
+
+            Interlocked.Increment(ref diskWriteCount);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try
+                {
+                    File.Delete(tempPath);
+                }
+                catch
+                {
+                }
             }
         }
-
-        if (syncDir)
-        {
-            syncDirectory(dir);
-        }
-
-        Interlocked.Increment(ref diskWriteCount);
     }
 
     internal static void FlushDirectory(string directory)
