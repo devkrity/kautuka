@@ -4,7 +4,7 @@ This guide describes the architecture, approval workflows, operational procedure
 
 ---
 
-## 1. Architecture Overview `[Built]` `[Tested]`
+## 1. Architecture Overview `[Built]`
 
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 
@@ -14,7 +14,7 @@ flowchart LR
     GW["Gateway"]
     CH["ChannelHost"]
     subgraph MGR["Kautuka.Manager"]
-      NAC["Kautuka.NetworkAccessController<br/>(Policy, Matching, Registry, Request Store)"]
+      NAC["Kautuka.NetworkAccessController<br/>(Policy, Authorizer, Matching, Registry, Request Store)"]
       LST["Envoy ext_authz Listener<br/>(Linux: UDS, Windows: TCP+mTLS)"]
     end
     UI["Web UI -> Approvals & Rules"]

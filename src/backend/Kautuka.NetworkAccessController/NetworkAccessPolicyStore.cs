@@ -35,12 +35,8 @@ public sealed partial class NetworkAccessPolicyStore
 
     public UserPrivileges GetUserPrivileges(NetworkAccessActor actor, string? targetUserId = null, bool targetIsAdmin = false)
     {
-        ValidateActor(actor);
-        string effectiveUserId = string.IsNullOrWhiteSpace(targetUserId) ? actor.UserId : targetUserId.Trim();
-        if (!actor.IsAdmin && !string.Equals(effectiveUserId, actor.UserId, StringComparison.Ordinal))
-        {
-            throw new UnauthorizedAccessException("PermissionDenied: Cannot read another user's privileges.");
-        }
+        ArgumentNullException.ThrowIfNull(actor);
+        string effectiveUserId = NetworkAccessPolicyAuthorizer.AuthorizeGetUserPrivileges(actor, targetUserId);
 
         lock (gate)
         {
@@ -58,14 +54,9 @@ public sealed partial class NetworkAccessPolicyStore
         bool canAllowAllAgents,
         bool? targetIsAdmin = null)
     {
-        ValidateActor(actor);
-        if (!actor.IsAdmin)
-        {
-            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may set user privileges.");
-        }
-
-        ValidateIdentifier(targetUserId, nameof(targetUserId));
-        string normalizedTarget = targetUserId.Trim();
+        ArgumentNullException.ThrowIfNull(actor);
+        ArgumentNullException.ThrowIfNull(targetUserId);
+        string normalizedTarget = NetworkAccessPolicyAuthorizer.AuthorizeSetUserPrivileges(actor, targetUserId);
 
         lock (gate)
         {
@@ -120,7 +111,7 @@ public sealed partial class NetworkAccessPolicyStore
 
     public BrakeState GetBrake(NetworkAccessActor actor)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         lock (gate)
         {
             return Load().Brake;
@@ -141,7 +132,7 @@ public sealed partial class NetworkAccessPolicyStore
         string? targetUserId,
         bool on)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         if (string.IsNullOrWhiteSpace(scope) || scope is not ("user" or "system"))
         {
             throw new ArgumentException("invalid_scope: Brake scope must be 'user' or 'system'.", nameof(scope));
@@ -150,16 +141,12 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            string? effectiveUser = NetworkAccessPolicyAuthorizer.AuthorizeSetBrake(actor, scope, targetUserId, current.Brake);
             DateTimeOffset now = DateTimeOffset.UtcNow;
             BrakeState nextBrake;
 
-            if (scope == "system")
+            if (effectiveUser is null)
             {
-                if (!actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may change the system brake.");
-                }
-
                 nextBrake = current.Brake with
                 {
                     System = on,
@@ -169,18 +156,6 @@ public sealed partial class NetworkAccessPolicyStore
             }
             else
             {
-                string effectiveUser = string.IsNullOrWhiteSpace(targetUserId) ? actor.UserId : targetUserId.Trim();
-                if (!actor.IsAdmin && !string.Equals(effectiveUser, actor.UserId, StringComparison.Ordinal))
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Cannot change another user's brake.");
-                }
-
-                UserBrakeEntry? existing = current.Brake.GetUserBrake(effectiveUser);
-                if (existing is not null && existing.LockedByAdmin && !actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("brake_locked: Only an administrator can release or modify a brake locked by an administrator.");
-                }
-
                 if (on)
                 {
                     bool lockedByAdmin = actor.IsAdmin && !string.Equals(effectiveUser, actor.UserId, StringComparison.Ordinal);
@@ -218,7 +193,7 @@ public sealed partial class NetworkAccessPolicyStore
         NetworkAccessActor actor,
         long? sinceRevision = null)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
@@ -234,28 +209,16 @@ public sealed partial class NetworkAccessPolicyStore
             var views = new List<NetworkAccessRequestView>();
             foreach (NetworkAccessRequest req in current.Requests)
             {
-                if (actor.IsAdmin)
+                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
                 {
-                    views.Add(new NetworkAccessRequestView(
-                        req,
-                        WaitingForAdmin: false,
-                        CompatibilityMode: !string.IsNullOrEmpty(req.CompatProfile)));
+                    continue;
                 }
-                else
-                {
-                    if (string.IsNullOrWhiteSpace(req.UserId)
-                        || req.UserId == "system"
-                        || !string.Equals(req.UserId, actor.UserId, StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
 
-                    bool waitingForAdmin = req.Systemwide || !callerPrivs.CanApproveOwn;
-                    views.Add(new NetworkAccessRequestView(
-                        req,
-                        WaitingForAdmin: waitingForAdmin,
-                        CompatibilityMode: !string.IsNullOrEmpty(req.CompatProfile)));
-                }
+                bool waitingForAdmin = !actor.IsAdmin && (req.Systemwide || !callerPrivs.CanApproveOwn);
+                views.Add(new NetworkAccessRequestView(
+                    req,
+                    WaitingForAdmin: waitingForAdmin,
+                    CompatibilityMode: !string.IsNullOrEmpty(req.CompatProfile)));
             }
 
             return (current.Revision, views, callerPrivs, current.Brake);
@@ -266,12 +229,8 @@ public sealed partial class NetworkAccessPolicyStore
         NetworkAccessActor actor,
         string? filterUserId = null)
     {
-        ValidateActor(actor);
-        string? normalizedFilter = string.IsNullOrWhiteSpace(filterUserId) ? null : filterUserId.Trim();
-        if (!actor.IsAdmin && normalizedFilter is not null && !string.Equals(normalizedFilter, actor.UserId, StringComparison.Ordinal))
-        {
-            throw new UnauthorizedAccessException("PermissionDenied: Cannot list another user's rules.");
-        }
+        ArgumentNullException.ThrowIfNull(actor);
+        string? normalizedFilter = NetworkAccessPolicyAuthorizer.AuthorizeListRules(actor, filterUserId);
 
         lock (gate)
         {
@@ -292,19 +251,9 @@ public sealed partial class NetworkAccessPolicyStore
 
             foreach (NetworkAccessRule rule in current.Rules)
             {
-                if (!actor.IsAdmin)
+                if (!NetworkAccessPolicyAuthorizer.CanViewRule(actor, rule, normalizedFilter))
                 {
-                    if (!string.Equals(rule.UserId, actor.UserId, StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
-                }
-                else if (normalizedFilter is not null)
-                {
-                    if (!string.Equals(rule.UserId, normalizedFilter, StringComparison.Ordinal))
-                    {
-                        continue;
-                    }
+                    continue;
                 }
 
                 bool paused = IsRulePausedUnsafe(current, rule);
@@ -324,7 +273,7 @@ public sealed partial class NetworkAccessPolicyStore
         long expectedRevision,
         bool allowLan = false)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
 
         lock (gate)
@@ -334,156 +283,16 @@ public sealed partial class NetworkAccessPolicyStore
                 ?? throw new KeyNotFoundException("Request not found.");
 
             // Check authorization BEFORE revision conflict so unauthorized callers never probe revisions.
-            string effectiveScope;
-            string? ruleUserId;
-            string? ruleAgentId;
-            string? ruleConnectorId;
-
-            if (request.Systemwide)
-            {
-                if (!actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a systemwide connector request.");
-                }
-
-                if (allow && string.IsNullOrWhiteSpace(scope))
-                {
-                    throw new ArgumentException("scope_required: Systemwide allow decisions require an explicit scope.", nameof(scope));
-                }
-
-                effectiveScope = string.IsNullOrWhiteSpace(scope)
-                    ? (request.Attribution == "user" && !allow ? "user" : "connector-system")
-                    : scope.Trim();
-
-                if (effectiveScope == "user")
-                {
-                    if (request.Attribution == "none" || string.IsNullOrWhiteSpace(request.UserId))
-                    {
-                        throw new ArgumentException("scope_not_enforceable: Cannot grant user-scoped rule on a shared unattributed systemwide connector.", nameof(scope));
-                    }
-
-                    ruleUserId = request.UserId;
-                    ruleAgentId = null;
-                    ruleConnectorId = request.ConnectorId;
-                }
-                else if (effectiveScope == "connector-system")
-                {
-                    ruleUserId = null;
-                    ruleAgentId = null;
-                    ruleConnectorId = request.ConnectorId;
-                }
-                else
-                {
-                    throw new ArgumentException($"scope_not_allowed: Scope '{effectiveScope}' is not valid for a systemwide connector request.", nameof(scope));
-                }
-            }
-            else if (string.Equals(request.UserId, "system", StringComparison.Ordinal))
-            {
-                if (!actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a system request.");
-                }
-
-                effectiveScope = string.IsNullOrWhiteSpace(scope) ? "agent" : scope.Trim();
-                if (effectiveScope != "agent")
-                {
-                    throw new ArgumentException("scope_not_allowed: System requests only support 'agent' scope.", nameof(scope));
-                }
-
-                ruleUserId = "system";
-                ruleAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? "system" : request.AgentId;
-                ruleConnectorId = null;
-            }
-            else if (request.Attribution == "user" && string.IsNullOrWhiteSpace(request.AgentId) && !string.IsNullOrWhiteSpace(request.ConnectorId))
-            {
-                // User-attributed connector probe request (A1)
-                if (string.IsNullOrWhiteSpace(request.UserId))
-                {
-                    throw new InvalidOperationException("User-attributed request is missing userId.");
-                }
-
-                if (!actor.IsAdmin && !string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal))
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's request.");
-                }
-
-                UserPrivileges ownerPrivs = ResolveUserPrivilegesUnsafe(ref current, request.UserId, isTargetAdmin: actor.IsAdmin && string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal));
-                if (!actor.IsAdmin && !ownerPrivs.CanApproveOwn)
-                {
-                    throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
-                }
-
-                effectiveScope = string.IsNullOrWhiteSpace(scope) ? "user" : scope.Trim();
-                if (effectiveScope is not ("user" or "connector-system"))
-                {
-                    throw new ArgumentException($"scope_not_allowed: Scope '{effectiveScope}' is not valid for a connector probe request.", nameof(scope));
-                }
-
-                if (effectiveScope == "connector-system" && !actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may grant connector-system scope.");
-                }
-
-                ruleUserId = effectiveScope == "user" ? request.UserId : null;
-                ruleAgentId = null;
-                ruleConnectorId = request.ConnectorId;
-            }
-            else
-            {
-                // Ordinary user + agent request
-                if (string.IsNullOrWhiteSpace(request.UserId) || string.IsNullOrWhiteSpace(request.AgentId))
-                {
-                    throw new InvalidOperationException("Ordinary agent request is missing userId or agentId.");
-                }
-
-                if (!actor.IsAdmin && !string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal))
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's request.");
-                }
-
-                // For ordinary request "Keep blocked" (allow == false), ALWAYS force scope = "agent" (do not let it widen to "user"!)
-                if (!allow)
-                {
-                    effectiveScope = "agent";
-                }
-                else
-                {
-                    effectiveScope = string.IsNullOrWhiteSpace(scope) ? "agent" : scope.Trim();
-                }
-
-                if (effectiveScope is not ("agent" or "user"))
-                {
-                    throw new ArgumentException($"scope_not_allowed: Scope '{effectiveScope}' is not allowed for an ordinary agent request.", nameof(scope));
-                }
-
-                UserPrivileges ownerPrivs = ResolveUserPrivilegesUnsafe(
-                    ref current,
-                    request.UserId,
-                    isTargetAdmin: actor.IsAdmin && string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal));
-
-                if (!actor.IsAdmin && !ownerPrivs.CanApproveOwn)
-                {
-                    throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
-                }
-
-                if (effectiveScope == "user")
-                {
-                    if (!(ownerPrivs.CanApproveOwn && ownerPrivs.CanAllowAllAgents))
-                    {
-                        throw new UnauthorizedAccessException("privilege_required: User must hold both canApproveOwn and canAllowAllAgents for user-scope rules.");
-                    }
-
-                    ruleUserId = request.UserId;
-                    ruleAgentId = null;
-                    ruleConnectorId = null;
-                }
-                else
-                {
-                    ruleUserId = request.UserId;
-                    ruleAgentId = request.AgentId;
-                    ruleConnectorId = null;
-                }
-            }
+            NetworkAccessPolicyAuthorizer.ResolvedDecisionTarget resolved = NetworkAccessPolicyAuthorizer.AuthorizeAndResolveDecideRequest(
+                actor,
+                request,
+                allow,
+                scope,
+                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+            string effectiveScope = resolved.EffectiveScope;
+            string? ruleUserId = resolved.RuleUserId;
+            string? ruleAgentId = resolved.RuleAgentId;
+            string? ruleConnectorId = resolved.RuleConnectorId;
 
             if (current.Revision != expectedRevision)
             {
@@ -579,130 +388,20 @@ public sealed partial class NetworkAccessPolicyStore
         RuleWriteSpec spec,
         long expectedRevision)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentNullException.ThrowIfNull(spec);
 
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            string scopeKind = spec.ScopeKind?.Trim() ?? string.Empty;
-            string? userId = NormalizeOptional(spec.UserId);
-            string? agentId = NormalizeOptional(spec.AgentId);
-            string? connectorId = NormalizeOptional(spec.ConnectorId);
-
-            // Validate scope and caller permissions BEFORE revision conflict check.
-            switch (scopeKind)
-            {
-                case "agent":
-                    if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
-                    {
-                        throw new ArgumentException("scope_not_allowed: any-public rules cannot be written at 'agent' scope.", nameof(spec));
-                    }
-
-                    if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId) || !string.IsNullOrEmpty(connectorId))
-                    {
-                        throw new ArgumentException("scope_not_allowed: 'agent' scope requires userId and agentId without connectorId.", nameof(spec));
-                    }
-
-                    if (userId == "system")
-                    {
-                        if (!actor.IsAdmin)
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write system rules.");
-                        }
-                    }
-                    else if (!actor.IsAdmin)
-                    {
-                        if (!string.Equals(actor.UserId, userId, StringComparison.Ordinal))
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: Cannot write rules for another user.");
-                        }
-
-                        UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin: false);
-                        if (!privs.CanApproveOwn)
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: User does not hold canApproveOwn privilege.");
-                        }
-                    }
-
-                    break;
-
-                case "user":
-                    if (string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
-                    {
-                        throw new ArgumentException("scope_not_allowed: 'user' scope requires userId and no agentId.", nameof(spec));
-                    }
-
-                    if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
-                    {
-                        if (!actor.IsAdmin)
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may grant any-public access.");
-                        }
-
-                        if (string.IsNullOrEmpty(connectorId))
-                        {
-                            throw new ArgumentException("scope_not_allowed: any-public rule requires a connectorId.", nameof(spec));
-                        }
-
-                        if (spec.ExecContext is "agent-sandbox" or "skill" or "skills" or "app" || spec.Attribution == "none")
-                        {
-                            throw new ArgumentException("scope_not_enforceable: any-public cannot be granted to AgentSandbox connectors, skills, app context, or unattributed shared containers.", nameof(spec));
-                        }
-                    }
-                    else if (!string.IsNullOrEmpty(connectorId))
-                    {
-                        if (!actor.IsAdmin)
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write user-scoped connector rules.");
-                        }
-
-                        if (spec.Attribution == "none")
-                        {
-                            throw new ArgumentException("scope_not_enforceable: User-scoped rule cannot be enforced on a shared unattributed connector.", nameof(spec));
-                        }
-                    }
-                    else
-                    {
-                        // User scope without connectorId ('all my agents')
-                        if (!actor.IsAdmin && !string.Equals(actor.UserId, userId, StringComparison.Ordinal))
-                        {
-                            throw new UnauthorizedAccessException("PermissionDenied: Cannot write user-scope rules for another user.");
-                        }
-
-                        UserPrivileges ownerPrivs = ResolveUserPrivilegesUnsafe(
-                            ref current,
-                            userId,
-                            isTargetAdmin: actor.IsAdmin && string.Equals(actor.UserId, userId, StringComparison.Ordinal));
-                        if (!(ownerPrivs.CanApproveOwn && ownerPrivs.CanAllowAllAgents))
-                        {
-                            throw new UnauthorizedAccessException("privilege_required: Target user must hold both canApproveOwn and canAllowAllAgents.");
-                        }
-                    }
-
-                    break;
-
-                case "connector-system":
-                    if (!actor.IsAdmin)
-                    {
-                        throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write connector-system rules.");
-                    }
-
-                    if (string.IsNullOrEmpty(connectorId) || !string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
-                    {
-                        throw new ArgumentException("scope_not_allowed: 'connector-system' scope requires connectorId only.", nameof(spec));
-                    }
-
-                    if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
-                    {
-                        throw new ArgumentException("scope_not_allowed: any-public rules are only supported at 'user' scope with a connectorId.", nameof(spec));
-                    }
-
-                    break;
-
-                default:
-                    throw new ArgumentException($"scope_not_allowed: Unsupported scopeKind '{scopeKind}'.", nameof(spec));
-            }
+            NetworkAccessPolicyAuthorizer.NormalizedRuleTarget normalized = NetworkAccessPolicyAuthorizer.AuthorizeSetRule(
+                actor,
+                spec,
+                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin));
+            string scopeKind = normalized.ScopeKind;
+            string? userId = normalized.UserId;
+            string? agentId = normalized.AgentId;
+            string? connectorId = normalized.ConnectorId;
 
             (string destKind, string normalizedDest, int port) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
                 spec.DestKind,
@@ -779,7 +478,7 @@ public sealed partial class NetworkAccessPolicyStore
 
     public long DeleteRule(NetworkAccessActor actor, string ruleId, long expectedRevision)
     {
-        ValidateActor(actor);
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentException.ThrowIfNullOrWhiteSpace(ruleId);
 
         lock (gate)
@@ -796,20 +495,7 @@ public sealed partial class NetworkAccessPolicyStore
                 throw new KeyNotFoundException("Rule not found.");
             }
 
-            if (string.Equals(existing.Source, "seed", StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("seed_rule_immutable: Built-in seed rules cannot be deleted.");
-            }
-
-            if (!actor.IsAdmin)
-            {
-                if (!string.Equals(existing.UserId, actor.UserId, StringComparison.Ordinal)
-                    || existing.ScopeKind is not ("agent" or "user")
-                    || !string.IsNullOrEmpty(existing.ConnectorId))
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Cannot delete this rule.");
-                }
-            }
+            NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, existing);
 
             if (current.Revision != expectedRevision)
             {
@@ -1226,29 +912,4 @@ public sealed partial class NetworkAccessPolicyStore
 
         return false;
     }
-
-    private static void ValidateActor(NetworkAccessActor actor)
-    {
-        ArgumentNullException.ThrowIfNull(actor);
-        if (string.IsNullOrWhiteSpace(actor.UserId))
-        {
-            throw new ArgumentException("Actor userId cannot be empty.", nameof(actor));
-        }
-    }
-
-    private static void ValidateIdentifier(string value, string paramName)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new ArgumentException($"Identifier '{paramName}' cannot be empty.", paramName);
-        }
-
-        if (string.Equals(value.Trim(), "-", StringComparison.Ordinal))
-        {
-            throw new ArgumentException($"Placeholder '-' is not a valid identifier for '{paramName}'.", paramName);
-        }
-    }
-
-    private static string? NormalizeOptional(string? value)
-        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }
