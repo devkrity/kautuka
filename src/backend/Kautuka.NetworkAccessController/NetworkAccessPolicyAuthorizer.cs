@@ -436,6 +436,24 @@ internal static class NetworkAccessPolicyAuthorizer
 
                 break;
 
+            case "system":
+                if (!actor.IsAdmin)
+                {
+                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write systemwide rules.");
+                }
+
+                if (!string.IsNullOrEmpty(connectorId) || !string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
+                {
+                    throw new ArgumentException("scope_not_allowed: 'system' scope must not specify userId, agentId, or connectorId.", nameof(spec));
+                }
+
+                if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
+                {
+                    throw new ArgumentException("scope_not_allowed: any-public rules cannot be written at 'system' scope.", nameof(spec));
+                }
+
+                break;
+
             default:
                 throw new ArgumentException($"scope_not_allowed: Unsupported scopeKind '{scopeKind}'.", nameof(spec));
         }

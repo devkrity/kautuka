@@ -28,6 +28,9 @@ export function getRuleScopeSentence(rule: NetworkAccessRuleDto): string {
   if (rule.scopeKind === 'connector-system') {
     return `Everyone using ${connector}`;
   }
+  if (rule.scopeKind === 'system') {
+    return 'Everyone (systemwide)';
+  }
   return `${user}'s ${agent}`;
 }
 

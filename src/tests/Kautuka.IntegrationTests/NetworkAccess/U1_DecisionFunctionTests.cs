@@ -438,6 +438,72 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         _ = a1Rule;
     }
 
+    [Fact]
+    public void V7_37_SystemwideProviderRule_AllowsOnlyAdminGrantedEndpoint_WithNegativeControls()
+    {
+        NacController controller = CreateController(out _);
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        var member = new NetworkAccessActor("user-1", IsAdmin: false);
+
+        static OutboundCheckInput Call(string user, string host, int port)
+            => new(user, "gateway", null, false, host, port, "provider-test", null);
+
+        // No built-in exception: before any grant, localhost-style provider endpoints are denied.
+        Assert.False(controller.EvaluateOutboundCheck(Call("admin-1", "192.168.1.50", 11434)).Allowed);
+        Assert.False(controller.EvaluateOutboundCheck(Call("admin-1", "api.provider.test", 443)).Allowed);
+
+        // A member cannot write a systemwide rule.
+        Assert.Throws<UnauthorizedAccessException>(() => controller.PolicyStore.SetRule(
+            member,
+            new RuleWriteSpec("system", null, null, null, "api.provider.test", "host", 443, Allowed: true),
+            controller.PolicyStore.Revision));
+
+        // Admin grants the provider's public host systemwide.
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "api.provider.test", "host", 443, Allowed: true),
+            controller.PolicyStore.Revision);
+        Assert.True(controller.EvaluateOutboundCheck(Call("admin-1", "api.provider.test", 443)).Allowed);
+        Assert.True(controller.EvaluateOutboundCheck(Call("user-1", "api.provider.test", 443)).Allowed);
+
+        // NC: a different port and a different host remain denied.
+        Assert.False(controller.EvaluateOutboundCheck(Call("admin-1", "api.provider.test", 8443)).Allowed);
+        Assert.False(controller.EvaluateOutboundCheck(Call("admin-1", "other.provider.test", 443)).Allowed);
+
+        // A LAN address needs allowLan; without it the rule is rejected.
+        Assert.Throws<ArgumentException>(() => controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "192.168.1.50", "ip", 11434, Allowed: true),
+            controller.PolicyStore.Revision));
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "192.168.1.50", "ip", 11434, Allowed: true, AllowLan: true),
+            controller.PolicyStore.Revision);
+        Assert.True(controller.EvaluateOutboundCheck(Call("user-1", "192.168.1.50", 11434)).Allowed);
+
+        // Loopback is allowed only through an admin allowLan systemwide rule; plain allow is rejected.
+        Assert.Throws<ArgumentException>(() => controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "127.0.0.1", "ip", 11434, Allowed: true),
+            controller.PolicyStore.Revision));
+        Assert.Throws<ArgumentException>(() => controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("agent", "user-1", "agent-1", null, "127.0.0.1", "ip", 11434, Allowed: true, AllowLan: true),
+            controller.PolicyStore.Revision));
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "127.0.0.1", "ip", 11434, Allowed: true, AllowLan: true),
+            controller.PolicyStore.Revision);
+        Assert.True(controller.EvaluateOutboundCheck(Call("admin-1", "127.0.0.1", 11434)).Allowed);
+
+        // An admin block rule at system scope beats nothing-allowed and stays denied.
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "api.provider.test", "host", 443, Allowed: false),
+            controller.PolicyStore.Revision);
+        Assert.False(controller.EvaluateOutboundCheck(Call("user-1", "api.provider.test", 443)).Allowed);
+    }
+
     private NacController CreateController(out string statePath)
     {
         statePath = Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json");

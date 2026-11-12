@@ -252,12 +252,14 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
 
             bool isAdmin = GatewayOwnershipAccess.IsAdmin(user);
+            bool isSystemScope = string.Equals(dto.ScopeKind, "system", StringComparison.OrdinalIgnoreCase);
+            bool isConnectorSystemScope = string.Equals(dto.ScopeKind, "connector-system", StringComparison.OrdinalIgnoreCase);
 
             if (!isAdmin)
             {
-                if (string.Equals(dto.ScopeKind, "connector-system", StringComparison.OrdinalIgnoreCase))
+                if (isSystemScope || isConnectorSystemScope)
                 {
-                    return Results.Json(new GatewayErrorResponse("connector-system scope requires administrator privileges."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
+                    return Results.Json(new GatewayErrorResponse($"{dto.ScopeKind} scope requires administrator privileges."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
                 }
 
                 if (string.Equals(dto.DestKind, "any-public", StringComparison.OrdinalIgnoreCase))
@@ -276,7 +278,9 @@ internal static partial class GatewayRuntimeEndpointMappings
                 }
             }
 
-            string targetUserId = isAdmin ? (dto.UserId ?? user.Id) : user.Id;
+            string targetUserId = (isSystemScope || isConnectorSystemScope)
+                ? string.Empty
+                : (isAdmin ? (dto.UserId ?? user.Id) : user.Id);
             (string? derivedExecContext, string? derivedAttribution) = DeriveRuleMetadataFromCatalog(
                 catalogStore,
                 dto.ConnectorId,
@@ -999,6 +1003,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 ? $"Only {user}, using {connector} {action} {dest}"
                 : $"All of {user}'s agents, including new ones, {action} {dest}",
             "connector-system" => $"Everyone using {connector} {action} {dest}",
+            "system" => $"Everyone (systemwide) {action} {dest}",
             _ => $"{dest} ({rule.ScopeKind})"
         };
     }

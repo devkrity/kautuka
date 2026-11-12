@@ -73,10 +73,15 @@ export const ProviderForm: React.FC<{
   generatedProviderId?: string;
   result?: { success: boolean; message: string } | null;
   saving: boolean;
+  testing?: boolean;
+  pendingNetworkTarget?: { host: string; port: number } | null;
   cancelLabel?: string;
   onChange(next: ProviderFormState): void;
   onCancel(): void;
   onSave(): void;
+  onTestConnection?: () => void;
+  onConfirmNetworkApproval?: () => void;
+  onCancelNetworkApproval?: () => void;
 }> = ({
   variant = 'settings',
   editingId,
@@ -84,10 +89,15 @@ export const ProviderForm: React.FC<{
   generatedProviderId = '',
   result = null,
   saving,
+  testing = false,
+  pendingNetworkTarget = null,
   cancelLabel = 'Cancel',
   onChange,
   onCancel,
   onSave,
+  onTestConnection,
+  onConfirmNetworkApproval,
+  onCancelNetworkApproval,
 }) => {
   const [providerTypes, setProviderTypes] = useState<ProviderTypeInfo[]>([]);
 
@@ -297,11 +307,40 @@ export const ProviderForm: React.FC<{
           </div>
         )}
 
+        {pendingNetworkTarget && (
+          <div className="rounded-lg border border-attention/40 bg-attention/10 p-3 text-sm">
+            <p className="font-medium text-foreground">
+              Allow systemwide outbound access to{' '}
+              <code>
+                {pendingNetworkTarget.host}:{pendingNetworkTarget.port}
+              </code>
+              ?
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Testing this provider connection sends a request from Gateway to this endpoint.
+              Provider rules apply systemwide across all users and agents.
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button type="button" variant="secondary" size="sm" onClick={onCancelNetworkApproval}>
+                Cancel
+              </Button>
+              <Button type="button" size="sm" onClick={onConfirmNetworkApproval} disabled={testing}>
+                Allow Systemwide &amp; Test
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onCancel}>
             {cancelLabel}
           </Button>
-          <Button onClick={onSave} disabled={saving}>
+          {variant === 'settings' && onTestConnection && (
+            <Button type="button" variant="secondary" onClick={onTestConnection} disabled={saving || testing}>
+              {testing ? 'Testing...' : 'Test Connection'}
+            </Button>
+          )}
+          <Button onClick={onSave} disabled={saving || testing}>
             {saving ? 'Checking...' : saveLabel}
           </Button>
         </div>

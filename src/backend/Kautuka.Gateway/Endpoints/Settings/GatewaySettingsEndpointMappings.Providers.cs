@@ -15,7 +15,7 @@ internal static partial class GatewaySettingsEndpointMappings
 
     private static void MapProviderSettingsEndpoints(WebApplication app)
     {
-        app.MapGet("/api/settings/provider-types", (KautukaAiClientFactory aiClientFactory, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/settings/provider-types", (KautukaAiClientFactory aiClientFactory, IProviderTypeCatalog providerTypeCatalog, IGatewayAuthGuard auth, HttpContext context) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
@@ -24,12 +24,17 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             GatewayProviderTypeItem[] items = [.. aiClientFactory.ListProviderTypes()
-                .Select(t => new GatewayProviderTypeItem(
-                    t.Type,
-                    t.FriendlyName,
-                    t.RequiresApiKey,
-                    t.RequiresBaseUrl,
-                    t.SupportsHttpTimeoutSeconds))];
+                .Select(t =>
+                {
+                    providerTypeCatalog.TryGet(t.Type, out AiProviderCatalog.ProviderMetadata? meta);
+                    return new GatewayProviderTypeItem(
+                        t.Type,
+                        t.FriendlyName,
+                        t.RequiresApiKey,
+                        t.RequiresBaseUrl,
+                        t.SupportsHttpTimeoutSeconds,
+                        meta?.DefaultBaseUrl);
+                })];
             return Results.Json(new GatewayProviderTypesResponse(items), KautukaJsonContext.Default.GatewayProviderTypesResponse);
         });
 

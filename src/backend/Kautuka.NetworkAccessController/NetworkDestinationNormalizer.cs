@@ -152,7 +152,8 @@ public static class NetworkDestinationNormalizer
         int port,
         bool allowed,
         bool allowLan,
-        bool isAdmin)
+        bool isAdmin,
+        bool allowLoopback = false)
     {
         if (string.IsNullOrWhiteSpace(destKind))
         {
@@ -206,8 +207,9 @@ public static class NetworkDestinationNormalizer
                 }
 
                 if (NetworkAddressClassifier.IsMetadata(normalizedHost)
-                    || string.Equals(normalizedHost, "localhost", StringComparison.OrdinalIgnoreCase)
-                    || normalizedHost.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+                    || normalizedHost.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)
+                    || (string.Equals(normalizedHost, "localhost", StringComparison.OrdinalIgnoreCase)
+                        && !(allowLoopback && allowed && isAdmin && allowLan)))
                 {
                     throw new ArgumentException("invalid_destination: Protected or loopback hostnames cannot be added to rules.", nameof(destination));
                 }
@@ -242,7 +244,10 @@ public static class NetworkDestinationNormalizer
 
                 if (NetworkAddressClassifier.IsNonPublicV4(ip!))
                 {
-                    if (!allowLan || !NetworkAddressClassifier.IsRfc1918AllowableWithLan(normalizedIp))
+                    bool isLoopback = string.Equals(normalizedIp, "127.0.0.1", StringComparison.Ordinal) || ip!.GetAddressBytes()[0] == 127;
+                    bool permittedPrivate = allowLan && (NetworkAddressClassifier.IsRfc1918AllowableWithLan(normalizedIp)
+                        || (allowLoopback && allowed && isAdmin && isLoopback));
+                    if (!permittedPrivate)
                     {
                         throw new ArgumentException("invalid_destination: Non-public IPv4 address is not permitted without an administrator LAN grant.", nameof(destination));
                     }

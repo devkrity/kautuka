@@ -205,6 +205,9 @@ export const OnboardingWizard: React.FC = () => {
     providerForm,
     setProviderForm,
     saveSetup,
+    pendingProviderNetworkApproval,
+    confirmProviderNetworkApprovalAndSave,
+    cancelProviderNetworkApproval,
     providerValidation,
     saving,
     error,
@@ -417,6 +420,9 @@ export const OnboardingWizard: React.FC = () => {
                 requiresBaseUrl={requiresBaseUrl}
                 providerValidationMessage={providerValidation?.message ?? null}
                 providerValidationSuccess={providerValidation?.success ?? false}
+                pendingNetworkTarget={pendingProviderNetworkApproval?.target ?? null}
+                onConfirmNetworkApproval={confirmProviderNetworkApprovalAndSave}
+                onCancelNetworkApproval={cancelProviderNetworkApproval}
                 runtimeNote="Your AI model can run locally or in the cloud, but Kautuka runs here and performs tool work here."
                 relationshipNote="You can change the brain later, and one provider can serve more than one agent."
                 saving={saving}

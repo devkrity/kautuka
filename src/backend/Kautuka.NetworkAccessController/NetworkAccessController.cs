@@ -401,6 +401,33 @@ public sealed class NetworkAccessController
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
 
             default:
+                // Admin-granted systemwide first-party endpoint rules (e.g. AI providers approved at test-connection time)
+                NetworkAccessRule? systemwideRule = FindExactRule(
+                    state.Rules,
+                    scopeKind: "system",
+                    userId: null,
+                    agentId: null,
+                    connectorId: null,
+                    destKind,
+                    normalizedDestination,
+                    input.Port);
+                if (systemwideRule is not null)
+                {
+                    if (!systemwideRule.Allowed)
+                    {
+                        return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+                    }
+
+                    if (destKind == "ip"
+                        && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
+                        && !systemwideRule.AllowLan)
+                    {
+                        return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
+                    }
+
+                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
+                }
+
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     userId,
                     input.Systemwide ? null : agentId,

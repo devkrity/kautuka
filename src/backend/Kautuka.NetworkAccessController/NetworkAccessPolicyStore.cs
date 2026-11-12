@@ -447,7 +447,8 @@ public sealed partial class NetworkAccessPolicyStore
                 spec.Port,
                 spec.Allowed,
                 spec.Allowed && spec.AllowLan,
-                actor.IsAdmin);
+                actor.IsAdmin,
+                allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan);
 
             if (current.Revision != expectedRevision)
             {

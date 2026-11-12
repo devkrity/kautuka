@@ -50,7 +50,7 @@ export interface NetworkRequestsResponseDto {
 
 export interface NetworkAccessRuleDto {
   id: string;
-  scopeKind: 'agent' | 'user' | 'connector-system';
+  scopeKind: 'agent' | 'user' | 'connector-system' | 'system';
   userId?: string;
   userDisplayName?: string;
   agentId?: string;
@@ -89,7 +89,7 @@ export interface RequestDecisionResponseDto {
 }
 
 export interface CreateOrUpdateRuleDto {
-  scopeKind: 'agent' | 'user' | 'connector-system';
+  scopeKind: 'agent' | 'user' | 'connector-system' | 'system';
   userId?: string;
   agentId?: string;
   connectorId?: string;
@@ -99,6 +99,98 @@ export interface CreateOrUpdateRuleDto {
   allowed: boolean;
   allowLan?: boolean;
   expectedRevision: number;
+}
+
+export interface ProviderNetworkTarget {
+  host: string;
+  port: number;
+  destKind: 'host' | 'ip';
+  allowLan: boolean;
+}
+
+const DEFAULT_PROVIDER_URLS: Record<string, string> = {
+  ollama: 'http://localhost:11434',
+  openai: 'https://api.openai.com/v1',
+  'openai-responses': 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  groq: 'https://api.groq.com/openai/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+  gemini: 'https://generativelanguage.googleapis.com/',
+  google: 'https://generativelanguage.googleapis.com/',
+};
+
+function isIpv4Literal(host: string): boolean {
+  const parts = host.split('.');
+  if (parts.length !== 4) return false;
+  return parts.every((p) => /^\d+$/.test(p) && Number(p) >= 0 && Number(p) <= 255);
+}
+
+function isLocalOrPrivateHost(host: string): boolean {
+  const lower = host.toLowerCase();
+  if (lower === 'localhost' || lower === '::1') return true;
+  if (!isIpv4Literal(lower)) return false;
+  const [a, b] = lower.split('.').map(Number);
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+export function resolveProviderNetworkTarget(
+  providerType: string,
+  baseUrl?: string | null,
+  catalogDefaultBaseUrl?: string | null
+): ProviderNetworkTarget | null {
+  const raw = baseUrl?.trim() || catalogDefaultBaseUrl?.trim() || DEFAULT_PROVIDER_URLS[providerType.toLowerCase()];
+  if (!raw) return null;
+
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (!host) return null;
+    const port = parsed.port ? Number(parsed.port) : parsed.protocol === 'http:' ? 80 : 443;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return {
+      host,
+      port,
+      destKind: isIpv4Literal(host) ? 'ip' : 'host',
+      allowLan: isLocalOrPrivateHost(host),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function checkProviderSystemwideRule(target: ProviderNetworkTarget): Promise<{
+  alreadyAllowed: boolean;
+  expectedRevision: number;
+}> {
+  const response = await apiClient.get<NetworkRulesResponseDto>('/network-access/rules');
+  const expectedRevision = response.data.revision;
+  const hostLower = target.host.toLowerCase();
+  const alreadyAllowed = response.data.rules.some(
+    (rule) =>
+      rule.scopeKind === 'system' &&
+      rule.allowed &&
+      !rule.paused &&
+      rule.destination.toLowerCase() === hostLower &&
+      rule.port === target.port
+  );
+  return { alreadyAllowed, expectedRevision };
+}
+
+export async function grantProviderSystemwideRule(
+  target: ProviderNetworkTarget,
+  expectedRevision: number
+): Promise<NetworkAccessRuleDto> {
+  const response = await apiClient.put<NetworkAccessRuleDto>('/network-access/rules', {
+    scopeKind: 'system',
+    destination: target.host,
+    destKind: target.destKind,
+    port: target.port,
+    allowed: true,
+    allowLan: target.allowLan,
+    expectedRevision,
+  });
+  return response.data;
 }
 
 export interface NetworkAccessActivityDto {

@@ -28,6 +28,26 @@ const {
   saveAgentMock: vi.fn(),
 }));
 
+const { checkRuleMock, grantRuleMock } = vi.hoisted(() => ({
+  checkRuleMock: vi.fn(),
+  grantRuleMock: vi.fn(),
+}));
+
+vi.mock('@/features/network-access/networkAccess', () => ({
+  resolveProviderNetworkTarget: (type: string, baseUrl?: string | null) => {
+    const raw = baseUrl || (type === 'ollama' ? 'http://localhost:11434' : 'https://generativelanguage.googleapis.com/');
+    const url = new URL(raw);
+    return {
+      host: url.hostname,
+      port: url.port ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
+      destKind: 'host',
+      allowLan: url.hostname === 'localhost',
+    };
+  },
+  checkProviderSystemwideRule: checkRuleMock,
+  grantProviderSystemwideRule: grantRuleMock,
+}));
+
 vi.mock('@/features/auth', () => ({
   useCurrentUser: () => ({
     data: {
@@ -127,6 +147,8 @@ describe('useOnboardingFlow existing setup detection', () => {
       },
     });
 
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
+    grantRuleMock.mockResolvedValue({});
     saveProviderMock.mockResolvedValue({ data: {} });
     probeModelCandidateMock.mockResolvedValue({
       data: {
@@ -290,6 +312,64 @@ describe('useOnboardingFlow existing setup detection', () => {
     await waitFor(() => expect(saveModelMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveAgentMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.stage).toBe('recommendations'));
+  });
+
+  it('v7-37: asks for a systemwide grant before the test call and never calls the provider until confirmed', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 7 });
+
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+
+    await act(async () => {
+      result.current.setProviderForm((prev) => ({ ...prev, apiCredential: 'key-123' }));
+    });
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+
+    // Prompt shown, nothing sent, nothing saved, no rule written (not on save).
+    expect(result.current.pendingProviderNetworkApproval?.target.host).toBe('generativelanguage.googleapis.com');
+    expect(testProviderMock).not.toHaveBeenCalled();
+    expect(saveProviderMock).not.toHaveBeenCalled();
+    expect(grantRuleMock).not.toHaveBeenCalled();
+
+    // Cancel: still no outbound call and no rule.
+    act(() => result.current.cancelProviderNetworkApproval());
+    expect(result.current.pendingProviderNetworkApproval).toBeNull();
+    expect(testProviderMock).not.toHaveBeenCalled();
+    expect(grantRuleMock).not.toHaveBeenCalled();
+
+    // Re-trigger and confirm: grant first, then the test call.
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+    await act(async () => {
+      await result.current.confirmProviderNetworkApprovalAndSave();
+    });
+
+    expect(grantRuleMock).toHaveBeenCalledTimes(1);
+    expect(grantRuleMock.mock.calls[0][1]).toBe(7);
+    expect(testProviderMock).toHaveBeenCalledTimes(1);
+    expect(grantRuleMock.mock.invocationCallOrder[0]).toBeLessThan(testProviderMock.mock.invocationCallOrder[0]);
+  });
+
+  it('v7-37 negative control: no prompt and no grant when the provider address is already allowed', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
+
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () => {
+      result.current.setProviderForm((prev) => ({ ...prev, apiCredential: 'key-123' }));
+    });
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+
+    expect(result.current.pendingProviderNetworkApproval).toBeNull();
+    expect(grantRuleMock).not.toHaveBeenCalled();
+    expect(testProviderMock).toHaveBeenCalledTimes(1);
   });
 
   it('requires a second confirmation when the starter model probe returns a warning', async () => {

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { settingsAdmin } from '@/features/settings';
+import {
+  checkProviderSystemwideRule,
+  grantProviderSystemwideRule,
+  resolveProviderNetworkTarget,
+  type ProviderNetworkTarget,
+} from '@/features/network-access/networkAccess';
 import { apiError } from '../utils/settingsUtils';
 import type { ProviderEntry, ProviderTypeInfo } from '../types/settingsTypes';
 
@@ -58,6 +64,11 @@ export function useProvidersTab() {
   const [form, setForm] = useState<ProviderFormState>(DEFAULT_FORM);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [pendingNetworkApproval, setPendingNetworkApproval] = useState<{
+    target: ProviderNetworkTarget;
+    expectedRevision: number;
+  } | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -98,6 +109,87 @@ export function useProvidersTab() {
   const cancelEdit = () => {
     setEditingId(null);
     setForm(DEFAULT_FORM);
+    setPendingNetworkApproval(null);
+  };
+
+  const runProviderTestCall = async () => {
+    const httpTimeoutSeconds = normalizeHttpTimeoutSeconds(form.http_timeout_seconds);
+    if (httpTimeoutSeconds === 'invalid') {
+      setResult({ success: false, message: 'HTTP timeout must be a positive number of seconds.' });
+      return;
+    }
+
+    setTesting(true);
+    setResult(null);
+    try {
+      const response = await settingsAdmin.testProvider({
+        id: form.id.trim() || undefined,
+        type: form.type,
+        settings: {
+          base_url: form.base_url.trim() || null,
+          api_key: form.api_key.trim() || null,
+          http_timeout_seconds: httpTimeoutSeconds,
+        },
+      });
+      setResult({
+        success: Boolean(response.data.success),
+        message: response.data.message || 'Provider connection check completed.',
+      });
+    } catch (err) {
+      setResult({ success: false, message: apiError(err) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const testConnection = async () => {
+    if (!form.type.trim()) {
+      setResult({ success: false, message: 'Provider type is required.' });
+      return;
+    }
+
+    const catalogType = providerTypes.find((t) => t.type === form.type);
+    const target = resolveProviderNetworkTarget(form.type, form.base_url, catalogType?.defaultBaseUrl);
+    if (target) {
+      setTesting(true);
+      try {
+        const status = await checkProviderSystemwideRule(target);
+        if (!status.alreadyAllowed) {
+          setPendingNetworkApproval({ target, expectedRevision: status.expectedRevision });
+          setTesting(false);
+          return;
+        }
+      } catch (err) {
+        setResult({ success: false, message: apiError(err) });
+        setTesting(false);
+        return;
+      }
+      setTesting(false);
+    }
+
+    await runProviderTestCall();
+  };
+
+  const confirmNetworkApprovalAndTest = async () => {
+    const pending = pendingNetworkApproval;
+    if (!pending) return;
+
+    setTesting(true);
+    setResult(null);
+    try {
+      await grantProviderSystemwideRule(pending.target, pending.expectedRevision);
+      setPendingNetworkApproval(null);
+    } catch (err) {
+      setResult({ success: false, message: apiError(err) });
+      setTesting(false);
+      return;
+    }
+
+    await runProviderTestCall();
+  };
+
+  const cancelNetworkApproval = () => {
+    setPendingNetworkApproval(null);
   };
 
   const save = async () => {
@@ -179,12 +271,17 @@ export function useProvidersTab() {
     form,
     result,
     saving,
+    testing,
+    pendingNetworkApproval,
     statusItems,
     setForm,
     startCreate,
     startEdit,
     cancelEdit,
     save,
+    testConnection,
+    confirmNetworkApprovalAndTest,
+    cancelNetworkApproval,
     remove,
   };
 }

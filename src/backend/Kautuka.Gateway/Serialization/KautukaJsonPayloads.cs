@@ -172,7 +172,8 @@ internal sealed record GatewayProviderTypeItem(
     string FriendlyName,
     bool RequiresApiKey,
     bool RequiresBaseUrl,
-    bool SupportsHttpTimeoutSeconds);
+    bool SupportsHttpTimeoutSeconds,
+    string? DefaultBaseUrl = null);
 
 internal sealed record GatewayProviderTypesResponse(GatewayProviderTypeItem[] ProviderTypes);
 

@@ -1,5 +1,11 @@
 import { useCurrentUser } from '@/features/auth';
 import {
+    checkProviderSystemwideRule,
+    grantProviderSystemwideRule,
+    resolveProviderNetworkTarget,
+    type ProviderNetworkTarget,
+} from '@/features/network-access/networkAccess';
+import {
     apiError,
     normalizePersonaDefinitions,
     normalizePersonaProfile,
@@ -122,6 +128,10 @@ export function useOnboardingFlow() {
   const [discoveringModels, setDiscoveringModels] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelEntry['capabilities']>(null);
   const [confirmedModelWarningKey, setConfirmedModelWarningKey] = useState<string | null>(null);
+  const [pendingProviderNetworkApproval, setPendingProviderNetworkApproval] = useState<{
+    target: ProviderNetworkTarget;
+    expectedRevision: number;
+  } | null>(null);
   const [personaDefinitions, setPersonaDefinitions] = useState<PersonaDefinitions>({
     styles: [],
     tones: [],
@@ -360,7 +370,7 @@ export function useOnboardingFlow() {
     };
   };
 
-  const saveSetup = async () => {
+  const saveSetup = async (options?: { networkApproved?: boolean }) => {
     const providerId =
       providerForm.id.trim() ||
       getGeneratedProviderId(
@@ -400,18 +410,71 @@ export function useOnboardingFlow() {
     }
 
     try {
-      setSaving(true);
       setError(null);
       setProviderValidation(null);
 
-      const providerTest = await settingsAdmin.testProvider({
-        id: providerId,
-        type: providerType,
-        settings: {
-          ...settings,
-          default_model: providerModel,
-        },
-      });
+      const target = options?.networkApproved === true
+        ? null
+        : resolveProviderNetworkTarget(providerType, settings.base_url);
+      if (target) {
+        const ruleStatus = await checkProviderSystemwideRule(target);
+        if (!ruleStatus.alreadyAllowed) {
+          setPendingProviderNetworkApproval({
+            target,
+            expectedRevision: ruleStatus.expectedRevision,
+          });
+          return;
+        }
+      }
+
+      setSaving(true);
+      try {
+        await continueSaveAfterNetworkApproval(providerId, providerType, settings, providerModel);
+      } finally {
+        setSaving(false);
+      }
+    } catch (err) {
+      setError(apiError(err));
+      setProviderValidation(null);
+    }
+  };
+
+  const confirmProviderNetworkApprovalAndSave = async () => {
+    const pending = pendingProviderNetworkApproval;
+    if (!pending) return;
+
+    try {
+      setSaving(true);
+      setError(null);
+      await grantProviderSystemwideRule(pending.target, pending.expectedRevision);
+      setPendingProviderNetworkApproval(null);
+    } catch (err) {
+      setError(apiError(err));
+      setSaving(false);
+      return;
+    }
+
+    await saveSetup({ networkApproved: true });
+  };
+
+  const cancelProviderNetworkApproval = () => {
+    setPendingProviderNetworkApproval(null);
+  };
+
+  const continueSaveAfterNetworkApproval = async (
+    providerId: string,
+    providerType: string,
+    settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
+    providerModel: string
+  ) => {
+    const providerTest = await settingsAdmin.testProvider({
+      id: providerId,
+      type: providerType,
+      settings: {
+        ...settings,
+        default_model: providerModel,
+      },
+    });
 
       const validation: ProviderTestResult = {
         success: Boolean(providerTest.data.success),
@@ -527,12 +590,6 @@ export function useOnboardingFlow() {
       await queryClient.invalidateQueries({ queryKey: ['system-setup-status'] });
       await queryClient.refetchQueries({ queryKey: ['system-setup-status'] });
       goNext(WIZARD_STAGES.recommendations);
-    } catch (err) {
-      setError(apiError(err));
-      setProviderValidation(null);
-    } finally {
-      setSaving(false);
-    }
   };
 
   const saveTelegramSetup = async () => {
@@ -608,6 +665,9 @@ export function useOnboardingFlow() {
     providerForm,
     setProviderForm,
     saveSetup,
+    pendingProviderNetworkApproval,
+    confirmProviderNetworkApprovalAndSave,
+    cancelProviderNetworkApproval,
     providerValidation,
     generatedProviderId:
       providerForm.id.trim() ||

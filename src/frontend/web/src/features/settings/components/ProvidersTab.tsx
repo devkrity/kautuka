@@ -18,12 +18,17 @@ export function ProvidersTab() {
     form,
     result,
     saving,
+    testing,
+    pendingNetworkApproval,
     statusItems,
     setForm,
     startCreate,
     startEdit,
     cancelEdit,
     save,
+    testConnection,
+    confirmNetworkApprovalAndTest,
+    cancelNetworkApproval,
     remove,
   } = useProvidersTab();
 
@@ -84,8 +89,17 @@ export function ProvidersTab() {
                 editingId={editingId}
                 form={form}
                 saving={saving}
+                testing={testing}
+                pendingNetworkTarget={pendingNetworkApproval?.target ?? null}
                 onChange={setForm}
                 onCancel={cancelEdit}
+                onTestConnection={() => {
+                  runAsync(testConnection);
+                }}
+                onConfirmNetworkApproval={() => {
+                  runAsync(confirmNetworkApprovalAndTest);
+                }}
+                onCancelNetworkApproval={cancelNetworkApproval}
                 onSave={() => {
                   runAsync(save);
                 }}

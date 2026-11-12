@@ -47,6 +47,9 @@ type CompactSetupScreenProps = {
   requiresBaseUrl: boolean;
   providerValidationMessage?: string | null;
   providerValidationSuccess?: boolean;
+  pendingNetworkTarget?: { host: string; port: number } | null;
+  onConfirmNetworkApproval?: () => void;
+  onCancelNetworkApproval?: () => void;
   runtimeNote: string;
   relationshipNote: string;
   saving: boolean;
@@ -85,6 +88,9 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
   requiresBaseUrl,
   providerValidationMessage,
   providerValidationSuccess,
+  pendingNetworkTarget,
+  onConfirmNetworkApproval,
+  onCancelNetworkApproval,
   runtimeNote,
   relationshipNote,
   saving,
@@ -287,6 +293,30 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
             <Alert variant={providerValidationSuccess ? 'success' : 'destructive'}>
               {providerValidationMessage}
             </Alert>
+          )}
+
+          {pendingNetworkTarget && (
+            <div className="rounded-lg border border-attention/40 bg-attention/10 p-4 text-sm">
+              <p className="font-medium text-foreground">
+                Allow systemwide outbound access to{' '}
+                <code>
+                  {pendingNetworkTarget.host}:{pendingNetworkTarget.port}
+                </code>
+                ?
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Testing this provider connection sends a request from Gateway to this endpoint.
+                Provider rules apply systemwide across all users and agents.
+              </p>
+              <div className="mt-3 flex justify-end gap-2">
+                <Button type="button" variant="secondary" size="sm" onClick={onCancelNetworkApproval}>
+                  Cancel
+                </Button>
+                <Button type="button" size="sm" onClick={onConfirmNetworkApproval} disabled={saving}>
+                  Allow Systemwide &amp; Test Connection
+                </Button>
+              </div>
+            </div>
           )}
         </div>
       </div>

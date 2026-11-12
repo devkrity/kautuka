@@ -293,6 +293,7 @@ export interface ProviderTypeInfo {
   requiresApiKey: boolean;
   requiresBaseUrl: boolean;
   supportsHttpTimeoutSeconds: boolean;
+  defaultBaseUrl?: string | null;
 }
 
 export interface OrganizationSettingsEntry {
