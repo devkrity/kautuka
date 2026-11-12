@@ -36,6 +36,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private const int agentSandboxNormalizationVersion = 3;
 
     private readonly ConcurrentDictionary<string, string> trackedConnectorContainers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, EphemeralWorkload> ephemeralWorkloads = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConnectorCooldownScheduler connectorCooldowns = new();
     private readonly AsyncKeyedLockPool connectorLocks = new();
     private readonly AsyncKeyedLockPool sandboxProvisionLocks = new();
@@ -253,7 +254,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             var transport = await CreateTransportAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = true;
-            var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(effectiveConnector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
+            var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(effectiveConnector.McpProtocolVersion), effectiveConnector, WorkspaceMcpExecutionContext.Isolated, probeContext, cancellationToken).ConfigureAwait(false);
 
             _ = desiredStateStore.TryTransitionConnectorState(
                 effectiveConnector.ConnectorId,
@@ -284,10 +285,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             CompleteProbeAuthorization(connectorId, probeContext);
             if (containerPrepared)
             {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext),
-                    BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext)).ConfigureAwait(false);
+                if (!CompleteEphemeralWorkload(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext))
+                {
+                    await ResetConnectorCooldownAsync(
+                        connector,
+                        BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext),
+                        BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext)).ConfigureAwait(false);
+                }
             }
         }
     }
@@ -352,7 +356,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             var transport = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken).ConfigureAwait(false);
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
-            var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
+            var tools = await ListMcpToolsAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), connector, executionContext, workspaceContext, cancellationToken).ConfigureAwait(false);
 
             _ = desiredStateStore.TryTransitionConnectorState(
                 connector.ConnectorId,
@@ -379,10 +383,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (containerPrepared && connector is not null)
             {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
-                    BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
+                if (!CompleteEphemeralWorkload(connector.ConnectorId, executionContext, workspaceContext))
+                {
+                    await ResetConnectorCooldownAsync(
+                        connector,
+                        BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
+                        BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
+                }
             }
         }
     }
@@ -431,6 +438,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             McpClient client = await McpClient.CreateAsync(transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: cancellationToken).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
+                await VerifyEphemeralWorkloadAsync(connector.ConnectorId, executionContext, workspaceContext, cancellationToken).ConfigureAwait(false);
                 var toolInput = McpToolContractCodec.ParseInput(toolInputJson);
                 CallToolResult result = await client.CallToolAsync(toolName, toolInput, cancellationToken: cancellationToken).ConfigureAwait(false);
                 string resultJson = ViewFileMaterializer.Materialize(
@@ -463,10 +471,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (containerPrepared && connector is not null)
             {
-                await ResetConnectorCooldownAsync(
-                    connector,
-                    BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
-                    BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
+                if (!CompleteEphemeralWorkload(connector.ConnectorId, executionContext, workspaceContext))
+                {
+                    await ResetConnectorCooldownAsync(
+                        connector,
+                        BuildRuntimeKey(connector.ConnectorId, executionContext, workspaceContext),
+                        BuildContainerName(connector.ConnectorId, executionContext, workspaceContext)).ConfigureAwait(false);
+                }
             }
         }
     }
@@ -612,6 +623,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     allocatedIp: allocatedIp,
                     purpose: isProbe ? "probe" : null,
                     compatProfile: compatProfile);
+                ephemeralWorkloads[containerName] = new EphemeralWorkload(allocatedIp, compatProfile);
             }
             catch
             {
@@ -1536,18 +1548,59 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             ? null
             : new McpClientOptions { ProtocolVersion = protocolVersion.Trim() };
 
-    private static async Task<IReadOnlyList<McpClientTool>> ListMcpToolsAsync(
+    private async Task<IReadOnlyList<McpClientTool>> ListMcpToolsAsync(
         StdioClientTransport transport,
         McpClientOptions? clientOptions,
+        WorkspaceMcpContainerConnectorDefinition connector,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
         CancellationToken cancellationToken)
     {
         McpClient client = await McpClient.CreateAsync(transport, clientOptions, cancellationToken: cancellationToken).ConfigureAwait(false);
         await using (client.ConfigureAwait(false))
         {
+            await VerifyEphemeralWorkloadAsync(connector.ConnectorId, executionContext, workspaceContext, cancellationToken).ConfigureAwait(false);
             IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
             return [.. tools];
         }
     }
+
+    private async Task VerifyEphemeralWorkloadAsync(
+        string connectorId,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        CancellationToken cancellationToken)
+    {
+        string containerName = BuildContainerName(connectorId, executionContext, workspaceContext);
+        if (!ephemeralWorkloads.TryGetValue(containerName, out EphemeralWorkload? workload))
+        {
+            return;
+        }
+
+        NetworkAccess.WorkloadPostStartVerifier verifier = postStartVerifier
+            ?? throw new InvalidOperationException("The workload post-start verifier is unavailable; refusing to use an ephemeral connector.");
+        await verifier.VerifyWorkloadAsync(containerName, workload.AllocatedIp, workload.CompatProfile, workloadRegistry, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private bool CompleteEphemeralWorkload(
+        string connectorId,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext)
+    {
+        string containerName = BuildContainerName(connectorId, executionContext, workspaceContext);
+        if (!ephemeralWorkloads.TryRemove(containerName, out EphemeralWorkload? workload))
+        {
+            return false;
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry? entry = workloadRegistry?.GetAll()
+            .FirstOrDefault(item => string.Equals(item.Ip, workload.AllocatedIp, StringComparison.Ordinal));
+        workloadRegistry?.Deregister(workload.AllocatedIp, entry?.ContainerId ?? containerName);
+        return true;
+    }
+
+    private sealed record EphemeralWorkload(string AllocatedIp, NetworkAccess.ImageCompatProfile? CompatProfile);
 
 }
 

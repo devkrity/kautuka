@@ -17,6 +17,54 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
+    [Fact]
+    public async Task V7_18_EphemeralWorkloadIsVerifiedAndDeregisteredAtTransportEnd()
+    {
+        const string connectorId = "ephemeral-test";
+        const string ip = "10.247.1.90";
+        var podmanCalls = new List<string[]>();
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            podmanCalls.Add([.. args]);
+            return Task.FromResult(new PodmanCommandResult(0, "{}", string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            workloadRegistry: registry,
+            postStartVerifier: new WorkloadPostStartVerifier(runner));
+
+        MethodInfo buildName = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("BuildContainerName", BindingFlags.Static | BindingFlags.NonPublic)!;
+        string containerName = (string)buildName.Invoke(null, [connectorId, WorkspaceMcpExecutionContext.Isolated, null])!;
+        registry.Register(new RegistryEntry(ip, null, null, containerName, "connector", connectorId, "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+
+        Type? workloadType = typeof(WorkspaceContainerConnectorExecutionService).GetNestedType("EphemeralWorkload", BindingFlags.NonPublic);
+        Assert.NotNull(workloadType);
+        ConstructorInfo workloadConstructor = workloadType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .Single(static constructor => constructor.GetParameters().Length == 2);
+        object workload = workloadConstructor.Invoke([ip, null]);
+        object? workloadMap = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetField("ephemeralWorkloads", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service);
+        Assert.NotNull(workloadMap);
+        _ = workloadMap.GetType().GetMethod("TryAdd")!.Invoke(workloadMap, [containerName, workload]);
+
+        MethodInfo verify = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("VerifyEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Task verifyTask = (Task)verify.Invoke(service, [connectorId, WorkspaceMcpExecutionContext.Isolated, null, CancellationToken.None])!;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => verifyTask);
+        Assert.Contains(podmanCalls, static call => call[0] == "inspect");
+
+        // Model the transport process still being registered at disposal time, independently of verifier failure cleanup.
+        registry.Register(new RegistryEntry(ip, null, null, containerName, "connector", connectorId, "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+        MethodInfo complete = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("CompleteEphemeralWorkload", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Assert.True((bool)complete.Invoke(service, [connectorId, WorkspaceMcpExecutionContext.Isolated, null])!);
+        Assert.Empty(registry.GetAll());
+    }
+
     [Theory]
     [InlineData("node", "abcdef0123456789", "localhost/kautuka-mcpb-node:")]
     [InlineData("UV", "0123deadbeef", "localhost/kautuka-mcpb-uv:")]
