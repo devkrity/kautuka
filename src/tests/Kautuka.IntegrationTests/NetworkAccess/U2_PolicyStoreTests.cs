@@ -33,7 +33,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
         string statePath = Path.Combine(tempDir, "atomic", "state.json");
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
 
-        var initialStore = new NetworkAccessPolicyStore(statePath);
+        using var initialStore = new NetworkAccessPolicyStore(statePath);
         initialStore.SetRule(
             admin,
             new RuleWriteSpec("agent", "user-1", "agent-1", null, "first.example.com", "host", 443, Allowed: true),
@@ -41,7 +41,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
         Assert.Equal(1, initialStore.Revision);
 
         // Simulate a kill/crash after the temp file is flushed but BEFORE File.Move renames it over state.json
-        var crashingStore = new NetworkAccessPolicyStore(
+        using var crashingStore = new NetworkAccessPolicyStore(
             statePath,
             NetworkAccessPolicyStore.FlushDirectory,
             beforeRenameHook: _ => throw new IOException("Simulated crash before rename"));
@@ -53,7 +53,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
                 expectedRevision: 1));
 
         // Reload from disk: must have the intact old state (revision 1, only first.example.com)
-        var reloadedStore = new NetworkAccessPolicyStore(statePath);
+        using var reloadedStore = new NetworkAccessPolicyStore(statePath);
         (long rev, IReadOnlyList<NetworkAccessRuleView> userRules) = reloadedStore.ListRules(new NetworkAccessActor("user-1", IsAdmin: false));
         Assert.Equal(1, rev);
         Assert.Single(userRules);
@@ -64,7 +64,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
             admin,
             new RuleWriteSpec("agent", "user-1", "agent-1", null, "second.example.com", "host", 443, Allowed: true),
             expectedRevision: 1);
-        var verifyStore = new NetworkAccessPolicyStore(statePath);
+        using var verifyStore = new NetworkAccessPolicyStore(statePath);
         (long ncRev, IReadOnlyList<NetworkAccessRuleView> ncRules) = verifyStore.ListRules(new NetworkAccessActor("user-1", IsAdmin: false));
         Assert.Equal(2, ncRev);
         Assert.Equal(2, ncRules.Count);
@@ -77,12 +77,12 @@ public sealed class U2_PolicyStoreTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(statePath)!);
         File.WriteAllText(statePath, "{ \"schemaVersion\": 1, \"revision\": \"not-a-number\" ");
 
-        var corruptStore = new NetworkAccessPolicyStore(statePath);
+        using var corruptStore = new NetworkAccessPolicyStore(statePath);
         Assert.Throws<InvalidDataException>(() => corruptStore.EnsureLoaded());
 
         // Negative control (.NC): replace with valid JSON -> loads cleanly
         File.Delete(statePath);
-        var cleanStore = new NetworkAccessPolicyStore(statePath);
+        using var cleanStore = new NetworkAccessPolicyStore(statePath);
         cleanStore.EnsureLoaded();
         Assert.Equal(0, cleanStore.Revision);
     }
@@ -91,7 +91,11 @@ public sealed class U2_PolicyStoreTests : IDisposable
     public async Task U2_RequestDedupe_100AttemptsProduceOneRequestAndOneDiskWrite_AndCapBehaviour_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "dedupe", "state.json");
-        var store = new NetworkAccessPolicyStore(statePath);
+        using var releaseWriter = new ManualResetEventSlim(false);
+        using var store = new NetworkAccessPolicyStore(
+            statePath,
+            _ => { },
+            beforeBackgroundDrainHook: () => Assert.True(releaseWriter.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)));
         var user = new NetworkAccessActor("user-1", IsAdmin: false);
 
         for (int i = 0; i < 100; i++)
@@ -111,15 +115,17 @@ public sealed class U2_PolicyStoreTests : IDisposable
             Assert.NotNull(reqId);
         }
 
-        // Hot-path pending request writes coalesce asynchronously; no synchronous blocking write occurred yet.
+        // Hot-path pending request writes coalesce asynchronously; while background writer hasn't flushed, zero disk writes occurred.
         Assert.Equal(0, store.DiskWriteCount);
+        releaseWriter.Set();
         await store.FlushPendingWritesAsync();
         Assert.Equal(1, store.DiskWriteCount);
         IReadOnlyList<NetworkAccessRequestView> requests = store.ListRequests(user).Requests;
         Assert.Single(requests);
         Assert.Equal(100, requests[0].Request.Attempts);
 
-        // Negative control (.NC): a different destination triggers a 2nd coalesced write and a 2nd request
+        // Negative control (.NC): a different destination triggers a 2nd coalesced write and a 2nd request;
+        // both the new request and 100 attempts survive reopening from disk.
         store.RecordOrUpdatePendingRequest(
             "user-1",
             "agent-1",
@@ -134,6 +140,10 @@ public sealed class U2_PolicyStoreTests : IDisposable
         await store.FlushPendingWritesAsync();
         Assert.Equal(2, store.DiskWriteCount);
         Assert.Equal(2, store.ListRequests(user).Requests.Count);
+        using (var reopened = new NetworkAccessPolicyStore(statePath))
+        {
+            Assert.Equal(100, reopened.ListRequests(user).Requests.Single(r => r.Request.Destination == "dedupe.example.com").Request.Attempts);
+        }
 
         // Fill remaining 498 slots to reach the 500 pending request cap
         for (int i = 2; i < NetworkAccessPolicyStore.MaxPendingRequests; i++)
@@ -189,7 +199,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
     public void U2_RevisionConflict_AndRuleDestinationValidation_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "validation", "state.json");
-        var store = new NetworkAccessPolicyStore(statePath);
+        using var store = new NetworkAccessPolicyStore(statePath);
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
 
         // Stale expectedRevision fails

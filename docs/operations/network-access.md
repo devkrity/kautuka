@@ -65,7 +65,7 @@ flowchart LR
 4. **Host Services Application-Layer Enforcement**:
    - `Gateway` and `ChannelHost` outbound HTTP and WebSocket traffic is checked in-process via `INetworkAccessChecker` before connection establishment. Denials surface directly into agent runs via Narad Protocol without opening approval cards for automated system seeds.
 5. **Policy State Durability (`NetworkAccessPolicyStore`)**:
-   - Approvals, revocations, user privileges, and emergency brake state flush synchronously (`SaveSync`) with directory fsync, while high-frequency pending-request attempt updates coalesce on a background writer ordered by a monotonic mutation sequence (`inMemoryMutationSeq`) so older background snapshots cannot overwrite newer synchronous saves and transient write errors do not stall subsequent persistence.
+   - Approvals, revocations, user privileges, and emergency brake state flush synchronously (`SaveSync`) with directory fsync, while pending-request creation and retry attempt updates coalesce on a background writer ordered by a monotonic mutation sequence (`inMemoryMutationSeq`) with deterministic LRU eviction so older background snapshots cannot overwrite newer synchronous saves and transient write errors do not stall subsequent persistence.
 
 ---
 

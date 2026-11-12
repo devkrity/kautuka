@@ -603,7 +603,7 @@ public sealed partial class NetworkAccessPolicyStore
                     CompatProfile = compatProfile ?? existing.CompatProfile,
                 };
                 var nextRequests = current.Requests.Select(r => string.Equals(r.Id, id, StringComparison.Ordinal) ? updatedPending : r).ToList();
-                state = current with { Requests = nextRequests };
+                EnqueuePendingRequestSave(current with { Requests = nextRequests });
                 lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark, checked(current.Revision + 1));
                 return (id, Overflow: false);
             }
@@ -617,7 +617,9 @@ public sealed partial class NetworkAccessPolicyStore
             {
                 NetworkAccessRequest? oldestResolved = activeRequests
                     .Where(static r => r.Status != "pending")
-                    .MinBy(static r => r.LastSeenUtc);
+                    .OrderBy(static r => r.LastSeenUtc)
+                    .ThenBy(static r => r.Id, StringComparer.Ordinal)
+                    .FirstOrDefault();
                 if (oldestResolved is not null)
                 {
                     activeRequests.Remove(oldestResolved);

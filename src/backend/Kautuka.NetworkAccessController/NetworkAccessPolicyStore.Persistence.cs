@@ -18,6 +18,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private readonly Action<string> syncDirectory;
     private readonly Action<string>? beforeRenameHook;
     private readonly Action? beforeBackgroundDiskLockHook;
+    private readonly Action? beforeBackgroundDrainHook;
     private readonly IReadOnlyList<NetworkAccessRule> seedRules;
     private readonly NetworkAccessAuditRing? auditRing;
 
@@ -48,7 +49,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         Action<string>? beforeRenameHook = null,
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
         NetworkAccessAuditRing? auditRing = null,
-        Action? beforeBackgroundDiskLockHook = null)
+        Action? beforeBackgroundDiskLockHook = null,
+        Action? beforeBackgroundDrainHook = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(syncDirectory);
@@ -56,6 +58,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         this.syncDirectory = syncDirectory;
         this.beforeRenameHook = beforeRenameHook;
         this.beforeBackgroundDiskLockHook = beforeBackgroundDiskLockHook;
+        this.beforeBackgroundDrainHook = beforeBackgroundDrainHook;
         this.seedRules = seedRules ?? NetworkAccessDefaultSeeds.DefaultRules;
         this.auditRing = auditRing;
 
@@ -192,6 +195,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
     private void DrainPendingWrites(CancellationToken token)
     {
+        beforeBackgroundDrainHook?.Invoke();
         while (true)
         {
             token.ThrowIfCancellationRequested();
