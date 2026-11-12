@@ -594,6 +594,22 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_20_CanaryRequiresSuccessfulHookRecordForItsOwnIp_WithNegativeControl()
+    {
+        const string canaryIp = "10.247.1.24";
+        string successfulHook = "{\"action\":\"allow\",\"reason\":\"workload_rules\",\"rules_sha256\":\"abc123\",\"ips\":[\"" + canaryIp + "\"]}";
+
+        Assert.True(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook, canaryIp));
+
+        // Negative controls: a warning-only/missing record, a refusal, a stale record for another IP,
+        // or a success without the applied-rules hash must all keep the startup gate closed.
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(null, canaryIp));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"refuse\",\"ips\":[\"" + canaryIp + "\"]}", canaryIp));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"allow\",\"rules_sha256\":\"abc123\",\"ips\":[\"10.247.1.25\"]}", canaryIp));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"allow\",\"rules_sha256\":\"\",\"ips\":[\"" + canaryIp + "\"]}", canaryIp));
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)

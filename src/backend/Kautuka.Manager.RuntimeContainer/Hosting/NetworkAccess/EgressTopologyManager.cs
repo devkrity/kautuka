@@ -440,14 +440,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 return false;
             }
 
-            // Verify hook log has entry
-            if (File.Exists(hookLogFilePath))
+            // The canary is only proof of the applied boundary if the hook recorded a successful
+            // ruleset application for this exact workload. A missing log must keep startup closed.
+            string logContent = File.Exists(hookLogFilePath)
+                ? await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false)
+                : string.Empty;
+            if (!HasSuccessfulCanaryHookRecord(logContent, canaryIp))
             {
-                string logContent = await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false);
-                if (!logContent.Contains("action", StringComparison.OrdinalIgnoreCase))
-                {
-                    logger.LogWarning("Hook log does not contain action entries.");
-                }
+                logger.LogError("Canary hook did not record an applied workload ruleset for {CanaryIp}.", canaryIp);
+                return false;
             }
 
             return true;
@@ -468,6 +469,43 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 // Ignore cleanup error
             }
         }
+    }
+
+    internal static bool HasSuccessfulCanaryHookRecord(string? hookLog, string canaryIp)
+    {
+        if (string.IsNullOrWhiteSpace(hookLog) || string.IsNullOrWhiteSpace(canaryIp))
+        {
+            return false;
+        }
+
+        foreach (string line in hookLog.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(line);
+                JsonElement record = doc.RootElement;
+                if (!record.TryGetProperty("action", out JsonElement action)
+                    || !string.Equals(action.GetString(), "allow", StringComparison.Ordinal)
+                    || !record.TryGetProperty("rules_sha256", out JsonElement rulesHash)
+                    || string.IsNullOrWhiteSpace(rulesHash.GetString())
+                    || !record.TryGetProperty("ips", out JsonElement ips)
+                    || ips.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                if (ips.EnumerateArray().Any(ip => string.Equals(ip.GetString(), canaryIp, StringComparison.Ordinal)))
+                {
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                // Ignore unrelated malformed JSONL records; a valid canary record is still required.
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
