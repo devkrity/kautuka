@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
@@ -98,6 +99,48 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
             NetworkAddressClassifier.NonPublicV4.Take(NetworkAddressClassifier.NonPublicV4.Count - 1));
         IReadOnlyList<string> incompleteEnvoyRanges = NetworkAddressClassifier.ExtractRangesFromEnvoyFilterYaml(incompleteEnvoyYaml);
         Assert.NotEqual(goldenNonPublicV4, incompleteEnvoyRanges);
+    }
+
+    [Fact]
+    public void U8_WorkloadTextAndJsonRulesetsShareTheLiteralSecurityGolden_WithNegativeControl()
+    {
+        string textGolden = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "kautuka-workload.nft"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        string jsonTemplate = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl");
+        string[] expectedComments =
+        [
+            "input_drop",
+            "ipv6_drop",
+            "spoof_drop",
+            "wl_net_drop",
+            "meta_drop",
+            "udp_drop",
+            "final_drop",
+        ];
+
+        string[] textComments = Regex.Matches(textGolden, "comment \"(?<name>[^\"]+)\"", RegexOptions.CultureInvariant)
+            .Select(static match => match.Groups["name"].Value)
+            .ToArray();
+        string jsonGolden = jsonTemplate.Replace("{{IP}}", "10.247.1.20", StringComparison.Ordinal);
+        using JsonDocument document = JsonDocument.Parse(jsonGolden);
+        string[] jsonComments = document.RootElement.GetProperty("nftables")
+            .EnumerateArray()
+            .Where(static item => item.TryGetProperty("rule", out _))
+            .Select(static item => item.GetProperty("rule"))
+            .Where(static rule => rule.TryGetProperty("comment", out _))
+            .Select(static rule => rule.GetProperty("comment").GetString()!)
+            .ToArray();
+
+        Assert.Equal(expectedComments, textComments);
+        Assert.Equal(expectedComments, jsonComments);
+        Assert.Contains("oifname != \"lo\" ip saddr != 10.247.1.20 counter drop comment \"spoof_drop\"", textGolden, StringComparison.Ordinal);
+        Assert.Contains("ip daddr 10.247.0.0/16 counter drop comment \"wl_net_drop\"", textGolden, StringComparison.Ordinal);
+        Assert.Contains("ip daddr { 169.254.0.0/16, 168.63.129.16 } counter drop comment \"meta_drop\"", textGolden, StringComparison.Ordinal);
+        Assert.Contains("\"right\": \"10.247.1.20\"", jsonGolden, StringComparison.Ordinal);
+        Assert.Contains("\"addr\": \"10.247.0.0\"", jsonGolden, StringComparison.Ordinal);
+        Assert.Contains("\"addr\": \"169.254.0.0\"", jsonGolden, StringComparison.Ordinal);
+        Assert.Contains("\"168.63.129.16\"", jsonGolden, StringComparison.Ordinal);
+
     }
 
     private static IReadOnlyList<IReadOnlyList<string>> ExtractAllResolvedAddressFilters(string yaml)

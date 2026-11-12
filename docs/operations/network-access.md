@@ -14,7 +14,7 @@ Gateway writes explicit network privileges for user creation and role changes, a
 
 Registry rebuild processes each live container inspection independently, so malformed inspect output is logged and skipped without preventing later valid workloads from being registered. A local Linux integration test covers this failure isolation; it does not prove live egress topology initialization.
 
-The U8 Envoy LAN address-filter test now compares against a literal expected CIDR list rather than deriving its expectation from the public-range list. A local Linux mutation check caught a renderer with an incorrect LAN exclusion; the cross-language nftables golden comparison remains incomplete.
+The U8 Envoy LAN address-filter test now compares against a literal expected CIDR list rather than deriving its expectation from the public-range list. A local Linux mutation check caught a renderer with an incorrect LAN exclusion. The workload nft text golden and embedded JSON template now share a literal rule-comment golden and checks for key addresses; a full boundary ruleset golden remains open.
 
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 
