@@ -1,3 +1,5 @@
+using System.Reflection;
+
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
@@ -35,6 +37,35 @@ public sealed class ConnectorContainerSpecBuilderTests
         Assert.True(identity.Systemwide);
         Assert.Equal("deny-all", identity.Egress);
         Assert.Equal("system", identity.Kind);
+    }
+
+    [Fact]
+    public void SystemwideConnectorInstancesCarryUserIdentityAndUseSeparateContainers()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
+        {
+            ConnectorId = "system::shared-provider",
+            IsInternalSystemConnector = true,
+        };
+        ContainerContext userAlpha = CreateWorkspaceContext() with { UserId = "user-alpha" };
+        ContainerContext userBeta = CreateWorkspaceContext() with { UserId = "user-beta" };
+
+        List<string> alphaArgs = ConnectorContainerSpecBuilder.BuildRun(
+            connector, "alpha-container", WorkspaceMcpExecutionContext.Isolated, userAlpha,
+            persistent: true, allocatedIp: "10.247.1.30");
+        List<string> betaArgs = ConnectorContainerSpecBuilder.BuildRun(
+            connector, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
+            persistent: true, allocatedIp: "10.247.1.31");
+
+        Assert.Contains("io.kautuka.user=user-alpha", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.systemwide=true", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.systemwide=true", betaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.kind=connector", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.egress=normal", alphaArgs, StringComparer.Ordinal);
+        Assert.NotEqual(
+            InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userAlpha),
+            InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userBeta));
     }
 
     [Fact]
@@ -324,6 +355,17 @@ public sealed class ConnectorContainerSpecBuilderTests
     private static ContainerContext CreateWorkspaceContext()
         => new("agent", "agent-alpha", "user-alpha", "/tmp/agent-alpha", "/workspace", "image@sha256:digest",
             1, "512m", 30, [], new Dictionary<string, string>());
+
+    private static string InvokeBuildContainerName(
+        string connectorId,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext workspaceContext)
+    {
+        MethodInfo method = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("BuildContainerName", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("BuildContainerName method was not found.");
+        return Assert.IsType<string>(method.Invoke(null, [connectorId, executionContext, workspaceContext]));
+    }
 
     private static void AssertOption(List<string> arguments, string option, string expectedValue)
     {

@@ -53,7 +53,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(connectors);
         return [.. connectors
-            .Where(static connector => connector.Enabled)
+            .Where(static connector => connector.Enabled && !connector.IsInternalSystemConnector)
             .Select(static connector => BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null))
             .Distinct(StringComparer.OrdinalIgnoreCase)];
     }
@@ -64,7 +64,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(connectors);
         var notes = new List<string>();
-        foreach (WorkspaceMcpContainerConnectorDefinition connector in connectors.Where(static item => item.Enabled))
+        foreach (WorkspaceMcpContainerConnectorDefinition connector in connectors.Where(static item => item.Enabled && !item.IsInternalSystemConnector))
         {
             string containerName = BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
             string runtimeKey = BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
@@ -553,7 +553,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
                 .AllocateNextIp(workloadRegistry);
             NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
-            string attribution = identity.Egress == "deny-all" ? "none" : (isProbe ? "user" : "user-agent");
+            string attribution = identity.Egress == "deny-all"
+                ? "none"
+                : (isProbe || string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
 
             if (workloadRegistry is not null)
             {
@@ -866,7 +868,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
             .AllocateNextIp(workloadRegistry);
         NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
-        string attribution = identity.Egress == "deny-all" ? "none" : (isProbe ? "user" : "user-agent");
+        string attribution = identity.Egress == "deny-all"
+            ? "none"
+            : (isProbe || string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
 
         if (workloadRegistry is not null)
         {
@@ -1313,7 +1317,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string connectorSegment = connectorId;
 
         int separatorIndex = connectorId.IndexOf(separator, StringComparison.Ordinal);
-        if (separatorIndex > 0 && separatorIndex + separator.Length < connectorId.Length)
+        if (!string.IsNullOrWhiteSpace(workspaceContext?.UserId))
+        {
+            userSegment = workspaceContext.UserId;
+            if (separatorIndex > 0 && separatorIndex + separator.Length < connectorId.Length)
+            {
+                connectorSegment = connectorId[(separatorIndex + separator.Length)..];
+            }
+        }
+        else if (separatorIndex > 0 && separatorIndex + separator.Length < connectorId.Length)
         {
             userSegment = connectorId[..separatorIndex];
             connectorSegment = connectorId[(separatorIndex + separator.Length)..];

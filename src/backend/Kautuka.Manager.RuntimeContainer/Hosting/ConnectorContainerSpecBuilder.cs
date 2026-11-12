@@ -38,7 +38,12 @@ internal static class ConnectorContainerSpecBuilder
 
         if (connector.IsInternalSystemConnector)
         {
-            return new ConnectorIdentity(string.Empty, string.Empty, true, "deny-all", "system");
+            return new ConnectorIdentity(
+                userId,
+                string.Empty,
+                true,
+                string.IsNullOrWhiteSpace(userId) ? "deny-all" : "normal",
+                string.IsNullOrWhiteSpace(userId) ? "system" : "connector");
         }
 
         if (string.IsNullOrWhiteSpace(userId))
@@ -126,7 +131,7 @@ internal static class ConnectorContainerSpecBuilder
             AgentId = agentId,
             ConnectorId = connector.ConnectorId,
             ExecContext = execContext,
-            Kind = connector.IsInternalSystemConnector ? "system" : "connector",
+            Kind = identity.Kind,
             Systemwide = systemwide,
             Egress = egress,
             Purpose = purpose,

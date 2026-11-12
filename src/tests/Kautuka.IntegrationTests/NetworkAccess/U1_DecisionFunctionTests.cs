@@ -439,6 +439,31 @@ public sealed class U1_DecisionFunctionTests : IDisposable
     }
 
     [Fact]
+    public void V7_40_SystemwideConnectorInstancesKeepPerUserGrantDecisions_WithNegativeControl()
+    {
+        NacController controller = CreateController(out _);
+        const string connectorId = "system::shared-provider";
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.1.51", "user-alpha", null, "system-provider-alpha", "connector", connectorId,
+            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.1.52", "user-beta", null, "system-provider-beta", "connector", connectorId,
+            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        (_, NetworkAccessRuleView alphaRule) = controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("user", "user-alpha", null, connectorId, "provider.example", "host", 443, Allowed: true),
+            controller.PolicyStore.Revision);
+
+        Assert.True(controller.EvaluateContainerConnection("10.247.1.51", "198.18.250.250", 443, true, "provider.example").Allowed);
+        Assert.False(controller.EvaluateContainerConnection("10.247.1.52", "198.18.250.250", 443, true, "provider.example").Allowed);
+
+        controller.PolicyStore.DeleteRule(admin, alphaRule.Rule.Id, controller.PolicyStore.Revision);
+        Assert.False(controller.EvaluateContainerConnection("10.247.1.51", "198.18.250.250", 443, true, "provider.example").Allowed);
+    }
+
+    [Fact]
     public void V7_37_SystemwideProviderRule_AllowsOnlyAdminGrantedEndpoint_WithNegativeControls()
     {
         NacController controller = CreateController(out _);
