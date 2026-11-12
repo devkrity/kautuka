@@ -684,9 +684,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string envoyPath = Path.Combine(nacDir, "envoy.yaml");
         string corefilePath = Path.Combine(nacDir, "Corefile");
 
-        await File.WriteAllTextAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
-        await File.WriteAllTextAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
-        await File.WriteAllTextAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
+        await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
+        await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
+        await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
 
         // Check if pod exists:
         PodmanCommandResult inspectPod = await podmanRunner
@@ -866,6 +866,49 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 allowlistEntries.Add(new(containerId, role, [EgressPodIp, OutsidePodIp], imageDigest));
             }
             WriteInfraAllowlist(allowlistEntries);
+        }
+    }
+
+    internal static async Task WriteConfigAtomicallyAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken,
+        Func<Stream, string, CancellationToken, Task>? writer = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(content);
+
+        string fullPath = Path.GetFullPath(path);
+        string directory = Path.GetDirectoryName(fullPath)!;
+        Directory.CreateDirectory(directory);
+        string tempPath = Path.Combine(directory, ".nac-config-" + Guid.NewGuid().ToString("N") + ".tmp");
+
+        try
+        {
+            var stream = new FileStream(
+                tempPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                FileOptions.Asynchronous | FileOptions.WriteThrough);
+            await using (stream.ConfigureAwait(false))
+            {
+                writer ??= static async (target, text, token) =>
+                    await target.WriteAsync(System.Text.Encoding.UTF8.GetBytes(text), token).ConfigureAwait(false);
+
+                await writer(stream, content, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(tempPath, fullPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
         }
     }
 

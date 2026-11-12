@@ -610,6 +610,27 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_ConfigReplacementKeepsPreviousFileOnInterruptedWrite_WithNegativeControl()
+    {
+        string configPath = Path.Combine(tempDir, "envoy.yaml");
+        await File.WriteAllTextAsync(configPath, "previous-valid-config", TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<IOException>(() => EgressTopologyManager.WriteConfigAtomicallyAsync(
+            configPath,
+            "new-config-that-must-not-be-partially-published",
+            TestContext.Current.CancellationToken,
+            async (stream, text, cancellationToken) =>
+            {
+                byte[] partial = System.Text.Encoding.UTF8.GetBytes(text[..8]);
+                await stream.WriteAsync(partial, cancellationToken);
+                throw new IOException("simulated write interruption");
+            }));
+
+        Assert.Equal("previous-valid-config", await File.ReadAllTextAsync(configPath, TestContext.Current.CancellationToken));
+        Assert.Empty(Directory.GetFiles(tempDir, ".nac-config-*.tmp"));
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)
