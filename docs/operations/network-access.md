@@ -8,7 +8,7 @@ This guide describes the architecture, approval workflows, operational procedure
 
 > **Status note:** This guide describes the target NAC v7 design. A rendered template or passing unit test does not prove a live Podman topology. The hook and policy components have local tests, and the launch path includes post-start checks for the ruleset hash, `no-new-privileges`, IPv6 disablement, Podman-resolved capability sets (including null empty sets), and mount sources restricted to desired workspace roots matching the workload's registry user and agent; verifier tests cover the same agent ID under a different user, a sibling agent, IPv6 disablement, and a captured rootless Podman inspect fragment. The canary now requires a successful hook record for its own workload IP with an applied-rules hash; rendered boundary, Envoy, and CoreDNS configuration files are published by atomic replacement. Boundary nft output uses LF line endings so nft can parse it when the manager runs on Windows. On Linux, startup captures canonical hashes for both boundary nft tables and reconcile closes the startup gate if their live hashes change. Startup and reconcile also require a successful exit code from the boundary init container, not only an exited state. Existing egress pods are checked for their recorded workload/outside addresses and forwarding sysctls before startup trusts them. The Envoy and CoreDNS create arguments use their pinned images' non-root defaults; tests ensure no root override is supplied. Startup and reconcile now reject a degraded or incomplete egress pod and keep the NAC launch gate closed. These checks have local Linux tests and have not yet been confirmed in CI or against live Podman. The other verifier tests and overlapping ephemeral-call test have local Linux evidence but have not yet been confirmed by CI or a live Podman connector run. New connector and sandbox launches consult the startup gate and persisted brakes. If an emergency brake cannot stop or kill a workload, the registry retains its identity so authorization can still fail closed; this path has a local test but still needs live Podman proof. Isolated connector launches keep user/agent identity labels while filtering workspace mounts; internal system connectors keep `deny-all` egress even when an agent invokes them with user context. Focused tests cover agent and probe argument construction and the missing-user failure. The boundary image lookup resolves the repository Dockerfile from the build output directory and fails with a direct diagnostic if the build fails. The full egress pod and end-to-end acceptance still need real Podman/nft proof. Treat the sections below as design and operator intent until a capability is explicitly marked **Proven** by a real Podman/nft acceptance run.
 
-`PodmanContainerTool` records and labels an agent identity only when its context scope is `agent`; a non-agent scope cannot inherit its scope ID as an agent ID. A Linux integration test covers rejection of a non-agent sandbox spec with no agent identity. Connector container fingerprints are derived at runtime from the resolved user/agent identity, execution context, connector image, and compatibility profile. The desired-state record does not infer an owner from the connector ID; runtime reconciliation supplies the launch identity when it compares a running connector.
+`PodmanContainerTool` records and labels an agent identity only when its context scope is `agent`; a non-agent scope cannot inherit its scope ID as an agent ID. A Linux integration test covers rejection of a non-agent sandbox spec with no agent identity. Connector container fingerprints are derived at runtime from the resolved user/agent identity, execution context, connector image, and compatibility profile. The desired-state record does not infer an owner from the connector ID. **Reconcile identity matching is not yet proven end to end**; do not treat a matching desired-state fingerprint as proof that reconciliation verified the owner of a running connector.
 
 Gateway writes explicit network privileges for user creation and role changes. Startup adds role defaults only when a user has no saved privilege record; it preserves saved choices and records any backfill as the `system` actor. A failed Manager sync during a role change restores the previous Gateway role and returns `503`; a failed startup lookup or backfill prevents Gateway startup. Reading an implicit admin default does not write the policy file. Linux integration tests cover reopened-store startup behavior, backfill audit attribution, promotion and demotion, and rejection of a demotion when Manager is unavailable. These are local test results, not CI or live-service evidence.
 
@@ -37,7 +37,6 @@ flowchart LR
   subgraph PODMAN["Rootless Podman Runtime"]
     subgraph WL["kautuka-workload (10.247.0.0/16 --internal --disable-dns)"]
       W1["Workload Container<br/>(10.247.1.5, cap-drop ALL, ro-rootfs)"]
-      PK["Package Proxy (10.247.0.3:20101)"]
     end
     subgraph EG["kautuka-egress Pod"]
       INIT["Init Container<br/>(boundary.nft)"]
@@ -50,9 +49,10 @@ flowchart LR
   W1 -.->|"DNS queries (:53)"| DNS
   ENV -->|"ext_authz Authorization/Check"| LST
   ENV -->|"Approved egress"| NET["Internet"]
-  W1 -.-x|"Dropped by hook ruleset"| PK
   HOOK["OCI createRuntime hook<br/>(kautuka_hook.py)"] -.-> W1
 ```
+
+The package proxy shown in earlier NAC v7 diagrams is not deployed. Package-manager access through a proxy remains a Phase 6 design item; the current workload hook blocks that path.
 
 ### Key Architectural Pillars
 
@@ -82,7 +82,7 @@ flowchart LR
 
 ## 2. User & Approval Workflows `[Implementation status varies; see status note above]`
 
-### 2.1 Approval Cards `[Built]`
+### 2.1 Approval Cards
 When an agent or connector attempts an outbound connection to an unapproved destination:
 1. Envoy or Gateway blocks the connection and registers a pending access request in `NetworkAccessController`.
 2. A single approval card appears in the **Network Approvals** section of the Kautuka Web UI.
@@ -98,7 +98,7 @@ When an agent or connector attempts an outbound connection to an unapproved dest
    - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared when the probe operation completes, independently of container deregistration. Subsequent runtime containers ask normally and write standard persistent rules.
    - User-owned connector probes go to the connector owner if they hold `canApproveOwn` (otherwise an administrator); systemwide connector probes always route exclusively to administrators.
 
-### 2.2 User Privileges `[Built]`
+### 2.2 User Privileges
 Administrators manage per-user network privileges under User Settings:
 - `canApproveOwn` (Default: **OFF** for standard users, **ON** for administrators):
   When enabled, the user can approve or deny network requests originating from their own agents. When disabled, requests escalate to administrators with a notice ("Waiting for an administrator to approve").
@@ -107,17 +107,17 @@ Administrators manage per-user network privileges under User Settings:
 - **Role-Change & Card Synchronization**:
   Gateway persists initial admin and invited-user privileges synchronously into Manager (`SetUserPrivileges`) on account creation and role transitions (promotion enables both flags; demotion clears both flags and pauses existing `user`-scope rules). Approval cards and rule views read the stored Manager record rather than inferring flags from role alone.
 
-### 2.3 Administrator Grants `[Built]`
+### 2.3 Administrator Grants
 - **Open Internet Grant (`any-public`)**:
   Administrators can grant open internet access to isolated containerized connectors (`scopeKind = user`, `destKind = any-public`, `port = 0`). This allows public internet egress while non-public IPv4 ranges (`NonPublicV4`) remain strictly enforced by kernel boundary rejection. Rule creation derives execution context and attribution server-side from Gateway's connector catalog and Manager's registry/desired-state/request records rather than trusting caller-supplied flags.
 - **LAN Grants (`allowLan`)**:
   When LAN grants are enabled, connections to RFC1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) route through Envoy's dedicated `dfp_lan` / `orig_dst_lan` clusters bound to `192.0.0.8`. The kernel boundary rule `lan_approved` permits this traffic while blocking access to `10.247.0.0/16` and metadata.
 
-### 2.4 Emergency Brake `[Built]`
+### 2.4 Emergency Brake
 - **User Emergency Brake**: Immediately pauses network access for all containers owned by the user, stops running workload containers, and blocks new container creation.
 - **System Emergency Brake (Admin Only)**: Halts all workload network egress across the entire instance and shuts down all running agent containers. Rules remain intact and are restored upon releasing the brake.
 
-### 2.5 Image Compatibility Profiles `[Built]`
+### 2.5 Image Compatibility Profiles
 Third-party containerized MCP tools that cannot operate under hardened security defaults may be granted an admin compatibility profile keyed by image digest (`sha256:...`). The profile selectively relaxes:
 - `writable-rootfs`: Permits a writable container filesystem.
 - `root-user`: Permits execution as container UID 0.
@@ -190,7 +190,9 @@ Verify the following rule comments are present:
 - `udp_drop`
 - `final_drop`
 
-### 3.4 Validating Static Templates `[Built]`
+### 3.4 Validating Rendered Configurations
+
+These commands validate files that have already been rendered. The checked-in templates and renderer tests do not prove that a live Podman topology applied the files.
 
 #### Envoy Static Configuration
 Validate the rendered Envoy bootstrap configuration using the official Envoy container:

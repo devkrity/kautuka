@@ -20,6 +20,20 @@ public sealed class NetworkAccessArchitectureContractTests
     private static readonly string channelHostRoot = ResolveProjectRoot("Kautuka.ChannelHost");
 
     [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public void V7_21_OperationsGuideDoesNotClaimUnprovenTopologyOrTesting()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string guide = File.ReadAllText(Path.Combine(repositoryRoot, "docs", "operations", "network-access.md"));
+
+        Assert.DoesNotContain("Package Proxy (10.247.0.3:20101)", guide, StringComparison.Ordinal);
+        Assert.DoesNotContain("runtime reconciliation supplies the launch identity", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("### 3.4 Validating Static Templates `[Built]`", guide, StringComparison.Ordinal);
+        Assert.DoesNotContain("### 2.1 Approval Cards `[Built]`", guide, StringComparison.Ordinal);
+        Assert.Contains("full egress pod and end-to-end acceptance still need real Podman/nft proof", guide, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
     public void G1_AllOutboundHttpAndWebSocketUsages_AreCheckedOrAllowlisted()
     {
