@@ -774,16 +774,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             "kautuka-egress-dns",
             "egress-dns",
             CoreDnsPinnedImage,
-            [
-                "create",
-                "--pod", EgressPodName,
-                "--name", "kautuka-egress-dns",
-                "--cap-add", "NET_BIND_SERVICE",
-                "--user", "0:0",
-                "-v", $"{corefilePath}:/etc/coredns/Corefile:ro",
-                CoreDnsPinnedImage,
-                "-conf", "/etc/coredns/Corefile"
-            ],
+            BuildCoreDnsCreateArgs(corefilePath),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -791,23 +782,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         Directory.CreateDirectory(envoySocketHostDir);
         string adminSocketDir = Path.Combine(stateDirectory, "admin-socket");
         Directory.CreateDirectory(adminSocketDir);
-        List<string> envoyCreateArgs =
-        [
-            "create",
-            "--pod", EgressPodName,
-            "--name", "kautuka-egress-envoy",
-            "--user", "0:0",
-            "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro",
-            "-v", $"{envoySocketHostDir}:/run/kautuka-nac:z",
-            "-v", $"{adminSocketDir}:/run/kautuka-admin:z",
-            EnvoyPinnedImage,
-            "-c", "/etc/envoy/envoy.yaml"
-        ];
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-envoy",
             "egress-envoy",
             EnvoyPinnedImage,
-            envoyCreateArgs,
+            BuildEnvoyCreateArgs(envoyPath, envoySocketHostDir, adminSocketDir),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -817,6 +796,29 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             throw new InvalidOperationException($"Failed to start egress pod '{EgressPodName}' (rc {podStart.ExitCode}): {podStart.StdErr}");
         }
     }
+
+    internal static IReadOnlyList<string> BuildCoreDnsCreateArgs(string corefilePath) =>
+    [
+        "create",
+        "--pod", EgressPodName,
+        "--name", "kautuka-egress-dns",
+        "--cap-add", "NET_BIND_SERVICE",
+        "-v", $"{corefilePath}:/etc/coredns/Corefile:ro",
+        CoreDnsPinnedImage,
+        "-conf", "/etc/coredns/Corefile"
+    ];
+
+    internal static IReadOnlyList<string> BuildEnvoyCreateArgs(string envoyPath, string envoySocketHostDir, string adminSocketDir) =>
+    [
+        "create",
+        "--pod", EgressPodName,
+        "--name", "kautuka-egress-envoy",
+        "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro",
+        "-v", $"{envoySocketHostDir}:/run/kautuka-nac:z",
+        "-v", $"{adminSocketDir}:/run/kautuka-admin:z",
+        EnvoyPinnedImage,
+        "-c", "/etc/envoy/envoy.yaml"
+    ];
 
     private async Task EnsureInfraContainerCreatedAsync(
         string containerName,

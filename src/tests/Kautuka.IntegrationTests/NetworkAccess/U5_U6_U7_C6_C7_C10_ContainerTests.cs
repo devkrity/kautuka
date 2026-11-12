@@ -631,6 +631,23 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_20_UnprivilegedInfraImagesUseTheirPinnedNonRootUsers_WithNegativeControl()
+    {
+        IReadOnlyList<string> dnsArgs = EgressTopologyManager.BuildCoreDnsCreateArgs("/state/Corefile");
+        IReadOnlyList<string> envoyArgs = EgressTopologyManager.BuildEnvoyCreateArgs(
+            "/state/envoy.yaml",
+            "/state/sockets",
+            "/state/admin-socket");
+
+        Assert.DoesNotContain("--user", dnsArgs);
+        Assert.DoesNotContain("--user", envoyArgs);
+        Assert.Contains("--cap-add", dnsArgs);
+        Assert.Contains("NET_BIND_SERVICE", dnsArgs);
+        Assert.Contains(EgressTopologyManager.CoreDnsPinnedImage, dnsArgs);
+        Assert.Contains(EgressTopologyManager.EnvoyPinnedImage, envoyArgs);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)
