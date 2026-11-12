@@ -17,6 +17,69 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceGrpcServiceTests
 {
+    [Fact]
+    public async Task V7_40_GatewaySystemScopeSurvivesDesiredStateGrpcMapping_WithNegativeControl()
+    {
+        var gatewayConnector = new WorkspaceMcpContainerConnectorPayload(
+            "user-a::shared-provider",
+            "shared-provider",
+            "ghcr.io/example/provider@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            [],
+            Enabled: true,
+            IsInternalSystemConnector: false,
+            BundlePath: null,
+            ServerType: null,
+            Environment: [],
+            ReadinessTimeoutSeconds: 30,
+            JitCooldownSeconds: 600,
+            CatalogScope: "system");
+        var desiredState = new WorkspaceDesiredStatePayload(
+            new ManagerRuntimeSettingsPayload("/tmp/kautuka-workspaces", "ghcr.io/example/sandbox:latest", 2, "2g", 3600, null, null, null, null, null),
+            [],
+            [gatewayConnector],
+            []);
+        var update = new ManagerDesiredStateUpdateRequest(desiredState, 1, WorkspaceDesiredStateSyncReason.Bootstrap, Guid.NewGuid().ToString("D"), "gateway-v7-40-test");
+
+        var store = new WorkspaceDesiredStateStore();
+        var managerConnector = new WorkspaceMcpContainerConnectorDefinition(
+            gatewayConnector.ConnectorId,
+            gatewayConnector.Image,
+            gatewayConnector.Command,
+            gatewayConnector.Args,
+            gatewayConnector.Enabled,
+            gatewayConnector.IsInternalSystemConnector,
+            gatewayConnector.BundlePath,
+            gatewayConnector.ServerType,
+            gatewayConnector.Environment,
+            gatewayConnector.ReadinessTimeoutSeconds,
+            gatewayConnector.JitCooldownSeconds,
+            gatewayConnector.McpProtocolVersion)
+        {
+            CatalogScope = "system",
+        };
+        var runtimeSettings = new ManagerRuntimeSettings(
+            new ManagerWorkspaceDefinition { BaseRoot = "/tmp/kautuka-workspaces" },
+            new ManagerSandboxRuntimeDefinition { Image = "ghcr.io/example/sandbox:latest", DefaultCpus = 2, DefaultMemory = "2g", DefaultTimeout = 3600 },
+            new WorkspaceTelemetryDefinition());
+        store.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap, runtimeSettings, [], [managerConnector], [], "gateway-v7-40-test");
+        Assert.True(store.TryMarkReconciled(1, WorkspaceReconcileTriggerKind.DesiredStateAccepted, DateTimeOffset.UtcNow));
+
+        var readiness = new WorkspaceReadinessGate();
+        readiness.SignalReady();
+        var service = new WorkspaceGrpcService(
+            null!, store, readiness, new WorkspaceExecTracker(), new StubRuntimeHealthProbe(true),
+            null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
+        var client = new ManagerGrpcServiceClient(
+            new DesiredStateServiceCallInvoker(request => service.UpdateDesiredState(request, TestServerCallContext.Instance)),
+            "in-process-test");
+        DesiredStateUpdateResponse response = await client.UpdateDesiredStateAsync(update, TestContext.Current.CancellationToken);
+
+        Assert.Equal(DesiredStateUpdateOutcome.Replayed, response.Outcome);
+        WorkspaceMcpContainerConnectorDefinition saved = Assert.Single(store.Snapshot.DesiredContainerConnectors);
+        Assert.Equal("system", saved.CatalogScope);
+    }
+
     [Theory]
     [InlineData("user-missing")]
     [InlineData("")]
@@ -532,6 +595,44 @@ public sealed class WorkspaceGrpcServiceTests
             => throw new NotSupportedException();
 
         public Task CloseSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class DesiredStateServiceCallInvoker(
+        Func<WorkspaceDesiredStateUpdate, Task<DesiredStateUpdateResponse>> updateDesiredState) : CallInvoker
+    {
+        public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(
+            Method<TRequest, TResponse> method,
+            string? host,
+            CallOptions options,
+            TRequest request)
+        {
+            if (request is not WorkspaceDesiredStateUpdate update || typeof(TResponse) != typeof(DesiredStateUpdateResponse))
+            {
+                throw new NotSupportedException($"Unexpected gRPC method '{method.Name}'.");
+            }
+
+            async Task<TResponse> InvokeAsync()
+                => (TResponse)(object)await updateDesiredState(update).ConfigureAwait(false);
+
+            return new AsyncUnaryCall<TResponse>(
+                InvokeAsync(),
+                Task.FromResult(new Metadata()),
+                static () => Status.DefaultSuccess,
+                static () => new Metadata(),
+                static () => { });
+        }
+
+        public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
+            => throw new NotSupportedException();
+
+        public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
+            => throw new NotSupportedException();
+
+        public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
+            => throw new NotSupportedException();
+
+        public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
             => throw new NotSupportedException();
     }
 
