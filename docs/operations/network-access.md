@@ -235,4 +235,4 @@ When container startup fails with exit code 126 or 1, check the `reason` field i
 ## 6. AI Provider Endpoints (v7-37)
 - There is no built-in localhost or Ollama exception. Gateway calls to a provider endpoint are denied until an admin grants a rule.
 - At the **Test connection** step (Settings > Providers, and the first-run wizard), before the outbound test call, the admin is asked to allow the provider's address systemwide. Nothing is written on save, and Cancel sends no request and writes no rule.
-- The grant is a `system`-scope rule (admin only; `PUT /api/network-access/rules`). Loopback addresses are accepted only in a `system` rule with an admin LAN grant. Tested by `V7_37_SystemwideProviderRule_*` and the `v7-37` cases in `useOnboardingFlow.test.tsx`.
+- The grant is a `system`-scope rule (admin only; `PUT /api/network-access/rules`). Loopback addresses are accepted only in a `system` rule with an admin LAN grant. Focused local coverage includes `TestConnectionCreatesAdminApprovalBeforeSystemwideProviderRule_WithNegativeControl`; CI confirmation is pending.

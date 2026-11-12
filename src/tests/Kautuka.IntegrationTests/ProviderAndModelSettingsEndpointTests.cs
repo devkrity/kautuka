@@ -9,10 +9,13 @@ using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Autopilot;
+using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Protos;
+using Kautuka.NetworkAccess.Client;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -34,6 +37,81 @@ namespace Kautuka.IntegrationTests;
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ProviderSettingsEndpointTests
 {
+    [Fact]
+    public async Task TestConnectionCreatesAdminApprovalBeforeSystemwideProviderRule_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-provider-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var controller = new NetworkAccessController.NetworkAccessController(policyStore, new WorkloadRegistry());
+            var validation = new NetworkAccessProviderTestProbe(controller);
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
+            builder.Services.AddSingleton<IProviderValidationService>(validation);
+            builder.Services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
+            WebApplication app = builder.Build();
+            await using (app)
+            {
+                app.MapGatewaySettingsEndpoints();
+                await app.StartAsync(TestContext.Current.CancellationToken);
+                using HttpClient client = app.GetTestClient();
+
+                using HttpResponseMessage response = await client.PostAsJsonAsync(
+                    "/api/settings/providers/test",
+                    new { provider_id = "ollama-local" },
+                    cancellationToken: TestContext.Current.CancellationToken);
+                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+                Assert.Equal("no_rule", validation.Decision?.Reason);
+                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), validation.Scope);
+
+                var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+                NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
+                    .Select(static view => view.Request)
+                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443);
+                Assert.NotNull(pending);
+                Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
+
+                _ = policyStore.SetRule(admin,
+                    new RuleWriteSpec("system", null, null, null, "api.provider.test", "host", 443, Allowed: true),
+                    policyStore.Revision);
+                Assert.True(controller.EvaluateOutboundCheck(new OutboundCheckInput(
+                    "admin-1", "gateway", null, false, "api.provider.test", 443, "provider-test", null)).Allowed);
+            }
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private sealed class NetworkAccessProviderTestProbe(NetworkAccessController.NetworkAccessController controller) : IProviderValidationService
+    {
+        public NetworkAccessScope? Scope { get; private set; }
+        public NetworkAccessDecisionResult? Decision { get; private set; }
+
+        public Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
+        {
+            Scope = NetworkAccessContext.Current;
+            Decision = controller.EvaluateOutboundCheck(new OutboundCheckInput(
+                Scope?.UserId ?? string.Empty, Scope?.AgentId ?? string.Empty, null, false,
+                "api.provider.test", 443, Scope?.Purpose ?? string.Empty, Scope?.Service));
+            return Task.FromResult(new GatewayProviderTestResult(false, "network approval required"));
+        }
+    }
+
+    private sealed class ProviderTestAdminAuthGuard : IGatewayAuthGuard
+    {
+        public bool TryAuthorize(HttpContext context, out GatewayUser? user) { user = Admin(); return true; }
+        public IResult? RequireAuthenticated(HttpContext context, out GatewayUser? user) { user = Admin(); return null; }
+        public IResult? RequireAdmin(HttpContext context, out GatewayUser? user) { user = Admin(); return null; }
+        private static GatewayUser Admin() => new(
+            Id: "admin-1", Username: "admin", Password: "", Role: "admin", IsActive: true,
+            Email: "admin@example.test", DisplayName: "Admin");
+    }
+
     [Fact]
     public async Task SaveProviderPersistsToCatalog()
     {
