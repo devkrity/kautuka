@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -62,6 +65,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
+    private string? expectedBoundaryRulesetHash;
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
@@ -195,6 +199,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         // 2. Ensure egress pod and containers exist, and write infra allowlist before start
         await EnsureEgressPodAsync(isWindowsHostNativeDev, decisionEndpointIp, includeLanGrants, cancellationToken).ConfigureAwait(false);
+
+        if (OperatingSystem.IsLinux())
+        {
+            expectedBoundaryRulesetHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         // 3. Rebuild registry from live containers before opening listener (Section 4.3.4 item 6)
         await RebuildRegistryFromLiveContainersAsync(registry, cancellationToken).ConfigureAwait(false);
@@ -852,6 +861,118 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
+    internal static string ComputeBoundaryRulesetHash(string ipv4RulesJson, string ipv6RulesJson)
+    {
+        string ipv4Hash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
+            ipv4RulesJson,
+            ["private_reject", "wl_net_reject"]);
+        string ipv6Hash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
+            ipv6RulesJson,
+            ["ipv6_drop_pod"]);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(ipv4Hash + ":" + ipv6Hash)));
+    }
+
+    private async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult podInspect = await podmanRunner
+            .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
+            .ConfigureAwait(false);
+        string infraId = ReadPodInfraContainerId(podInspect);
+        PodmanCommandResult infraInspect = await podmanRunner
+            .RunAsync(["inspect", infraId, "--format", "json"], 10, cancellationToken)
+            .ConfigureAwait(false);
+        int infraPid = ReadContainerPid(infraInspect);
+        string ipv4Rules = await ReadBoundaryNftTableAsync(infraPid, "ip", cancellationToken).ConfigureAwait(false);
+        string ipv6Rules = await ReadBoundaryNftTableAsync(infraPid, "ip6", cancellationToken).ConfigureAwait(false);
+        return ComputeBoundaryRulesetHash(ipv4Rules, ipv6Rules);
+    }
+
+    private static string ReadPodInfraContainerId(PodmanCommandResult inspect)
+    {
+        if (inspect.ExitCode != 0 || string.IsNullOrWhiteSpace(inspect.StdOut))
+        {
+            throw new InvalidOperationException($"Failed to inspect egress pod before boundary ruleset verification: {inspect.StdErr}");
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(inspect.StdOut);
+        JsonElement pod = doc.RootElement.ValueKind == JsonValueKind.Array
+            ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+            : doc.RootElement;
+        if (pod.ValueKind != JsonValueKind.Object
+            || !pod.TryGetProperty("InfraContainerID", out JsonElement id)
+            || string.IsNullOrWhiteSpace(id.GetString()))
+        {
+            throw new InvalidOperationException("Egress pod inspect did not contain an infra container ID for boundary ruleset verification.");
+        }
+
+        return id.GetString()!;
+    }
+
+    private static int ReadContainerPid(PodmanCommandResult inspect)
+    {
+        if (inspect.ExitCode != 0 || string.IsNullOrWhiteSpace(inspect.StdOut))
+        {
+            throw new InvalidOperationException($"Failed to inspect egress pod infra container: {inspect.StdErr}");
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(inspect.StdOut);
+        JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
+            ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+            : doc.RootElement;
+        if (container.ValueKind != JsonValueKind.Object
+            || !container.TryGetProperty("State", out JsonElement state)
+            || !state.TryGetProperty("Pid", out JsonElement pid)
+            || !pid.TryGetInt32(out int processId)
+            || processId <= 0)
+        {
+            throw new InvalidOperationException("Egress pod infra inspect did not contain a running PID for boundary ruleset verification.");
+        }
+
+        return processId;
+    }
+
+    private async Task<string> ReadBoundaryNftTableAsync(int infraPid, string family, CancellationToken cancellationToken)
+    {
+        string pid = infraPid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        IReadOnlyList<string> args = ["unshare", "nsenter", "-t", pid, "-n", "nft", "-j", "list", "table", family, "kautuka_egress"];
+        string output;
+        if (!Environment.IsPrivilegedProcess)
+        {
+            PodmanCommandResult nft = await podmanRunner.RunAsync(args, 10, cancellationToken).ConfigureAwait(false);
+            if (nft.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Rootless boundary nft verification failed for {family} (rc {nft.ExitCode}): {nft.StdErr}");
+            }
+
+            output = nft.StdOut;
+        }
+        else
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "nsenter",
+                    Arguments = $"-t {pid} -n nft -j list table {family} kautuka_egress",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                }
+            };
+            process.Start();
+            output = await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            string error = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Boundary nft verification failed for {family} (rc {process.ExitCode}): {error}");
+            }
+        }
+
+        return output;
+    }
+
     internal static bool HasRequiredEgressPodConfiguration(string? inspectJson)
     {
         if (string.IsNullOrWhiteSpace(inspectJson))
@@ -1129,6 +1250,27 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             logger.LogError("Egress pod health check failed during reconcile; closing the NAC startup gate.");
             IsStartupGateOpen = false;
             return;
+        }
+
+        if (IsStartupGateOpen && OperatingSystem.IsLinux())
+        {
+            try
+            {
+                string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash)
+                    || !string.Equals(liveBoundaryHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
+                {
+                    logger.LogError("Boundary nft ruleset hash changed during reconcile; closing the NAC startup gate.");
+                    IsStartupGateOpen = false;
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Boundary nft ruleset verification failed during reconcile; closing the NAC startup gate.");
+                IsStartupGateOpen = false;
+                return;
+            }
         }
 
         // 1. Compare running containers to registry

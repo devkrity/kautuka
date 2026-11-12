@@ -735,6 +735,65 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_ReconcileClosesGateWhenBoundaryRulesetDrifts_WithNegativeControl()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("Boundary netns ruleset drift verification runs on Linux rootless Podman.");
+        }
+
+        const string healthyPod = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra-id\",\"Containers\":["
+            + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
+            + "{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},"
+            + "{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},"
+            + "{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+        const string boundarySuccess = "[{\"State\":{\"Status\":\"exited\",\"ExitCode\":0}}]";
+        const string infraInspect = "[{\"State\":{\"Pid\":4242}}]";
+        const string ipv4Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},"
+            + "{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},"
+            + "{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
+        const string ipv4Tampered = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},"
+            + "{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},"
+            + "{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}},"
+            + "{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"rogue_accept\",\"expr\":[{\"accept\":null}]}}]}";
+        const string ipv6Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip6\",\"name\":\"kautuka_egress\"}},"
+            + "{\"rule\":{\"family\":\"ip6\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(string.Join(" ", args));
+            string output = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"])
+                ? healthyPod
+                : args.SequenceEqual(["inspect", "kautuka-egress-boundary", "--format", "json"])
+                    ? boundarySuccess
+                    : args.SequenceEqual(["inspect", "infra-id", "--format", "json"])
+                        ? infraInspect
+                        : args.SequenceEqual(["unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "ip", "kautuka_egress"])
+                            ? ipv4Tampered
+                            : args.SequenceEqual(["unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "ip6", "kautuka_egress"])
+                                ? ipv6Rules
+                                : "[]";
+            return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-drift-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        typeof(EgressTopologyManager)
+            .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+        typeof(EgressTopologyManager)
+            .GetField("expectedBoundaryRulesetHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4Rules, ipv6Rules));
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.Contains("unshare nsenter -t 4242 -n nft -j list table ip kautuka_egress", calls);
+        Assert.DoesNotContain("ps -a --format json", calls);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)
