@@ -1,0 +1,38 @@
+table ip kautuka_egress
+delete table ip kautuka_egress
+table ip kautuka_egress {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 tcp dport 53 counter return
+    ip saddr 10.247.0.0/16 meta l4proto tcp counter redirect to :15001
+  }
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    counter drop
+  }
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    ip saddr 10.247.0.0/16 tcp dport 15001 accept
+    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 meta l4proto { tcp, udp } th dport 53 accept
+    counter drop
+  }
+  chain output {
+    type filter hook output priority 0; policy accept;
+    ct state established,related accept
+    oifname "lo" ip daddr 127.0.0.1 meta l4proto { tcp, udp } th dport 10053 accept
+    oifname "lo" ip daddr 127.0.0.1 tcp dport { 15002, 15003 } accept
+    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 0.0.0.0/8, 192.0.0.0/24, 198.18.0.0/15, 224.0.0.0/3, 168.63.129.16/32 } counter reject comment "private_reject"
+    ip daddr 10.247.0.0/16 counter reject comment "wl_net_reject"
+    accept
+  }
+}
+table ip6 kautuka_egress
+delete table ip6 kautuka_egress
+table ip6 kautuka_egress {
+  chain output {
+    type filter hook output priority 0; policy drop;
+    counter drop comment "ipv6_drop_pod"
+  }
+}

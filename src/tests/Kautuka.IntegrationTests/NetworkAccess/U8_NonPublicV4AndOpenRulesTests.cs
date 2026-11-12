@@ -143,6 +143,17 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
 
     }
 
+    [Fact]
+    public void BoundaryRulesetMatchesIndependentGolden_WithNegativeControl()
+    {
+        string goldenPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "kautuka-egress-boundary.nft");
+        string golden = File.ReadAllText(goldenPath).Replace("\r\n", "\n", StringComparison.Ordinal);
+        string actual = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false)
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Equal(golden, actual);
+    }
+
     private static IReadOnlyList<IReadOnlyList<string>> ExtractAllResolvedAddressFilters(string yaml)
     {
         string[] lines = yaml.Split(['\r', '\n'], StringSplitOptions.None);
