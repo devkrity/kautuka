@@ -766,7 +766,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             connector,
             containerName,
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
-            workspaceContext,
+            workspaceContext ?? CreateWorkspaceContext(),
             persistent: false,
             allocatedIp: "10.247.1.1");
     }
@@ -824,10 +824,14 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             connector,
             containerName,
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
-            workspaceContext,
+            workspaceContext ?? CreateWorkspaceContext(),
             persistent: true,
             allocatedIp: "10.247.1.1");
     }
+
+    private static ContainerContext CreateWorkspaceContext()
+        => new("agent", "test-agent", "test-user", Path.GetTempPath(), "/workspace", "image@sha256:digest",
+            1, "512m", 30, [], new Dictionary<string, string>());
 
     private static List<string> InvokeBuildPodmanExecArguments(
         WorkspaceMcpContainerConnectorDefinition connector,
