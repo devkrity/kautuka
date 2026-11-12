@@ -636,7 +636,52 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             });
             Assert.Equal(StatusCode.PermissionDenied, exSelfEscalate.StatusCode);
 
-            // (f) Admin default: an admin user has both privileges true by default without any prior SetUserPrivileges call
+            // (f) Admin default: an admin user's first request/rule decision persists default privileges to disk
+            //     so decisions and UI never disagree (not paused), and demotion resets ON flags cleanly (v7-4).
+            RegisterAgent(registry, "10.247.0.48", "admin-new", "admin-agent-1");
+            RegisterAgent(registry, "10.247.0.49", "admin-new", "admin-agent-2");
+            var newAdmin = new NetworkAccessActorMessage { UserId = "admin-new", IsAdmin = true };
+
+            // Without any prior GetUserPrivileges call, admin-new lists/decides at 'user' scope:
+            _ = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = newAdmin }, ctx);
+            NetworkAccessSetRuleResponse adminRule = await svc.SetRule(new NetworkAccessSetRuleRequest
+            {
+                Actor = newAdmin,
+                ScopeKind = "user",
+                UserId = "admin-new",
+                Destination = "admin-default.example.com",
+                DestKind = "host",
+                Port = 443,
+                Allowed = true,
+                ExpectedRevision = userApproveAllAgents.Revision,
+            }, ctx);
+
+            Assert.False(adminRule.Rule.Paused);
+            Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
+
+            // Reopen persisted policy store from disk to verify admin defaults actually persisted (non-tautological).
+            using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json")))
+            {
+                Assert.True(reopened.HasBothPrivileges("admin-new"));
+                Assert.False(reopened.ListRules(new NetworkAccessActor("admin-new", IsAdmin: true)).Rules.Single(r => r.Rule.Destination == "admin-default.example.com").Paused);
+            }
+
+            // Negative control (.NC): demoting admin-new clears their ON flags, pauses user-scope rules, and denies agent-2.
+            NetworkAccessUserPrivilegesMessage demoted = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "admin-new",
+                CanApproveOwn = false,
+                CanAllowAllAgents = false,
+                TargetIsAdmin = false,
+            }, ctx);
+            Assert.False(demoted.CanApproveOwn);
+            Assert.False(demoted.CanAllowAllAgents);
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
+            NetworkAccessListRulesResponse afterDemoteRules = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx);
+            Assert.True(afterDemoteRules.Rules.Single(r => r.Destination == "admin-default.example.com").Paused);
+
+            // Also verify GetUserPrivileges persists admin default when called cleanly for another admin.
             NetworkAccessUserPrivilegesMessage adminDefaultPrivs = await svc.GetUserPrivileges(new NetworkAccessGetUserPrivilegesRequest
             {
                 Actor = admin,

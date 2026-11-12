@@ -46,10 +46,12 @@ internal static partial class GatewayRuntimeEndpointMappings
                 request,
                 cancellationToken: cancellationToken);
 
-            var privCache = new Dictionary<string, UserPrivilegesSummaryDto>(StringComparer.Ordinal);
-            privCache[user.Id] = new UserPrivilegesSummaryDto(
-                isAdmin || response.Privileges.CanApproveOwn,
-                isAdmin || response.Privileges.CanAllowAllAgents);
+            var privCache = new Dictionary<string, UserPrivilegesSummaryDto>(StringComparer.Ordinal)
+            {
+                [user.Id] = new UserPrivilegesSummaryDto(
+                    response.Privileges.CanApproveOwn,
+                    response.Privileges.CanAllowAllAgents),
+            };
 
             var dtos = new List<NetworkAccessRequestDto>(response.Requests.Count);
             foreach (NetworkAccessRequestMessage req in response.Requests)
@@ -59,104 +61,19 @@ internal static partial class GatewayRuntimeEndpointMappings
                     continue;
                 }
 
-                string? userDisplayName = null;
-                string? userPronoun = null;
-                bool ownerIsAdmin = false;
-
-                if (!string.IsNullOrWhiteSpace(req.UserId))
-                {
-                    if (userStore.TryGetUserById(req.UserId, out GatewayUser? ownerUser) && ownerUser is not null)
-                    {
-                        userDisplayName = !string.IsNullOrWhiteSpace(ownerUser.DisplayName) ? ownerUser.DisplayName : ownerUser.Username;
-                        ownerIsAdmin = GatewayOwnershipAccess.IsAdmin(ownerUser);
-                    }
-                    else
-                    {
-                        userDisplayName = req.UserId;
-                    }
-                }
-
-                string? agentDisplayName = null;
-                if (!string.IsNullOrWhiteSpace(req.AgentId) && catalogStore.TryGetAgent(req.AgentId, out GatewayAgent? agent) && agent is not null)
-                {
-                    agentDisplayName = agent.Name;
-                }
-
-                string? connectorDisplayName = null;
-                if (!string.IsNullOrWhiteSpace(req.ConnectorId) && catalogStore.TryGetMcpServer(req.ConnectorId, out GatewayMcpServer? connector) && connector is not null)
-                {
-                    connectorDisplayName = connector.Name;
-                }
-
-                // Resolve owner privileges per v7-12
-                UserPrivilegesSummaryDto? ownerPrivs = null;
-                if (!string.IsNullOrWhiteSpace(req.UserId))
-                {
-                    if (!privCache.TryGetValue(req.UserId, out ownerPrivs))
-                    {
-                        if (ownerIsAdmin)
-                        {
-                            ownerPrivs = new UserPrivilegesSummaryDto(true, true);
-                        }
-                        else
-                        {
-                            try
-                            {
-                                NetworkAccessUserPrivilegesMessage p = await managerService.Client.GetUserPrivilegesAsync(
-                                    new NetworkAccessGetUserPrivilegesRequest
-                                    {
-                                        Actor = actor,
-                                        UserId = req.UserId,
-                                        TargetIsAdmin = false,
-                                    },
-                                    cancellationToken: cancellationToken);
-                                ownerPrivs = new UserPrivilegesSummaryDto(p.CanApproveOwn, p.CanAllowAllAgents);
-                            }
-                            catch (RpcException)
-                            {
-                                ownerPrivs = new UserPrivilegesSummaryDto(false, false);
-                            }
-                        }
-                        privCache[req.UserId] = ownerPrivs;
-                    }
-                }
-
-                bool canApproveOwn = ownerPrivs?.CanApproveOwn ?? ownerIsAdmin;
-                bool canAllowAllAgents = ownerPrivs?.CanAllowAllAgents ?? ownerIsAdmin;
-
-                bool isSystemwide = req.Systemwide || req.Attribution is "none" || req.ActorKind is "first-party";
-                bool waitingForAdmin = req.WaitingForAdmin || isSystemwide || !canApproveOwn;
-
-                dtos.Add(new NetworkAccessRequestDto(
-                    Id: req.Id,
-                    UserId: string.IsNullOrWhiteSpace(req.UserId) ? null : req.UserId,
-                    UserDisplayName: userDisplayName,
-                    UserPronoun: userPronoun,
-                    AgentId: string.IsNullOrWhiteSpace(req.AgentId) ? null : req.AgentId,
-                    AgentDisplayName: agentDisplayName,
-                    ConnectorId: string.IsNullOrWhiteSpace(req.ConnectorId) ? null : req.ConnectorId,
-                    ConnectorDisplayName: connectorDisplayName,
-                    Systemwide: req.Systemwide,
-                    Attribution: req.Attribution,
-                    Destination: req.Destination,
-                    DestKind: req.DestKind,
-                    Port: req.Port,
-                    ActorKind: req.ActorKind,
-                    FirstSeenUtc: req.FirstSeenUtc,
-                    LastSeenUtc: req.LastSeenUtc,
-                    Attempts: req.Attempts,
-                    Status: req.Status,
-                    Origin: req.Origin,
-                    Purpose: string.IsNullOrWhiteSpace(req.Purpose) ? null : req.Purpose,
-                    CompatibilityMode: req.CompatibilityMode,
-                    WaitingForAdmin: waitingForAdmin,
-                    OwnerCanApproveOwn: canApproveOwn,
-                    OwnerCanAllowAllAgents: canAllowAllAgents));
+                dtos.Add(await BuildRequestDtoAsync(
+                    req,
+                    managerService,
+                    actor,
+                    userStore,
+                    catalogStore,
+                    privCache,
+                    cancellationToken).ConfigureAwait(false));
             }
 
             var summaryPrivs = new UserPrivilegesSummaryDto(
-                isAdmin || response.Privileges.CanApproveOwn,
-                isAdmin || response.Privileges.CanAllowAllAgents);
+                response.Privileges.CanApproveOwn,
+                response.Privileges.CanAllowAllAgents);
 
             NetworkAccessUserBrakeMessage? userBrake = response.Brake.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
             var brakeDto = new NetworkAccessBrakeDto(
@@ -215,9 +132,10 @@ internal static partial class GatewayRuntimeEndpointMappings
                 }
             }
 
+            var actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = isAdmin };
             var decideRequest = new NetworkAccessDecideRequest
             {
-                Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = isAdmin },
+                Actor = actor,
                 RequestId = id,
                 Allow = decision.Allow,
                 Scope = decision.Scope ?? "agent",
@@ -236,7 +154,14 @@ internal static partial class GatewayRuntimeEndpointMappings
                     : null;
 
                 NetworkAccessRequestDto? requestDto = response.Request is not null && !string.IsNullOrWhiteSpace(response.Request.Id)
-                    ? MapRequestToDto(response.Request, userStore, catalogStore)
+                    ? await BuildRequestDtoAsync(
+                        response.Request,
+                        managerService,
+                        actor,
+                        userStore,
+                        catalogStore,
+                        privCache: null,
+                        cancellationToken).ConfigureAwait(false)
                     : null;
 
                 var result = new RequestDecisionResponseDto(response.Revision, ruleDto, requestDto);
@@ -535,12 +460,12 @@ internal static partial class GatewayRuntimeEndpointMappings
                 TargetIsAdmin = targetIsAdmin,
             };
 
-            NetworkAccessUserPrivilegesMessage response = await managerService.Client.GetUserPrivilegesAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessUserPrivilegesMessage response = await managerService.GetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
 
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,
-                CanApproveOwn: targetIsAdmin || response.CanApproveOwn,
-                CanAllowAllAgents: targetIsAdmin || response.CanAllowAllAgents,
+                CanApproveOwn: response.CanApproveOwn,
+                CanAllowAllAgents: response.CanAllowAllAgents,
                 SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
                 SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
 
@@ -577,17 +502,17 @@ internal static partial class GatewayRuntimeEndpointMappings
             {
                 Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true },
                 UserId = userId,
-                CanApproveOwn = targetIsAdmin || dto.CanApproveOwn,
-                CanAllowAllAgents = targetIsAdmin || dto.CanAllowAllAgents,
+                CanApproveOwn = dto.CanApproveOwn,
+                CanAllowAllAgents = dto.CanAllowAllAgents,
                 TargetIsAdmin = targetIsAdmin,
             };
 
-            NetworkAccessUserPrivilegesMessage response = await managerService.Client.SetUserPrivilegesAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessUserPrivilegesMessage response = await managerService.SetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
 
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,
-                CanApproveOwn: targetIsAdmin || response.CanApproveOwn,
-                CanAllowAllAgents: targetIsAdmin || response.CanAllowAllAgents,
+                CanApproveOwn: response.CanApproveOwn,
+                CanAllowAllAgents: response.CanAllowAllAgents,
                 SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
                 SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
 
@@ -881,10 +806,14 @@ internal static partial class GatewayRuntimeEndpointMappings
             OpenInternetBadge: rule.OpenInternetBadge);
     }
 
-    private static NetworkAccessRequestDto MapRequestToDto(
+    private static async Task<NetworkAccessRequestDto> BuildRequestDtoAsync(
         NetworkAccessRequestMessage req,
+        IManagerGrpcService managerService,
+        NetworkAccessActorMessage actor,
         IGatewayUserStore userStore,
-        IGatewayCatalogStore catalogStore)
+        IGatewayCatalogStore catalogStore,
+        Dictionary<string, UserPrivilegesSummaryDto>? privCache,
+        CancellationToken cancellationToken)
     {
         string? userDisplayName = null;
         bool ownerIsAdmin = false;
@@ -914,6 +843,37 @@ internal static partial class GatewayRuntimeEndpointMappings
             connectorDisplayName = connector.Name;
         }
 
+        UserPrivilegesSummaryDto? ownerPrivs = null;
+        if (!string.IsNullOrWhiteSpace(req.UserId) && !string.Equals(req.UserId, "system", StringComparison.Ordinal))
+        {
+            if (privCache is null || !privCache.TryGetValue(req.UserId, out ownerPrivs))
+            {
+                try
+                {
+                    NetworkAccessUserPrivilegesMessage p = await managerService.GetUserPrivilegesAsync(
+                        new NetworkAccessGetUserPrivilegesRequest
+                        {
+                            Actor = actor,
+                            UserId = req.UserId,
+                            TargetIsAdmin = ownerIsAdmin,
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                    ownerPrivs = new UserPrivilegesSummaryDto(p.CanApproveOwn, p.CanAllowAllAgents);
+                }
+                catch (Exception ex) when (ex is RpcException or NotSupportedException or InvalidOperationException)
+                {
+                    ownerPrivs = new UserPrivilegesSummaryDto(ownerIsAdmin, ownerIsAdmin);
+                }
+
+                privCache?.TryAdd(req.UserId, ownerPrivs);
+            }
+        }
+
+        bool canApproveOwn = ownerPrivs?.CanApproveOwn ?? false;
+        bool canAllowAllAgents = ownerPrivs?.CanAllowAllAgents ?? false;
+        bool isSystemwide = req.Systemwide || req.Attribution is "none" || req.ActorKind is "first-party";
+        bool waitingForAdmin = req.WaitingForAdmin || isSystemwide || !canApproveOwn;
+
         return new NetworkAccessRequestDto(
             Id: req.Id,
             UserId: string.IsNullOrWhiteSpace(req.UserId) ? null : req.UserId,
@@ -936,9 +896,9 @@ internal static partial class GatewayRuntimeEndpointMappings
             Origin: req.Origin,
             Purpose: string.IsNullOrWhiteSpace(req.Purpose) ? null : req.Purpose,
             CompatibilityMode: req.CompatibilityMode,
-            WaitingForAdmin: req.WaitingForAdmin,
-            OwnerCanApproveOwn: ownerIsAdmin,
-            OwnerCanAllowAllAgents: ownerIsAdmin);
+            WaitingForAdmin: waitingForAdmin,
+            OwnerCanApproveOwn: canApproveOwn,
+            OwnerCanAllowAllAgents: canAllowAllAgents);
     }
 
     private static string FormatRuleSummaryText(

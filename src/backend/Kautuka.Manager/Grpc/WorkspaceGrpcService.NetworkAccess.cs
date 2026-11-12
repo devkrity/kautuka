@@ -274,7 +274,8 @@ public sealed partial class WorkspaceGrpcService
                 ToActor(request.Actor),
                 request.UserId,
                 request.CanApproveOwn,
-                request.CanAllowAllAgents);
+                request.CanAllowAllAgents,
+                request.HasTargetIsAdmin ? request.TargetIsAdmin : null);
             return ToMessage(privs);
         });
     }

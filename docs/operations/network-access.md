@@ -86,12 +86,14 @@ When an agent or connector attempts an outbound connection to an unapproved dest
    - A user's own connector probe creates an ordinary `agent`/`user` pending request subject to standard `canApproveOwn` privileges.
    - Systemwide connector probes (`systemwide=true` or unowned connector) route exclusively to administrators.
 
-### 2.2 User Privileges `[Built]` `[Tested]`
+### 2.2 User Privileges `[Built]`
 Administrators manage per-user network privileges under User Settings:
 - `canApproveOwn` (Default: **OFF** for standard users, **ON** for administrators):
   When enabled, the user can approve or deny network requests originating from their own agents. When disabled, requests escalate to administrators with a notice ("Waiting for an administrator to approve").
 - `canAllowAllAgents` (Default: **OFF** for standard users, **ON** for administrators):
   Allows the user to create `user`-scope rules applying across all their agents. Unticking this privilege pauses all `user`-scope rules created by that user without deleting them; re-ticking restores them.
+- **Role-Change & Card Synchronization**:
+  Gateway persists initial admin and invited-user privileges synchronously into Manager (`SetUserPrivileges`) on account creation and role transitions (promotion enables both flags; demotion clears both flags and pauses existing `user`-scope rules). Approval cards and rule views read the stored Manager record rather than inferring flags from role alone.
 
 ### 2.3 Administrator Grants `[Built]` `[Tested]`
 - **Open Internet Grant (`any-public`)**:

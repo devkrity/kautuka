@@ -98,7 +98,8 @@ internal static partial class GatewayAuthEndpointMappings
 
     private static async Task<IResult> CompleteBoundExternalLogin(BoundExternalOperationRequest? body, HttpContext context,
         ExternalLoginSessionStore sessions, IGatewayAuthGuard auth, ExternalLoginProviders providers, BrokerHandoffClient broker,
-        IExternalIdentityClient identities, IGatewayUserStore users, IGatewayTokenStore tokens, SetupPossession setupToken, ILoggerFactory loggerFactory, CancellationToken ct)
+        IExternalIdentityClient identities, IGatewayUserStore users, IGatewayTokenStore tokens, SetupPossession setupToken,
+        IManagerGrpcService managerService, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         ILogger logger = loggerFactory.CreateLogger("Kautuka.Gateway.ExternalLogin");
         context.Response.Headers.CacheControl = "no-store";
@@ -131,6 +132,16 @@ internal static partial class GatewayAuthEndpointMappings
             identity = identity with { InviteCode = body.InviteCode, LinkUserId = session.Intent == "LINK" ? session.LinkUserId : null };
             if (!users.TryCompleteExternalSignIn(identity, body.SetupToken, setupToken, out GatewayUser? user, out string accountReason) || user is null)
             { LogBoundLoginFailure(logger, "account_resolution", accountReason); return Results.Unauthorized(); }
+            if (string.Equals(accountReason, "created", StringComparison.Ordinal))
+            {
+                await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                    managerService,
+                    actorUserId: user.Id,
+                    targetUserId: user.Id,
+                    targetIsAdmin: GatewayOwnershipAccess.IsAdmin(user),
+                    logger,
+                    ct).ConfigureAwait(false);
+            }
             string access = tokens.IssueAccessToken(user.Id);
             string refresh = tokens.IssueRefreshToken(user.Id);
             session.CompletedResponse = new AuthLoginResponse(access, "bearer", checked((int)GatewayTokenStore.AccessTokenLifetime.TotalSeconds),

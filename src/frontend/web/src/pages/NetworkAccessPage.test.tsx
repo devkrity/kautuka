@@ -761,7 +761,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       ).toBeVisible();
       expect(screen.getByText('Open internet')).toBeVisible();
 
-      // Check paused rule sentence: "Paused: Ravi can no longer allow for all agents"
+      // Check paused rule sentence: "Paused: Ravi can no longer allow for all agents" and Paused badge (v7-4)
+      expect(screen.getByText('Paused')).toBeVisible();
       expect(
         screen.getByText(/Paused: Ravi can no longer allow for all agents/)
       ).toBeVisible();

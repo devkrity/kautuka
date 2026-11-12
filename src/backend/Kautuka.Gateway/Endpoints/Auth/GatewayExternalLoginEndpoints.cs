@@ -143,6 +143,7 @@ internal static partial class GatewayAuthEndpointMappings
         IGatewayTokenStore tokens,
         IGatewayAuthGuard auth,
         SetupPossession setupToken,
+        IManagerGrpcService managerService,
         ILoggerFactory loggerFactory,
         CancellationToken cancellationToken)
     {
@@ -228,6 +229,17 @@ internal static partial class GatewayAuthEndpointMappings
         {
             LogExternalSignInRejected(logger, remote, accountReason);
             return Results.Json(new AuthErrorResponse(rejectedDetail), KautukaJsonContext.Default.AuthErrorResponse, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        if (string.Equals(accountReason, "created", StringComparison.Ordinal))
+        {
+            await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                managerService,
+                actorUserId: user.Id,
+                targetUserId: user.Id,
+                targetIsAdmin: GatewayOwnershipAccess.IsAdmin(user),
+                logger,
+                cancellationToken).ConfigureAwait(false);
         }
 
         return IssueLogin(context, tokens, user, users.ExternalProvidersFor(user.Id));

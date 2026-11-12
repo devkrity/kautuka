@@ -388,5 +388,8 @@ internal static class GatewayOperationsModule
     }
 
     public static void MapEndpoints(WebApplication app)
-        => GatewayRuntimeEndpointMappings.MapGatewayRuntimeSystemEndpoints(app);
+    {
+        GatewayRuntimeEndpointMappings.MapGatewayRuntimeSystemEndpoints(app);
+        GatewayRuntimeEndpointMappings.MapGatewayNetworkAccessEndpoints(app);
+    }
 }

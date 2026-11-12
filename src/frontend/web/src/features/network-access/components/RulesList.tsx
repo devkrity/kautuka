@@ -99,6 +99,12 @@ export function RulesList({
               {destDisplay}
             </span>
 
+            {rule.paused && (
+              <Badge variant="outline" className="text-xs">
+                Paused
+              </Badge>
+            )}
+
             {rule.openInternetBadge && (
               <Badge variant="attention" className="text-xs">
                 Open internet

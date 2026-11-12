@@ -197,7 +197,7 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin);
+            UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin, persistAdminDefault: actor.IsAdmin);
 
             if (sinceRevision.HasValue
                 && sinceRevision.Value >= current.Revision
@@ -288,7 +288,7 @@ public sealed partial class NetworkAccessPolicyStore
                 request,
                 allow,
                 scope,
-                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin, persistAdminDefault: isTargetAdmin));
             string effectiveScope = resolved.EffectiveScope;
             string? ruleUserId = resolved.RuleUserId;
             string? ruleAgentId = resolved.RuleAgentId;
@@ -397,7 +397,7 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyAuthorizer.NormalizedRuleTarget normalized = NetworkAccessPolicyAuthorizer.AuthorizeSetRule(
                 actor,
                 spec,
-                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin));
+                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin, persistAdminDefault: isTargetAdmin));
             string scopeKind = normalized.ScopeKind;
             string? userId = normalized.UserId;
             string? agentId = normalized.AgentId;
@@ -869,7 +869,7 @@ public sealed partial class NetworkAccessPolicyStore
         bool persistAdminDefault = false)
     {
         UserPrivileges? stored = current.UserPrivileges.FirstOrDefault(p => string.Equals(p.UserId, userId, StringComparison.Ordinal));
-        if (stored is not null)
+        if (stored is not null && (!isTargetAdmin || (stored.CanApproveOwn && stored.CanAllowAllAgents)))
         {
             return stored;
         }
@@ -885,7 +885,11 @@ public sealed partial class NetworkAccessPolicyStore
 
             if (persistAdminDefault)
             {
-                UserPrivileges[] nextPrivs = [.. current.UserPrivileges, adminDefault];
+                UserPrivileges[] nextPrivs =
+                [
+                    .. current.UserPrivileges.Where(p => !string.Equals(p.UserId, userId, StringComparison.Ordinal)),
+                    adminDefault,
+                ];
                 current = current with { UserPrivileges = nextPrivs };
                 SaveSync(current);
             }

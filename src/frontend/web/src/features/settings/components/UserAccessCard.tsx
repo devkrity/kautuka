@@ -44,7 +44,7 @@ interface UserAccessCardProps {
   onClearExternalLogin: (userId: string, provider: string) => Promise<void>;
 }
 
-function useDirectUserPrivileges(userId: string) {
+function useDirectUserPrivileges(userId: string, role: string) {
   const [privs, setPrivs] = useState<UserNetworkPrivilegesDto | null>(null);
 
   useEffect(() => {
@@ -62,13 +62,13 @@ function useDirectUserPrivileges(userId: string) {
     return () => {
       active = false;
     };
-  }, [userId]);
+  }, [userId, role]);
 
   return [privs, setPrivs] as const;
 }
 
 function UserNetworkPrivilegesSummary({ userId, role }: { userId: string; role: string }) {
-  const [privs] = useDirectUserPrivileges(userId);
+  const [privs] = useDirectUserPrivileges(userId, role);
   const canApprove = privs?.canApproveOwn ?? (role === 'admin');
   const canAllowAll = privs?.canAllowAllAgents ?? (role === 'admin');
   return (
@@ -84,7 +84,7 @@ function UserNetworkPrivilegesSummary({ userId, role }: { userId: string; role: 
 }
 
 function UserNetworkPrivilegesSection({ user, disabled }: { user: UserSettingsEntry; disabled?: boolean }) {
-  const [privs, setPrivs] = useDirectUserPrivileges(user.id);
+  const [privs, setPrivs] = useDirectUserPrivileges(user.id, user.role);
 
   const handleSave = async (next: { canApproveOwn: boolean; canAllowAllAgents: boolean }) => {
     const response = await apiClient.put<UserNetworkPrivilegesDto>(

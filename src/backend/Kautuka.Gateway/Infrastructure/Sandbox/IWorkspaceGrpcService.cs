@@ -33,4 +33,8 @@ internal interface IManagerGrpcService
     Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerToolsAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default);
     Task<WorkspaceMcpContainerCallResponse> CallMcpContainerToolAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default);
     Task<DesiredStateUpdateResponse> UpdateDesiredStateAsync(ManagerDesiredStateUpdateRequest request, CancellationToken cancellationToken = default);
+    Task<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Client.GetUserPrivilegesAsync(request, cancellationToken: cancellationToken).ResponseAsync;
+    Task<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Client.SetUserPrivilegesAsync(request, cancellationToken: cancellationToken).ResponseAsync;
 }

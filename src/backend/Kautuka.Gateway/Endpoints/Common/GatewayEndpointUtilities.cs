@@ -2,10 +2,50 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
+using Grpc.Core;
+
+using Kautuka.Manager.Protos;
+
 namespace Kautuka.Gateway.Endpoints.Common;
 
-internal static class GatewayEndpointUtilities
+internal static partial class GatewayEndpointUtilities
 {
+    [LoggerMessage(
+        EventId = 8501,
+        Level = LogLevel.Warning,
+        Message = "Could not sync network access role privileges to Manager for user '{UserId}' (isAdmin={TargetIsAdmin})")]
+    private static partial void LogPrivilegeSyncUnavailable(ILogger logger, Exception exception, string userId, bool targetIsAdmin);
+
+    internal static async Task TrySyncUserRolePrivilegesAsync(
+        IManagerGrpcService managerService,
+        string actorUserId,
+        string targetUserId,
+        bool targetIsAdmin,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        var request = new NetworkAccessSetUserPrivilegesRequest
+        {
+            Actor = new NetworkAccessActorMessage { UserId = actorUserId, IsAdmin = true },
+            UserId = targetUserId,
+            CanApproveOwn = targetIsAdmin,
+            CanAllowAllAgents = targetIsAdmin,
+            TargetIsAdmin = targetIsAdmin,
+        };
+
+        try
+        {
+            _ = await managerService.SetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or RpcException)
+        {
+            if (logger is not null)
+            {
+                LogPrivilegeSyncUnavailable(logger, ex, targetUserId, targetIsAdmin);
+            }
+        }
+    }
+
     internal static string Timestamp() => DateTimeOffset.UtcNow.ToString("O");
 
     internal static GatewayUserPayload ToUserPayload(GatewayUser user, string[]? externalProviders = null) => new(

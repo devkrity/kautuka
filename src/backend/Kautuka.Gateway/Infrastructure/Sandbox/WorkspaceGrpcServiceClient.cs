@@ -81,6 +81,24 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
             deadline: utcNow.Add(DesiredStateMaterializationDeadline),
             cancellationToken: cancellationToken);
 
+    public Task<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Call(
+            "GetUserPrivileges",
+            () => client.GetUserPrivilegesAsync(
+                request,
+                headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+                deadline: DateTime.UtcNow.AddSeconds(10),
+                cancellationToken: cancellationToken).ResponseAsync);
+
+    public Task<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Call(
+            "SetUserPrivileges",
+            () => client.SetUserPrivilegesAsync(
+                request,
+                headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+                deadline: DateTime.UtcNow.AddSeconds(10),
+                cancellationToken: cancellationToken).ResponseAsync);
+
     private static WorkspaceDesiredStateUpdate ToMessage(ManagerDesiredStateUpdateRequest request)
     {
         var message = new WorkspaceDesiredStateUpdate
