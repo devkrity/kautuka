@@ -574,14 +574,15 @@ public sealed class McpbImageMaterializer(
         string systemImage,
         IReadOnlyList<KeyValuePair<string, string>> indexEnvironment,
         string installScript,
-        string? allocatedIp = null)
+        string allocatedIp)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(systemImage);
         ArgumentNullException.ThrowIfNull(indexEnvironment);
         ArgumentException.ThrowIfNullOrWhiteSpace(installScript);
 
-        string effectiveIp = allocatedIp ?? "10.247.1.1";
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        string effectiveIp = allocatedIp;
         var builderCompat = new NetworkAccess.ImageCompatProfile(
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             null,
@@ -639,7 +640,8 @@ public sealed class McpbImageMaterializer(
             serverType);
         string installScript = BuildLanguagePackageInstallScript(serverType, forSandboxArtifact);
         string containerName = "kautuka-mcpb-pkg-" + Guid.NewGuid().ToString("N")[..12];
-        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+        string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
+            .AllocateNextIp(workloadRegistry);
 
         if (workloadRegistry is not null)
         {

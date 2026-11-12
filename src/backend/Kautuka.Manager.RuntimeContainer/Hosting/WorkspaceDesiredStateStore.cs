@@ -139,8 +139,8 @@ public sealed class WorkspaceDesiredStateStore
                     userId = connector.ConnectorId[..separatorIndex];
                 }
 
-                bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId);
-                string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
+                bool systemwide = connector.IsInternalSystemConnector;
+                string egress = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId) ? "deny-all" : "normal";
                 string kind = connector.IsInternalSystemConnector ? "system" : "connector";
 
                 return connector with

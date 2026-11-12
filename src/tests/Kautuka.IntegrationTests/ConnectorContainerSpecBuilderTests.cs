@@ -7,6 +7,37 @@ namespace Kautuka.IntegrationTests;
 public sealed class ConnectorContainerSpecBuilderTests
 {
     [Fact]
+    public void ResolveIdentityRequiresOwnerAndAgentForRuntimeConnector()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector();
+        Assert.Throws<InvalidOperationException>(() =>
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, null, purpose: null));
+
+        ContainerContext userOnly = CreateWorkspaceContext() with { ScopeType = "user", ScopeId = "user-alpha" };
+        Assert.Throws<InvalidOperationException>(() =>
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userOnly, purpose: null));
+
+        ConnectorContainerSpecBuilder.ConnectorIdentity identity =
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, CreateWorkspaceContext(), purpose: null);
+        Assert.Equal("user-alpha", identity.UserId);
+        Assert.Equal("agent-alpha", identity.AgentId);
+        Assert.False(identity.Systemwide);
+        Assert.Equal("normal", identity.Egress);
+    }
+
+    [Fact]
+    public void InternalSystemConnectorIsAlwaysDenyAll()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with { IsInternalSystemConnector = true };
+        ConnectorContainerSpecBuilder.ConnectorIdentity identity =
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, null, purpose: null);
+
+        Assert.True(identity.Systemwide);
+        Assert.Equal("deny-all", identity.Egress);
+        Assert.Equal("system", identity.Kind);
+    }
+
+    [Fact]
     public void IsolatedSpecIsBoundedAndDoesNotExposeSecretValuesInArguments()
     {
         WorkspaceMcpContainerConnectorDefinition connector = CreateConnector();
@@ -14,8 +45,9 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector,
             "connector-test",
             WorkspaceMcpExecutionContext.Isolated,
-            null,
-            persistent: false);
+            CreateWorkspaceContext(),
+            persistent: false,
+            allocatedIp: "10.247.1.1");
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         AssertOption(arguments, "--cap-drop", "ALL");
@@ -53,7 +85,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             "connector-test",
             WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspace,
-            persistent: true);
+            persistent: true,
+            allocatedIp: "10.247.1.1");
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.Contains("/srv/kautuka/alpha:/workspace:ro", arguments);
@@ -79,7 +112,8 @@ public sealed class ConnectorContainerSpecBuilderTests
                 "connector-test",
                 WorkspaceMcpExecutionContext.Isolated,
                 workspace,
-                persistent: false);
+                persistent: false,
+                allocatedIp: "10.247.1.1");
 
             Assert.DoesNotContain(arguments, argument => argument.Contains("/kautuka/mail", StringComparison.Ordinal));
             Assert.DoesNotContain(arguments, argument => argument.Contains(":/workspace", StringComparison.Ordinal));
@@ -101,8 +135,9 @@ public sealed class ConnectorContainerSpecBuilderTests
             CreateConnector(),
             "connector-test",
             executionContext,
-            null,
-            persistent: false);
+            CreateWorkspaceContext(),
+            persistent: false,
+            allocatedIp: "10.247.1.1");
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.DoesNotContain("none", arguments, StringComparer.Ordinal);
@@ -121,8 +156,9 @@ public sealed class ConnectorContainerSpecBuilderTests
                 connector,
                 "connector-test",
                 WorkspaceMcpExecutionContext.Isolated,
-                null,
-                persistent: false));
+                CreateWorkspaceContext(),
+                persistent: false,
+                allocatedIp: "10.247.1.1"));
 
         Assert.Contains("must be pinned", exception.Message, StringComparison.Ordinal);
     }
@@ -138,8 +174,9 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector,
             "connector-test",
             WorkspaceMcpExecutionContext.Isolated,
-            null,
-            persistent: false);
+            CreateWorkspaceContext(),
+            persistent: false,
+            allocatedIp: "10.247.1.1");
 
         Assert.Contains(image, arguments);
     }
@@ -165,8 +202,9 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector,
             "connector-test",
             WorkspaceMcpExecutionContext.Isolated,
-            null,
-            persistent: false);
+            CreateWorkspaceContext(),
+            persistent: false,
+            allocatedIp: "10.247.1.1");
 
         int commandIndex = arguments.IndexOf("npx");
         Assert.True(commandIndex >= 0);
@@ -201,8 +239,9 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector,
             "connector-test",
             WorkspaceMcpExecutionContext.Isolated,
-            null,
-            persistent: false);
+            CreateWorkspaceContext(),
+            persistent: false,
+            allocatedIp: "10.247.1.1");
 
         int commandIndex = arguments.IndexOf("uvx");
         Assert.True(commandIndex >= 0);
@@ -281,6 +320,10 @@ public sealed class ConnectorContainerSpecBuilderTests
         => new(
             "connector", $"ghcr.io/example/image@sha256:{new string('a', 64)}", "server", [], true, false, null, null,
             [new KeyValuePair<string, string>("TOKEN", "canary-secret")], 30, 60);
+
+    private static ContainerContext CreateWorkspaceContext()
+        => new("agent", "agent-alpha", "user-alpha", "/tmp/agent-alpha", "/workspace", "image@sha256:digest",
+            1, "512m", 30, [], new Dictionary<string, string>());
 
     private static void AssertOption(List<string> arguments, string option, string expectedValue)
     {

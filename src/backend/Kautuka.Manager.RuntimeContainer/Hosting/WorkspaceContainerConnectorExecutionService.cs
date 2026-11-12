@@ -267,13 +267,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             MarkConnectorFailed(connectorId, "probe-startup-failed");
             logger.LogWarning(ex, "[ContainerConnector] Container startup failed for connector '{ConnectorId}'", connectorId);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, await DescribeFailureAsync(connector, timeoutSeconds, ex, cancellationToken).ConfigureAwait(false));
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, DescribeFailure(ex));
         }
         catch (Exception ex)
         {
             MarkConnectorFailed(connectorId, "probe-failed");
             logger.LogError(ex, "[ContainerConnector] Unexpected error probing connector '{ConnectorId}'", connectorId);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, await DescribeFailureAsync(connector, timeoutSeconds, ex, cancellationToken).ConfigureAwait(false));
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, DescribeFailure(ex));
         }
         finally
         {
@@ -344,7 +344,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             logger.LogError(ex, "[ContainerConnector] Error listing tools from connector '{ConnectorId}'", connectorId);
             string failureMessage = connector is null
                 ? DescribeFailure(ex)
-                : await DescribeFailureAsync(connector, timeoutSeconds, ex, cancellationToken).ConfigureAwait(false);
+                : DescribeFailure(ex);
             return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
         }
         finally
@@ -428,7 +428,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             logger.LogError(ex, "[ContainerConnector] Error calling tool '{ToolName}' on connector '{ConnectorId}'", toolName, connectorId);
             string failureMessage = connector is null
                 ? DescribeFailure(ex)
-                : await DescribeFailureAsync(connector, timeoutSeconds, ex, cancellationToken).ConfigureAwait(false);
+                : DescribeFailure(ex);
             return (false, null, WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
         }
         finally
@@ -475,83 +475,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         return string.Join(" | ", parts);
-    }
-
-    private async Task<string> DescribeFailureAsync(
-        WorkspaceMcpContainerConnectorDefinition connector,
-        int timeoutSeconds,
-        Exception exception,
-        CancellationToken cancellationToken)
-    {
-        string fallback = DescribeFailure(exception);
-
-        if (!ContainsGenericShutdownMessage(exception))
-        {
-            return fallback;
-        }
-
-        try
-        {
-            string? processFailure = await TryDescribeProcessFailureAsync(
-                connector,
-                timeoutSeconds,
-                cancellationToken).ConfigureAwait(false);
-
-            return string.IsNullOrWhiteSpace(processFailure)
-                ? fallback
-                : processFailure;
-        }
-        catch (Exception diagnosticException)
-        {
-            logger.LogDebug(
-                diagnosticException,
-                "[ContainerConnector] Failed to capture process diagnostics for connector '{ConnectorId}'",
-                connector.ConnectorId);
-            return fallback;
-        }
-    }
-
-    private async Task<string?> TryDescribeProcessFailureAsync(
-        WorkspaceMcpContainerConnectorDefinition connector,
-        int timeoutSeconds,
-        CancellationToken cancellationToken)
-    {
-        connector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
-
-        List<string> arguments = ConnectorContainerSpecBuilder.BuildRun(
-            connector,
-            BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null),
-            WorkspaceMcpExecutionContext.Isolated,
-            null,
-            persistent: false);
-
-        PodmanCommandResult result = await podmanCommandRunner
-            .RunAsync(arguments, Math.Clamp(timeoutSeconds, 1, 10), cancellationToken, BuildPodmanEnvironment(connector))
-            .ConfigureAwait(false);
-
-        if (result.ExitCode == 124
-            && string.IsNullOrWhiteSpace(result.StdErr)
-            && string.IsNullOrWhiteSpace(result.StdOut))
-        {
-            return null;
-        }
-
-        return PodmanFailureFormatter.FormatFailure(
-            $"Start container connector '{connector.ConnectorId}'",
-            result);
-    }
-
-    private static bool ContainsGenericShutdownMessage(Exception exception)
-    {
-        for (Exception? current = exception; current is not null; current = current.InnerException)
-        {
-            if (string.Equals(current.Message?.Trim(), "The server shut down unexpectedly.", StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private async Task<StdioClientTransport> CreateTransportAsync(
@@ -615,37 +538,27 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         List<string> arguments;
         if (UsesImageDefaultCommand(connector))
         {
-            string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+            ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
+                connector,
+                workspaceContext,
+                isProbe ? "probe" : null);
+            string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
+                .AllocateNextIp(workloadRegistry);
             NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
-            string effectiveUserId = workspaceContext?.UserId ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(effectiveUserId))
-            {
-                int sep = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
-                if (sep > 0)
-                {
-                    effectiveUserId = connector.ConnectorId[..sep];
-                }
-            }
-            string effectiveAgentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-                ? (workspaceContext?.ScopeId ?? string.Empty)
-                : string.Empty;
-            bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(effectiveUserId);
-            string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
-            string kind = connector.IsInternalSystemConnector ? "system" : "connector";
-            string attribution = egress == "deny-all" ? "none" : (systemwide ? "user" : (isProbe ? "user" : "user-agent"));
+            string attribution = identity.Egress == "deny-all" ? "none" : (isProbe ? "user" : "user-agent");
 
             if (workloadRegistry is not null)
             {
                 workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
                     allocatedIp,
-                    string.IsNullOrWhiteSpace(effectiveUserId) ? null : effectiveUserId,
-                    string.IsNullOrWhiteSpace(effectiveAgentId) ? null : effectiveAgentId,
+                    string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId,
+                    string.IsNullOrWhiteSpace(identity.AgentId) ? null : identity.AgentId,
                     containerName,
-                    kind,
+                    identity.Kind,
                     connector.ConnectorId,
                     NormalizeExecutionContext(effectiveExecutionContext).ToString().ToLowerInvariant(),
-                    systemwide,
-                    egress,
+                    identity.Systemwide,
+                    identity.Egress,
                     attribution,
                     compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                     DateTimeOffset.UtcNow,
@@ -928,37 +841,27 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
         }
 
-        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+        ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
+            connector,
+            workspaceContext,
+            isProbe ? "probe" : null);
+        string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
+            .AllocateNextIp(workloadRegistry);
         NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
-        string effectiveUserId = workspaceContext?.UserId ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(effectiveUserId))
-        {
-            int sep = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
-            if (sep > 0)
-            {
-                effectiveUserId = connector.ConnectorId[..sep];
-            }
-        }
-        string effectiveAgentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-            ? (workspaceContext?.ScopeId ?? string.Empty)
-            : string.Empty;
-        bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(effectiveUserId);
-        string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
-        string kind = connector.IsInternalSystemConnector ? "system" : "connector";
-        string attribution = egress == "deny-all" ? "none" : (systemwide ? "user" : (isProbe ? "user" : "user-agent"));
+        string attribution = identity.Egress == "deny-all" ? "none" : (isProbe ? "user" : "user-agent");
 
         if (workloadRegistry is not null)
         {
             workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
                 allocatedIp,
-                string.IsNullOrWhiteSpace(effectiveUserId) ? null : effectiveUserId,
-                string.IsNullOrWhiteSpace(effectiveAgentId) ? null : effectiveAgentId,
+                string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId,
+                string.IsNullOrWhiteSpace(identity.AgentId) ? null : identity.AgentId,
                 containerName,
-                kind,
+                identity.Kind,
                 connector.ConnectorId,
                 NormalizeExecutionContext(executionContext).ToString().ToLowerInvariant(),
-                systemwide,
-                egress,
+                identity.Systemwide,
+                identity.Egress,
                 attribution,
                 compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                 DateTimeOffset.UtcNow,

@@ -218,7 +218,8 @@ public sealed class PodmanContainerTool(
             }
         }
 
-        string allocatedIp = addressAllocator?.AllocateNextIp(workloadRegistry) ?? "10.247.1.1";
+        string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
+            .AllocateNextIp(workloadRegistry);
 
         if (workloadRegistry is not null)
         {
@@ -568,18 +569,16 @@ public sealed class PodmanContainerTool(
         return current;
     }
 
-    private static List<string> BuildRunArguments(ContainerContext context, string containerName)
-        => BuildRunArguments(context, containerName, allocatedIp: null).ToList();
-
     public static IReadOnlyList<string> BuildRunArguments(
         ContainerContext context,
         string containerName,
-        string? allocatedIp = null)
+        string allocatedIp)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
 
-        string ip = allocatedIp ?? "10.247.1.1";
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        string ip = allocatedIp;
         var envList = new List<KeyValuePair<string, string>>();
         foreach (KeyValuePair<string, string> kv in context.ContainerEnvironment)
         {

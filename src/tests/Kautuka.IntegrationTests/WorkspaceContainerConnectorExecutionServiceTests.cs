@@ -164,7 +164,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             "kautuka-mcpb-pkg-test",
             "localhost/kautuka-mcpb-uv:sys",
             [new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")],
-            "uv sync --no-dev");
+            "uv sync --no-dev",
+            "10.247.1.10");
 
         Assert.DoesNotContain("--entrypoint", arguments, StringComparer.Ordinal);
         Assert.Contains("--network", arguments, StringComparer.Ordinal);
@@ -766,7 +767,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             containerName,
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspaceContext,
-            persistent: false);
+            persistent: false,
+            allocatedIp: "10.247.1.1");
     }
 
     private static string InvokeBuildContainerName(
@@ -823,7 +825,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             containerName,
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspaceContext,
-            persistent: true);
+            persistent: true,
+            allocatedIp: "10.247.1.1");
     }
 
     private static List<string> InvokeBuildPodmanExecArguments(

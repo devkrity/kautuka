@@ -62,6 +62,7 @@ flowchart LR
      - Drops link-local and cloud metadata addresses (`meta_drop` for `169.254.0.0/16` and Azure `168.63.129.16`).
      - Drops outbound UDP (`udp_drop`).
      - Permits outbound TCP to `10.247.0.2:15001`, DNS to `10.247.0.2:53`, and package proxy traffic to `10.247.0.3:20101`.
+   - Manager allocates a distinct workload IP before launch. Connector ownership comes from the workspace user and agent context; missing identity or address fails the start instead of falling back to a shared system identity or a fixed IP. Internal `system::` connectors are labeled as system workloads and remain deny-all.
 4. **Host Services Application-Layer Enforcement**:
    - `Gateway` and `ChannelHost` outbound HTTP and WebSocket clients fail closed (`FailClosedNetworkAccessChecker` / `checker_missing`) when constructed without an explicit `INetworkAccessChecker` or `NetworkAccessWebSocketChecker`. Non-ChannelHost callers must carry an explicit `NetworkAccessContext` user identity (never defaulting missing users to `"system"`), failing closed (`unknown_source`) when unattributed and enforcing per-user brakes across OIDC link, OAuth, AI provider discovery/probes, and catalog downloads. Denials surface directly into agent runs via Narad Protocol without opening approval cards for automated system seeds.
 5. **Policy State Durability (`NetworkAccessPolicyStore`)**:

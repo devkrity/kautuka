@@ -223,7 +223,6 @@ public sealed record WorkloadContainerSpec
             "--sysctl", Ipv6DisableSysctl,
             "--annotation", WorkloadRoleAnnotation,
             "--label", $"io.kautuka.user={UserId ?? string.Empty}",
-            "--label", $"io.kautuka.agent={AgentId ?? string.Empty}",
             "--label", $"io.kautuka.connector={ConnectorId ?? string.Empty}",
             "--label", $"io.kautuka.exec-context={ExecContext ?? string.Empty}",
             "--label", $"io.kautuka.kind={Kind ?? string.Empty}",
@@ -231,6 +230,11 @@ public sealed record WorkloadContainerSpec
             "--label", $"io.kautuka.egress={Egress ?? string.Empty}",
             "--label", $"io.kautuka.compat={compatLabel}",
         ]);
+
+        if (!string.IsNullOrWhiteSpace(AgentId))
+        {
+            args.AddRange(["--label", $"io.kautuka.agent={AgentId}"]);
+        }
 
         if (!string.IsNullOrWhiteSpace(Purpose))
         {

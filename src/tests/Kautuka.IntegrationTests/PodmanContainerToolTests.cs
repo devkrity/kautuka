@@ -183,11 +183,11 @@ public sealed class PodmanContainerToolTests
     private static List<string> InvokeBuildRunArguments(ContainerContext context, string containerName)
     {
         MethodInfo method = typeof(PodmanContainerTool)
-            .GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.NonPublic)
+            .GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.Public)
             ?? throw new InvalidOperationException("BuildRunArguments method was not found.");
 
-        object? result = method.Invoke(null, [context, containerName]);
-        return Assert.IsType<List<string>>(result);
+        object? result = method.Invoke(null, [context, containerName, "10.247.1.10"]);
+        return Assert.IsAssignableFrom<IReadOnlyList<string>>(result).ToList();
     }
 
     private static void InvokeEnsureWritableVolumePermissions(string path)

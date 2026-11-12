@@ -13,32 +13,64 @@ internal static class ConnectorContainerSpecBuilder
     internal const string SandboxNetworkName = "kautuka-sandbox";
     internal const string WorkloadNetworkName = "kautuka-workload";
 
+    internal readonly record struct ConnectorIdentity(
+        string UserId,
+        string AgentId,
+        bool Systemwide,
+        string Egress,
+        string Kind);
+
+    /// <summary>
+    /// Single source of truth for connector workload identity (v7-22). The owner comes only from the
+    /// workspace context; it is never guessed from the connector name. A non-internal connector with
+    /// no owner is not systemwide and gets deny-all egress.
+    /// </summary>
+    internal static ConnectorIdentity ResolveIdentity(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        ContainerContext? workspaceContext,
+        string? purpose)
+    {
+        ArgumentNullException.ThrowIfNull(connector);
+        string userId = workspaceContext?.UserId ?? string.Empty;
+        string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            ? (workspaceContext?.ScopeId ?? string.Empty)
+            : string.Empty;
+
+        if (connector.IsInternalSystemConnector)
+        {
+            return new ConnectorIdentity(string.Empty, string.Empty, true, "deny-all", "system");
+        }
+
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            throw new InvalidOperationException("A user identity is required before starting a connector workload.");
+        }
+
+        if (string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
+        }
+
+        return new ConnectorIdentity(userId, agentId, false, "normal", "connector");
+    }
+
     public static List<string> BuildRun(
         WorkspaceMcpContainerConnectorDefinition connector,
         string containerName,
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
         bool persistent,
-        string? allocatedIp = null,
+        string allocatedIp,
         string? purpose = null,
         ImageCompatProfile? compatProfile = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
 
-        string userId = workspaceContext?.UserId ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(userId))
-        {
-            int separatorIndex = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
-            if (separatorIndex > 0)
-            {
-                userId = connector.ConnectorId[..separatorIndex];
-            }
-        }
-
-        string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-            ? (workspaceContext?.ScopeId ?? string.Empty)
-            : string.Empty;
+        ConnectorIdentity identity = ResolveIdentity(connector, workspaceContext, purpose);
+        string userId = identity.UserId;
+        string agentId = identity.AgentId;
 
         string execContext = executionContext switch
         {
@@ -48,13 +80,9 @@ internal static class ConnectorContainerSpecBuilder
             _ => "isolated"
         };
 
-        bool systemwide = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId);
-        string egress = connector.IsInternalSystemConnector ? "deny-all" : "normal";
-        if (!systemwide && string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
-        {
-            egress = "deny-all";
-        }
-        string effectiveIp = allocatedIp ?? "10.247.1.1";
+        bool systemwide = identity.Systemwide;
+        string egress = identity.Egress;
+        string effectiveIp = allocatedIp;
 
         var envList = new List<KeyValuePair<string, string>>
         {
@@ -103,7 +131,15 @@ internal static class ConnectorContainerSpecBuilder
             Purpose = purpose,
             Persistent = persistent,
             DesiredStateVersion = connector.DesiredStateVersion,
-            SpecFingerprint = connector.SpecFingerprint,
+            SpecFingerprint = ComputeFingerprint(
+                connector,
+                userId,
+                agentId,
+                execContext,
+                identity.Kind,
+                systemwide,
+                egress,
+                compatProfile?.ImageDigest),
             ManagerRole = "connector",
             Environment = envList,
             Mounts = mounts,
