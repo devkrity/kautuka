@@ -76,11 +76,18 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
         IReadOnlyList<IReadOnlyList<string>> renderedEnvoyFilters = ExtractAllResolvedAddressFilters(renderedEnvoyConfig);
         Assert.Equal(4, renderedEnvoyFilters.Count);
         Assert.Equal(goldenNonPublicV4, renderedEnvoyFilters[0]);
+        // Independent literal golden: do not derive this from the public list or renderer filter.
         string[] expectedLanRanges =
         [
-            .. goldenNonPublicV4.Where(static cidr =>
-                cidr is not "10.0.0.0/8" and not "172.16.0.0/12" and not "192.168.0.0/16"),
-            NetworkAddressClassifier.WorkloadSubnetCidr,
+            "100.64.0.0/10",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "0.0.0.0/8",
+            "192.0.0.0/24",
+            "198.18.0.0/15",
+            "224.0.0.0/3",
+            "168.63.129.16/32",
+            "10.247.0.0/16",
         ];
         Assert.Equal(expectedLanRanges, renderedEnvoyFilters[1]);
         Assert.Equal(goldenNonPublicV4, renderedEnvoyFilters[2]);
