@@ -27,7 +27,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
     Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
     NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null,
-    NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null) : IAsyncDisposable
+    NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
+    NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -42,6 +43,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
     private readonly NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
     private readonly NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = imageCompatibilityStore;
+    private readonly NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = workloadLaunchGate;
 
     public IReadOnlyCollection<string> TrackedContainerNames
         => [.. trackedConnectorContainers.Values.Distinct(StringComparer.OrdinalIgnoreCase)];
@@ -502,6 +504,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             throw new InvalidOperationException($"Container connector '{connector.ConnectorId}' has no image configured.");
         }
+
+        ConnectorContainerSpecBuilder.ConnectorIdentity launchIdentity = ConnectorContainerSpecBuilder.ResolveIdentity(
+            connector,
+            workspaceContext,
+            isProbe ? "probe" : null);
+        workloadLaunchGate?.EnsureLaunchAllowed(string.IsNullOrWhiteSpace(launchIdentity.UserId) ? null : launchIdentity.UserId);
 
         WorkspaceMcpExecutionContext effectiveExecutionContext = NormalizeExecutionContext(executionContext);
 

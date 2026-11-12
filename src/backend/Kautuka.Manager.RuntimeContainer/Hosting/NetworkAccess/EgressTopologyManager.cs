@@ -33,7 +33,7 @@ internal sealed partial class InfraAllowlistJsonContext : JsonSerializerContext;
 /// 7. Startup canary self-test gating workload creation.
 /// 8. 30s background reconcile loop and emergency brake container stops.
 /// </summary>
-public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
+public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IWorkloadStartupState
 {
     public const string WorkloadNetworkName = "kautuka-workload";
     public const string OutsideNetworkName = "kautuka-outside";

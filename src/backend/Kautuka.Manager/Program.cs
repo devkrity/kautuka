@@ -80,6 +80,8 @@ builder.Services.AddSingleton(sp =>
         envoySocketHostDir: envoySocketDir,
         hookStateDirectory: hookStateDir));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton<WorkloadLaunchGate>();
 builder.Services.AddSingleton(sp =>
     new Kautuka.NetworkAccessController.NetworkAccessController(
         sp.GetRequiredService<NetworkAccessPolicyStore>(),

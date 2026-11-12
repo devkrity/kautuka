@@ -16,7 +16,8 @@ public sealed class PodmanContainerTool(
     PodmanCommandRunner podmanCommandRunner,
     Hosting.NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
     Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
-    Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null) : IContainerTool
+    Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null,
+    Hosting.NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null) : IContainerTool
 {
     private readonly ConcurrentDictionary<string, byte> primedWorkspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> driftNotes = new();
@@ -25,6 +26,7 @@ public sealed class PodmanContainerTool(
     private readonly Hosting.NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
     private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
     private readonly Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
+    private readonly Hosting.NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = workloadLaunchGate;
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -180,6 +182,7 @@ public sealed class PodmanContainerTool(
 
     private async Task<OciSandboxSession> EnsureContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
+        workloadLaunchGate?.EnsureLaunchAllowed(context.UserId);
         string containerName = BuildContainerName(context);
         await using var containerLease = (await containerLocks
             .AcquireAsync(containerName, cancellationToken)
