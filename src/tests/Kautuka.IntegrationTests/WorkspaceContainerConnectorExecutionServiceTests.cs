@@ -334,6 +334,72 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         }
     }
 
+    [Fact]
+    public async Task V7_18_ProbeStopsBeforeListingToolsWhenPostStartVerificationFails_WithNegativeControl()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("The ephemeral stdio probe reproduction uses a Linux Python process.");
+        }
+
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-probe-verifier-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        const string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n";
+        var registry = new WorkloadRegistry();
+        var commands = new List<string[]>();
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            if (args[0] == "run")
+            {
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args[0] == "inspect")
+            {
+                RegistryEntry entry = Assert.Single(registry.GetAll());
+                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var desired = new WorkspaceDesiredStateStore();
+        const string connectorId = "probe-verifier-test";
+        var connector = new WorkspaceMcpContainerConnectorDefinition(connectorId, "localhost/test:latest", "", [], true, false, null, null, [], 30, 600);
+        string ownerWorkspace = Path.Combine(workspaceRoot, "users", "user-a", "agents", "agent-a");
+        Directory.CreateDirectory(ownerWorkspace);
+        var workspace = new ContainerContext("agent", "agent-a", "user-a", ownerWorkspace, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+            [workspace], [connector], []);
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            desired,
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
+            workloadRegistry: registry,
+            postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            stdioCommand: "python3",
+            stdioArgumentsPrefix: ["-u", "-c", server]);
+
+        try
+        {
+            var result = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "user-a");
+
+            Assert.False(result.Ok);
+            Assert.Contains("WorkloadPostStartVerifier failed", result.FailureMessage, StringComparison.Ordinal);
+            Assert.Contains(commands, static args => args[0] == "inspect");
+            Assert.Empty(registry.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("node", "abcdef0123456789", "localhost/kautuka-mcpb-node:")]
     [InlineData("UV", "0123deadbeef", "localhost/kautuka-mcpb-uv:")]
