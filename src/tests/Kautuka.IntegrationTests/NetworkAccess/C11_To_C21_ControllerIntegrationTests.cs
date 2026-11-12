@@ -1406,6 +1406,349 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task V7_7_SetRule_OverridesCallerSpoofedExecContextAndAttribution_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out IWorkloadRegistry registry);
+            ServerCallContext ctx = CreateCallContext();
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+
+            // 1. Registered agent-sandbox connector: even if caller spoofs ExecContext="isolated", Attribution="user",
+            //    Manager resolves authoritative registry ExecContext ("agent-sandbox") and rejects any-public.
+            registry.Register(new RegistryEntry(
+                "10.247.1.70",
+                "user-a",
+                "a1",
+                "ctr-sandbox-spoof",
+                "connector",
+                "conn-sandbox-bound",
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            RpcException exSpoofSandbox = await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                {
+                    Actor = admin,
+                    ScopeKind = "user",
+                    UserId = "user-a",
+                    ConnectorId = "conn-sandbox-bound",
+                    Destination = "*",
+                    DestKind = "any-public",
+                    Port = 0,
+                    Allowed = true,
+                    ExecContext = "isolated",
+                    Attribution = "user",
+                    ExpectedRevision = controller.PolicyStore.Revision,
+                }, ctx);
+            });
+            Assert.Equal(StatusCode.InvalidArgument, exSpoofSandbox.StatusCode);
+            Assert.Contains("scope_not_enforceable", exSpoofSandbox.Status.Detail, StringComparison.Ordinal);
+
+            // 2. Connector with Attribution="none" recorded request history: caller spoofing Attribution="user" is rejected.
+            registry.Register(new RegistryEntry(
+                "10.247.1.71",
+                null,
+                null,
+                "ctr-unattr",
+                "connector",
+                "conn-unattributed",
+                "isolated",
+                true,
+                "normal",
+                "none",
+                null,
+                DateTimeOffset.UtcNow));
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.71", "93.184.216.34", 443, "unattr.example.com"));
+            registry.Deregister("10.247.1.71", "ctr-unattr");
+
+            RpcException exSpoofUnattr = await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                {
+                    Actor = admin,
+                    ScopeKind = "user",
+                    UserId = "user-a",
+                    ConnectorId = "conn-unattributed",
+                    Destination = "unattr.example.com",
+                    DestKind = "host",
+                    Port = 443,
+                    Allowed = true,
+                    ExecContext = "isolated",
+                    Attribution = "user",
+                    ExpectedRevision = controller.PolicyStore.Revision,
+                }, ctx);
+            });
+            Assert.Equal(StatusCode.InvalidArgument, exSpoofUnattr.StatusCode);
+            Assert.Contains("scope_not_enforceable", exSpoofUnattr.Status.Detail, StringComparison.Ordinal);
+
+            // Negative control (.NC): genuine per-user isolated connector in registry succeeds even if caller omits ExecContext/Attribution.
+            registry.Register(new RegistryEntry(
+                "10.247.1.72",
+                "user-a",
+                "a1",
+                "ctr-real-iso",
+                "connector",
+                "conn-real-isolated",
+                "isolated",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            NetworkAccessSetRuleResponse allowedIso = await svc.SetRule(new NetworkAccessSetRuleRequest
+            {
+                Actor = admin,
+                ScopeKind = "user",
+                UserId = "user-a",
+                ConnectorId = "conn-real-isolated",
+                Destination = "*",
+                DestKind = "any-public",
+                Port = 0,
+                Allowed = true,
+                ExpectedRevision = controller.PolicyStore.Revision,
+            }, ctx);
+            Assert.True(allowedIso.Rule.Allowed);
+            Assert.True(allowedIso.Rule.OpenInternetBadge);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task V7_8_DecideRequest_DefaultAndForcedScopeResolution_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out IWorkloadRegistry registry);
+            ServerCallContext ctx = CreateCallContext();
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+            var userA = new NetworkAccessActorMessage { UserId = "user-a", IsAdmin = false };
+
+            await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "user-a",
+                CanApproveOwn = true,
+                CanAllowAllAgents = true,
+            }, ctx);
+
+            RegisterAgent(registry, "10.247.1.80", "user-a", "a1");
+            registry.Register(new RegistryEntry(
+                "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry(
+                "10.247.1.82", null, null, "ctr-sys-none", "connector", "conn-sys-none", "isolated", true, "normal", "none", null, DateTimeOffset.UtcNow));
+
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-block.example.com"));
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-allow.example.com"));
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.81", "93.184.216.34", 443, "sys-user-deny.example.com"));
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.81", "93.184.216.34", 443, "sys-allow-empty.example.com"));
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.82", "93.184.216.34", 443, "sys-none-deny.example.com"));
+
+            NetworkAccessListRequestsResponse list = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            string idOrdBlock = list.Requests.Single(r => r.Destination == "ord-block.example.com").Id;
+            string idOrdAllow = list.Requests.Single(r => r.Destination == "ord-allow.example.com").Id;
+            string idSysUserDeny = list.Requests.Single(r => r.Destination == "sys-user-deny.example.com").Id;
+            string idSysAllowEmpty = list.Requests.Single(r => r.Destination == "sys-allow-empty.example.com").Id;
+            string idSysNoneDeny = list.Requests.Single(r => r.Destination == "sys-none-deny.example.com").Id;
+            long rev = list.Revision;
+
+            // 1. Ordinary agent "Keep blocked" (Allow=false) ALWAYS forces scope="agent" even when caller passes Scope="user".
+            NetworkAccessDecideResponse ordBlockRes = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userA,
+                RequestId = idOrdBlock,
+                Allow = false,
+                Scope = "user",
+                ExpectedRevision = rev,
+            }, ctx);
+            Assert.Equal("agent", ordBlockRes.Rule.ScopeKind);
+            rev = ordBlockRes.Revision;
+
+            // 2. Ordinary agent Allow with empty Scope defaults to "agent".
+            NetworkAccessDecideResponse ordAllowRes = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userA,
+                RequestId = idOrdAllow,
+                Allow = true,
+                Scope = string.Empty,
+                ExpectedRevision = rev,
+            }, ctx);
+            Assert.Equal("agent", ordAllowRes.Rule.ScopeKind);
+            rev = ordAllowRes.Revision;
+
+            // 3. Systemwide user-attributed deny with empty Scope defaults to "user".
+            NetworkAccessDecideResponse sysUserDenyRes = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = admin,
+                RequestId = idSysUserDeny,
+                Allow = false,
+                Scope = string.Empty,
+                ExpectedRevision = rev,
+            }, ctx);
+            Assert.Equal("user", sysUserDenyRes.Rule.ScopeKind);
+            rev = sysUserDenyRes.Revision;
+
+            // 4. Systemwide non-attributed deny with empty Scope defaults to "connector-system".
+            NetworkAccessDecideResponse sysNoneDenyRes = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = admin,
+                RequestId = idSysNoneDeny,
+                Allow = false,
+                Scope = string.Empty,
+                ExpectedRevision = rev,
+            }, ctx);
+            Assert.Equal("connector-system", sysNoneDenyRes.Rule.ScopeKind);
+            rev = sysNoneDenyRes.Revision;
+
+            // 5. Negative control (.NC): Systemwide allow with empty Scope rejects (scope_required), whereas explicit Scope succeeds.
+            RpcException exScopeReq = await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.DecideRequest(new NetworkAccessDecideRequest
+                {
+                    Actor = admin,
+                    RequestId = idSysAllowEmpty,
+                    Allow = true,
+                    Scope = string.Empty,
+                    ExpectedRevision = rev,
+                }, ctx);
+            });
+            Assert.Equal(StatusCode.InvalidArgument, exScopeReq.StatusCode);
+            Assert.Contains("scope_required", exScopeReq.Status.Detail, StringComparison.Ordinal);
+
+            NetworkAccessDecideResponse sysAllowExplicit = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = admin,
+                RequestId = idSysAllowEmpty,
+                Allow = true,
+                Scope = "connector-system",
+                ExpectedRevision = rev,
+            }, ctx);
+            Assert.Equal("connector-system", sysAllowExplicit.Rule.ScopeKind);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task V7_9_ClearingCards_ResolvesOnlyRequestsEvaluatingToAllow_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out IWorkloadRegistry registry);
+            ServerCallContext ctx = CreateCallContext();
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+            var userA = new NetworkAccessActorMessage { UserId = "user-a", IsAdmin = false };
+
+            await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "user-a",
+                CanApproveOwn = true,
+                CanAllowAllAgents = true,
+            }, ctx);
+
+            RegisterAgent(registry, "10.247.1.90", "user-a", "a1");
+            RegisterAgent(registry, "10.247.1.91", "user-a", "a2");
+            registry.Register(new RegistryEntry(
+                "10.247.1.92", "user-a", "a1", "ctr-iso-a", "connector", "conn-a", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+
+            // Create pending requests across agents, ports, destinations, and LAN vs public.
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.90", "93.184.216.34", 443, "shared.example.com")); // a1 shared:443
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.91", "93.184.216.34", 443, "shared.example.com")); // a2 shared:443
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.91", "93.184.216.34", 8443, "shared.example.com")); // a2 shared:8443
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.90", "93.184.216.34", 443, "deny-test.example.com")); // a1 deny-test
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.91", "93.184.216.34", 443, "deny-test.example.com")); // a2 deny-test
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.92", "93.184.216.34", 443, "public-conn.example.com")); // conn-a public host
+            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.92", "192.168.1.50", 443, null)); // conn-a RFC1918 IP
+
+            NetworkAccessListRequestsResponse list0 = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            long rev = list0.Revision;
+
+            // 1. Agent-scope block of a1's deny-test does NOT touch a2's deny-test (stays pending).
+            string a1DenyId = list0.Requests.Single(r => r.AgentId == "a1" && r.Destination == "deny-test.example.com").Id;
+            rev = (await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userA,
+                RequestId = a1DenyId,
+                Allow = false,
+                Scope = "agent",
+                ExpectedRevision = rev,
+            }, ctx)).Revision;
+
+            NetworkAccessListRequestsResponse afterDeny = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            Assert.Equal("pending", afterDeny.Requests.Single(r => r.AgentId == "a2" && r.Destination == "deny-test.example.com").Status);
+
+            // 2. Agent-scope allow of a1's shared:443 keeps a2's shared:443 and shared:8443 pending.
+            string a1SharedId = afterDeny.Requests.Single(r => r.AgentId == "a1" && r.Destination == "shared.example.com").Id;
+            rev = (await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userA,
+                RequestId = a1SharedId,
+                Allow = true,
+                Scope = "agent",
+                ExpectedRevision = rev,
+            }, ctx)).Revision;
+
+            NetworkAccessListRequestsResponse afterAgentAllow = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            Assert.Equal("pending", afterAgentAllow.Requests.Single(r => r.AgentId == "a2" && r.Destination == "shared.example.com" && r.Port == 443).Status);
+            Assert.Equal("pending", afterAgentAllow.Requests.Single(r => r.AgentId == "a2" && r.Destination == "shared.example.com" && r.Port == 8443).Status);
+
+            // 3. Negative control (.NC): user-scope allow of shared:443 resolves a2's matching shared:443 card,
+            //    while keeping shared:8443 pending; and any-public on conn-a resolves public card while keeping RFC1918 pending!
+            rev = (await svc.SetRule(new NetworkAccessSetRuleRequest
+            {
+                Actor = userA,
+                ScopeKind = "user",
+                UserId = "user-a",
+                Destination = "shared.example.com",
+                DestKind = "host",
+                Port = 443,
+                Allowed = true,
+                ExpectedRevision = rev,
+            }, ctx)).Revision;
+
+            NetworkAccessListRequestsResponse afterUserAllow = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            Assert.Equal("allowed", afterUserAllow.Requests.Single(r => r.AgentId == "a2" && r.Destination == "shared.example.com" && r.Port == 443).Status);
+            Assert.Equal("pending", afterUserAllow.Requests.Single(r => r.AgentId == "a2" && r.Destination == "shared.example.com" && r.Port == 8443).Status);
+
+            _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+            {
+                Actor = admin,
+                ScopeKind = "user",
+                UserId = "user-a",
+                ConnectorId = "conn-a",
+                Destination = "*",
+                DestKind = "any-public",
+                Port = 0,
+                Allowed = true,
+                ExpectedRevision = rev,
+            }, ctx);
+
+            NetworkAccessListRequestsResponse afterOpenInternet = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
+            Assert.Equal("allowed", afterOpenInternet.Requests.Single(r => r.ConnectorId == "conn-a" && r.Destination == "public-conn.example.com").Status);
+            Assert.Equal("pending", afterOpenInternet.Requests.Single(r => r.ConnectorId == "conn-a" && r.Destination == "192.168.1.50").Status);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
     private static void RegisterAgent(IWorkloadRegistry registry, string ip, string userId, string agentId)
     {
         registry.Register(new RegistryEntry(

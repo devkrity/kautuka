@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
@@ -165,20 +166,29 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
+            string? targetUserId = string.IsNullOrWhiteSpace(request.UserId) ? null : request.UserId;
+            string? targetAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? null : request.AgentId;
+            string? targetConnectorId = string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId;
+            (string? execContext, string? attribution) = ResolveAuthoritativeRuleContextAndAttribution(
+                targetConnectorId,
+                targetUserId,
+                string.IsNullOrWhiteSpace(request.ExecContext) ? null : request.ExecContext,
+                string.IsNullOrWhiteSpace(request.Attribution) ? null : request.Attribution);
+
             (long revision, NetworkAccessRuleView rule) = Nac.PolicyStore.SetRule(
                 ToActor(request.Actor),
                 new RuleWriteSpec(
                     request.ScopeKind,
-                    string.IsNullOrWhiteSpace(request.UserId) ? null : request.UserId,
-                    string.IsNullOrWhiteSpace(request.AgentId) ? null : request.AgentId,
-                    string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId,
+                    targetUserId,
+                    targetAgentId,
+                    targetConnectorId,
                     request.Destination,
                     request.DestKind,
                     request.Port,
                     request.Allowed,
                     request.AllowLan,
-                    string.IsNullOrWhiteSpace(request.ExecContext) ? null : request.ExecContext,
-                    string.IsNullOrWhiteSpace(request.Attribution) ? null : request.Attribution),
+                    execContext,
+                    attribution),
                 request.ExpectedRevision);
 
             return new NetworkAccessSetRuleResponse
@@ -187,6 +197,77 @@ public sealed partial class WorkspaceGrpcService
                 Rule = ToMessage(rule),
             };
         });
+    }
+
+    private (string? ExecContext, string? Attribution) ResolveAuthoritativeRuleContextAndAttribution(
+        string? connectorId,
+        string? userId,
+        string? requestedExecContext,
+        string? requestedAttribution)
+    {
+        if (string.IsNullOrWhiteSpace(connectorId))
+        {
+            return (requestedExecContext, requestedAttribution);
+        }
+
+        string trimmedConnectorId = connectorId.Trim();
+
+        // 1. Authoritative live container registry metadata takes precedence over caller-supplied values.
+        RegistryEntry[] registryMatches =
+        [
+            .. Nac.Registry.GetAll().Where(entry =>
+                string.Equals(entry.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
+                && (string.IsNullOrWhiteSpace(userId)
+                    || string.IsNullOrWhiteSpace(entry.UserId)
+                    || string.Equals(entry.UserId, userId, StringComparison.Ordinal))),
+        ];
+        if (registryMatches.Length > 0)
+        {
+            RegistryEntry? restrictive = registryMatches.FirstOrDefault(static entry =>
+                entry.ExecContext is "agent-sandbox" or "skill" or "skills" or "app" or "system"
+                || string.Equals(entry.Attribution, "none", StringComparison.Ordinal));
+            RegistryEntry authoritative = restrictive ?? registryMatches[0];
+            return (authoritative.ExecContext, authoritative.Attribution);
+        }
+
+        // 2. Desired state snapshot synced from Gateway (sandbox bindings and internal connectors).
+        if (desiredStateStore is not null)
+        {
+            WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
+            bool isInternal = snapshot.DesiredContainerConnectors.Any(connector =>
+                connector.IsInternalSystemConnector
+                && (string.Equals(connector.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
+                    || (!string.IsNullOrWhiteSpace(userId)
+                        && string.Equals(connector.ConnectorId, $"{userId}::{trimmedConnectorId}", StringComparison.Ordinal))));
+            if (isInternal)
+            {
+                return ("system", "none");
+            }
+
+            bool boundToSandbox = snapshot.DesiredSandboxConnectorBindings.Any(binding =>
+                binding.ConnectorIds.Any(id => string.Equals(id, trimmedConnectorId, StringComparison.Ordinal)));
+            bool hasStandaloneIsolated = snapshot.DesiredContainerConnectors.Any(connector =>
+                !connector.IsInternalSystemConnector
+                && (string.Equals(connector.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
+                    || (!string.IsNullOrWhiteSpace(userId)
+                        && string.Equals(connector.ConnectorId, $"{userId}::{trimmedConnectorId}", StringComparison.Ordinal))));
+            if (boundToSandbox && !hasStandaloneIsolated)
+            {
+                return ("agent-sandbox", requestedAttribution);
+            }
+        }
+
+        // 3. Previously observed network requests in policy store for unattributed connectors.
+        bool recordedUnattributed = Nac.PolicyStore.GetRawStateSnapshot().Requests.Any(req =>
+            string.Equals(req.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
+            && string.Equals(req.Attribution, "none", StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(userId) || req.Systemwide || string.Equals(req.UserId, userId, StringComparison.Ordinal)));
+        if (recordedUnattributed)
+        {
+            return (requestedExecContext, "none");
+        }
+
+        return (requestedExecContext, requestedAttribution);
     }
 
     public override Task<NetworkAccessDeleteRuleResponse> DeleteRule(

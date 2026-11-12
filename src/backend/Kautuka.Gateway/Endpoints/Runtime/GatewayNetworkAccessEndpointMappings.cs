@@ -277,6 +277,11 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
 
             string targetUserId = isAdmin ? (dto.UserId ?? user.Id) : user.Id;
+            (string? derivedExecContext, string? derivedAttribution) = DeriveRuleMetadataFromCatalog(
+                catalogStore,
+                dto.ConnectorId,
+                targetUserId,
+                dto.AgentId);
 
             var setRuleRequest = new NetworkAccessSetRuleRequest
             {
@@ -291,6 +296,8 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Allowed = dto.Allowed,
                 AllowLan = dto.AllowLan ?? false,
                 ExpectedRevision = dto.ExpectedRevision,
+                ExecContext = derivedExecContext ?? string.Empty,
+                Attribution = derivedAttribution ?? string.Empty,
             };
 
             try
@@ -899,6 +906,72 @@ internal static partial class GatewayRuntimeEndpointMappings
             WaitingForAdmin: waitingForAdmin,
             OwnerCanApproveOwn: canApproveOwn,
             OwnerCanAllowAllAgents: canAllowAllAgents);
+    }
+
+    private static (string? ExecContext, string? Attribution) DeriveRuleMetadataFromCatalog(
+        IGatewayCatalogStore catalogStore,
+        string? connectorId,
+        string? targetUserId,
+        string? agentId)
+    {
+        if (string.IsNullOrWhiteSpace(connectorId))
+        {
+            return !string.IsNullOrWhiteSpace(agentId)
+                ? ("agent-sandbox", "user-agent")
+                : (null, null);
+        }
+
+        string trimmedConnectorId = connectorId.Trim();
+        if (!catalogStore.TryGetMcpServer(trimmedConnectorId, out GatewayMcpServer? connector) || connector is null)
+        {
+            return (null, null);
+        }
+
+        if (connector.IsInternalSystemConnector)
+        {
+            return ("system", "none");
+        }
+
+        bool hasSandboxBinding = false;
+        bool hasIsolatedBinding = false;
+        foreach (GatewayAgent agent in catalogStore.ListAgents())
+        {
+            if (!string.IsNullOrWhiteSpace(targetUserId)
+                && !string.Equals(agent.OwnerUserId, targetUserId, StringComparison.Ordinal)
+                && !string.Equals(agent.Scope, GatewayOwnershipScopes.System, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (agent.McpBindings is null)
+            {
+                continue;
+            }
+
+            foreach (GatewayAgentMcpBinding binding in agent.McpBindings)
+            {
+                if (!string.Equals(binding.ConnectorId, trimmedConnectorId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (string.Equals(binding.Context, "AgentSandbox", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasSandboxBinding = true;
+                }
+                else
+                {
+                    hasIsolatedBinding = true;
+                }
+            }
+        }
+
+        string execContext = hasSandboxBinding && !hasIsolatedBinding ? "agent-sandbox" : "isolated";
+        string attribution = string.Equals(connector.Scope, GatewayOwnershipScopes.System, StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(connector.OwnerUserId)
+            ? "none"
+            : (hasSandboxBinding && !hasIsolatedBinding ? "user-agent" : "user");
+        return (execContext, attribution);
     }
 
     private static string FormatRuleSummaryText(
