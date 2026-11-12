@@ -24,6 +24,80 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
     [Fact]
+    public async Task V7_45_BrakedProbeIsRefusedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-launch-gate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            policyStore.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "user", "blocked-user", on: true);
+            var commands = new List<string[]>();
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add([.. args]);
+                if (args[0] == "run")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic start failure", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+            var registry = new WorkloadRegistry();
+            var gate = new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                workloadRegistry: registry,
+                workloadLaunchGate: gate);
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "launch-gate-test",
+                "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+                "fake-server",
+                [],
+                true,
+                false,
+                null,
+                null,
+                [],
+                30,
+                600);
+
+            var blocked = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "blocked-user");
+            Assert.False(blocked.Ok);
+            Assert.Contains("network brake is active", blocked.FailureMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(commands);
+            Assert.Empty(registry.GetAll());
+
+            var allowedUser = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "other-user");
+            Assert.False(allowedUser.Ok);
+            Assert.True(commands.Any(static args => args[0] == "run"), allowedUser.FailureMessage);
+            string[] run = Assert.Single(commands, static args => args[0] == "run");
+            Assert.Contains("io.kautuka.user=other-user", run, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.purpose=probe", run, StringComparer.Ordinal);
+            Assert.Empty(registry.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task V7_48_OverlappingCallsVerifyAndDeregisterTheirOwnEphemeralWorkloads()
     {
         if (!OperatingSystem.IsLinux())
@@ -1347,5 +1421,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
         archive.CreateEntry("splose_mcp/server.py");
         return archivePath;
+    }
+
+    private sealed class TestWorkloadStartupState(bool isStartupGateOpen) : IWorkloadStartupState
+    {
+        public bool IsStartupGateOpen { get; } = isStartupGateOpen;
     }
 }

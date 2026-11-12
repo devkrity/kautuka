@@ -3,13 +3,69 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 
 namespace Kautuka.IntegrationTests;
 
 public sealed class PodmanContainerToolTests
 {
+    [Fact]
+    public async Task V7_45_BrakedSandboxIsRejectedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-v7-sandbox-launch-gate-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            policyStore.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "user", "blocked-user", on: true);
+            var commands = new List<string[]>();
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add([.. args]);
+                if (args[0] == "run")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic start failure", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+            var gate = new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore);
+            var tool = new PodmanContainerTool(
+                runner,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip-cursor.json")),
+                workloadLaunchGate: gate);
+            ContainerContext blockedContext = CreateLaunchContext("blocked-user", "agent-a", Path.Combine(root, "blocked"));
+
+            InvalidOperationException blocked = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => tool.SpawnSandboxAsync(blockedContext, TestContext.Current.CancellationToken));
+
+            Assert.Contains("user network brake is active", blocked.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(commands);
+
+            ContainerContext otherUserContext = CreateLaunchContext("other-user", "agent-b", Path.Combine(root, "other"));
+            _ = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => tool.SpawnSandboxAsync(otherUserContext, TestContext.Current.CancellationToken));
+            Assert.Contains(commands, static args => args[0] == "run");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task EphemeralEnvironmentFileIsRestrictedToTheProcessOwner()
     {
@@ -219,5 +275,24 @@ public sealed class PodmanContainerToolTests
             ?? throw new InvalidOperationException("EnsureWritableVolumePermissions method was not found.");
 
         method.Invoke(null, [path]);
+    }
+
+    private static ContainerContext CreateLaunchContext(string userId, string agentId, string hostPath)
+        => new(
+            "agent",
+            agentId,
+            userId,
+            hostPath,
+            "/workspace",
+            "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+            2,
+            "2g",
+            120,
+            [],
+            new Dictionary<string, string>());
+
+    private sealed class TestWorkloadStartupState(bool isStartupGateOpen) : IWorkloadStartupState
+    {
+        public bool IsStartupGateOpen { get; } = isStartupGateOpen;
     }
 }
