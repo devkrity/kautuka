@@ -220,7 +220,7 @@ public sealed class NetworkAccessController
                 string actorKind = entry.Kind == "connector" ? "connector" : "agent";
                 if (isProbe)
                 {
-                    string probeRequestId = policyStore.RecordOrUpdatePendingProbeRequest(
+                    string? probeRequestId = policyStore.RecordOrUpdatePendingProbeRequest(
                         entry.ContainerId,
                         entry.UserId,
                         entry.AgentId,
@@ -234,6 +234,12 @@ public sealed class NetworkAccessController
                         origin: "container",
                         compatProfile: entry.CompatProfile,
                         observedAtUtc: now);
+                    if (probeRequestId is null)
+                    {
+                        Interlocked.Increment(ref requestOverflow);
+                        return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "request_overflow");
+                    }
+
                     return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", probeRequestId);
                 }
 

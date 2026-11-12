@@ -974,7 +974,7 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
-    public string RecordOrUpdatePendingProbeRequest(
+    public string? RecordOrUpdatePendingProbeRequest(
         string containerId,
         string? userId,
         string? agentId,
@@ -1011,6 +1011,13 @@ public sealed partial class NetworkAccessPolicyStore
             }
             else
             {
+                int containerRequestCount = probeRequestsById.Values.Count(entry =>
+                    string.Equals(entry.ContainerId, containerId, StringComparison.Ordinal));
+                if (containerRequestCount >= MaxPendingProbeRequestsPerContainer)
+                {
+                    return null;
+                }
+
                 var req = new NetworkAccessRequest(
                     id,
                     userId,

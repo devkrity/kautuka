@@ -8,6 +8,7 @@ namespace Kautuka.NetworkAccessController;
 public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDisposable
 {
     public const int MaxPendingRequests = 500;
+    public const int MaxPendingProbeRequestsPerContainer = 64;
     public const int MaxRules = 10000;
     private static readonly TimeSpan resolvedRequestRetention = TimeSpan.FromDays(30);
 

@@ -1486,6 +1486,94 @@ public sealed class C11_To_C21_ControllerIntegrationTests
     }
 
     [Fact]
+    public void V7_14_ProbeCardsAreCappedPerContainer_AndOverflowStillDenies_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            const int probeCardLimit = NetworkAccessPolicyStore.MaxPendingProbeRequestsPerContainer;
+            using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NacController(store, registry);
+            registry.Register(new RegistryEntry(
+                "10.247.1.130",
+                "user-a",
+                null,
+                "probe-card-cap",
+                "connector",
+                "connector-cap",
+                "isolated",
+                Systemwide: false,
+                Egress: "normal",
+                Attribution: "user",
+                CompatProfile: null,
+                DateTimeOffset.UtcNow,
+                Purpose: "probe"));
+
+            NetworkAccessDecisionResult last = default!;
+            for (int index = 0; index <= probeCardLimit; index++)
+            {
+                last = controller.EvaluateContainerConnection(new ContainerConnectionInput(
+                    "10.247.1.130",
+                    "93.184.216.34",
+                    443,
+                    $"probe-{index}.example.com"));
+                Assert.False(last.Allowed);
+            }
+
+            Assert.Equal("request_overflow", last.Reason);
+            Assert.Null(last.RequestId);
+            NetworkAccessRequestView[] probeCards = store.ListRequests(new NetworkAccessActor("user-a", IsAdmin: false))
+                .Requests
+                .Where(static view => string.Equals(view.Request.Purpose, "probe", StringComparison.Ordinal))
+                .ToArray();
+            Assert.Equal(probeCardLimit, probeCards.Length);
+            Assert.Equal(1, controller.RequestOverflow);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public void V7_14_LegacyPersistedProbeCannotBecomeAPersistentRule_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            var owner = new NetworkAccessActor("user-a", IsAdmin: false);
+            _ = store.SetUserPrivileges(admin, owner.UserId, canApproveOwn: true, canAllowAllAgents: false);
+            (string? requestId, bool overflow) = store.RecordOrUpdatePendingRequest(
+                userId: owner.UserId,
+                agentId: null,
+                connectorId: "connector-probe",
+                systemwide: false,
+                attribution: "user",
+                destKind: "host",
+                destination: "legacy-probe.example",
+                port: 443,
+                actorKind: "connector",
+                origin: "container",
+                purpose: "probe");
+            Assert.False(overflow);
+            Assert.NotNull(requestId);
+
+            UnauthorizedAccessException rejected = Assert.Throws<UnauthorizedAccessException>(
+                () => store.DecideRequest(owner, requestId!, allow: true, scope: "user", store.Revision));
+
+            Assert.Contains("probe", rejected.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(store.ListRules(admin).Rules, view => view.Rule.Destination == "legacy-probe.example");
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task V7_7_SetRule_OverridesCallerSpoofedExecContextAndAttribution_WithNegativeControl()
     {
         string tempDir = CreateTempDir();

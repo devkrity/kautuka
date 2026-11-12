@@ -285,7 +285,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
         finally
         {
-            CompleteProbeAuthorization(connectorId, probeContext);
+            CompleteProbeAuthorization(connectorId, probeContext, ephemeralWorkload?.ContainerName);
             if (containerPrepared)
             {
                 if (!CompleteEphemeralWorkload(ephemeralWorkload))
@@ -299,27 +299,17 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
     }
 
-    internal void CompleteProbeAuthorization(string connectorId, ContainerContext? probeContext)
+    internal void CompleteProbeAuthorization(string connectorId, ContainerContext? probeContext, string? probeContainerId = null)
     {
         if (clearProbeAuthorization is null)
         {
             return;
         }
 
-        string containerName = BuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
-        clearProbeAuthorization(containerName);
-        if (workloadRegistry is null)
-        {
-            return;
-        }
-
-        foreach (Kautuka.NetworkAccessController.RegistryEntry entry in workloadRegistry.GetAll().Where(entry =>
-            string.Equals(entry.ConnectorId, connectorId, StringComparison.Ordinal)
-            && string.Equals(entry.UserId, probeContext?.UserId, StringComparison.Ordinal)
-            && string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
-        {
-            clearProbeAuthorization(entry.ContainerId);
-        }
+        string containerId = string.IsNullOrWhiteSpace(probeContainerId)
+            ? BuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext)
+            : probeContainerId.Trim();
+        clearProbeAuthorization(containerId);
     }
 
     /// <summary>

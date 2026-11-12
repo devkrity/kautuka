@@ -720,10 +720,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             ContainerContext probeContext = new(
                 "user", user.UserId, user.UserId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>());
             string containerId = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
-            string requestId = policyStore.RecordOrUpdatePendingProbeRequest(
+            string requestId = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
                 containerId, user.UserId, null, connectorId, systemwide: false, attribution: "user",
                 destKind: "host", destination: "probe.example", port: 443, actorKind: "connector",
-                origin: "probe");
+                origin: "probe"));
             _ = policyStore.DecideRequest(admin, requestId, allow: true, scope: null, policyStore.Revision);
             Assert.True(policyStore.TryEvaluateTemporaryProbeDecision(
                 containerId, user.UserId, connectorId, "host", "probe.example", 443, out bool allowedBefore, out _));
@@ -747,6 +747,57 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 containerId, user.UserId, connectorId, "host", "probe.example", 443, out _, out _));
             Assert.DoesNotContain(policyStore.ListRequests(user).Requests, view => view.Request.Id == requestId);
             Assert.Equal(0, registry.Count);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V7_14_ProbeCompletionClearsOnlyItsOwnContainer_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-probe-isolation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            const string userId = "user-alpha";
+            const string connectorId = "connector-overlap";
+            ContainerContext probeContext = new(
+                "user", userId, userId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>());
+            string completingContainerId = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            _ = policyStore.RecordOrUpdatePendingProbeRequest(
+                completingContainerId, userId, null, connectorId, systemwide: false, attribution: "user",
+                destKind: "host", destination: "first.example", port: 443, actorKind: "connector", origin: "probe");
+            string overlappingRequestId = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
+                "overlapping-probe-container", userId, null, connectorId, systemwide: false, attribution: "user",
+                destKind: "host", destination: "second.example", port: 443, actorKind: "connector", origin: "probe"));
+
+            var registry = new WorkloadRegistry();
+            registry.Register(new RegistryEntry(
+                "10.247.1.131", userId, null, completingContainerId, "connector", connectorId, "isolated",
+                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+            registry.Register(new RegistryEntry(
+                "10.247.1.132", userId, null, "overlapping-probe-container", "connector", connectorId, "isolated",
+                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command should run."));
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(), runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                workloadRegistry: registry,
+                probePolicyStore: policyStore);
+
+            service.CompleteProbeAuthorization(connectorId, probeContext);
+
+            NetworkAccessRequestView[] remaining = policyStore.ListRequests(new NetworkAccessActor(userId, IsAdmin: false))
+                .Requests
+                .Where(static view => string.Equals(view.Request.Purpose, "probe", StringComparison.Ordinal))
+                .ToArray();
+            Assert.DoesNotContain(remaining, view => view.Request.Destination == "first.example");
+            Assert.Contains(remaining, view => view.Request.Id == overlappingRequestId && view.Request.Destination == "second.example");
         }
         finally
         {

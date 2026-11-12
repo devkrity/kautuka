@@ -192,6 +192,11 @@ internal static class NetworkAccessPolicyAuthorizer
         string? scope,
         ResolvePrivilegesCallback resolvePrivileges)
     {
+        if (string.Equals(request.Purpose, "probe", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedAccessException("PermissionDenied: Probe requests require temporary in-memory authorization and cannot be decided from persisted records.");
+        }
+
         if (request.Systemwide)
         {
             if (!actor.IsAdmin)
