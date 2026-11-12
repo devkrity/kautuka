@@ -40,6 +40,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
         string adminId = fixture.UserStore.ListUsers().Single(u => u.Username == "admin").Id;
         Assert.True(fixture.PolicyStore.HasBothPrivileges(adminId));
+        AssertPersistedPrivileges(fixture, adminId, expected: true);
 
         // 2. Invite a second admin -> Manager PolicyStore immediately persists (true, true).
         using JsonDocument invitedAdminDoc = await fixture.SendJsonAsync(
@@ -49,6 +50,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         string secondAdminId = invitedAdminDoc.RootElement.GetProperty("user").GetProperty("id").GetString()!;
         Assert.True(fixture.PolicyStore.HasBothPrivileges(secondAdminId));
+        AssertPersistedPrivileges(fixture, secondAdminId, expected: true);
 
         // 3. Invite a standard user -> privileges default to (false, false).
         using JsonDocument invitedUserDoc = await fixture.SendJsonAsync(
@@ -58,6 +60,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         string aliceId = invitedUserDoc.RootElement.GetProperty("user").GetProperty("id").GetString()!;
         Assert.False(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        AssertPersistedPrivileges(fixture, aliceId, expected: false);
 
         // 4. Promote Alice -> privileges persist as (true, true) and user-scope rules evaluate Allowed.
         using JsonDocument promoteDoc = await fixture.SendJsonAsync(
@@ -67,6 +70,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         Assert.True(promoteDoc.RootElement.GetProperty("success").GetBoolean());
         Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        AssertPersistedPrivileges(fixture, aliceId, expected: true);
 
         fixture.Registry.Register(new RegistryEntry(
             "10.247.1.20", aliceId, "agent-1", "ctr-alice-1", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
@@ -101,6 +105,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         Assert.True(demoteDoc.RootElement.GetProperty("success").GetBoolean());
         Assert.False(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        AssertPersistedPrivileges(fixture, aliceId, expected: false);
 
         using JsonDocument privAfterDemote = await fixture.SendGetAsync($"/api/network-access/users/{aliceId}/privileges", adminToken);
         Assert.False(privAfterDemote.RootElement.GetProperty("canApproveOwn").GetBoolean());
@@ -113,6 +118,14 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         JsonElement demotedRule = rulesAfterDemote.RootElement.GetProperty("rules").EnumerateArray()
             .Single(r => r.GetProperty("destination").GetString() == "promoted.example.com");
         Assert.True(demotedRule.GetProperty("paused").GetBoolean());
+    }
+
+    private static void AssertPersistedPrivileges(GatewayNacFixture fixture, string userId, bool expected)
+    {
+        using var reopenedStore = new NetworkAccessPolicyStore(fixture.PolicyStorePath);
+        UserPrivileges privileges = reopenedStore.GetUserPrivileges(new NetworkAccessActor("test-admin", IsAdmin: true), userId);
+        Assert.Equal(expected, privileges.CanApproveOwn);
+        Assert.Equal(expected, privileges.CanAllowAllAgents);
     }
 
     [Fact]
@@ -191,6 +204,59 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.False(decidedReq2.GetProperty("ownerCanAllowAllAgents").GetBoolean());
     }
 
+    [Fact]
+    public async Task V7_4_DemotionIsRejectedWhenManagerPrivilegeSyncFails()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using JsonDocument invited = await fixture.SendJsonAsync(
+            HttpMethod.Post,
+            "/api/settings/users/invite",
+            new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "admin" },
+            adminToken);
+        string aliceId = invited.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+
+        fixture.FailPrivilegeSync = true;
+        using HttpResponseMessage response = await fixture.SendRoleUpdateAsync(aliceId, isAdmin: false, adminToken);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.True(fixture.UserStore.TryGetUserById(aliceId, out GatewayUser? alice));
+        Assert.Equal("admin", alice!.Role);
+        Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+    }
+
+    [Fact]
+    public async Task V7_4_StartupSyncRepairsExistingAdminPrivilegesInThePersistedStore()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        long writesBeforeDefaultRead = fixture.PolicyStore.DiskWriteCount;
+        UserPrivileges implicitAdmin = fixture.PolicyStore.GetUserPrivileges(new NetworkAccessActor("legacy-admin", IsAdmin: true));
+        Assert.True(implicitAdmin.CanApproveOwn);
+        Assert.True(implicitAdmin.CanAllowAllAgents);
+        Assert.Equal(writesBeforeDefaultRead, fixture.PolicyStore.DiskWriteCount);
+        Assert.DoesNotContain(fixture.PolicyStore.GetRawStateSnapshot().UserPrivileges, item => item.UserId == "legacy-admin");
+
+        _ = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        string adminId = fixture.UserStore.ListUsers().Single(u => u.Username == "admin").Id;
+        fixture.PolicyStore.SetUserPrivileges(
+            new NetworkAccessActor(adminId, IsAdmin: true),
+            adminId,
+            canApproveOwn: false,
+            canAllowAllAgents: false,
+            targetIsAdmin: false);
+        Assert.False(fixture.PolicyStore.HasBothPrivileges(adminId));
+
+        var sync = new GatewayUserRolePrivilegesStartupSyncService(
+            fixture.ManagerService,
+            fixture.UserStore,
+            NullLogger<GatewayUserRolePrivilegesStartupSyncService>.Instance);
+        await sync.StartAsync(CancellationToken.None);
+
+        Assert.True(fixture.PolicyStore.HasBothPrivileges(adminId));
+        AssertPersistedPrivileges(fixture, adminId, expected: true);
+    }
+
     private sealed class GatewayNacFixture : IAsyncDisposable
     {
         private readonly string root;
@@ -200,7 +266,16 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         public NetworkAccessPolicyStore PolicyStore { get; }
         public WorkloadRegistry Registry { get; }
         public Kautuka.NetworkAccessController.NetworkAccessController Controller { get; }
+        public string PolicyStorePath => Path.Combine(root, "nac", "policy.json");
         public IGatewayUserStore UserStore => app.Services.GetRequiredService<IGatewayUserStore>();
+        public IManagerGrpcService ManagerService => managerService;
+        public bool FailPrivilegeSync
+        {
+            get => managerService.FailPrivilegeSync;
+            set => managerService.FailPrivilegeSync = value;
+        }
+
+        private InProcessManagerGrpcService managerService = null!;
 
         private GatewayNacFixture(
             string root,
@@ -248,7 +323,8 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             RemoveHostedService<ChannelHostOutboxWorker>(builder.Services);
             RemoveHostedService<ChannelHostIngressWorker>(builder.Services);
             RemoveHostedService<AutopilotSchedulerService>(builder.Services);
-            builder.Services.AddSingleton<IManagerGrpcService>(new InProcessManagerGrpcService(grpcService));
+            var managerService = new InProcessManagerGrpcService(grpcService);
+            builder.Services.AddSingleton<IManagerGrpcService>(managerService);
             builder.Services.RemoveAll<CredentialResolverService>();
             builder.Services.AddSingleton(new CredentialResolverService(
                 new Lazy<CredentialsService.CredentialsServiceClient>(new NoOpCredentialsClient())));
@@ -261,7 +337,11 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             GatewayAppBootstrap.ConfigureApp(app, database);
             await app.StartAsync();
 
-            return new GatewayNacFixture(root, app, app.GetTestClient(), policyStore, registry, controller);
+            var fixture = new GatewayNacFixture(root, app, app.GetTestClient(), policyStore, registry, controller)
+            {
+                managerService = managerService,
+            };
+            return fixture;
         }
 
         public async Task<string> SetupAndLoginFirstAdminAsync(string username, string password)
@@ -306,6 +386,16 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             return JsonDocument.Parse(json);
         }
 
+        public async Task<HttpResponseMessage> SendRoleUpdateAsync(string userId, bool isAdmin, string accessToken)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Put, $"/api/settings/users/{userId}/role")
+            {
+                Content = JsonContent.Create(new { isAdmin }),
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            return await client.SendAsync(req);
+        }
+
         public async ValueTask DisposeAsync()
         {
             client.Dispose();
@@ -324,9 +414,16 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         }
     }
 
-    private sealed class InProcessManagerGrpcService(WorkspaceGrpcService grpc) : IManagerGrpcService
+    private sealed class InProcessManagerGrpcService : IManagerGrpcService
     {
-        private readonly InProcessManagerServiceClient client = new(grpc);
+        public InProcessManagerGrpcService(WorkspaceGrpcService grpc)
+        {
+            client = new InProcessManagerServiceClient(grpc, () => FailPrivilegeSync);
+        }
+
+        public bool FailPrivilegeSync { get; set; }
+
+        private readonly InProcessManagerServiceClient client;
 
         public ManagerService.ManagerServiceClient Client => client;
 
@@ -376,7 +473,7 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             => Task.FromResult(new DesiredStateUpdateResponse { Outcome = DesiredStateUpdateOutcome.Applied });
     }
 
-    private sealed class InProcessManagerServiceClient(WorkspaceGrpcService grpc) : ManagerService.ManagerServiceClient
+    private sealed class InProcessManagerServiceClient(WorkspaceGrpcService grpc, Func<bool> failPrivilegeSync) : ManagerService.ManagerServiceClient
     {
         private static readonly TestServerCallContext ctx = new();
 
@@ -396,7 +493,9 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             => Wrap(grpc.GetUserPrivileges(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CallOptions options)
-            => Wrap(grpc.SetUserPrivileges(request, ctx));
+            => failPrivilegeSync()
+                ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage"))
+                : Wrap(grpc.SetUserPrivileges(request, ctx));
 
         private static AsyncUnaryCall<T> Wrap<T>(Task<T> task)
             => new(task, Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });

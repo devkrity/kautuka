@@ -636,11 +636,16 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             });
             Assert.Equal(StatusCode.PermissionDenied, exSelfEscalate.StatusCode);
 
-            // (f) Admin default: an admin user's first request/rule decision persists default privileges to disk
-            //     so decisions and UI never disagree (not paused), and demotion resets ON flags cleanly (v7-4).
+            // (f) Admin defaults are applied for decisions without writing from the read path, and demotion resets ON flags cleanly (v7-4).
             RegisterAgent(registry, "10.247.0.48", "admin-new", "admin-agent-1");
             RegisterAgent(registry, "10.247.0.49", "admin-new", "admin-agent-2");
             var newAdmin = new NetworkAccessActorMessage { UserId = "admin-new", IsAdmin = true };
+            controller.PolicyStore.SetUserPrivileges(
+                new NetworkAccessActor("admin-new", IsAdmin: true),
+                "admin-new",
+                canApproveOwn: true,
+                canAllowAllAgents: true,
+                targetIsAdmin: true);
 
             // Without any prior GetUserPrivileges call, admin-new lists/decides at 'user' scope:
             _ = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = newAdmin }, ctx);
@@ -659,7 +664,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.False(adminRule.Rule.Paused);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
 
-            // Reopen persisted policy store from disk to verify admin defaults actually persisted (non-tautological).
+            // The role-sync path owns persistence; a decision must not write an implicit read default.
             using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json")))
             {
                 Assert.True(reopened.HasBothPrivileges("admin-new"));
@@ -681,15 +686,19 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             NetworkAccessListRulesResponse afterDemoteRules = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx);
             Assert.True(afterDemoteRules.Rules.Single(r => r.Destination == "admin-default.example.com").Paused);
 
-            // Also verify GetUserPrivileges persists admin default when called cleanly for another admin.
+            // Also verify an admin can read its default without creating an implicit persisted record.
             NetworkAccessUserPrivilegesMessage adminDefaultPrivs = await svc.GetUserPrivileges(new NetworkAccessGetUserPrivilegesRequest
             {
                 Actor = admin,
-                UserId = "admin",
+                UserId = "legacy-admin-read-only",
                 TargetIsAdmin = true,
             }, ctx);
             Assert.True(adminDefaultPrivs.CanApproveOwn);
             Assert.True(adminDefaultPrivs.CanAllowAllAgents);
+            using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json")))
+            {
+                Assert.False(reopened.HasBothPrivileges("legacy-admin-read-only"));
+            }
         }
         finally
         {

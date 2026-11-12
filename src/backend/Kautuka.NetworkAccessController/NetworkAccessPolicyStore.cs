@@ -31,26 +31,6 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
-    public void RegisterAdminUser(string userId)
-    {
-        if (string.IsNullOrWhiteSpace(userId))
-        {
-            return;
-        }
-
-        string trimmed = userId.Trim();
-        lock (gate)
-        {
-            NetworkAccessPolicyState current = Load();
-            if (!current.UserPrivileges.Any(p => string.Equals(p.UserId, trimmed, StringComparison.Ordinal)))
-            {
-                var adminRecord = new UserPrivileges(trimmed, CanApproveOwn: true, CanAllowAllAgents: true, SetBy: "system", SetAtUtc: DateTimeOffset.UtcNow);
-                UserPrivileges[] nextPrivs = [.. current.UserPrivileges, adminRecord];
-                SaveSync(current with { UserPrivileges = nextPrivs });
-            }
-        }
-    }
-
     public UserPrivileges GetUserPrivileges(NetworkAccessActor actor, string? targetUserId = null, bool targetIsAdmin = false)
     {
         ArgumentNullException.ThrowIfNull(actor);
@@ -60,7 +40,7 @@ public sealed partial class NetworkAccessPolicyStore
         {
             NetworkAccessPolicyState current = Load();
             bool isAdmin = targetIsAdmin || (actor.IsAdmin && string.Equals(effectiveUserId, actor.UserId, StringComparison.Ordinal));
-            UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref current, effectiveUserId, isTargetAdmin: isAdmin, persistAdminDefault: isAdmin);
+            UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref current, effectiveUserId, isTargetAdmin: isAdmin);
             return privs;
         }
     }
@@ -215,7 +195,7 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin, persistAdminDefault: actor.IsAdmin);
+            UserPrivileges callerPrivs = ResolveUserPrivilegesUnsafe(ref current, actor.UserId, isTargetAdmin: actor.IsAdmin);
 
             if (sinceRevision.HasValue
                 && sinceRevision.Value >= current.Revision
@@ -326,7 +306,7 @@ public sealed partial class NetworkAccessPolicyStore
                 request,
                 allow,
                 scope,
-                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin, persistAdminDefault: isTargetAdmin));
+                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
             string effectiveScope = resolved.EffectiveScope;
             string? ruleUserId = resolved.RuleUserId;
             string? ruleAgentId = resolved.RuleAgentId;
@@ -435,7 +415,7 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyAuthorizer.NormalizedRuleTarget normalized = NetworkAccessPolicyAuthorizer.AuthorizeSetRule(
                 actor,
                 spec,
-                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin, persistAdminDefault: isTargetAdmin));
+                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin));
             string scopeKind = normalized.ScopeKind;
             string? userId = normalized.UserId;
             string? agentId = normalized.AgentId;
@@ -906,8 +886,7 @@ public sealed partial class NetworkAccessPolicyStore
     private UserPrivileges ResolveUserPrivilegesUnsafe(
         ref NetworkAccessPolicyState current,
         string userId,
-        bool isTargetAdmin,
-        bool persistAdminDefault = false)
+        bool isTargetAdmin)
     {
         UserPrivileges? stored = current.UserPrivileges.FirstOrDefault(p => string.Equals(p.UserId, userId, StringComparison.Ordinal));
         if (stored is not null && (!isTargetAdmin || (stored.CanApproveOwn && stored.CanAllowAllAgents)))
@@ -923,17 +902,6 @@ public sealed partial class NetworkAccessPolicyStore
                 CanAllowAllAgents: true,
                 SetBy: "system",
                 SetAtUtc: DateTimeOffset.UtcNow);
-
-            if (persistAdminDefault)
-            {
-                UserPrivileges[] nextPrivs =
-                [
-                    .. current.UserPrivileges.Where(p => !string.Equals(p.UserId, userId, StringComparison.Ordinal)),
-                    adminDefault,
-                ];
-                current = current with { UserPrivileges = nextPrivs };
-                SaveSync(current);
-            }
 
             return adminDefault;
         }
@@ -1131,7 +1099,7 @@ public sealed partial class NetworkAccessPolicyStore
             request,
             allow,
             allowLan,
-            (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin, persistAdminDefault: isTargetAdmin));
+            (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
 
         if (current.Revision != expectedRevision)
         {

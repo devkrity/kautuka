@@ -116,6 +116,7 @@ internal static class GatewaySecurityModule
         builder.Services.AddSingleton<IGatewayTokenStore, GatewayTokenStore>();
         builder.Services.AddSingleton<SetupPossession>();
         builder.Services.AddSingleton<IGatewayUserStore, GatewayUserStore>();
+        builder.Services.AddHostedService<GatewayUserRolePrivilegesStartupSyncService>();
         builder.Services.AddSingleton<IGatewayAuthGuard, GatewayAuthGuard>();
         builder.Services.AddHttpClient(HttpExternalIdentityClient.HttpClientName).AddHttpMessageHandler<NetworkAccessCheckHandler>();
         builder.Services.AddSingleton(static provider => ExternalLoginProviders.Create(

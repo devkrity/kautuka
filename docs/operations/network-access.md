@@ -10,6 +10,8 @@ This guide describes the architecture, approval workflows, operational procedure
 
 `PodmanContainerTool` records and labels an agent identity only when its context scope is `agent`; a non-agent scope cannot inherit its scope ID as an agent ID. A Linux integration test covers rejection of a non-agent sandbox spec with no agent identity. Connector container fingerprints are derived at runtime from the resolved user/agent identity, execution context, connector image, and compatibility profile. The desired-state record does not infer an owner from the connector ID; runtime reconciliation supplies the launch identity when it compares a running connector.
 
+Gateway writes explicit network privileges for user creation and role changes, and syncs every persisted user role to Manager during startup so existing admin records are backfilled. A failed Manager sync during a role change restores the previous Gateway role and returns `503`; a failed startup sync prevents Gateway startup. Reading an implicit admin default does not write the policy file. Linux integration tests cover startup backfill and disk persistence, promotion and demotion, and rejection of a demotion when Manager is unavailable. These are local test results, not CI or live-service evidence.
+
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 
 ```mermaid

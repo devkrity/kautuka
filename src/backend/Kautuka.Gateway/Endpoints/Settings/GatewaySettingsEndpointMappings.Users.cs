@@ -161,6 +161,9 @@ internal static partial class GatewaySettingsEndpointMappings
                 return Results.BadRequest(new GatewayErrorResponse("Invalid user role payload."));
             }
 
+            bool previousIsAdmin = users.TryGetUserById(userId, out GatewayUser? existingUser)
+                && string.Equals(existingUser?.Role, "admin", StringComparison.OrdinalIgnoreCase);
+
             if (!users.UpdateRole(userId, request, out string? error))
             {
                 return Results.Json(
@@ -171,13 +174,32 @@ internal static partial class GatewaySettingsEndpointMappings
                         : StatusCodes.Status400BadRequest);
             }
 
-            await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
-                managerService,
-                actorUserId: actor.Id,
-                targetUserId: userId,
-                targetIsAdmin: request.IsAdmin,
-                loggerFactory.CreateLogger("Kautuka.Gateway.Settings.Users"),
-                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                    managerService,
+                    actorUserId: actor.Id,
+                    targetUserId: userId,
+                    targetIsAdmin: request.IsAdmin,
+                    loggerFactory.CreateLogger("Kautuka.Gateway.Settings.Users"),
+                    cancellationToken,
+                    failClosed: true).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or Grpc.Core.RpcException or OperationCanceledException)
+            {
+                if (!users.UpdateRole(userId, new GatewayUserRoleUpdateRequest { IsAdmin = previousIsAdmin }, out string? rollbackError))
+                {
+                    return Results.Json(
+                        new GatewayErrorResponse(rollbackError ?? "Unable to restore the user's previous role after privilege sync failed."),
+                        KautukaJsonContext.Default.GatewayErrorResponse,
+                        statusCode: StatusCodes.Status500InternalServerError);
+                }
+
+                return Results.Json(
+                    new GatewayErrorResponse("The role change was not saved because network access privileges could not be synchronized."),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             return Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse);
         });

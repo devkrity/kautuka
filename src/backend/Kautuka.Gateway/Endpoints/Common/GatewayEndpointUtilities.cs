@@ -22,7 +22,8 @@ internal static partial class GatewayEndpointUtilities
         string targetUserId,
         bool targetIsAdmin,
         ILogger? logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool failClosed = false)
     {
         var request = new NetworkAccessSetUserPrivilegesRequest
         {
@@ -37,11 +38,16 @@ internal static partial class GatewayEndpointUtilities
         {
             _ = await managerService.SetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or RpcException)
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or RpcException or OperationCanceledException)
         {
             if (logger is not null)
             {
                 LogPrivilegeSyncUnavailable(logger, ex, targetUserId, targetIsAdmin);
+            }
+
+            if (failClosed)
+            {
+                throw;
             }
         }
     }

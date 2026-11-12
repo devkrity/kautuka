@@ -686,6 +686,7 @@ public sealed class PersonaSettingsEndpointsTests
             RemoveHostedService<ChannelHostOutboxWorker>(builder.Services);
             RemoveHostedService<ChannelHostIngressWorker>(builder.Services);
             RemoveHostedService<AutopilotSchedulerService>(builder.Services);
+            RemoveHostedService<GatewayUserRolePrivilegesStartupSyncService>(builder.Services);
             builder.Services.AddSingleton<IManagerGrpcService, TestWorkspaceGrpcService>();
             builder.Services.RemoveAll<CredentialResolverService>();
             builder.Services.AddSingleton(
