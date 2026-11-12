@@ -838,16 +838,24 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable
         string dockerfilePath = Path.Combine(AppContext.BaseDirectory, "sidecar-assets", "egress-boundary", "Dockerfile");
         if (!File.Exists(dockerfilePath))
         {
-            dockerfilePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "images", "kautuka-egress-boundary", "Dockerfile"));
+            dockerfilePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "images", "kautuka-egress-boundary", "Dockerfile"));
         }
 
         if (File.Exists(dockerfilePath))
         {
             string contextDir = Path.GetDirectoryName(dockerfilePath)!;
             logger.LogInformation("Building boundary init image '{Image}' from {Path}...", BoundaryInitImage, dockerfilePath);
-            await podmanRunner
+            PodmanCommandResult buildResult = await podmanRunner
                 .RunAsync(["build", "-t", BoundaryInitImage, "-f", dockerfilePath, contextDir], 120, cancellationToken)
                 .ConfigureAwait(false);
+            if (buildResult.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to build boundary init image '{BoundaryInitImage}' from '{dockerfilePath}' (rc {buildResult.ExitCode}): {buildResult.StdErr}");
+            }
+        }
+        else
+        {
+            throw new FileNotFoundException($"Boundary init image '{BoundaryInitImage}' is not present and its Dockerfile could not be found.", dockerfilePath);
         }
     }
 
