@@ -7,6 +7,7 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -467,6 +468,55 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Equal(runCount + 1, commands.Count(static command => command[0] == "run"));
             Assert.Contains(commands, static command => command[0] == "rm");
             Assert.NotEqual(startedFingerprint, connector.SpecFingerprint);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CompletingProbeClearsTemporaryGrantAndRequestWithoutContainerDeregistration()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-probe-complete-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            var user = new NetworkAccessActor("user-alpha", IsAdmin: false);
+            _ = policyStore.SetUserPrivileges(admin, user.UserId, canApproveOwn: true, canAllowAllAgents: false);
+            const string connectorId = "connector-one";
+            ContainerContext probeContext = new(
+                "user", user.UserId, user.UserId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>());
+            string containerId = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
+            string requestId = policyStore.RecordOrUpdatePendingProbeRequest(
+                containerId, user.UserId, null, connectorId, systemwide: false, attribution: "user",
+                destKind: "host", destination: "probe.example", port: 443, actorKind: "connector",
+                origin: "probe");
+            _ = policyStore.DecideRequest(admin, requestId, allow: true, scope: null, policyStore.Revision);
+            Assert.True(policyStore.TryEvaluateTemporaryProbeDecision(
+                containerId, user.UserId, connectorId, "host", "probe.example", 443, out bool allowedBefore, out _));
+            Assert.True(allowedBefore);
+
+            var registry = new WorkloadRegistry();
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command should run without an address allocator."));
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(), runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                workloadRegistry: registry,
+                probePolicyStore: policyStore);
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                connectorId, "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+                string.Empty, [], true, false, null, null, [], 30, 600);
+            (bool ok, _, _, _) = await service.ProbeConnectorAsync(connector, 15, CancellationToken.None, user.UserId);
+            Assert.False(ok);
+
+            Assert.False(policyStore.TryEvaluateTemporaryProbeDecision(
+                containerId, user.UserId, connectorId, "host", "probe.example", 443, out _, out _));
+            Assert.DoesNotContain(policyStore.ListRequests(user).Requests, view => view.Request.Id == requestId);
+            Assert.Equal(0, registry.Count);
         }
         finally
         {

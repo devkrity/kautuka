@@ -1295,15 +1295,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
             var userX = new NetworkAccessActorMessage { UserId = "user-x", IsAdmin = false };
 
-            // Set user-x privileges: canApproveOwn = true
-            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
-            {
-                Actor = admin,
-                UserId = "user-x",
-                CanApproveOwn = true,
-                CanAllowAllAgents = false,
-            }, ctx);
-
             // 1. User's own connector probe container (user-x, conn-user, purpose="probe")
             registry.Register(new RegistryEntry(
                 "10.247.1.110",
@@ -1326,12 +1317,37 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.False(userProbeTry.Allowed);
             Assert.Equal("no_rule", userProbeTry.Reason);
 
-            // User-x can see the probe request and waitingForAdmin is false (canApproveOwn = true)
+            // Without canApproveOwn, the owner sees the probe as waiting for an administrator.
             NetworkAccessListRequestsResponse userList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             NetworkAccessRequestMessage? userReq = userList.Requests.FirstOrDefault(r => r.Destination == "user-probe.example.com");
             Assert.NotNull(userReq);
-            Assert.False(userReq.WaitingForAdmin);
+            Assert.True(userReq.WaitingForAdmin);
             Assert.Equal("probe", userReq.Purpose);
+
+            RpcException deniedWithoutPrivilege = await Assert.ThrowsAsync<RpcException>(() => svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userX,
+                RequestId = userReq.Id,
+                Allow = true,
+                Scope = "agent",
+                ExpectedRevision = userList.Revision,
+            }, ctx));
+            Assert.Equal(StatusCode.PermissionDenied, deniedWithoutPrivilege.StatusCode);
+            Assert.False(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
+
+            // Grant the owner permission, then refresh the request view and approve temporarily.
+            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "user-x",
+                CanApproveOwn = true,
+                CanAllowAllAgents = false,
+            }, ctx);
+            userList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            userReq = userList.Requests.FirstOrDefault(r => r.Destination == "user-probe.example.com");
+            Assert.NotNull(userReq);
+            Assert.False(userReq.WaitingForAdmin);
 
             // User-x approves probe temporarily: writes NO rule and does NOT increment persistent Revision!
             NetworkAccessDecideResponse decideUser = await svc.DecideRequest(new NetworkAccessDecideRequest

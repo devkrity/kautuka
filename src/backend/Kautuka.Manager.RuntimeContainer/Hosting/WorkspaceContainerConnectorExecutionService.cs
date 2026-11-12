@@ -28,7 +28,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
     NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null,
     NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
-    NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null) : IAsyncDisposable
+    NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null,
+    Kautuka.NetworkAccessController.NetworkAccessPolicyStore? probePolicyStore = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -44,6 +45,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private readonly NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
     private readonly NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = imageCompatibilityStore;
     private readonly NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = workloadLaunchGate;
+    private readonly Action<string>? clearProbeAuthorization = CreateProbeClearAction(probePolicyStore);
 
     public IReadOnlyCollection<string> TrackedContainerNames
         => [.. trackedConnectorContainers.Values.Distinct(StringComparer.OrdinalIgnoreCase)];
@@ -279,6 +281,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
         finally
         {
+            CompleteProbeAuthorization(connectorId, probeContext);
             if (containerPrepared)
             {
                 await ResetConnectorCooldownAsync(
@@ -286,6 +289,29 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext),
                     BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, probeContext)).ConfigureAwait(false);
             }
+        }
+    }
+
+    internal void CompleteProbeAuthorization(string connectorId, ContainerContext? probeContext)
+    {
+        if (clearProbeAuthorization is null)
+        {
+            return;
+        }
+
+        string containerName = BuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
+        clearProbeAuthorization(containerName);
+        if (workloadRegistry is null)
+        {
+            return;
+        }
+
+        foreach (Kautuka.NetworkAccessController.RegistryEntry entry in workloadRegistry.GetAll().Where(entry =>
+            string.Equals(entry.ConnectorId, connectorId, StringComparison.Ordinal)
+            && string.Equals(entry.UserId, probeContext?.UserId, StringComparison.Ordinal)
+            && string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
+        {
+            clearProbeAuthorization(entry.ContainerId);
         }
     }
 
@@ -1238,6 +1264,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
             _ => "isolated",
         };
+
+    private static Action<string>? CreateProbeClearAction(Kautuka.NetworkAccessController.NetworkAccessPolicyStore? store)
+        => store is null ? null : store.ClearProbeContainer;
 
     private static bool RequiresContainerRecycle(
         WorkspaceMcpContainerConnectorDefinition previousConnector,

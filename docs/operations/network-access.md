@@ -76,7 +76,7 @@ flowchart LR
 
 ## 2. User & Approval Workflows `[Implementation status varies; see status note above]`
 
-### 2.1 Approval Cards `[Built]` `[Tested]`
+### 2.1 Approval Cards `[Built]`
 When an agent or connector attempts an outbound connection to an unapproved destination:
 1. Envoy or Gateway blocks the connection and registers a pending access request in `NetworkAccessController`.
 2. A single approval card appears in the **Network Approvals** section of the Kautuka Web UI.
@@ -89,7 +89,7 @@ When an agent or connector attempts an outbound connection to an unapproved dest
      - **Allow for all my agents, including new ones**: (Visible only if the request's owner possesses `canApproveOwn` and `canAllowAllAgents` privileges). Writes a `user`-scope rule `(userId, destination, port)` covering all existing and future agents owned by this user for this destination.
 4. **Connector Probes (`v7-14`)**:
    - Probe containers (`io.kautuka.purpose=probe`) receive a temporary, **in-memory only** allow or block scoped strictly to `(probe container, user, connector, destination, port)`.
-   - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared immediately when the probe container exits or deregisters. Subsequent runtime containers ask normally and write standard persistent rules.
+   - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared when the probe operation completes, independently of container deregistration. Subsequent runtime containers ask normally and write standard persistent rules.
    - User-owned connector probes go to the connector owner if they hold `canApproveOwn` (otherwise an administrator); systemwide connector probes always route exclusively to administrators.
 
 ### 2.2 User Privileges `[Built]`
@@ -101,17 +101,17 @@ Administrators manage per-user network privileges under User Settings:
 - **Role-Change & Card Synchronization**:
   Gateway persists initial admin and invited-user privileges synchronously into Manager (`SetUserPrivileges`) on account creation and role transitions (promotion enables both flags; demotion clears both flags and pauses existing `user`-scope rules). Approval cards and rule views read the stored Manager record rather than inferring flags from role alone.
 
-### 2.3 Administrator Grants `[Built]` `[Tested]`
+### 2.3 Administrator Grants `[Built]`
 - **Open Internet Grant (`any-public`)**:
   Administrators can grant open internet access to isolated containerized connectors (`scopeKind = user`, `destKind = any-public`, `port = 0`). This allows public internet egress while non-public IPv4 ranges (`NonPublicV4`) remain strictly enforced by kernel boundary rejection. Rule creation derives execution context and attribution server-side from Gateway's connector catalog and Manager's registry/desired-state/request records rather than trusting caller-supplied flags.
 - **LAN Grants (`allowLan`)**:
   When LAN grants are enabled, connections to RFC1918 private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) route through Envoy's dedicated `dfp_lan` / `orig_dst_lan` clusters bound to `192.0.0.8`. The kernel boundary rule `lan_approved` permits this traffic while blocking access to `10.247.0.0/16` and metadata.
 
-### 2.4 Emergency Brake `[Built]` `[Tested]`
+### 2.4 Emergency Brake `[Built]`
 - **User Emergency Brake**: Immediately pauses network access for all containers owned by the user, stops running workload containers, and blocks new container creation.
 - **System Emergency Brake (Admin Only)**: Halts all workload network egress across the entire instance and shuts down all running agent containers. Rules remain intact and are restored upon releasing the brake.
 
-### 2.5 Image Compatibility Profiles `[Built]` `[Tested]`
+### 2.5 Image Compatibility Profiles `[Built]`
 Third-party containerized MCP tools that cannot operate under hardened security defaults may be granted an admin compatibility profile keyed by image digest (`sha256:...`). The profile selectively relaxes:
 - `writable-rootfs`: Permits a writable container filesystem.
 - `root-user`: Permits execution as container UID 0.
@@ -184,7 +184,7 @@ Verify the following rule comments are present:
 - `udp_drop`
 - `final_drop`
 
-### 3.4 Validating Static Templates `[Built]` `[Tested]`
+### 3.4 Validating Static Templates `[Built]`
 
 #### Envoy Static Configuration
 Validate the rendered Envoy bootstrap configuration using the official Envoy container:
