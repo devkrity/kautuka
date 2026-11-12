@@ -712,14 +712,9 @@ internal sealed class SlackSocketModeWorker(
             ClientWebSocket socket = new();
             try
             {
-                if (webSocketChecker is not null)
-                {
-                    await webSocketChecker.ConnectAsync(socket, uri, ct).ConfigureAwait(false);
-                }
-                else
-                {
-                    await socket.ConnectAsync(uri, ct).ConfigureAwait(false);
-                }
+                NetworkAccessWebSocketChecker effectiveChecker = webSocketChecker
+                    ?? new NetworkAccessWebSocketChecker(FailClosedNetworkAccessChecker.Instance);
+                await effectiveChecker.ConnectAsync(socket, uri, ct).ConfigureAwait(false);
 
                 return socket;
             }

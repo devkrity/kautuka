@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -12,7 +13,8 @@ internal sealed class KautukaAiClientFactory(
     IEnumerable<IAiClientProvider> providers,
     CredentialResolverService credentialResolver,
     IProviderTypeCatalog providerTypeCatalog,
-    IRunLimitResolver? runLimitResolver = null)
+    IRunLimitResolver? runLimitResolver = null,
+    INetworkAccessChecker? checker = null)
 {
     public KautukaAiClientFactory(IEnumerable<IAiClientProvider> providers, CredentialResolverService credentialResolver)
         : this(providers, credentialResolver, new SeededProviderTypeCatalog())
@@ -248,7 +250,7 @@ internal sealed class KautukaAiClientFactory(
             return null;
         }
 
-        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver);
+        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver, checker);
     }
 
     private JsonObject MaterializeCatalogDefaults(string providerType, JsonObject settings)

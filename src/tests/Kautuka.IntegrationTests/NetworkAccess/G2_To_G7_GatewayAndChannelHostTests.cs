@@ -647,4 +647,144 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             CallOptions options)
             => new(grpc.CheckOutbound(request, callCtx), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
     }
+
+    [Fact]
+    public async Task V7_31_ClientsWithNullChecker_FailClosedBeforeNetwork_WithNegativeControl()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        string httpUrl = $"http://127.0.0.1:{port}";
+        int acceptedConnections = 0;
+        using var acceptCts = new CancellationTokenSource();
+        Task acceptLoop = Task.Run(async () =>
+        {
+            while (!acceptCts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    using System.Net.Sockets.TcpClient client = await listener.AcceptTcpClientAsync(acceptCts.Token);
+                    Interlocked.Increment(ref acceptedConnections);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (System.Net.Sockets.SocketException)
+                {
+                    break;
+                }
+            }
+        });
+
+        try
+        {
+            // 1. OllamaAiClientProvider with checker: null -> fail closed (no TCP connection)
+            var ollama = new Kautuka.Gateway.Infrastructure.AI.OllamaAiClientProvider(checker: null);
+            var ollamaSettings = new System.Text.Json.Nodes.JsonObject { ["base_url"] = httpUrl };
+            NetworkAccessDeniedException ollamaEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await ollama.DiscoverModelsAsync(ollamaSettings, apiKey: null, throwOnFailure: true));
+            Assert.Equal("checker_missing", ollamaEx.Reason);
+
+            // 2. OpenAiCompatibleProvider with checker: null -> fail closed
+            var openAi = new Kautuka.Gateway.Infrastructure.AI.OpenAiCompatibleProvider("openai", checker: null);
+            var openAiSettings = new System.Text.Json.Nodes.JsonObject { ["base_url"] = httpUrl };
+            NetworkAccessDeniedException openAiEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await openAi.DiscoverModelsAsync(openAiSettings, apiKey: "sk-test", throwOnFailure: true));
+            Assert.Equal("checker_missing", openAiEx.Reason);
+
+            // 3. OpenAiCompatibleEndpoint.DiscoverModelsAsync without handler -> fail closed
+            NetworkAccessDeniedException endpointEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await Kautuka.Gateway.Infrastructure.AI.OpenAiCompatibleEndpoint.DiscoverModelsAsync(
+                    openAiSettings,
+                    apiKey: "sk-test",
+                    defaultBaseUrl: null,
+                    runLimitResolver: null,
+                    throwOnFailure: true,
+                    cancellationToken: CancellationToken.None));
+            Assert.Equal("checker_missing", endpointEx.Reason);
+
+            // 4. OpenAiResponsesCompatibleProvider with checker: null -> fail closed
+            var openAiResp = new Kautuka.Gateway.Infrastructure.AI.OpenAiResponsesCompatibleProvider(checker: null);
+            NetworkAccessDeniedException respEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await openAiResp.DiscoverModelsAsync(openAiSettings, apiKey: "sk-test", throwOnFailure: true));
+            Assert.Equal("checker_missing", respEx.Reason);
+
+            // 5. GoogleAiClientProvider with checker: null -> fail closed
+            var google = new Kautuka.Gateway.Infrastructure.AI.GoogleAiClientProvider(checker: null);
+            var googleSettings = new System.Text.Json.Nodes.JsonObject { ["base_url"] = httpUrl };
+            await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await google.DiscoverModelsAsync(googleSettings, apiKey: "AIza-test", throwOnFailure: true));
+
+            // 6. McpHttpClientFactory & RemoteMcpRequestHandler with checker: null -> fail closed
+            var mcpFactory = new Kautuka.Gateway.Infrastructure.Agents.McpHttpClientFactory(networkAccessChecker: null);
+            var mcpContext = new Kautuka.Gateway.Infrastructure.Agents.RemoteMcpRequestContext(
+                new Uri(httpUrl + "/mcp"), "conn-1", "user-1", false, [], [],
+                (_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()),
+                CredentialNamespace: "ns");
+            await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                await mcpFactory.CreateAsync(new ModelContextProtocol.Client.HttpClientTransportOptions { Endpoint = new Uri(httpUrl + "/mcp") }, true, mcpContext, CancellationToken.None));
+
+            using var rawMcpHandler = new Kautuka.Gateway.Infrastructure.Agents.RemoteMcpRequestHandler(mcpContext, new TrackingHttpHandler());
+            using var mcpHttpClient = new HttpClient(rawMcpHandler);
+            NetworkAccessDeniedException mcpHandlerEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await mcpHttpClient.GetAsync(new Uri(httpUrl + "/mcp")));
+            Assert.Equal("checker_missing", mcpHandlerEx.Reason);
+
+            // 7. ConnectorAuthorizationClient with checker: null -> fail closed
+            using var oauthClient = new Kautuka.Gateway.Infrastructure.Connectors.ConnectorAuthorizationClient(checker: null);
+            var oauthProfile = new Kautuka.Gateway.Domain.Connectors.ConnectorAuthProfile
+            {
+                Id = "google-mail",
+                Name = "Google Mail",
+                Description = "test",
+                Grant = "oauth2",
+                AuthorizeUrl = httpUrl + "/auth",
+                TokenUrl = httpUrl + "/token",
+                Scopes = "mail.read",
+                RedirectUri = "/connectors/oauth/callback",
+                StartUrl = "/connectors/oauth/start",
+                RefreshCredentialKey = "refresh_token",
+                AccessTokenEnvironmentKey = "ACCESS_TOKEN",
+                RevokeUrl = httpUrl + "/revoke",
+                SignInLabel = "Sign in",
+                EntryPoint = "google-mail",
+                ToolNames = ["mail.read"],
+                AskFirst = [],
+                ClientId = "test-client-id",
+            };
+            await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await oauthClient.RefreshAsync(oauthProfile, "rt", null, httpUrl + "/token", false, CancellationToken.None));
+
+            // 8. SlackSocketModeWorker with webSocketChecker: null -> fail closed on socket connect
+            var nullWsChecker = new NetworkAccessWebSocketChecker(FailClosedNetworkAccessChecker.Instance);
+            using var ws = new System.Net.WebSockets.ClientWebSocket();
+            await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                await nullWsChecker.ConnectAsync(ws, new Uri($"ws://127.0.0.1:{port}/ws")));
+
+            // Verify zero TCP connections ever reached the loopback listener!
+            Assert.Equal(0, Volatile.Read(ref acceptedConnections));
+
+            // Negative control (.NC): with an allowing checker passed in, RemoteMcpRequestHandler permits the transport call
+            using var allowHandler = new Kautuka.Gateway.Infrastructure.Agents.RemoteMcpRequestHandler(
+                mcpContext,
+                new AllowTestChecker(),
+                new TrackingHttpHandler());
+            using var allowClient = new HttpClient(allowHandler);
+            using HttpResponseMessage okResp = await allowClient.GetAsync(new Uri(httpUrl + "/mcp"));
+            Assert.Equal(HttpStatusCode.OK, okResp.StatusCode);
+        }
+        finally
+        {
+            await acceptCts.CancelAsync();
+            listener.Stop();
+            await acceptLoop;
+        }
+    }
+
+    private sealed class AllowTestChecker : INetworkAccessChecker
+    {
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+            => Task.FromResult(NetworkAccessCheckResult.CreateAllowed("test_allow"));
+    }
 }

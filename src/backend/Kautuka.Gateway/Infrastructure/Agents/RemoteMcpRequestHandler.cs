@@ -56,25 +56,23 @@ internal sealed class RemoteMcpRequestHandler(
             || destination.Port != context.Endpoint.Port)
             throw new HttpRequestException("Remote MCP destination is outside the authorized origin.");
 
-        if (checker is not null)
-        {
-            var target = new OutboundTarget(
-                Host: destination.IdnHost,
-                Port: destination.Port > 0 ? destination.Port : (string.Equals(destination.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80),
-                Scheme: destination.Scheme,
-                Service: "remote-mcp",
-                Purpose: "remote-mcp",
-                UserId: context.UserId,
-                AgentId: NetworkAccessContext.Current?.AgentId,
-                ConnectorId: context.ConnectorId,
-                Systemwide: context.IncludeSystemScope,
-                ExecutionContext: "app");
+        INetworkAccessChecker effectiveChecker = checker ?? FailClosedNetworkAccessChecker.Instance;
+        var target = new OutboundTarget(
+            Host: destination.IdnHost,
+            Port: destination.Port > 0 ? destination.Port : (string.Equals(destination.Scheme, "https", StringComparison.OrdinalIgnoreCase) ? 443 : 80),
+            Scheme: destination.Scheme,
+            Service: "remote-mcp",
+            Purpose: "remote-mcp",
+            UserId: context.UserId,
+            AgentId: NetworkAccessContext.Current?.AgentId,
+            ConnectorId: context.ConnectorId,
+            Systemwide: context.IncludeSystemScope,
+            ExecutionContext: "app");
 
-            NetworkAccessCheckResult checkResult = await checker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
-            if (!checkResult.Allowed)
-            {
-                checkResult.ThrowIfDenied(target);
-            }
+        NetworkAccessCheckResult checkResult = await effectiveChecker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
+        if (!checkResult.Allowed)
+        {
+            checkResult.ThrowIfDenied(target);
         }
 
         RemoteMcpConfigurationValidator.Validate("http", context.Credentials, context.Headers);

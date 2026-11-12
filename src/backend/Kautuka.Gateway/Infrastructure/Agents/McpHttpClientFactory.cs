@@ -30,7 +30,10 @@ internal sealed class McpHttpClientFactory(INetworkAccessChecker? networkAccessC
         HttpClient? client = null;
         try
         {
-            handler = new RemoteMcpRequestHandler(context, networkAccessChecker, socket);
+            handler = new RemoteMcpRequestHandler(
+                context,
+                networkAccessChecker ?? FailClosedNetworkAccessChecker.Instance,
+                socket);
             socket = null;
             client = new HttpClient(handler, disposeHandler: true);
             handler = null;

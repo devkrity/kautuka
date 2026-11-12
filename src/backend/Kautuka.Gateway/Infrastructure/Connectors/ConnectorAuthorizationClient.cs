@@ -29,13 +29,15 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
     {
         if (handler is null)
         {
+#pragma warning disable CA2000 // Disposed by ownedHandler in ConnectorAuthorizationClient.Dispose
             var sockets = new SocketsHttpHandler
             {
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             };
-            ownedHandler = checker is not null
-                ? new NetworkAccessCheckHandler(checker, sockets)
-                : sockets;
+            ownedHandler = new NetworkAccessCheckHandler(
+                checker ?? FailClosedNetworkAccessChecker.Instance,
+                sockets);
+#pragma warning restore CA2000
             http = new HttpClient(ownedHandler, disposeHandler: false);
         }
         else

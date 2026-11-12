@@ -150,12 +150,11 @@ internal sealed class GoogleAiClientProvider(
         }
 
 #pragma warning disable CA2000 // Owned by Client
-        ClientOptions? clientOptions = checker is not null
-            ? new ClientOptions
-            {
-                HttpClientFactory = () => new HttpClient(new NetworkAccessCheckHandler(checker, new SocketsHttpHandler()), disposeHandler: true),
-            }
-            : null;
+        INetworkAccessChecker effectiveChecker = checker ?? FailClosedNetworkAccessChecker.Instance;
+        var clientOptions = new ClientOptions
+        {
+            HttpClientFactory = () => new HttpClient(new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler()), disposeHandler: true),
+        };
 
         return new Client(apiKey: apiKey, httpOptions: httpOptions, clientOptions: clientOptions);
 #pragma warning restore CA2000
