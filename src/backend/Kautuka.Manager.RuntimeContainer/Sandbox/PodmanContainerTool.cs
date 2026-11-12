@@ -229,7 +229,7 @@ public sealed class PodmanContainerTool(
             workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
                 allocatedIp,
                 context.UserId,
-                context.ScopeId,
+                IsAgentScope(context) ? context.ScopeId : null,
                 containerName,
                 "agent-sandbox",
                 null,
@@ -602,7 +602,7 @@ public sealed class PodmanContainerTool(
         var spec = new Hosting.NetworkAccess.WorkloadContainerSpec(containerName, image, ip)
         {
             UserId = context.UserId ?? string.Empty,
-            AgentId = context.ScopeId ?? string.Empty,
+            AgentId = IsAgentScope(context) ? context.ScopeId ?? string.Empty : string.Empty,
             ExecContext = "agent-sandbox",
             Kind = "agent-sandbox",
             Systemwide = false,
@@ -631,6 +631,9 @@ public sealed class PodmanContainerTool(
     /// </summary>
     private static string QualifyLocalImage(string image)
         => image.Contains('/', StringComparison.Ordinal) ? image : $"localhost/{image}";
+
+    private static bool IsAgentScope(ContainerContext context)
+        => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeContainerSegment(string? value)
     {

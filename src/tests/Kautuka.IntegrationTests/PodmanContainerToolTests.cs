@@ -117,6 +117,28 @@ public sealed class PodmanContainerToolTests
         Assert.Contains("kautuka.spec-fingerprint=abc123", arguments, StringComparer.Ordinal);
     }
 
+    [Fact]
+    public void BuildRunArgumentsRejectsUserScopeWithoutAnAgentIdentity()
+    {
+        ContainerContext context = new(
+            ScopeType: "user",
+            ScopeId: "user-alpha",
+            UserId: "user-alpha",
+            HostWorkspacePath: "/tmp/kautuka/user-alpha",
+            ContainerWorkspacePath: "/workspace",
+            Image: "localhost/kautuka-base:latest",
+            DefaultCpuLimit: 1,
+            DefaultMemoryLimit: "512m",
+            DefaultTimeoutSeconds: 30,
+            BaseCapabilities: [],
+            ContainerEnvironment: new Dictionary<string, string>());
+
+        ArgumentException exception = Assert.Throws<ArgumentException>(
+            () => PodmanContainerTool.BuildRunArguments(context, "kautuka-user-user-alpha", "10.247.1.10"));
+
+        Assert.Contains("agentId", exception.Message, StringComparison.Ordinal);
+    }
+
     private static void AssertOption(List<string> arguments, string option, string value)
     {
         for (int index = 0; index < arguments.Count - 1; index++)
