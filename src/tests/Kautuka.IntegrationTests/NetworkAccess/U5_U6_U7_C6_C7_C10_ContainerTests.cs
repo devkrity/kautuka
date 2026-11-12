@@ -685,6 +685,41 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_ReconcileClosesGateWhenBoundaryInitFailed_WithNegativeControl()
+    {
+        const string healthyPod = "[{\"State\":\"Running\",\"Containers\":["
+            + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
+            + "{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},"
+            + "{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},"
+            + "{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+        const string failedBoundary = "[{\"State\":{\"Status\":\"exited\",\"ExitCode\":1}}]";
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(string.Join(" ", args));
+            string output = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"])
+                ? healthyPod
+                : args.SequenceEqual(["inspect", "kautuka-egress-boundary"])
+                    ? failedBoundary
+                    : "[]";
+            return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-failure-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        typeof(EgressTopologyManager)
+            .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.Contains("inspect kautuka-egress-boundary --format json", calls);
+        Assert.DoesNotContain("ps -a --format json", calls);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)

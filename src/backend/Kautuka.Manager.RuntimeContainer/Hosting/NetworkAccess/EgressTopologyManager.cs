@@ -808,7 +808,44 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
             .ConfigureAwait(false);
 
-        return inspect.ExitCode == 0 && IsEgressPodHealthy(inspect.StdOut);
+        if (inspect.ExitCode != 0 || !IsEgressPodHealthy(inspect.StdOut))
+        {
+            return false;
+        }
+
+        PodmanCommandResult boundaryInspect = await podmanRunner
+            .RunAsync(["inspect", "kautuka-egress-boundary", "--format", "json"], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        return boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut);
+    }
+
+    internal static bool IsSuccessfulBoundaryInit(string? inspectJson)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            return container.ValueKind == JsonValueKind.Object
+                && container.TryGetProperty("State", out JsonElement state)
+                && state.ValueKind == JsonValueKind.Object
+                && state.TryGetProperty("Status", out JsonElement status)
+                && string.Equals(status.GetString(), "exited", StringComparison.OrdinalIgnoreCase)
+                && state.TryGetProperty("ExitCode", out JsonElement exitCode)
+                && exitCode.TryGetInt32(out int code)
+                && code == 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     internal static bool IsEgressPodHealthy(string? inspectJson)
