@@ -566,7 +566,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     containerName,
                     identity.Kind,
                     connector.ConnectorId,
-                    NormalizeExecutionContext(effectiveExecutionContext).ToString().ToLowerInvariant(),
+                    ExecutionContextLabel(effectiveExecutionContext),
                     identity.Systemwide,
                     identity.Egress,
                     attribution,
@@ -845,6 +845,19 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         await using var connectorLease = (await connectorLocks
             .AcquireAsync(runtimeKey, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
+        ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
+            connector,
+            identityContext ?? workspaceContext,
+            isProbe ? "probe" : null);
+        NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+        connector = connector with
+        {
+            SpecFingerprint = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(
+                connector,
+                identity,
+                executionContext,
+                compatProfile),
+        };
         ConnectorContainerInspection inspection = await InspectContainerStateAsync(containerName, connector, workspaceContext, cancellationToken).ConfigureAwait(false);
         await CancelConnectorCooldownAsync(runtimeKey).ConfigureAwait(false);
         if (inspection.IsRunning && inspection.Matches(connector))
@@ -861,13 +874,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
         }
 
-        ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
-            connector,
-            identityContext ?? workspaceContext,
-            isProbe ? "probe" : null);
         string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
             .AllocateNextIp(workloadRegistry);
-        NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
         string attribution = identity.Egress == "deny-all"
             ? "none"
             : (isProbe || string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
@@ -881,7 +889,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 containerName,
                 identity.Kind,
                 connector.ConnectorId,
-                NormalizeExecutionContext(executionContext).ToString().ToLowerInvariant(),
+                ExecutionContextLabel(executionContext),
                 identity.Systemwide,
                 identity.Egress,
                 attribution,
@@ -1222,6 +1230,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         return builder.ToString().Trim('-');
     }
+
+    private static string ExecutionContextLabel(WorkspaceMcpExecutionContext executionContext)
+        => NormalizeExecutionContext(executionContext) switch
+        {
+            WorkspaceMcpExecutionContext.Isolated => "isolated",
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles => "isolated-with-agent-files",
+            WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
+            _ => "isolated",
+        };
 
     private static bool RequiresContainerRecycle(
         WorkspaceMcpContainerConnectorDefinition previousConnector,

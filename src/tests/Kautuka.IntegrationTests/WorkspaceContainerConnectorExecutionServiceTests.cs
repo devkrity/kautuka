@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Text.Json;
 
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
@@ -366,6 +367,106 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Equal(WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, result.UnavailabilityReason);
             Assert.Contains("user identity is required", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(0, registry.Count);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AgentFileConnectorReusesMatchingFingerprintAndRecreatesWhenAgentChanges()
+    {
+        const string hostWorkspace = "/tmp/nac-v7-fingerprint-workspace";
+        const string containerName = "kautuka-mcp-user-alpha-agent-alpha-shared-files";
+        var commands = new List<string[]>();
+        bool containerExists = false;
+        string? startedFingerprint = null;
+        string? inspectJson = null;
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            return Task.FromResult(args[0] switch
+            {
+                "inspect" when containerExists && args.Count > 1 && args[1] == containerName => Success(inspectJson!),
+                "inspect" => new PodmanCommandResult(125, "", "missing", ProcessTerminationReason.NonZeroExit),
+                "container" => new PodmanCommandResult(1, "", "missing", ProcessTerminationReason.NonZeroExit),
+                "image" => Success("sha256:current"),
+                "run" => Start(args),
+                "rm" => Remove(),
+                _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
+            });
+        });
+        PodmanCommandResult Start(IReadOnlyList<string> args)
+        {
+            int fingerprintIndex = args.ToList().IndexOf("--label") + 1;
+            startedFingerprint = args.Skip(fingerprintIndex).First(static label => label.StartsWith("kautuka.spec-fingerprint=", StringComparison.Ordinal))["kautuka.spec-fingerprint=".Length..];
+            containerExists = true;
+            inspectJson = ConnectorInspectJson(hostWorkspace, startedFingerprint, desiredVersion: 7);
+            return Success(containerName);
+        }
+        PodmanCommandResult Remove()
+        {
+            containerExists = false;
+            return Success(string.Empty);
+        }
+
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-fingerprint-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var registry = new Kautuka.NetworkAccessController.WorkloadRegistry();
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                registry);
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "user-alpha::shared",
+                "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+                "node",
+                ["server.js"], true, false, null, null, [], 30, 600)
+            {
+                DesiredStateVersion = 7,
+                SpecFingerprint = "state-store-fingerprint-without-agent",
+            };
+            ContainerContext agentAlpha = FingerprintContext("agent-alpha", hostWorkspace);
+
+            MethodInfo ensure = typeof(WorkspaceContainerConnectorExecutionService)
+                .GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("EnsureConnectorContainerRunningAsync method was not found.");
+            async Task EnsureAsync(ContainerContext context)
+                => await ((Task)ensure.Invoke(service, [
+                    connector,
+                    "runtime-key",
+                    containerName,
+                    WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
+                    context,
+                    CancellationToken.None,
+                    false,
+                    context,
+                ])!).ConfigureAwait(false);
+
+            await EnsureAsync(agentAlpha);
+            int runCount = commands.Count(static command => command[0] == "run");
+            await EnsureAsync(agentAlpha);
+
+            Assert.Equal(runCount, commands.Count(static command => command[0] == "run"));
+            Assert.DoesNotContain(commands, static command => command[0] == "rm");
+            Assert.Equal(1, registry.Count);
+
+            await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+            Assert.Equal(runCount, commands.Count(static command => command[0] == "run"));
+            Assert.DoesNotContain(commands, static command => command[0] == "rm");
+
+            ContainerContext agentBeta = FingerprintContext("agent-beta", hostWorkspace);
+            await EnsureAsync(agentBeta);
+            Assert.Equal(runCount + 1, commands.Count(static command => command[0] == "run"));
+            Assert.Contains(commands, static command => command[0] == "rm");
+            Assert.NotEqual(startedFingerprint, connector.SpecFingerprint);
         }
         finally
         {
@@ -928,6 +1029,49 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             persistent: true,
             allocatedIp: "10.247.1.1");
     }
+
+    private static ContainerContext FingerprintContext(string agentId, string hostPath)
+        => new("agent", agentId, "user-alpha", hostPath, "/workspace", "image@sha256:digest",
+            1, "512m", 30, [], new Dictionary<string, string>());
+
+    private static string ConnectorInspectJson(string hostPath, string fingerprint, long desiredVersion)
+        => JsonSerializer.Serialize(new[]
+        {
+            new
+            {
+                Image = "sha256:current",
+                NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new() } },
+                State = new { Status = "running" },
+                Config = new
+                {
+                    Env = new[] { "PATH=/usr/bin", "HOME=/tmp", "NPM_CONFIG_CACHE=/tmp/.npm", "PIP_CACHE_DIR=/tmp/.pip", "UV_CACHE_DIR=/tmp/.uv" },
+                    Labels = new Dictionary<string, string>
+                    {
+                        ["kautuka.desired-version"] = desiredVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        ["kautuka.spec-fingerprint"] = fingerprint,
+                    },
+                },
+                Mounts = new[] { new { Type = "bind", Source = hostPath, Destination = "/workspace", RW = false } },
+                HostConfig = new
+                {
+                    NetworkMode = "bridge",
+                    Binds = new[] { hostPath + ":/workspace:ro" },
+                    CapDrop = new[] { "ALL" },
+                    CapAdd = Array.Empty<string>(),
+                    Privileged = false,
+                    Devices = Array.Empty<object>(),
+                    PublishAllPorts = false,
+                    PortBindings = new Dictionary<string, object[]>(),
+                    ReadonlyRootfs = true,
+                    PidsLimit = 128,
+                    SecurityOpt = new[] { "no-new-privileges", "label=disable" },
+                    Tmpfs = new Dictionary<string, string> { ["/tmp"] = "rw,noexec,nosuid,nodev,size=64m" },
+                },
+            },
+        });
+
+    private static PodmanCommandResult Success(string stdout)
+        => new(0, stdout, string.Empty, ProcessTerminationReason.Completed);
 
     private static ContainerContext CreateWorkspaceContext()
         => new("agent", "test-agent", "test-user", Path.GetTempPath(), "/workspace", "image@sha256:digest",

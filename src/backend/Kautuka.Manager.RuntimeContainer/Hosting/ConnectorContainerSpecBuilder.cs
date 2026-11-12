@@ -137,15 +137,7 @@ internal static class ConnectorContainerSpecBuilder
             Purpose = purpose,
             Persistent = persistent,
             DesiredStateVersion = connector.DesiredStateVersion,
-            SpecFingerprint = ComputeFingerprint(
-                connector,
-                userId,
-                agentId,
-                execContext,
-                identity.Kind,
-                systemwide,
-                egress,
-                compatProfile?.ImageDigest),
+            SpecFingerprint = ComputeWorkloadFingerprint(connector, identity, executionContext, compatProfile),
             ManagerRole = "connector",
             Environment = envList,
             Mounts = mounts,
@@ -284,6 +276,30 @@ internal static class ConnectorContainerSpecBuilder
         }
 
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    internal static string ComputeWorkloadFingerprint(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        ConnectorIdentity identity,
+        WorkspaceMcpExecutionContext executionContext,
+        ImageCompatProfile? compatProfile = null)
+    {
+        string execContext = executionContext switch
+        {
+            WorkspaceMcpExecutionContext.Isolated => "isolated",
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles => "isolated-with-agent-files",
+            WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
+            _ => "isolated",
+        };
+        return ComputeFingerprint(
+            connector,
+            identity.UserId,
+            identity.AgentId,
+            execContext,
+            identity.Kind,
+            identity.Systemwide,
+            identity.Egress,
+            compatProfile?.ImageDigest);
     }
 
     internal static void EnsureHostProcessArguments(IReadOnlyList<string> arguments)

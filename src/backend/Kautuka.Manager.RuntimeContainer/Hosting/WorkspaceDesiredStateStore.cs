@@ -131,31 +131,14 @@ public sealed class WorkspaceDesiredStateStore
             runtimeSettings = nextRuntimeSettings;
             desiredWorkspaces = EnrichDesiredWorkspaces(nextDesiredStateVersion, nextDesiredWorkspaces, nextSandboxConnectorBindings);
             desiredContainerConnectors = [.. nextContainerConnectors.Select(connector =>
-            {
-                string userId = string.Empty;
-                int separatorIndex = connector.ConnectorId.IndexOf("::", StringComparison.Ordinal);
-                if (separatorIndex > 0)
-                {
-                    userId = connector.ConnectorId[..separatorIndex];
-                }
-
-                bool systemwide = connector.IsInternalSystemConnector;
-                string egress = connector.IsInternalSystemConnector || string.IsNullOrWhiteSpace(userId) ? "deny-all" : "normal";
-                string kind = connector.IsInternalSystemConnector ? "system" : "connector";
-
-                return connector with
+                connector with
                 {
                     DesiredStateVersion = nextDesiredStateVersion,
-                    SpecFingerprint = ConnectorContainerSpecBuilder.ComputeFingerprint(
-                        connector,
-                        userId: userId,
-                        agentId: string.Empty,
-                        execContext: "isolated",
-                        kind: kind,
-                        systemwide: systemwide,
-                        egress: egress),
-                };
-            })];
+                    // Runtime identity (user, agent, execution context, and compatibility profile)
+                    // is only available when the connector is launched. The service computes the
+                    // expected fingerprint from that resolved context before inspecting a container.
+                    SpecFingerprint = string.Empty,
+                })];
             desiredSandboxConnectorBindings = [.. nextSandboxConnectorBindings];
             acceptedPublisherEpoch = publisherEpoch;
             acceptedContentHash = contentHash;
