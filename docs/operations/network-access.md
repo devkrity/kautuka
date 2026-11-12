@@ -6,7 +6,7 @@ This guide describes the architecture, approval workflows, operational procedure
 
 ## 1. Architecture Overview `[Partially implemented; not end-to-end verified]`
 
-> **Status note:** This guide describes the target NAC v7 design. A rendered template or passing unit test does not prove a live Podman topology. The hook and policy components have local tests, and the launch path now includes live post-start checks for the ruleset hash, `no-new-privileges`, IPv6 disablement, and workspace bind-mount roots. The complete egress pod, brake enforcement, and end-to-end acceptance still need real Podman/nft proof. Treat the sections below as design and operator intent until a capability is explicitly marked **Proven** by a real Podman/nft acceptance run.
+> **Status note:** This guide describes the target NAC v7 design. A rendered template or passing unit test does not prove a live Podman topology. The hook and policy components have local tests, and the launch path now includes live post-start checks for the ruleset hash, `no-new-privileges`, IPv6 disablement, and workspace bind-mount roots. The full solution build now includes the acceptance project after the verifier signature update. The complete egress pod, brake enforcement, and end-to-end acceptance still need real Podman/nft proof. Treat the sections below as design and operator intent until a capability is explicitly marked **Proven** by a real Podman/nft acceptance run.
 
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 

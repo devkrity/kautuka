@@ -790,7 +790,7 @@ public static class Program
             }
 
             // v7-29: Post-start verifier via rootless podman unshare nsenter
-            WorkloadVerificationResult verResult = await verifier.VerifyWorkloadAsync(wlName, wlIp, null, registry, CancellationToken.None).ConfigureAwait(false);
+            WorkloadVerificationResult verResult = await verifier.VerifyWorkloadAsync(wlName, wlIp, null, registry, cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
             // v7-28: ReconcileOnceAsync preserves running container (even if previously registered by name, now promoted to hex ID)
             await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
@@ -865,7 +865,7 @@ public static class Program
             bool verifierCaughtTamper = false;
             try
             {
-                await verifier.VerifyWorkloadAsync(wl2Name, wl2Ip, null, registry, CancellationToken.None).ConfigureAwait(false);
+                await verifier.VerifyWorkloadAsync(wl2Name, wl2Ip, null, registry, cancellationToken: CancellationToken.None).ConfigureAwait(false);
             }
             catch (InvalidOperationException)
             {
