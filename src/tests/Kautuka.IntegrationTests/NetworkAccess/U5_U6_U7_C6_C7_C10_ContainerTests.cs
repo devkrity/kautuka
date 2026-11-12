@@ -666,6 +666,21 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_20_ExistingPodMustMatchRequiredNetworkAndSysctls_WithNegativeControl()
+    {
+        const string inspect = "[{\"CreateCommand\":[\"podman\",\"pod\",\"create\",\"--name\",\"kautuka-egress\","
+            + "\"--network\",\"kautuka-workload:ip=10.247.0.2\",\"--network\",\"kautuka-outside:ip=10.248.0.2\","
+            + "\"--sysctl\",\"net.ipv4.ip_forward=0\",\"--sysctl\",\"net.ipv6.conf.all.disable_ipv6=1\"]}]";
+
+        Assert.True(EgressTopologyManager.HasRequiredEgressPodConfiguration(inspect));
+        Assert.False(EgressTopologyManager.HasRequiredEgressPodConfiguration(
+            inspect.Replace("kautuka-workload:ip=10.247.0.2", "kautuka-workload:ip=10.247.0.3", StringComparison.Ordinal)));
+        Assert.False(EgressTopologyManager.HasRequiredEgressPodConfiguration(
+            inspect.Replace("net.ipv6.conf.all.disable_ipv6=1", "net.ipv6.conf.all.disable_ipv6=0", StringComparison.Ordinal)));
+        Assert.False(EgressTopologyManager.HasRequiredEgressPodConfiguration("[]"));
+    }
+
+    [Fact]
     public async Task V7_20_ReconcileClosesStartupGateWhenPodDegrades_WithNegativeControl()
     {
         const string degraded = "[{\"State\":\"Degraded\",\"Containers\":[]}]";

@@ -716,6 +716,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 throw new InvalidOperationException($"Failed to create egress pod: {podResult.StdErr}");
             }
         }
+        else if (!HasRequiredEgressPodConfiguration(inspectPod.StdOut))
+        {
+            throw new InvalidOperationException($"Existing egress pod '{EgressPodName}' does not have the required workload/outside network addresses and forwarding sysctls.");
+        }
 
         // Get Pod infra container ID and populate allowlist
         PodmanCommandResult podInspect = await podmanRunner
@@ -841,6 +845,48 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 && state.TryGetProperty("ExitCode", out JsonElement exitCode)
                 && exitCode.TryGetInt32(out int code)
                 && code == 0;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool HasRequiredEgressPodConfiguration(string? inspectJson)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement pod = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            if (pod.ValueKind != JsonValueKind.Object
+                || !pod.TryGetProperty("CreateCommand", out JsonElement createCommand)
+                || createCommand.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            string[] args = createCommand.EnumerateArray()
+                .Where(static token => token.ValueKind == JsonValueKind.String)
+                .Select(static token => token.GetString() ?? string.Empty)
+                .ToArray();
+
+            static bool HasPair(IReadOnlyList<string> values, string flag, string expected) =>
+                Enumerable.Range(0, Math.Max(0, values.Count - 1))
+                    .Any(index => string.Equals(values[index], flag, StringComparison.Ordinal)
+                        && string.Equals(values[index + 1], expected, StringComparison.Ordinal));
+
+            return HasPair(args, "--name", EgressPodName)
+                && HasPair(args, "--network", $"{WorkloadNetworkName}:ip={EgressPodIp}")
+                && HasPair(args, "--network", $"{OutsideNetworkName}:ip={OutsidePodIp}")
+                && HasPair(args, "--sysctl", "net.ipv4.ip_forward=0")
+                && HasPair(args, "--sysctl", "net.ipv6.conf.all.disable_ipv6=1");
         }
         catch (JsonException)
         {
