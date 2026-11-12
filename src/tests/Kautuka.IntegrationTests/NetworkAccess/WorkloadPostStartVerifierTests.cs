@@ -79,6 +79,18 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
+    public async Task Ipv6DisableSysctlOffFailsAndCleansUp()
+    {
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => VerifyAsync(
+            Inspect(ipv6Disabled: false), calls, registry));
+
+        Assert.Contains("IPv6 disable sysctl", exception.InnerException?.Message ?? exception.Message, StringComparison.OrdinalIgnoreCase);
+        AssertCleanup(calls, registry);
+    }
+
+    [Fact]
     public async Task BindMountOutsideConfiguredRootFailsAndCleansUp()
     {
         var calls = new List<string[]>();
@@ -90,7 +102,7 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
-    public async Task BindMountFromAnotherUsersWorkspaceInsideBaseRootFailsAndCleansUp()
+    public async Task BindMountFromSameAgentIdInAnotherUsersWorkspaceFailsAndCleansUp()
     {
         var calls = new List<string[]>();
         WorkloadRegistry registry = CreateRegistry();
@@ -174,7 +186,7 @@ public sealed class WorkloadPostStartVerifierTests
                 .Replace("{{OWNER_WORKSPACE}}", JsonSerializer.Serialize(ownerWorkspacePath)[1..^1], StringComparison.Ordinal)
                 .Replace(
                     "{{OTHER_USER_WORKSPACE}}",
-                    JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-beta"))[1..^1],
+                    JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-alpha"))[1..^1],
                     StringComparison.Ordinal)
                 .Replace(
                     "{{OTHER_AGENT_WORKSPACE}}",
@@ -209,6 +221,8 @@ public sealed class WorkloadPostStartVerifierTests
                     new ContainerContext(
                         "agent", "agent-alpha", "user-alpha", ownerWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
                     new ContainerContext(
+                        "agent", "agent-alpha", "user-beta", Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-alpha"), "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
+                    new ContainerContext(
                         "agent", "agent-beta", "user-alpha", siblingAgentWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
                 ],
                 [], []);
@@ -228,14 +242,17 @@ public sealed class WorkloadPostStartVerifierTests
         string? mountSource = null,
         string? effectiveCapsJson = "[]",
         string? boundingCapsJson = "[]",
-        bool fileCaps = false)
+        bool fileCaps = false,
+        bool ipv6Disabled = true)
     {
         var inspect = new JsonObject
         {
             ["HostConfig"] = new JsonObject
             {
                 ["SecurityOpt"] = noNewPrivileges ? JsonNode.Parse("[\"no-new-privileges\"]") : JsonNode.Parse("[]"),
-                ["Sysctls"] = JsonNode.Parse("{\"net.ipv6.conf.all.disable_ipv6\":\"1\"}"),
+                ["Sysctls"] = JsonNode.Parse(ipv6Disabled
+                    ? "{\"net.ipv6.conf.all.disable_ipv6\":\"1\"}"
+                    : "{\"net.ipv6.conf.all.disable_ipv6\":\"0\"}"),
                 ["Privileged"] = false,
                 ["CapAdd"] = fileCaps ? JsonNode.Parse("[\"CHOWN\"]") : JsonNode.Parse("[]"),
                 ["CapDrop"] = JsonNode.Parse("[\"ALL\"]"),
