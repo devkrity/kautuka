@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
@@ -122,6 +124,11 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
             .Select(static match => match.Groups["name"].Value)
             .ToArray();
         string jsonGolden = jsonTemplate.Replace("{{IP}}", "10.247.1.20", StringComparison.Ordinal);
+        // Full-file SHA is an independent nft -j golden. It ties every expression in
+        // the shipped template to this reviewed revision, not only the rule comments.
+        const string expectedJsonSha256 = "A47D954605600F99A30B1AB1840DA925E60A6B181E7BD58DBDFA54349FB03D4D";
+        string actualJsonSha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(jsonGolden)));
+        Assert.Equal(expectedJsonSha256, actualJsonSha256);
         using JsonDocument document = JsonDocument.Parse(jsonGolden);
         string[] jsonComments = document.RootElement.GetProperty("nftables")
             .EnumerateArray()
