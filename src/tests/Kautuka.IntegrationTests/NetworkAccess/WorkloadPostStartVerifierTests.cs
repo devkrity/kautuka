@@ -103,6 +103,18 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
+    public async Task BindMountFromAnotherAgentsWorkspaceOfSameUserFailsAndCleansUp()
+    {
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => VerifyAsync(
+            Inspect(mountType: "bind", mountSource: "{{OTHER_AGENT_WORKSPACE}}"), calls, registry));
+
+        Assert.Contains("Mount check failed", exception.InnerException?.Message ?? exception.Message, StringComparison.OrdinalIgnoreCase);
+        AssertCleanup(calls, registry);
+    }
+
+    [Fact]
     public async Task BindMountFromMatchingDesiredWorkspacePasses()
     {
         var calls = new List<string[]>();
@@ -157,11 +169,16 @@ public sealed class WorkloadPostStartVerifierTests
         try
         {
             string ownerWorkspacePath = Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-alpha");
+            string siblingAgentWorkspacePath = Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-beta");
             inspectJson = inspectJson
                 .Replace("{{OWNER_WORKSPACE}}", JsonSerializer.Serialize(ownerWorkspacePath)[1..^1], StringComparison.Ordinal)
                 .Replace(
                     "{{OTHER_USER_WORKSPACE}}",
                     JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-beta"))[1..^1],
+                    StringComparison.Ordinal)
+                .Replace(
+                    "{{OTHER_AGENT_WORKSPACE}}",
+                    JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-beta"))[1..^1],
                     StringComparison.Ordinal);
             string ipRules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
                 .Replace("{{IP}}", AllocatedIp, StringComparison.Ordinal);
@@ -188,8 +205,12 @@ public sealed class WorkloadPostStartVerifierTests
                     new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot },
                     new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
-                [new ContainerContext(
-                    "agent", "agent-alpha", "user-alpha", ownerWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>())],
+                [
+                    new ContainerContext(
+                        "agent", "agent-alpha", "user-alpha", ownerWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
+                    new ContainerContext(
+                        "agent", "agent-beta", "user-alpha", siblingAgentWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
+                ],
                 [], []);
 
             await new WorkloadPostStartVerifier(runner, desiredState).VerifyWorkloadAsync(
