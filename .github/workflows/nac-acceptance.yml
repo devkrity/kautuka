@@ -19,6 +19,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+
+      - name: Install repository dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Set up .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
