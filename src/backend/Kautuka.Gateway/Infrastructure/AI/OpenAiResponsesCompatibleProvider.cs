@@ -33,7 +33,7 @@ internal sealed class OpenAiResponsesCompatibleProvider(
 
 #pragma warning disable CA2000 // Owned by chat client
         HttpMessageHandler effectiveHandler = transportHandler
-            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler());
+            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false });
 
 #pragma warning disable OPENAI001
         IChatClient inner = new OpenAIClient(
@@ -55,7 +55,7 @@ internal sealed class OpenAiResponsesCompatibleProvider(
     {
 #pragma warning disable CA2000 // Passed to DiscoverModelsAsync
         HttpMessageHandler effectiveHandler = transportHandler
-            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler());
+            ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false });
 
         return OpenAiCompatibleEndpoint.DiscoverModelsAsync(
             settings,

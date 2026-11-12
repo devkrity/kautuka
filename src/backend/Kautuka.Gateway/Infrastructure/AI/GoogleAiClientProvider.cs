@@ -153,7 +153,9 @@ internal sealed class GoogleAiClientProvider(
         INetworkAccessChecker effectiveChecker = checker ?? FailClosedNetworkAccessChecker.Instance;
         var clientOptions = new ClientOptions
         {
-            HttpClientFactory = () => new HttpClient(new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler()), disposeHandler: true),
+            HttpClientFactory = () => new HttpClient(
+                new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler { AllowAutoRedirect = false }),
+                disposeHandler: true),
         };
 
         return new Client(apiKey: apiKey, httpOptions: httpOptions, clientOptions: clientOptions);

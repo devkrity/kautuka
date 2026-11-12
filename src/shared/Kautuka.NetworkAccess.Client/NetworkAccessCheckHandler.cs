@@ -38,11 +38,13 @@ public sealed partial class NetworkAccessCheckHandler : DelegatingHandler
         this.logger = logger ?? NullLogger<NetworkAccessCheckHandler>.Instance;
         this.exemptPredicate = exemptPredicate;
         this.defaultExecutionContext = defaultExecutionContext;
+        EnsureAutoRedirectDisabled(InnerHandler);
     }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        EnsureAutoRedirectDisabled(InnerHandler);
 
         Uri? uri = request.RequestUri;
         if (uri is null || !uri.IsAbsoluteUri)
@@ -50,19 +52,52 @@ public sealed partial class NetworkAccessCheckHandler : DelegatingHandler
             return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         }
 
-        if (exemptPredicate?.Invoke(uri) == true)
+        NetworkAccessScope? ambient = NetworkAccessContext.Current;
+        if (exemptPredicate?.Invoke(uri) != true)
         {
-            return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            await EnforcePolicyAsync(uri, ambient, cancellationToken).ConfigureAwait(false);
         }
 
+        HttpResponseMessage response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (IsRedirectStatusCode(response.StatusCode) && response.Headers.Location is { } location)
+        {
+            Uri redirectUri = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            if (redirectUri.IsAbsoluteUri && exemptPredicate?.Invoke(redirectUri) != true)
+            {
+                try
+                {
+                    await EnforcePolicyAsync(redirectUri, ambient, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    response.Dispose();
+                    throw;
+                }
+            }
+        }
+
+        return response;
+    }
+
+    private async Task EnforcePolicyAsync(Uri uri, NetworkAccessScope? ambient, CancellationToken cancellationToken)
+    {
+        OutboundTarget target = BuildTarget(uri, ambient, defaultExecutionContext);
+        NetworkAccessCheckResult result = await checker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
+        if (!result.Allowed)
+        {
+            LogNetworkAccessDenied(logger, target.Host, target.Port, result.Reason, result.RequestId);
+            result.ThrowIfDenied(target);
+        }
+    }
+
+    private static OutboundTarget BuildTarget(Uri uri, NetworkAccessScope? ambient, string defaultExecutionContext)
+    {
         string host = uri.IdnHost;
         int port = uri.Port > 0
             ? uri.Port
             : (string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase) || string.Equals(uri.Scheme, "wss", StringComparison.OrdinalIgnoreCase) ? 443 : 80);
 
-        NetworkAccessScope? ambient = NetworkAccessContext.Current;
-
-        var target = new OutboundTarget(
+        return new OutboundTarget(
             Host: host,
             Port: port,
             Scheme: uri.Scheme,
@@ -73,15 +108,48 @@ public sealed partial class NetworkAccessCheckHandler : DelegatingHandler
             ConnectorId: ambient?.ConnectorId,
             Systemwide: ambient?.Systemwide ?? false,
             ExecutionContext: ambient?.ExecutionContext ?? defaultExecutionContext);
+    }
 
-        NetworkAccessCheckResult result = await checker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
-        if (!result.Allowed)
+    private static bool IsRedirectStatusCode(System.Net.HttpStatusCode statusCode)
+    {
+        int code = (int)statusCode;
+        return code is 300 or 301 or 302 or 303 or 307 or 308;
+    }
+
+    private static void EnsureAutoRedirectDisabled(HttpMessageHandler? handler)
+    {
+        HttpMessageHandler? cursor = handler;
+        while (cursor is not null)
         {
-            LogNetworkAccessDenied(logger, host, port, result.Reason, result.RequestId);
-            result.ThrowIfDenied(target);
-        }
+            if (cursor is SocketsHttpHandler { AllowAutoRedirect: true } sockets)
+            {
+                try
+                {
+                    sockets.AllowAutoRedirect = false;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    throw new InvalidOperationException(
+                        "NetworkAccessCheckHandler requires AllowAutoRedirect = false on inner SocketsHttpHandler.",
+                        ex);
+                }
+            }
+            else if (cursor is HttpClientHandler { AllowAutoRedirect: true } httpClientHandler)
+            {
+                try
+                {
+                    httpClientHandler.AllowAutoRedirect = false;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    throw new InvalidOperationException(
+                        "NetworkAccessCheckHandler requires AllowAutoRedirect = false on inner HttpClientHandler.",
+                        ex);
+                }
+            }
 
-        return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            cursor = (cursor as DelegatingHandler)?.InnerHandler;
+        }
     }
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Information, Message = "Network access denied for outbound request to {Host}:{Port} (Reason: {Reason}, RequestId: {RequestId})")]

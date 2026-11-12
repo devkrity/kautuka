@@ -546,10 +546,21 @@ public sealed class ConnectorValidationEndpointTests
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForUrl("http://127.0.0.1:4567/mcp");
         Assert.True(captured.AllowPrivateDestination);
         var inner = new FailIfSentHandler();
-        using var invoker = new HttpMessageInvoker(new RemoteMcpRequestHandler(captured.RemoteContext!, inner));
+        using var invoker = new HttpMessageInvoker(new RemoteMcpRequestHandler(
+            captured.RemoteContext!,
+            new AllowAllConnectorTestChecker(),
+            inner));
         using var outgoing = new HttpRequestMessage(HttpMethod.Get, "http://127.0.0.1:4567/mcp");
         await Assert.ThrowsAsync<HttpRequestException>(() => invoker.SendAsync(outgoing, TestContext.Current.CancellationToken));
         Assert.False(inner.WasSent);
+    }
+
+    private sealed class AllowAllConnectorTestChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+    {
+        public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
+            Kautuka.NetworkAccess.Client.OutboundTarget target,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("test_allow"));
     }
 
     private sealed class FailIfSentHandler : HttpMessageHandler

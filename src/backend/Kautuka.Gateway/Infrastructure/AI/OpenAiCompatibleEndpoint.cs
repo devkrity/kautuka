@@ -67,7 +67,7 @@ internal static class OpenAiCompatibleEndpoint
         {
 #pragma warning disable CA2000 // Owned and disposed by HttpClient when transportHandler is null
             HttpMessageHandler handler = transportHandler
-                ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler());
+                ?? new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, new SocketsHttpHandler { AllowAutoRedirect = false });
             using var http = new HttpClient(handler, disposeHandler: transportHandler is null);
 #pragma warning restore CA2000
             http.Timeout = AiProviderSettings.GetTimeout(

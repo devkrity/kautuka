@@ -32,6 +32,7 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
 #pragma warning disable CA2000 // Disposed by ownedHandler in ConnectorAuthorizationClient.Dispose
             var sockets = new SocketsHttpHandler
             {
+                AllowAutoRedirect = false,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             };
             ownedHandler = new NetworkAccessCheckHandler(

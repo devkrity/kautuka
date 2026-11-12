@@ -375,7 +375,9 @@ internal static class GatewayOperationsModule
     public static void AddServices(IServiceCollection services)
     {
         services.AddHttpClient();
-        services.ConfigureHttpClientDefaults(clientBuilder => clientBuilder.AddHttpMessageHandler<NetworkAccessCheckHandler>());
+        services.ConfigureHttpClientDefaults(clientBuilder => clientBuilder
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false })
+            .AddHttpMessageHandler<NetworkAccessCheckHandler>());
         services.AddSingleton<IWorkspaceRuntimeTool, GrpcWorkspaceRuntimeTool>();
         services.AddSingleton<IWorkspaceUserIdentityResolver, GatewayWorkspaceUserIdentityResolver>();
         services.AddSingleton(static provider => GatewayState.FromDatabase(

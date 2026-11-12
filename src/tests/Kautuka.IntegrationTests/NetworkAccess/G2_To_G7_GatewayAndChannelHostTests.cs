@@ -782,6 +782,116 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         }
     }
 
+    // -------------------------------------------------------------------------------------------------
+    // G7 (v7-34): HTTP 3xx redirects are never auto-followed silently; denied redirect targets fail
+    // closed with NetworkAccessDeniedException, and allowed redirect targets still aren't auto-followed.
+    // -------------------------------------------------------------------------------------------------
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
+    public async Task G7_RedirectFromAllowedHost_IsNeverAutoFollowed_WithNegativeControl()
+    {
+        using var allowedListener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        using var targetListener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        allowedListener.Start();
+        targetListener.Start();
+
+        int allowedPort = ((IPEndPoint)allowedListener.LocalEndpoint).Port;
+        int targetPort = ((IPEndPoint)targetListener.LocalEndpoint).Port;
+        int targetHits = 0;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        Task serveAllowed = Task.Run(async () =>
+        {
+            while (!cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    using System.Net.Sockets.TcpClient conn = await allowedListener.AcceptTcpClientAsync(cts.Token);
+                    using System.Net.Sockets.NetworkStream stream = conn.GetStream();
+                    byte[] buf = new byte[1024];
+                    _ = await stream.ReadAsync(buf, cts.Token);
+                    byte[] resp = System.Text.Encoding.ASCII.GetBytes(
+                        $"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{targetPort}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    await stream.WriteAsync(resp, cts.Token);
+                }
+                catch
+                {
+                    break;
+                }
+            }
+        });
+
+        Task serveTarget = Task.Run(async () =>
+        {
+            while (!cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    using System.Net.Sockets.TcpClient conn = await targetListener.AcceptTcpClientAsync(cts.Token);
+                    Interlocked.Increment(ref targetHits);
+                    using System.Net.Sockets.NetworkStream stream = conn.GetStream();
+                    byte[] buf = new byte[1024];
+                    _ = await stream.ReadAsync(buf, cts.Token);
+                    byte[] resp = System.Text.Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    await stream.WriteAsync(resp, cts.Token);
+                }
+                catch
+                {
+                    break;
+                }
+            }
+        });
+
+        try
+        {
+            // 1. Primary: allowed host returns 302 to non-allowed host -> denied, target mock hit count == 0
+            var denyRedirectChecker = new PortSelectiveTestChecker(allowedPort);
+            using var defaultSockets = new SocketsHttpHandler(); // AllowAutoRedirect starts true (.NET default)
+            using var checkedHandler = new NetworkAccessCheckHandler(denyRedirectChecker, defaultSockets);
+            Assert.False(defaultSockets.AllowAutoRedirect);
+
+            using var client = new HttpClient(checkedHandler);
+            NetworkAccessDeniedException denied = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await client.GetAsync(new Uri($"http://127.0.0.1:{allowedPort}/start"), cts.Token));
+            Assert.Equal(targetPort, denied.Port);
+            Assert.Equal(0, Volatile.Read(ref targetHits));
+
+            // 2. Spec G7.NC: allow second host too -> redirect is still NOT auto-followed (302 returned, targetHits == 0)
+            using var allowBothClient = new HttpClient(
+                new NetworkAccessCheckHandler(new AllowTestChecker(), new SocketsHttpHandler()));
+            using HttpResponseMessage redirectResp = await allowBothClient.GetAsync(
+                new Uri($"http://127.0.0.1:{allowedPort}/start"),
+                cts.Token);
+            Assert.Equal(HttpStatusCode.Redirect, redirectResp.StatusCode);
+            Assert.Equal(0, Volatile.Read(ref targetHits));
+
+            // 3. Handler-removal NC: raw SocketsHttpHandler without NetworkAccessCheckHandler auto-follows to targetPort
+            using var uncheckedClient = new HttpClient(new SocketsHttpHandler());
+            using HttpResponseMessage bypassedResp = await uncheckedClient.GetAsync(
+                new Uri($"http://127.0.0.1:{allowedPort}/start"),
+                cts.Token);
+            Assert.Equal(HttpStatusCode.OK, bypassedResp.StatusCode);
+            Assert.Equal(1, Volatile.Read(ref targetHits));
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            allowedListener.Stop();
+            targetListener.Stop();
+            await Task.WhenAll(serveAllowed, serveTarget);
+        }
+    }
+
+    private sealed class PortSelectiveTestChecker(int allowedPort) : INetworkAccessChecker
+    {
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+            => Task.FromResult(target.Port == allowedPort
+                ? NetworkAccessCheckResult.CreateAllowed("test_allow_port")
+                : NetworkAccessCheckResult.CreateDenied("test_deny_redirect_port", "req-redirect"));
+    }
+
     private sealed class AllowTestChecker : INetworkAccessChecker
     {
         public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)

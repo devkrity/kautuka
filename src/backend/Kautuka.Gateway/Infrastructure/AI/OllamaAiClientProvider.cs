@@ -176,7 +176,7 @@ internal sealed class OllamaAiClientProvider(
 #pragma warning disable CA2000 // Caller disposes or client owns
         HttpMessageHandler handler = new NetworkAccessCheckHandler(
             checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler());
+            new SocketsHttpHandler { AllowAutoRedirect = false });
         var client = new HttpClient(handler, disposeHandler: true)
         {
             Timeout = timeout,

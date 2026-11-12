@@ -34,7 +34,7 @@ internal sealed class OpenAiCompatibleProvider(
 #pragma warning disable CA2000 // Owned by chat client
         HttpMessageHandler transportHandler = new NetworkAccessCheckHandler(
             checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler());
+            new SocketsHttpHandler { AllowAutoRedirect = false });
 
         return new OpenAIClient(new ApiKeyCredential(apiKey), OpenAiCompatibleEndpoint.CreateClientOptions(baseUrl, transportHandler))
             .GetChatClient(modelName)
@@ -51,7 +51,7 @@ internal sealed class OpenAiCompatibleProvider(
 #pragma warning disable CA2000 // Passed to DiscoverModelsAsync
         HttpMessageHandler transportHandler = new NetworkAccessCheckHandler(
             checker ?? FailClosedNetworkAccessChecker.Instance,
-            new SocketsHttpHandler());
+            new SocketsHttpHandler { AllowAutoRedirect = false });
 
         return OpenAiCompatibleEndpoint.DiscoverModelsAsync(
             settings,

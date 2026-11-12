@@ -157,6 +157,9 @@ builder.Services.AddSingleton<IHostedService>(sp => new ChannelAdapterHostedServ
 builder.Services.AddHostedService<ChannelQueueCardExpiryWorker>();
 KautukaMaintenanceMode.SuppressApplicationHostedServices(builder.Services);
 
+builder.Services.ConfigureHttpClientDefaults(clientBuilder => clientBuilder
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false }));
+
 builder.Services.AddHttpClient("telegram-api", client =>
 {
     // Max Telegram long-poll server timeout is clamped at 25 s (well under typical NAT
