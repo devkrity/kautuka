@@ -89,14 +89,6 @@ public sealed class WorkloadPostStartVerifier
                 throw new InvalidOperationException("Security check failed: no-new-privileges is not enabled.");
             }
 
-            if (!hostConfig.TryGetProperty("Sysctls", out JsonElement sysctls)
-                || sysctls.ValueKind != JsonValueKind.Object
-                || !sysctls.TryGetProperty("net.ipv6.conf.all.disable_ipv6", out JsonElement disableIpv6)
-                || !string.Equals(disableIpv6.GetString(), "1", StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("Network check failed: IPv6 disable sysctl is missing or incorrect.");
-            }
-
             int pid = state.TryGetProperty("Pid", out JsonElement pidElem) ? pidElem.GetInt32() : 0;
 
             // 1a. Security options & privileges
@@ -265,7 +257,12 @@ public sealed class WorkloadPostStartVerifier
                     throw new InvalidOperationException($"Process check failed: invalid or non-positive PID ({pid}) on Linux.");
                 }
 
+                await VerifyNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
                 await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                VerifyInspectIpv6Disable(hostConfig);
             }
 
             stopwatch.Stop();
@@ -375,6 +372,68 @@ public sealed class WorkloadPostStartVerifier
         }
 
         return false;
+    }
+
+    private static void VerifyInspectIpv6Disable(JsonElement hostConfig)
+    {
+        if (!hostConfig.TryGetProperty("Sysctls", out JsonElement sysctls)
+            || sysctls.ValueKind != JsonValueKind.Object
+            || !sysctls.TryGetProperty("net.ipv6.conf.all.disable_ipv6", out JsonElement disableIpv6)
+            || !string.Equals(disableIpv6.GetString(), "1", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Network check failed: IPv6 disable sysctl is missing or incorrect.");
+        }
+    }
+
+    private async Task VerifyNetnsIpv6DisableAsync(int pid, CancellationToken cancellationToken)
+    {
+        string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        const string sysctlPath = "/proc/sys/net/ipv6/conf/all/disable_ipv6";
+        string actualValue;
+        if (!Environment.IsPrivilegedProcess)
+        {
+            PodmanCommandResult result = await podmanRunner
+                .RunAsync(["unshare", "nsenter", "-t", pidText, "-n", "cat", sysctlPath], 10, cancellationToken)
+                .ConfigureAwait(false);
+            if (result.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"podman unshare nsenter could not read the IPv6 disable sysctl (rc {result.ExitCode}): {result.StdErr}");
+            }
+
+            actualValue = result.StdOut.Trim();
+        }
+        else
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "nsenter",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                }
+            };
+            foreach (string argument in new[] { "-t", pidText, "-n", "cat", sysctlPath })
+            {
+                process.StartInfo.ArgumentList.Add(argument);
+            }
+
+            process.Start();
+            actualValue = (await process.StandardOutput.ReadToEndAsync(cancellationToken).ConfigureAwait(false)).Trim();
+            string standardError = await process.StandardError.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"nsenter could not read the IPv6 disable sysctl (rc {process.ExitCode}): {standardError}");
+            }
+        }
+
+        if (!string.Equals(actualValue, "1", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Network check failed: IPv6 disable sysctl is '{actualValue}' in the workload network namespace.");
+        }
     }
 
     internal async Task VerifyNetnsRulesetAsync(

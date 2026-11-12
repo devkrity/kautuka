@@ -33,6 +33,19 @@ public sealed class WorkloadPostStartVerifierTests
         }
         """;
 
+    private const string RootlessPodman58SysctlInspectFragment = """
+        {
+          "Sysctls": null,
+          "HostConfig": {
+            "SecurityOpt": ["no-new-privileges"],
+            "CapDrop": [
+              "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL",
+              "CAP_NET_BIND_SERVICE", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_CHROOT"
+            ]
+          }
+        }
+        """;
+
     [Fact]
     public async Task ValidInspectPassesAndKeepsRegistryEntry()
     {
@@ -84,10 +97,40 @@ public sealed class WorkloadPostStartVerifierTests
         var calls = new List<string[]>();
         WorkloadRegistry registry = CreateRegistry();
         InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => VerifyAsync(
-            Inspect(ipv6Disabled: false), calls, registry));
+            OperatingSystem.IsLinux() ? Inspect() : Inspect(ipv6Disabled: false),
+            calls, registry, ipv6SysctlValue: "0"));
 
         Assert.Contains("IPv6 disable sysctl", exception.InnerException?.Message ?? exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(calls, static call => call.Contains("/proc/sys/net/ipv6/conf/all/disable_ipv6", StringComparer.Ordinal));
         AssertCleanup(calls, registry);
+    }
+
+    [Fact]
+    public async Task RootlessPodman58InspectWithoutSysctlsUsesLiveNetnsValue()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        JsonObject inspect = JsonNode.Parse(Inspect())!.AsArray()[0]!.AsObject().DeepClone().AsObject();
+        JsonObject actualPodmanFields = JsonNode.Parse(RootlessPodman58SysctlInspectFragment)!.AsObject();
+        JsonObject hostConfig = inspect["HostConfig"]!.AsObject();
+        JsonObject actualHostConfig = actualPodmanFields["HostConfig"]!.AsObject();
+        hostConfig.Remove("Sysctls");
+        hostConfig["SecurityOpt"] = actualHostConfig["SecurityOpt"]!.DeepClone();
+        hostConfig["CapDrop"] = actualHostConfig["CapDrop"]!.DeepClone();
+        inspect["Sysctls"] = null;
+        inspect["EffectiveCaps"] = null;
+        inspect["BoundingCaps"] = null;
+
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        await VerifyAsync(JsonSerializer.Serialize(new JsonArray(inspect)), calls, registry, ipv6SysctlValue: "1");
+
+        Assert.Contains(calls, static call => call.Contains("/proc/sys/net/ipv6/conf/all/disable_ipv6", StringComparer.Ordinal));
+        Assert.Equal(1, registry.Count);
+        Assert.DoesNotContain(calls, static call => call[0] is "kill" or "rm");
     }
 
     [Fact]
@@ -174,7 +217,8 @@ public sealed class WorkloadPostStartVerifierTests
         string inspectJson,
         List<string[]> calls,
         WorkloadRegistry registry,
-        ImageCompatProfile? compatProfile = null)
+        ImageCompatProfile? compatProfile = null,
+        string ipv6SysctlValue = "1")
     {
         string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-verifier-root-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspaceRoot);
@@ -204,6 +248,11 @@ public sealed class WorkloadPostStartVerifierTests
 
                 if (args[0] == "unshare")
                 {
+                    if (args.Contains("cat", StringComparer.Ordinal))
+                    {
+                        return Task.FromResult(Success(ipv6SysctlValue));
+                    }
+
                     return Task.FromResult(Success(ipRules));
                 }
 

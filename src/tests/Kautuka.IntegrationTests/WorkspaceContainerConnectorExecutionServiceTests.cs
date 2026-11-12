@@ -59,6 +59,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
                 if (args[0] == "unshare")
                 {
+                    if (args.Contains("cat", StringComparer.Ordinal))
+                    {
+                        return Task.FromResult(new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed));
+                    }
+
                     string ip = pidIps[args[3]];
                     string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
                         .Replace("{{IP}}", ip, StringComparison.Ordinal);
@@ -218,6 +223,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
             if (args[0] == "unshare")
             {
+                if (args.Contains("cat", StringComparer.Ordinal))
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed));
+                }
+
                 string ip = pidIps[args[3]];
                 string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", ip, StringComparison.Ordinal);
                 return Task.FromResult(new PodmanCommandResult(0, nft, string.Empty, ProcessTerminationReason.Completed));
