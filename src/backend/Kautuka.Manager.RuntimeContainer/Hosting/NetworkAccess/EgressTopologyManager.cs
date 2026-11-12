@@ -548,13 +548,23 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             if (!stopped)
             {
+                bool killed = false;
                 try
                 {
-                    await podmanRunner.RunAsync(["kill", entry.ContainerId], 10, cancellationToken).ConfigureAwait(false);
+                    PodmanCommandResult killResult = await podmanRunner
+                        .RunAsync(["kill", entry.ContainerId], 10, cancellationToken)
+                        .ConfigureAwait(false);
+                    killed = killResult.ExitCode == 0;
                 }
                 catch
                 {
                     // Best-effort kill fallback
+                }
+
+                if (!killed)
+                {
+                    logger.LogError("Emergency brake could not stop or kill container '{ContainerId}' (IP: {Ip}); retaining its registry identity for fail-closed authorization.", entry.ContainerId, entry.Ip);
+                    continue;
                 }
             }
 

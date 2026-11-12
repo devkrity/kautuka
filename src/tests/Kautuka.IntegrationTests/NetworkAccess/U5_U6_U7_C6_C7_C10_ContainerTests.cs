@@ -794,6 +794,31 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_BrakeKeepsRegistryEntryWhenContainerCannotBeStopped_WithNegativeControl()
+    {
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry(
+            "10.247.1.31", "user-braked", "agent-a", "container-a", "agent-sandbox", null,
+            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(string.Join(" ", args));
+            return Task.FromResult(new PodmanCommandResult(125, string.Empty, "container runtime unavailable", ProcessTerminationReason.NonZeroExit));
+        });
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-brake-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+
+        await manager.EngageBrakeAsync("user-braked", registry, TestContext.Current.CancellationToken);
+
+        Assert.Contains("stop -t 2 container-a", calls);
+        Assert.Contains("kill container-a", calls);
+        Assert.True(registry.TryGetByIp("10.247.1.31", out RegistryEntry? stillTracked));
+        Assert.Equal("container-a", stillTracked?.ContainerId);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)
