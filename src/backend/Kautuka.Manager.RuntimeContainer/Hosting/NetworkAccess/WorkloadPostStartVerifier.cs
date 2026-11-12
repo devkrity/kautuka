@@ -37,6 +37,7 @@ public sealed class WorkloadPostStartVerifier
         string allocatedIp,
         ImageCompatProfile? compatProfile = null,
         IWorkloadRegistry? registry = null,
+        IReadOnlyList<string>? allowedMountRoots = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
@@ -74,6 +75,25 @@ public sealed class WorkloadPostStartVerifier
             JsonElement hostConfig = container.GetProperty("HostConfig");
             JsonElement config = container.GetProperty("Config");
             JsonElement state = container.GetProperty("State");
+
+            // Verify the runtime view of the typed spec's process and kernel hardening.
+            bool noNewPrivileges = hostConfig.TryGetProperty("SecurityOpt", out JsonElement securityOpt)
+                && securityOpt.ValueKind == JsonValueKind.Array
+                && securityOpt.EnumerateArray().Any(static option =>
+                    string.Equals(option.GetString(), "no-new-privileges", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(option.GetString(), "no-new-privileges:true", StringComparison.OrdinalIgnoreCase));
+            if (!noNewPrivileges)
+            {
+                throw new InvalidOperationException("Security check failed: no-new-privileges is not enabled.");
+            }
+
+            if (!hostConfig.TryGetProperty("Sysctls", out JsonElement sysctls)
+                || sysctls.ValueKind != JsonValueKind.Object
+                || !sysctls.TryGetProperty("net.ipv6.conf.all.disable_ipv6", out JsonElement disableIpv6)
+                || !string.Equals(disableIpv6.GetString(), "1", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Network check failed: IPv6 disable sysctl is missing or incorrect.");
+            }
 
             int pid = state.TryGetProperty("Pid", out JsonElement pidElem) ? pidElem.GetInt32() : 0;
 
@@ -217,6 +237,13 @@ public sealed class WorkloadPostStartVerifier
                 {
                     string source = mount.TryGetProperty("Source", out JsonElement srcElem) ? srcElem.GetString() ?? string.Empty : string.Empty;
                     string dest = mount.TryGetProperty("Destination", out JsonElement dstElem) ? dstElem.GetString() ?? string.Empty : string.Empty;
+                    string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) ? typeElem.GetString() ?? string.Empty : string.Empty;
+
+                    if (mountType.Equals("bind", StringComparison.OrdinalIgnoreCase)
+                        && (allowedMountRoots is null || allowedMountRoots.Count == 0 || !IsWithinAllowedRoot(source, allowedMountRoots)))
+                    {
+                        throw new InvalidOperationException($"Mount check failed: bind source '{source}' is outside the workspace mount allowlist.");
+                    }
 
                     if (source.Contains("docker.sock", StringComparison.OrdinalIgnoreCase)
                         || source.Contains("podman.sock", StringComparison.OrdinalIgnoreCase)
@@ -281,6 +308,32 @@ public sealed class WorkloadPostStartVerifier
                 $"WorkloadPostStartVerifier failed for '{containerId}' at '{allocatedIp}' after {exposureMs} ms: {ex.Message}",
                 ex);
         }
+    }
+
+    private static bool IsWithinAllowedRoot(string path, IReadOnlyList<string> allowedRoots)
+    {
+        string fullPath = Path.GetFullPath(path);
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (string root in allowedRoots)
+        {
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                continue;
+            }
+
+            string fullRoot = Path.GetFullPath(root);
+            string relative = Path.GetRelativePath(fullRoot, fullPath);
+            if (string.Equals(relative, ".", comparison)
+                || (!Path.IsPathRooted(relative)
+                    && !string.Equals(relative, "..", comparison)
+                    && !relative.StartsWith(".." + Path.DirectorySeparatorChar, comparison)
+                    && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, comparison)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal async Task VerifyNetnsRulesetAsync(

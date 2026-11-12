@@ -901,7 +901,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             try
             {
-                await postStartVerifier.VerifyWorkloadAsync(containerName, allocatedIp, compatProfile, workloadRegistry, cancellationToken).ConfigureAwait(false);
+                await postStartVerifier.VerifyWorkloadAsync(
+                    containerName,
+                    allocatedIp,
+                    compatProfile,
+                    workloadRegistry,
+                    workspaceContext is null ? [] : [workspaceContext.HostWorkspacePath],
+                    cancellationToken).ConfigureAwait(false);
             }
             catch
             {

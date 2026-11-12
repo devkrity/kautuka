@@ -257,7 +257,13 @@ public sealed class PodmanContainerTool(
 
         if (postStartVerifier is not null)
         {
-            await postStartVerifier.VerifyWorkloadAsync(containerName, allocatedIp, compatProfile: null, registry: workloadRegistry, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await postStartVerifier.VerifyWorkloadAsync(
+                containerName,
+                allocatedIp,
+                compatProfile: null,
+                registry: workloadRegistry,
+                cancellationToken: cancellationToken,
+                allowedMountRoots: [context.HostWorkspacePath]).ConfigureAwait(false);
         }
 
         return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);
