@@ -55,18 +55,13 @@ public sealed partial class NetworkAccessPolicyStore
         ArgumentNullException.ThrowIfNull(actor);
         ArgumentNullException.ThrowIfNull(targetUserId);
         string normalizedTarget = NetworkAccessPolicyAuthorizer.AuthorizeSetUserPrivileges(actor, targetUserId);
+        _ = targetIsAdmin; // Role defaults apply only when a record is absent; they never override an explicit saved value.
 
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
             bool effectiveApprove = canApproveOwn;
             bool effectiveAllowAll = canAllowAllAgents;
-
-            if (targetIsAdmin == true)
-            {
-                effectiveApprove = true;
-                effectiveAllowAll = true;
-            }
 
             var updated = new UserPrivileges(
                 normalizedTarget,
@@ -104,6 +99,20 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyState current = Load();
             UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin: false);
             return privs.CanApproveOwn && privs.CanAllowAllAgents;
+        }
+    }
+
+    public bool HasStoredUserPrivileges(string userId)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            return Load().UserPrivileges.Any(privileges =>
+                string.Equals(privileges.UserId, userId, StringComparison.Ordinal));
         }
     }
 
@@ -889,7 +898,7 @@ public sealed partial class NetworkAccessPolicyStore
         bool isTargetAdmin)
     {
         UserPrivileges? stored = current.UserPrivileges.FirstOrDefault(p => string.Equals(p.UserId, userId, StringComparison.Ordinal));
-        if (stored is not null && (!isTargetAdmin || (stored.CanApproveOwn && stored.CanAllowAllAgents)))
+        if (stored is not null)
         {
             return stored;
         }

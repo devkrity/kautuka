@@ -1,5 +1,6 @@
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Endpoints.Common;
+using Kautuka.Manager.Protos;
 
 namespace Kautuka.Gateway.Hosting;
 
@@ -19,9 +20,22 @@ internal sealed class GatewayUserRolePrivilegesStartupSyncService(
             }
 
             bool isAdmin = string.Equals(user.Role, "admin", StringComparison.OrdinalIgnoreCase);
+            NetworkAccessUserPrivilegesMessage existing = await managerService.GetUserPrivilegesAsync(
+                new NetworkAccessGetUserPrivilegesRequest
+                {
+                    Actor = new NetworkAccessActorMessage { UserId = "system", IsAdmin = true },
+                    UserId = user.Id,
+                    TargetIsAdmin = isAdmin,
+                },
+                cancellationToken).ConfigureAwait(false);
+            if (existing.HasStoredRecord)
+            {
+                continue;
+            }
+
             await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
                 managerService,
-                actorUserId: user.Id,
+                actorUserId: "system",
                 targetUserId: user.Id,
                 targetIsAdmin: isAdmin,
                 logger,

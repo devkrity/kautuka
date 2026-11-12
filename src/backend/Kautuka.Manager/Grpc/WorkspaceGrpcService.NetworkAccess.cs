@@ -335,11 +335,14 @@ public sealed partial class WorkspaceGrpcService
 
         return ExecuteNacRpc(() =>
         {
+            string userId = string.IsNullOrWhiteSpace(request.UserId)
+                ? request.Actor.UserId
+                : request.UserId;
             UserPrivileges privs = Nac.PolicyStore.GetUserPrivileges(
                 ToActor(request.Actor),
                 string.IsNullOrWhiteSpace(request.UserId) ? null : request.UserId,
                 request.TargetIsAdmin);
-            return ToMessage(privs);
+            return ToMessage(privs, Nac.PolicyStore.HasStoredUserPrivileges(userId));
         });
     }
 
@@ -576,7 +579,7 @@ public sealed partial class WorkspaceGrpcService
             OpenInternetBadge = view.OpenInternetBadge,
         };
 
-    private static NetworkAccessUserPrivilegesMessage ToMessage(UserPrivileges privs)
+    private static NetworkAccessUserPrivilegesMessage ToMessage(UserPrivileges privs, bool hasStoredRecord = true)
         => new()
         {
             UserId = privs.UserId,
@@ -584,6 +587,7 @@ public sealed partial class WorkspaceGrpcService
             CanAllowAllAgents = privs.CanAllowAllAgents,
             SetBy = privs.SetBy,
             SetAtUtc = privs.SetAtUtc.ToString("O", CultureInfo.InvariantCulture),
+            HasStoredRecord = hasStoredRecord,
         };
 
     private static NetworkAccessBrakeMessage ToMessage(BrakeState brake)

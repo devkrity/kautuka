@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using Grpc.Core;
 
@@ -227,34 +228,95 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
     }
 
     [Fact]
-    public async Task V7_4_StartupSyncRepairsExistingAdminPrivilegesInThePersistedStore()
+    public async Task V7_49_StartupSyncPreservesSavedChoicesAndBackfillsAsSystem_WithNegativeControl()
     {
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
-        long writesBeforeDefaultRead = fixture.PolicyStore.DiskWriteCount;
-        UserPrivileges implicitAdmin = fixture.PolicyStore.GetUserPrivileges(new NetworkAccessActor("legacy-admin", IsAdmin: true));
-        Assert.True(implicitAdmin.CanApproveOwn);
-        Assert.True(implicitAdmin.CanAllowAllAgents);
-        Assert.Equal(writesBeforeDefaultRead, fixture.PolicyStore.DiskWriteCount);
-        Assert.DoesNotContain(fixture.PolicyStore.GetRawStateSnapshot().UserPrivileges, item => item.UserId == "legacy-admin");
-
-        _ = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
         string adminId = fixture.UserStore.ListUsers().Single(u => u.Username == "admin").Id;
-        fixture.PolicyStore.SetUserPrivileges(
-            new NetworkAccessActor(adminId, IsAdmin: true),
-            adminId,
-            canApproveOwn: false,
-            canAllowAllAgents: false,
-            targetIsAdmin: false);
-        Assert.False(fixture.PolicyStore.HasBothPrivileges(adminId));
 
-        var sync = new GatewayUserRolePrivilegesStartupSyncService(
-            fixture.ManagerService,
+        using JsonDocument aliceInvite = await fixture.SendJsonAsync(
+            HttpMethod.Post,
+            "/api/settings/users/invite",
+            new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" },
+            adminToken);
+        string aliceId = aliceInvite.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        using JsonDocument bobInvite = await fixture.SendJsonAsync(
+            HttpMethod.Post,
+            "/api/settings/users/invite",
+            new { username = "bob", email = "bob@example.com", password = "Testing1!", role = "admin" },
+            adminToken);
+        string bobId = bobInvite.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        using JsonDocument legacyInvite = await fixture.SendJsonAsync(
+            HttpMethod.Post,
+            "/api/settings/users/invite",
+            new { username = "legacy", email = "legacy@example.com", password = "Testing1!", role = "admin" },
+            adminToken);
+        string legacyAdminId = legacyInvite.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+
+        using JsonDocument aliceSet = await fixture.SendJsonAsync(
+            HttpMethod.Put,
+            $"/api/network-access/users/{aliceId}/privileges",
+            new { canApproveOwn = true, canAllowAllAgents = false },
+            adminToken);
+        Assert.True(aliceSet.RootElement.GetProperty("canApproveOwn").GetBoolean());
+        Assert.False(aliceSet.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+
+        using JsonDocument bobSet = await fixture.SendJsonAsync(
+            HttpMethod.Put,
+            $"/api/network-access/users/{bobId}/privileges",
+            new { canApproveOwn = false, canAllowAllAgents = false },
+            adminToken);
+        Assert.False(bobSet.RootElement.GetProperty("canApproveOwn").GetBoolean());
+        Assert.False(bobSet.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+
+        // Simulate an older Gateway user without a corresponding NAC record, then restart against the reopened store.
+        JsonNode policy = JsonNode.Parse(await File.ReadAllTextAsync(fixture.PolicyStorePath, TestContext.Current.CancellationToken))!;
+        JsonArray records = policy["userPrivileges"]!.AsArray();
+        for (int index = records.Count - 1; index >= 0; index--)
+        {
+            if (string.Equals(records[index]?["userId"]?.GetValue<string>(), legacyAdminId, StringComparison.Ordinal))
+            {
+                records.RemoveAt(index);
+            }
+        }
+        await File.WriteAllTextAsync(fixture.PolicyStorePath, policy.ToJsonString(), TestContext.Current.CancellationToken);
+
+        var auditRing = new NetworkAccessAuditRing();
+        using var reopenedStore = new NetworkAccessPolicyStore(fixture.PolicyStorePath, auditRing: auditRing);
+        var registry = new WorkloadRegistry();
+        var controller = new Kautuka.NetworkAccessController.NetworkAccessController(
+            reopenedStore,
+            registry,
+            auditRing);
+        var grpc = new WorkspaceGrpcService(
+            null!, null!, null!, null!, null!, null!, null!, null!,
+            NullLogger<WorkspaceGrpcService>.Instance,
+            controller,
+            new ImageCompatibilityStore(Path.Combine(Path.GetDirectoryName(fixture.PolicyStorePath)!, "compat.json")));
+        var restartedManager = new InProcessManagerGrpcService(grpc);
+        var startupSync = new GatewayUserRolePrivilegesStartupSyncService(
+            restartedManager,
             fixture.UserStore,
             NullLogger<GatewayUserRolePrivilegesStartupSyncService>.Instance);
-        await sync.StartAsync(CancellationToken.None);
 
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(adminId));
-        AssertPersistedPrivileges(fixture, adminId, expected: true);
+        await startupSync.StartAsync(TestContext.Current.CancellationToken);
+
+        using var afterRestart = new NetworkAccessPolicyStore(fixture.PolicyStorePath);
+        var system = new NetworkAccessActor("system", IsAdmin: true);
+        UserPrivileges alice = afterRestart.GetUserPrivileges(system, aliceId);
+        UserPrivileges bob = afterRestart.GetUserPrivileges(system, bobId, targetIsAdmin: true);
+        Assert.True(alice.CanApproveOwn);
+        Assert.False(alice.CanAllowAllAgents);
+        Assert.False(bob.CanApproveOwn);
+        Assert.False(bob.CanAllowAllAgents);
+        Assert.Equal(adminId, afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == aliceId).SetBy);
+        Assert.Equal(adminId, afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == bobId).SetBy);
+
+        UserPrivileges legacy = afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == legacyAdminId);
+        Assert.True(legacy.CanApproveOwn);
+        Assert.True(legacy.CanAllowAllAgents);
+        Assert.Equal("system", legacy.SetBy);
+        Assert.Contains(auditRing.List(system), entry => entry.Reason.Contains("actor=system", StringComparison.Ordinal));
     }
 
     private sealed class GatewayNacFixture : IAsyncDisposable

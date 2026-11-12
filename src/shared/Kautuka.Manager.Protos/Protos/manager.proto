@@ -439,6 +439,7 @@ message NetworkAccessUserPrivilegesMessage {
   bool can_allow_all_agents = 3;
   string set_by = 4;
   string set_at_utc = 5;
+  bool has_stored_record = 6;
 }
 
 message NetworkAccessUserBrakeMessage {
