@@ -818,6 +818,8 @@ public static class Program
             // Production flow Step B: Decide card -> rule created -> retry through Envoy + CoreDNS upstream succeeds!
             string dnsCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             DecideRequestResult decision = policyStore.DecideRequest(admin, card.Id, allow: true, scope: "agent", allowLan: false, expectedRevision: policyStore.Revision);
+            NetworkAccessRule allowedRule = decision.Rule
+                ?? throw new InvalidOperationException("Allow decision did not return the created network rule.");
             var (allowRc, allowOut, allowErr) = await ExecAsync("podman", ["exec", wlName, "curl", "-v", "--max-time", "12", "https://example.com/"]).ConfigureAwait(false);
             if (allowRc != 0)
             {
@@ -839,7 +841,7 @@ public static class Program
             await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
             bool deregisteredAfterRm = !registry.TryGetByIp(wlIp, out _);
 
-            string allowedObs = $"ALLOWED:card={card.Destination}:{card.Port}:rule={decision.Rule.Destination}:body={hasExampleDomain}";
+            string allowedObs = $"ALLOWED:card={card.Destination}:{card.Port}:rule={allowedRule.Destination}:body={hasExampleDomain}";
             var observations = new List<AcceptanceObservation>
             {
                 AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
