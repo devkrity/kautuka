@@ -478,15 +478,22 @@ internal static class LiveContainerSpec
             && value.ValueKind == JsonValueKind.String
             && string.Equals(value.GetString(), "host", StringComparison.OrdinalIgnoreCase);
 
-    internal static bool CapDropIncludesAll(JsonElement container, JsonElement host)
+    internal static bool CapDropIncludesAll(
+        JsonElement container,
+        JsonElement host,
+        IReadOnlySet<string>? allowedCapabilities = null)
     {
         // Podman expands --cap-drop ALL into its default capability names. Its
         // resolved sets are authoritative; an empty Go slice can serialize as null.
+        allowedCapabilities ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool hasEffective = container.TryGetProperty("EffectiveCaps", out JsonElement effective);
         bool hasBounding = container.TryGetProperty("BoundingCaps", out JsonElement bounding);
         if (hasEffective || hasBounding)
         {
-            return hasEffective && hasBounding && IsEmptyCapabilitySet(effective) && IsEmptyCapabilitySet(bounding);
+            return hasEffective
+                && hasBounding
+                && CapabilitySetContainsOnlyAllowed(effective, allowedCapabilities)
+                && CapabilitySetContainsOnlyAllowed(bounding, allowedCapabilities);
         }
 
         if (!host.TryGetProperty("CapDrop", out JsonElement capDrop) || capDrop.ValueKind != JsonValueKind.Array)
@@ -505,9 +512,29 @@ internal static class LiveContainerSpec
         return false;
     }
 
-    private static bool IsEmptyCapabilitySet(JsonElement value)
-        => value.ValueKind == JsonValueKind.Null
-            || (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 0);
+    private static bool CapabilitySetContainsOnlyAllowed(JsonElement value, IReadOnlySet<string> allowed)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            return allowed.Count == 0;
+        }
+
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (JsonElement capability in value.EnumerateArray())
+        {
+            string? name = capability.ValueKind == JsonValueKind.String ? capability.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name) || !allowed.Contains(name))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool CapAddIsPresent(JsonElement host)
         => host.TryGetProperty("CapAdd", out JsonElement capAdd)

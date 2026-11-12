@@ -17,12 +17,50 @@ public sealed class WorkloadPostStartVerifierTests
     private const string ContainerId = "nac-verifier-test";
     private const string AllocatedIp = "10.247.1.80";
 
+    private const string RootlessPodmanCapabilityInspectFragment = """
+        {
+          "EffectiveCaps": null,
+          "BoundingCaps": null,
+          "HostConfig": {
+            "CapAdd": [],
+            "CapDrop": [
+              "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_FSETID", "CAP_KILL",
+              "CAP_NET_BIND_SERVICE", "CAP_SETFCAP", "CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID", "CAP_SYS_CHROOT"
+            ],
+            "SecurityOpt": ["no-new-privileges"]
+          }
+        }
+        """;
+
     [Fact]
     public async Task ValidInspectPassesAndKeepsRegistryEntry()
     {
         var calls = new List<string[]>();
         WorkloadRegistry registry = CreateRegistry();
         await VerifyAsync(Inspect(), calls, registry);
+
+        Assert.Equal(1, registry.Count);
+        Assert.DoesNotContain(calls, static call => call[0] is "kill" or "rm");
+    }
+
+    [Fact]
+    public async Task RootlessPodmanExpandedCapDropAndNullCapabilitySetsPass()
+    {
+        // These capability fields are copied from a live `podman inspect` on rootless Podman 6.1.4.
+        JsonObject inspect = JsonNode.Parse(Inspect(effectiveCapsJson: "null", boundingCapsJson: "null"))!
+            .AsArray()[0]!.AsObject().DeepClone().AsObject();
+        JsonObject capabilityInspect = JsonNode.Parse(RootlessPodmanCapabilityInspectFragment)!.AsObject();
+        JsonObject hostConfig = inspect["HostConfig"]!.AsObject();
+        JsonObject capturedHostConfig = capabilityInspect["HostConfig"]!.AsObject();
+        hostConfig["CapAdd"] = capturedHostConfig["CapAdd"]!.DeepClone();
+        hostConfig["CapDrop"] = capturedHostConfig["CapDrop"]!.DeepClone();
+        hostConfig["SecurityOpt"] = capturedHostConfig["SecurityOpt"]!.DeepClone();
+        inspect["EffectiveCaps"] = JsonNode.Parse("null");
+        inspect["BoundingCaps"] = JsonNode.Parse("null");
+
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        await VerifyAsync(JsonSerializer.Serialize(new JsonArray(inspect)), calls, registry);
 
         Assert.Equal(1, registry.Count);
         Assert.DoesNotContain(calls, static call => call[0] is "kill" or "rm");

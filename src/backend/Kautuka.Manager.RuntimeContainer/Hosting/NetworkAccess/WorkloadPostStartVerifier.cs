@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 
+using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.NetworkAccessController;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
@@ -124,16 +125,14 @@ public sealed class WorkloadPostStartVerifier
                 }
             }
 
-            if (!hostConfig.TryGetProperty("CapDrop", out JsonElement capDrop)
-                || capDrop.ValueKind != JsonValueKind.Array
-                || !capDrop.EnumerateArray().Any(static cap => string.Equals(cap.GetString(), "ALL", StringComparison.OrdinalIgnoreCase)))
-            {
-                throw new InvalidOperationException("Capability check failed: CapDrop does not include 'ALL'.");
-            }
-
             IReadOnlySet<string> allowedCapabilities = allowFileCaps
                 ? WorkloadContainerSpec.AllowedFileOwnershipCaps
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!LiveContainerSpec.CapDropIncludesAll(container, hostConfig, allowedCapabilities))
+            {
+                throw new InvalidOperationException("Capability check failed: CapDrop does not remove all prohibited capabilities.");
+            }
+
             VerifyCapabilitySet(container, "EffectiveCaps", allowedCapabilities);
             VerifyCapabilitySet(container, "BoundingCaps", allowedCapabilities);
 
@@ -321,9 +320,15 @@ public sealed class WorkloadPostStartVerifier
     private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
     {
         if (!container.TryGetProperty(propertyName, out JsonElement capabilities)
-            || capabilities.ValueKind != JsonValueKind.Array)
+            || (capabilities.ValueKind != JsonValueKind.Array
+                && !(capabilities.ValueKind == JsonValueKind.Null && allowed.Count == 0)))
         {
             throw new InvalidOperationException($"Capability check failed: {propertyName} is missing or null.");
+        }
+
+        if (capabilities.ValueKind == JsonValueKind.Null)
+        {
+            return;
         }
 
         foreach (JsonElement capability in capabilities.EnumerateArray())
