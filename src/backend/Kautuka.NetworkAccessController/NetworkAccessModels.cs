@@ -132,7 +132,7 @@ public sealed record RuleWriteSpec(
 
 public sealed record DecideRequestResult(
     long Revision,
-    NetworkAccessRule Rule,
+    NetworkAccessRule? Rule,
     NetworkAccessRequest Request,
     bool Paused,
     bool OpenInternetBadge);

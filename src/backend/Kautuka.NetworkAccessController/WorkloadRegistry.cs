@@ -21,11 +21,35 @@ public sealed record RegistryEntry(
     DateTimeOffset RegisteredUtc,
     string? Purpose = null);
 
+public sealed class WorkloadContainerEventArgs(string containerId) : EventArgs
+{
+    public string ContainerId { get; } = containerId;
+}
+
+public sealed class WorkloadContainerIdPromotedEventArgs(string previousContainerId, string actualContainerId) : EventArgs
+{
+    public string PreviousContainerId { get; } = previousContainerId;
+
+    public string ActualContainerId { get; } = actualContainerId;
+}
+
 public interface IWorkloadRegistry
 {
     long RegistryConflicts { get; }
 
     int Count { get; }
+
+    event EventHandler<WorkloadContainerEventArgs>? ContainerDeregistered
+    {
+        add { }
+        remove { }
+    }
+
+    event EventHandler<WorkloadContainerIdPromotedEventArgs>? ContainerIdPromoted
+    {
+        add { }
+        remove { }
+    }
 
     void Register(RegistryEntry entry);
 
@@ -57,15 +81,21 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
 
     public int Count => entriesByIp.Count;
 
+    public event EventHandler<WorkloadContainerEventArgs>? ContainerDeregistered;
+
+    public event EventHandler<WorkloadContainerIdPromotedEventArgs>? ContainerIdPromoted;
+
     public void Register(RegistryEntry entry)
     {
         RegistryEntry normalized = ValidateAndNormalize(entry);
+        string? evictedContainerId = null;
         lock (writeLock)
         {
             if (entriesByIp.TryGetValue(normalized.Ip, out RegistryEntry? existing)
                 && !string.Equals(existing.ContainerId, normalized.ContainerId, StringComparison.Ordinal))
             {
                 Interlocked.Increment(ref registryConflicts);
+                evictedContainerId = existing.ContainerId;
                 logger.LogWarning(
                     "Workload IP {Ip} registration conflict: replacing container {OldContainerId} with {NewContainerId}.",
                     normalized.Ip,
@@ -74,6 +104,11 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             entriesByIp[normalized.Ip] = normalized;
+        }
+
+        if (!string.IsNullOrEmpty(evictedContainerId))
+        {
+            ContainerDeregistered?.Invoke(this, new WorkloadContainerEventArgs(evictedContainerId));
         }
     }
 
@@ -84,6 +119,8 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             return false;
         }
 
+        string? removedContainerId = null;
+        bool removed;
         lock (writeLock)
         {
             if (!entriesByIp.TryGetValue(normalizedIp, out RegistryEntry? existing))
@@ -97,8 +134,19 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
                 return false;
             }
 
-            return entriesByIp.TryRemove(normalizedIp, out _);
+            removed = entriesByIp.TryRemove(normalizedIp, out _);
+            if (removed)
+            {
+                removedContainerId = existing.ContainerId;
+            }
         }
+
+        if (removed && !string.IsNullOrEmpty(removedContainerId))
+        {
+            ContainerDeregistered?.Invoke(this, new WorkloadContainerEventArgs(removedContainerId));
+        }
+
+        return removed;
     }
 
     public bool UpdateContainerId(string ip, string previousContainerId, string actualContainerId)
@@ -111,6 +159,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         }
 
         string trimmedActual = actualContainerId.Trim();
+        bool promoted = false;
         lock (writeLock)
         {
             if (!entriesByIp.TryGetValue(normalizedIp, out RegistryEntry? existing))
@@ -129,8 +178,15 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             entriesByIp[normalizedIp] = existing with { ContainerId = trimmedActual };
-            return true;
+            promoted = true;
         }
+
+        if (promoted)
+        {
+            ContainerIdPromoted?.Invoke(this, new WorkloadContainerIdPromotedEventArgs(previousContainerId.Trim(), trimmedActual));
+        }
+
+        return true;
     }
 
     public void Rebuild(IEnumerable<RegistryEntry> entries)
@@ -142,8 +198,15 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             validated.Add(ValidateAndNormalize(entry));
         }
 
+        var activeIds = validated.Select(static e => e.ContainerId).ToHashSet(StringComparer.Ordinal);
+        List<string> removedIds;
         lock (writeLock)
         {
+            removedIds = entriesByIp.Values
+                .Select(static e => e.ContainerId)
+                .Where(id => !activeIds.Contains(id))
+                .ToList();
+
             entriesByIp.Clear();
             foreach (RegistryEntry normalized in validated)
             {
@@ -160,6 +223,11 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
 
                 entriesByIp[normalized.Ip] = normalized;
             }
+        }
+
+        foreach (string removedId in removedIds)
+        {
+            ContainerDeregistered?.Invoke(this, new WorkloadContainerEventArgs(removedId));
         }
     }
 

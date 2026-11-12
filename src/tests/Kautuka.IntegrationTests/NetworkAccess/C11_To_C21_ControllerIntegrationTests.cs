@@ -1304,35 +1304,36 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 CanAllowAllAgents = false,
             }, ctx);
 
-            // 1. User's own connector probe container (user-x, conn-probe, purpose="probe")
+            // 1. User's own connector probe container (user-x, conn-user, purpose="probe")
             registry.Register(new RegistryEntry(
                 "10.247.1.110",
                 "user-x",
-                "a1",
+                null,
                 "user-probe-ctr",
                 "connector",
                 "conn-user",
                 "isolated",
                 Systemwide: false,
                 Egress: "normal",
-                Attribution: "user-agent",
+                Attribution: "user",
                 CompatProfile: null,
                 DateTimeOffset.UtcNow,
                 Purpose: "probe"));
 
-            // Probe connection attempt -> creates pending request
+            // Probe connection attempt -> creates ephemeral in-memory pending request with Purpose="probe"
             NetworkAccessDecisionResult userProbeTry = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com"));
             Assert.False(userProbeTry.Allowed);
             Assert.Equal("no_rule", userProbeTry.Reason);
 
-            // User-x can see the request and waitingForAdmin is false (canApproveOwn = true)
+            // User-x can see the probe request and waitingForAdmin is false (canApproveOwn = true)
             NetworkAccessListRequestsResponse userList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             NetworkAccessRequestMessage? userReq = userList.Requests.FirstOrDefault(r => r.Destination == "user-probe.example.com");
             Assert.NotNull(userReq);
             Assert.False(userReq.WaitingForAdmin);
+            Assert.Equal("probe", userReq.Purpose);
 
-            // User-x can approve the probe request under standard canApproveOwn
+            // User-x approves probe temporarily: writes NO rule and does NOT increment persistent Revision!
             NetworkAccessDecideResponse decideUser = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
                 Actor = userX,
@@ -1341,14 +1342,59 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Scope = "agent",
                 ExpectedRevision = userList.Revision,
             }, ctx);
-            Assert.NotNull(decideUser.Rule);
-            Assert.True(controller.EvaluateContainerConnection(
-                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
+            Assert.True(decideUser.Rule is null || string.IsNullOrEmpty(decideUser.Rule.Id));
+            NetworkAccessListRulesResponse rulesAfterProbeApprove = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx);
+            Assert.DoesNotContain(rulesAfterProbeApprove.Rules, r => r.Destination == "user-probe.example.com");
 
-            // 2. Systemwide connector probe container (systemwide = true)
+            // While probe container is active: (probe container, user-x, conn-user, host, 443) is temporarily allowed!
+            NetworkAccessDecisionResult probeAllowed = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 443, "user-probe.example.com"));
+            Assert.True(probeAllowed.Allowed);
+            Assert.Equal("probe_temporary_allow", probeAllowed.Reason);
+
+            // Negative control 1: Different port or another probe container for same user+connector is NOT covered.
+            Assert.False(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 8443, "user-probe.example.com")).Allowed);
+            registry.Register(new RegistryEntry(
+                "10.247.1.111", "user-x", null, "user-probe-ctr-other", "connector", "conn-user", "isolated",
+                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+            Assert.False(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.111", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
+            registry.Deregister("10.247.1.111", "user-probe-ctr-other");
+
+            // Probe finishes -> deregister clears temporary probe grant and ephemeral request card.
+            registry.Deregister("10.247.1.110", "user-probe-ctr");
+            NetworkAccessListRequestsResponse afterProbeExitList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            Assert.DoesNotContain(afterProbeExitList.Requests, r => r.Destination == "user-probe.example.com");
+
+            // Negative control 2 (.NC): Runtime container starting afterwards for the SAME user+connector+destination is STILL DENIED with no rule written!
+            registry.Register(new RegistryEntry(
+                "10.247.1.112", "user-x", "a1", "runtime-ctr", "connector", "conn-user", "isolated",
+                Systemwide: false, Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
+            NetworkAccessDecisionResult runtimeTry = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.112", "93.184.216.34", 443, "user-probe.example.com"));
+            Assert.False(runtimeTry.Allowed);
+            Assert.Equal("no_rule", runtimeTry.Reason);
+            Assert.NotNull(runtimeTry.RequestId);
+
+            // Runtime approval writes the normal persistent user+agent rule!
+            NetworkAccessDecideResponse decideRuntime = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userX,
+                RequestId = runtimeTry.RequestId!,
+                Allow = true,
+                Scope = "agent",
+                ExpectedRevision = controller.PolicyStore.Revision,
+            }, ctx);
+            Assert.NotNull(decideRuntime.Rule);
+            Assert.Equal("agent", decideRuntime.Rule.ScopeKind);
+            Assert.True(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.112", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
+
+            // 2. Systemwide connector probe container (even if UserId is set on a user with canApproveOwn, systemwide probe ALWAYS goes to admin!)
             registry.Register(new RegistryEntry(
                 "10.247.1.120",
-                null,
+                "user-x",
                 null,
                 "sys-probe-ctr",
                 "connector",
@@ -1356,7 +1402,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "isolated",
                 Systemwide: true,
                 Egress: "normal",
-                Attribution: "none",
+                Attribution: "user",
                 CompatProfile: null,
                 DateTimeOffset.UtcNow,
                 Purpose: "probe"));
@@ -1365,16 +1411,16 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 new ContainerConnectionInput("10.247.1.120", "93.184.216.34", 443, "sys-probe.example.com"));
             Assert.False(sysProbeTry.Allowed);
 
-            // User-x CANNOT see or approve the systemwide probe request
+            // User-x CANNOT see or approve the systemwide probe request even with canApproveOwn = true
             NetworkAccessListRequestsResponse userListAfterSys = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             Assert.DoesNotContain(userListAfterSys.Requests, r => r.Destination == "sys-probe.example.com");
 
-            // Admin sees the systemwide request and approves it
+            // Admin sees the systemwide probe request and temporarily allows it without creating a persistent rule
             NetworkAccessListRequestsResponse adminList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
             NetworkAccessRequestMessage? sysReq = adminList.Requests.FirstOrDefault(r => r.Destination == "sys-probe.example.com");
             Assert.NotNull(sysReq);
 
-            // User-x attempting to decide systemwide request throws PermissionDenied
+            // User-x attempting to decide systemwide probe request throws PermissionDenied
             await Assert.ThrowsAsync<RpcException>(async () =>
             {
                 _ = await svc.DecideRequest(new NetworkAccessDecideRequest
@@ -1387,8 +1433,8 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 }, ctx);
             });
 
-            // Admin approves with connector-system scope (v7-14)
-            _ = await svc.DecideRequest(new NetworkAccessDecideRequest
+            // Admin temporarily approves systemwide probe -> NO persistent rule written; works during probe; gone on exit!
+            NetworkAccessDecideResponse decideSysProbe = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
                 Actor = admin,
                 RequestId = sysReq.Id,
@@ -1396,9 +1442,17 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Scope = "connector-system",
                 ExpectedRevision = adminList.Revision,
             }, ctx);
-
+            Assert.True(decideSysProbe.Rule is null || string.IsNullOrEmpty(decideSysProbe.Rule.Id));
             Assert.True(controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.120", "93.184.216.34", 443, "sys-probe.example.com")).Allowed);
+            Assert.DoesNotContain((await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx)).Rules, r => r.Destination == "sys-probe.example.com");
+
+            registry.Deregister("10.247.1.120", "sys-probe-ctr");
+            registry.Register(new RegistryEntry(
+                "10.247.1.121", "user-x", null, "sys-runtime-ctr", "connector", "conn-sys", "isolated",
+                Systemwide: true, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
+            Assert.False(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.121", "93.184.216.34", 443, "sys-probe.example.com")).Allowed);
         }
         finally
         {

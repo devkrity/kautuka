@@ -82,9 +82,10 @@ When an agent or connector attempts an outbound connection to an unapproved dest
      - **Allow**: Grants an active rule scoped specifically to `(userId, agentId, destination, port)`. Agent-scoped rules apply to all tools and connectors executed by that agent; rule records do not store a connector ID.
      - **Keep blocked**: Rejects the request.
      - **Allow for all my agents, including new ones**: (Visible only if the request's owner possesses `canApproveOwn` and `canAllowAllAgents` privileges). Writes a `user`-scope rule `(userId, destination, port)` covering all existing and future agents owned by this user for this destination.
-4. **Connector Probes**:
-   - A user's own connector probe creates an ordinary `agent`/`user` pending request subject to standard `canApproveOwn` privileges.
-   - Systemwide connector probes (`systemwide=true` or unowned connector) route exclusively to administrators.
+4. **Connector Probes (`v7-14`)**:
+   - Probe containers (`io.kautuka.purpose=probe`) receive a temporary, **in-memory only** allow or block scoped strictly to `(probe container, user, connector, destination, port)`.
+   - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared immediately when the probe container exits or deregisters. Subsequent runtime containers ask normally and write standard persistent rules.
+   - User-owned connector probes go to the connector owner if they hold `canApproveOwn` (otherwise an administrator); systemwide connector probes always route exclusively to administrators.
 
 ### 2.2 User Privileges `[Built]`
 Administrators manage per-user network privileges under User Settings:

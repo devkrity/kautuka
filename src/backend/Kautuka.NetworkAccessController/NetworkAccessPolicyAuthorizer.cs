@@ -123,9 +123,56 @@ internal static class NetworkAccessPolicyAuthorizer
             return true;
         }
 
+        if (req.Systemwide)
+        {
+            return false;
+        }
+
         return !string.IsNullOrWhiteSpace(req.UserId)
             && req.UserId != "system"
             && string.Equals(req.UserId, actor.UserId, StringComparison.Ordinal);
+    }
+
+    internal static void AuthorizeDecideProbeRequest(
+        NetworkAccessActor actor,
+        NetworkAccessRequest request,
+        bool allow,
+        bool allowLan,
+        ResolvePrivilegesCallback resolvePrivileges)
+    {
+        if (allow && allowLan && !actor.IsAdmin)
+        {
+            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may grant LAN access.");
+        }
+
+        if (request.Systemwide)
+        {
+            if (!actor.IsAdmin)
+            {
+                throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a systemwide connector probe request.");
+            }
+
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.UserId))
+        {
+            throw new InvalidOperationException("User probe request is missing userId.");
+        }
+
+        if (!actor.IsAdmin && !string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's probe request.");
+        }
+
+        if (!actor.IsAdmin)
+        {
+            UserPrivileges ownerPrivs = resolvePrivileges(request.UserId, false);
+            if (!ownerPrivs.CanApproveOwn)
+            {
+                throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
+            }
+        }
     }
 
     internal static bool CanViewRule(NetworkAccessActor actor, NetworkAccessRule rule, string? normalizedFilter)

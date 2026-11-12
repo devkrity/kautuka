@@ -2,6 +2,24 @@ namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore
 {
+    private sealed record TemporaryProbeGrant(
+        string ContainerId,
+        string? UserId,
+        string? ConnectorId,
+        string DestKind,
+        string Destination,
+        int Port,
+        bool Allowed,
+        bool AllowLan);
+
+    private sealed record TemporaryProbePendingEntry(
+        string ContainerId,
+        NetworkAccessRequest Request);
+
+    // Ephemeral in-memory probe decisions and pending cards (v7-14); never persisted to disk.
+    private readonly Dictionary<string, TemporaryProbePendingEntry> probeRequestsById = new(StringComparer.Ordinal);
+    private readonly List<TemporaryProbeGrant> probeGrants = [];
+
     public long Revision
     {
         get
@@ -221,6 +239,21 @@ public sealed partial class NetworkAccessPolicyStore
                     CompatibilityMode: !string.IsNullOrEmpty(req.CompatProfile)));
             }
 
+            foreach (TemporaryProbePendingEntry probeEntry in probeRequestsById.Values)
+            {
+                NetworkAccessRequest req = probeEntry.Request;
+                if (!NetworkAccessPolicyAuthorizer.CanViewRequest(actor, req))
+                {
+                    continue;
+                }
+
+                bool waitingForAdmin = !actor.IsAdmin && (req.Systemwide || !callerPrivs.CanApproveOwn);
+                views.Add(new NetworkAccessRequestView(
+                    req,
+                    WaitingForAdmin: waitingForAdmin,
+                    CompatibilityMode: !string.IsNullOrEmpty(req.CompatProfile)));
+            }
+
             return (current.Revision, views, callerPrivs, current.Brake);
         }
     }
@@ -279,6 +312,11 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            if (probeRequestsById.TryGetValue(requestId, out TemporaryProbePendingEntry? probeEntry))
+            {
+                return DecideProbeRequestUnsafe(actor, current, probeEntry, allow, expectedRevision, allowLan);
+            }
+
             NetworkAccessRequest request = current.Requests.FirstOrDefault(r => string.Equals(r.Id, requestId, StringComparison.Ordinal))
                 ?? throw new KeyNotFoundException("Request not found.");
 
@@ -917,5 +955,231 @@ public sealed partial class NetworkAccessPolicyStore
         }
 
         return false;
+    }
+
+    public bool TryEvaluateTemporaryProbeDecision(
+        string containerId,
+        string? userId,
+        string? connectorId,
+        string destKind,
+        string destination,
+        int port,
+        out bool allowed,
+        out bool allowLan)
+    {
+        allowed = false;
+        allowLan = false;
+        if (string.IsNullOrWhiteSpace(containerId))
+        {
+            return false;
+        }
+
+        string? normalizedUser = string.IsNullOrWhiteSpace(userId) ? null : userId.Trim();
+        string? normalizedConnector = string.IsNullOrWhiteSpace(connectorId) ? null : connectorId.Trim();
+        lock (gate)
+        {
+            TemporaryProbeGrant? grant = probeGrants.FirstOrDefault(g =>
+                string.Equals(g.ContainerId, containerId, StringComparison.Ordinal)
+                && string.Equals(g.UserId, normalizedUser, StringComparison.Ordinal)
+                && string.Equals(g.ConnectorId, normalizedConnector, StringComparison.Ordinal)
+                && string.Equals(g.DestKind, destKind, StringComparison.Ordinal)
+                && string.Equals(g.Destination, destination, StringComparison.Ordinal)
+                && g.Port == port);
+            if (grant is null)
+            {
+                return false;
+            }
+
+            allowed = grant.Allowed;
+            allowLan = grant.AllowLan;
+            return true;
+        }
+    }
+
+    public string RecordOrUpdatePendingProbeRequest(
+        string containerId,
+        string? userId,
+        string? agentId,
+        string? connectorId,
+        bool systemwide,
+        string attribution,
+        string destKind,
+        string destination,
+        int port,
+        string actorKind,
+        string origin,
+        string? compatProfile = null,
+        DateTimeOffset? observedAtUtc = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
+        string id = NetworkAccessIdGenerator.ComputeBase32Id(
+            $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{(systemwide ? "1" : "0")}|{origin}|{destKind}|{destination}|{port}");
+
+        lock (gate)
+        {
+            NetworkAccessPolicyState current = Load();
+            if (probeRequestsById.TryGetValue(id, out TemporaryProbePendingEntry? existing))
+            {
+                long nextAttempts = existing.Request.Attempts == long.MaxValue ? long.MaxValue : existing.Request.Attempts + 1;
+                DateTimeOffset lastSeen = now > existing.Request.LastSeenUtc ? now : existing.Request.LastSeenUtc;
+                NetworkAccessRequest updated = existing.Request with
+                {
+                    Attempts = nextAttempts,
+                    LastSeenUtc = lastSeen,
+                    CompatProfile = compatProfile ?? existing.Request.CompatProfile,
+                };
+                probeRequestsById[id] = existing with { Request = updated };
+            }
+            else
+            {
+                var req = new NetworkAccessRequest(
+                    id,
+                    userId,
+                    agentId,
+                    connectorId,
+                    systemwide,
+                    attribution,
+                    destination,
+                    destKind,
+                    port,
+                    actorKind,
+                    now,
+                    now,
+                    Attempts: 1,
+                    Status: "pending",
+                    origin,
+                    Purpose: "probe",
+                    CompatProfile: compatProfile);
+                probeRequestsById[id] = new TemporaryProbePendingEntry(containerId, req);
+            }
+
+            lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark + 1, checked(current.Revision + 1));
+            return id;
+        }
+    }
+
+    public void ClearProbeContainer(string containerId)
+    {
+        if (string.IsNullOrWhiteSpace(containerId))
+        {
+            return;
+        }
+
+        string trimmed = containerId.Trim();
+        lock (gate)
+        {
+            bool changed = probeGrants.RemoveAll(g => string.Equals(g.ContainerId, trimmed, StringComparison.Ordinal)) > 0;
+            foreach (string key in probeRequestsById
+                .Where(kv => string.Equals(kv.Value.ContainerId, trimmed, StringComparison.Ordinal))
+                .Select(static kv => kv.Key)
+                .ToArray())
+            {
+                probeRequestsById.Remove(key);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                NetworkAccessPolicyState current = Load();
+                lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark + 1, checked(current.Revision + 1));
+            }
+        }
+    }
+
+    public void PromoteProbeContainerId(string previousContainerId, string actualContainerId)
+    {
+        if (string.IsNullOrWhiteSpace(previousContainerId) || string.IsNullOrWhiteSpace(actualContainerId))
+        {
+            return;
+        }
+
+        string prev = previousContainerId.Trim();
+        string actual = actualContainerId.Trim();
+        lock (gate)
+        {
+            for (int i = 0; i < probeGrants.Count; i++)
+            {
+                if (string.Equals(probeGrants[i].ContainerId, prev, StringComparison.Ordinal))
+                {
+                    probeGrants[i] = probeGrants[i] with { ContainerId = actual };
+                }
+            }
+
+            foreach (string key in probeRequestsById
+                .Where(kv => string.Equals(kv.Value.ContainerId, prev, StringComparison.Ordinal))
+                .Select(static kv => kv.Key)
+                .ToArray())
+            {
+                probeRequestsById[key] = probeRequestsById[key] with { ContainerId = actual };
+            }
+        }
+    }
+
+    private DecideRequestResult DecideProbeRequestUnsafe(
+        NetworkAccessActor actor,
+        NetworkAccessPolicyState current,
+        TemporaryProbePendingEntry probeEntry,
+        bool allow,
+        long expectedRevision,
+        bool allowLan)
+    {
+        NetworkAccessRequest request = probeEntry.Request;
+        NetworkAccessPolicyAuthorizer.AuthorizeDecideProbeRequest(
+            actor,
+            request,
+            allow,
+            allowLan,
+            (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin, persistAdminDefault: isTargetAdmin));
+
+        if (current.Revision != expectedRevision)
+        {
+            throw new InvalidOperationException("revision_conflict: Policy revision has changed.");
+        }
+
+        (string destKind, string normalizedDest, int port) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
+            request.DestKind,
+            request.Destination,
+            request.Port,
+            allow,
+            allow && allowLan,
+            actor.IsAdmin);
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        NetworkAccessRequest updatedRequest = request with
+        {
+            Status = allow ? "allowed" : "blocked",
+            LastSeenUtc = now,
+        };
+        probeRequestsById[request.Id] = probeEntry with { Request = updatedRequest };
+
+        string? normalizedUser = string.IsNullOrWhiteSpace(request.UserId) ? null : request.UserId.Trim();
+        string? normalizedConnector = string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim();
+        probeGrants.RemoveAll(g =>
+            string.Equals(g.ContainerId, probeEntry.ContainerId, StringComparison.Ordinal)
+            && string.Equals(g.UserId, normalizedUser, StringComparison.Ordinal)
+            && string.Equals(g.ConnectorId, normalizedConnector, StringComparison.Ordinal)
+            && string.Equals(g.DestKind, destKind, StringComparison.Ordinal)
+            && string.Equals(g.Destination, normalizedDest, StringComparison.Ordinal)
+            && g.Port == port);
+        probeGrants.Add(new TemporaryProbeGrant(
+            probeEntry.ContainerId,
+            normalizedUser,
+            normalizedConnector,
+            destKind,
+            normalizedDest,
+            port,
+            allow,
+            allow && allowLan && actor.IsAdmin));
+
+        lastRequestActivityWatermark = Math.Max(lastRequestActivityWatermark + 1, checked(current.Revision + 1));
+
+        // Probe approvals never create or modify persistent rules or state.json (v7-14).
+        return new DecideRequestResult(
+            current.Revision,
+            Rule: null,
+            updatedRequest,
+            Paused: false,
+            OpenInternetBadge: false);
     }
 }

@@ -37,7 +37,11 @@ public sealed class NetworkAccessController
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
+        this.registry.ContainerDeregistered += (_, args) => this.policyStore.ClearProbeContainer(args.ContainerId);
+        this.registry.ContainerIdPromoted += (_, args) => this.policyStore.PromoteProbeContainerId(args.PreviousContainerId, args.ActualContainerId);
     }
+
+    public void ClearProbeContainer(string containerId) => policyStore.ClearProbeContainer(containerId);
 
     public NetworkAccessPolicyStore PolicyStore => policyStore;
 
@@ -166,7 +170,29 @@ public sealed class NetworkAccessController
             destKind = "ip";
         }
 
-        // 5. Scope resolution & exact-match rule lookup
+        bool isProbe = string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase);
+
+        // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
+        if (isProbe && policyStore.TryEvaluateTemporaryProbeDecision(
+                entry.ContainerId,
+                entry.UserId,
+                entry.ConnectorId,
+                destKind,
+                normalizedDestination,
+                destinationPort,
+                out bool tempAllowed,
+                out bool tempAllowLan))
+        {
+            if (tempAllowed)
+            {
+                string cluster = GetClusterName(isTls, tempAllowLan);
+                return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort, "probe_temporary_allow", cluster, openInternetBadge: false);
+            }
+
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
+        }
+
+        // 6. Scope resolution & exact-match rule lookup
         ScopeMatchOutcome match = ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort);
 
         switch (match.Kind)
@@ -192,6 +218,25 @@ public sealed class NetworkAccessController
             default:
                 // 7. No rule at any applicable scope -> deny (no_rule) and record/dedupe pending request
                 string actorKind = entry.Kind == "connector" ? "connector" : "agent";
+                if (isProbe)
+                {
+                    string probeRequestId = policyStore.RecordOrUpdatePendingProbeRequest(
+                        entry.ContainerId,
+                        entry.UserId,
+                        entry.AgentId,
+                        entry.ConnectorId,
+                        entry.Systemwide,
+                        entry.Attribution,
+                        destKind,
+                        normalizedDestination,
+                        destinationPort,
+                        actorKind,
+                        origin: "container",
+                        compatProfile: entry.CompatProfile,
+                        observedAtUtc: now);
+                    return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", probeRequestId);
+                }
+
                 (string? requestId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     entry.UserId,
                     entry.AgentId,

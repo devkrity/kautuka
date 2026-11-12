@@ -705,6 +705,46 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
         })
       ).toBeVisible();
     });
+
+    it('renders temporary probe card without permanent scope options (v7-14)', async () => {
+      const requestsData = createDefaultRequests(
+        [
+          {
+            id: 'req-probe-temp',
+            userId: 'user-ravi',
+            userDisplayName: 'Ravi',
+            connectorId: 'conn-probe',
+            connectorDisplayName: 'GitHub MCP',
+            systemwide: false,
+            attribution: 'user',
+            destination: 'api.github.com',
+            destKind: 'host',
+            port: 443,
+            actorKind: 'connector',
+            firstSeenUtc: '2026-11-11T10:00:00Z',
+            lastSeenUtc: '2026-11-11T10:00:01Z',
+            attempts: 1,
+            status: 'pending',
+            origin: 'container',
+            purpose: 'probe',
+            ownerCanApproveOwn: true,
+            ownerCanAllowAllAgents: true,
+          },
+        ],
+        { canApproveOwn: true, canAllowAllAgents: true }
+      );
+      setupMockApis({ requests: requestsData });
+
+      renderComponent(<NetworkAccessPage />);
+
+      expect(await screen.findByText('Probe (temporary)')).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Allow for this probe' })).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Keep blocked' })).toBeVisible();
+      expect(
+        screen.queryByRole('button', { name: 'Allow for all my agents, including new ones' })
+      ).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Allow for everyone' })).toBeNull();
+    });
   });
 
   // ──────────────── UX9: Open Internet Grant Dialog & Badges ────────────────

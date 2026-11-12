@@ -44,7 +44,8 @@ export function PendingApprovalCard({
   const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
 
-  const isSystemwide = request.systemwide || request.actorKind === 'connector' && !request.agentId;
+  const isSystemwide = Boolean(request.systemwide);
+  const isProbe = request.purpose === 'probe';
   const isPrivate = destinationScope(request.destination) === 'private';
   const destFormatted = formatDestinationDisplay(request.destination, request.port);
 
@@ -184,6 +185,7 @@ export function PendingApprovalCard({
       >
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="font-semibold text-base">{title}</h3>
+          {isProbe && <Badge variant="secondary">Probe (temporary)</Badge>}
           {request.compatibilityMode && (
             <Badge variant="attention">Compatibility mode (relaxed settings)</Badge>
           )}
@@ -219,24 +221,37 @@ export function PendingApprovalCard({
         )}
 
         <div className="flex flex-wrap items-center gap-2 pt-2">
-          <Button
-            type="button"
-            variant="default"
-            disabled={disabled || submitting}
-            onClick={() => void handleAllowEveryone()}
-          >
-            Allow for everyone
-          </Button>
-
-          {isAttributedUser && (
+          {isProbe ? (
             <Button
               type="button"
-              variant="outline"
+              variant="default"
               disabled={disabled || submitting}
-              onClick={() => void handleAllowUserOnly()}
+              onClick={() => void handleAllowAgent()}
             >
-              Allow for {request.userDisplayName || request.userId} only
+              Allow for this probe
             </Button>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="default"
+                disabled={disabled || submitting}
+                onClick={() => void handleAllowEveryone()}
+              >
+                Allow for everyone
+              </Button>
+
+              {isAttributedUser && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={disabled || submitting}
+                  onClick={() => void handleAllowUserOnly()}
+                >
+                  Allow for {request.userDisplayName || request.userId} only
+                </Button>
+              )}
+            </>
           )}
 
           <Button
@@ -252,11 +267,14 @@ export function PendingApprovalCard({
     );
   }
 
-  // Case 2: Ordinary Agent Request Card
+  // Case 2: Ordinary Agent / User Connector Probe Request Card
   const userLabel = request.userDisplayName || request.userId || 'User';
   const agentLabel = request.agentDisplayName || request.agentId || 'Agent';
+  const connectorLabel = request.connectorDisplayName || request.connectorId || 'Connector';
   const connectorInfo = request.connectorDisplayName ? ` (${request.connectorDisplayName})` : '';
-  const agentTitle = `${userLabel}'s ${agentLabel}${connectorInfo} wants to reach ${destFormatted}`;
+  const agentTitle = isProbe && !request.agentDisplayName && !request.agentId
+    ? `${userLabel}'s ${connectorLabel} wants to reach ${destFormatted}`
+    : `${userLabel}'s ${agentLabel}${connectorInfo} wants to reach ${destFormatted}`;
 
   // If waiting for admin or lacking canApproveOwn:
   const showWaitingNotice = (!canApproveOwn && isOwner) || request.waitingForAdmin;
@@ -268,6 +286,7 @@ export function PendingApprovalCard({
     >
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="font-semibold text-base">{agentTitle}</h3>
+        {isProbe && <Badge variant="secondary">Probe (temporary)</Badge>}
         {request.compatibilityMode && (
           <Badge variant="attention">Compatibility mode (relaxed settings)</Badge>
         )}
@@ -277,7 +296,9 @@ export function PendingApprovalCard({
         First tried {formattedTime}, tried {request.attempts} times.
       </p>
       <p className="text-sm text-muted-foreground">
-        This agent or connector tried to connect to a website it hasn't been allowed to use.
+        {isProbe
+          ? 'This temporary connector probe tried to connect while discovering tools. Any approval applies only until the probe exits.'
+          : "This agent or connector tried to connect to a website it hasn't been allowed to use."}
       </p>
 
       {showWaitingNotice ? (
@@ -310,7 +331,7 @@ export function PendingApprovalCard({
               disabled={disabled || submitting}
               onClick={() => void handleAllowAgent()}
             >
-              Allow
+              {isProbe ? 'Allow for this probe' : 'Allow'}
             </Button>
             <Button
               type="button"
@@ -322,9 +343,10 @@ export function PendingApprovalCard({
             </Button>
           </div>
 
-          {/* Secondary link: Shown ONLY when request's user holds both canApproveOwn and canAllowAllAgents.
+          {/* Secondary link: Shown ONLY when request's user holds both canApproveOwn and canAllowAllAgents
+              and this is NOT an ephemeral probe request.
               Completely ABSENT from DOM when canAllowAllAgents is false! */}
-          {canAllowAllAgents && (
+          {!isProbe && canAllowAllAgents && (
             <div className="pt-1">
               <button
                 type="button"

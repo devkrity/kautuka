@@ -124,7 +124,9 @@ public sealed partial class WorkspaceGrpcService
             return new NetworkAccessDecideResponse
             {
                 Revision = result.Revision,
-                Rule = ToMessage(new NetworkAccessRuleView(result.Rule, result.Paused, result.OpenInternetBadge)),
+                Rule = result.Rule is not null
+                    ? ToMessage(new NetworkAccessRuleView(result.Rule, result.Paused, result.OpenInternetBadge))
+                    : null,
                 Request = ToMessage(new NetworkAccessRequestView(
                     result.Request,
                     WaitingForAdmin: false,
