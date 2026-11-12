@@ -884,6 +884,89 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         }
     }
 
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
+    public async Task V7_30_ToolFailureLookup_UsesNonAdminActorAndNeverDisclosesOtherUsersOrSystemwideDestinations_WithNegativeControl()
+    {
+        var gatewayCtx = new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName);
+
+        // Seed pending request for user-a and a systemwide pending request
+        await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest
+        {
+            Host = "secret-user-a.example",
+            Port = 443,
+            UserId = "user-a",
+            AgentId = "agent-a",
+            Systemwide = false,
+            Purpose = "tool",
+        }, gatewayCtx);
+
+        await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest
+        {
+            Host = "secret-systemwide.example",
+            Port = 443,
+            UserId = "user-a",
+            AgentId = string.Empty,
+            ConnectorId = "sys-conn",
+            Systemwide = true,
+            Purpose = "tool",
+        }, gatewayCtx);
+
+        NetworkAccessActorMessage? capturedActor = null;
+        Task<NetworkAccessListRequestsResponse> ListViaManagerAsync(NetworkAccessListRequestsRequest req)
+        {
+            capturedActor = req.Actor;
+            return grpcService.ListRequests(req, gatewayCtx);
+        }
+
+        // User B executes a failing tool without a direct NetworkAccessDeniedException
+        var toolErr = new InvalidOperationException("Generic tool failure");
+        System.Text.Json.JsonElement payloadB = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper
+            .BuildToolCallFinishedPayloadAsync(
+                toolErr,
+                nacEx: null,
+                activeToolCallId: "tc-1",
+                activeToolName: "fetch",
+                userId: "user-b",
+                agentId: "agent-b",
+                listRequestsAsync: ListViaManagerAsync);
+
+        Assert.NotNull(capturedActor);
+        Assert.False(capturedActor!.IsAdmin);
+        Assert.Equal("user-b", capturedActor.UserId);
+        Assert.Equal("tool_execution_failed", payloadB.GetProperty("code").GetString());
+        Assert.False(payloadB.TryGetProperty("destination", out _));
+        Assert.False(payloadB.TryGetProperty("approvalUrl", out _));
+
+        // Negative control (.NC): When user-b / agent-b itself has a pending non-systemwide request,
+        // the lookup DOES surface user-b's own blocked destination without admin privileges.
+        await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest
+        {
+            Host = "user-b-target.example",
+            Port = 443,
+            UserId = "user-b",
+            AgentId = "agent-b",
+            Systemwide = false,
+            Purpose = "tool",
+        }, gatewayCtx);
+
+        System.Text.Json.JsonElement payloadBWithOwnPending = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper
+            .BuildToolCallFinishedPayloadAsync(
+                toolErr,
+                nacEx: null,
+                activeToolCallId: "tc-2",
+                activeToolName: "fetch",
+                userId: "user-b",
+                agentId: "agent-b",
+                listRequestsAsync: ListViaManagerAsync);
+
+        Assert.False(capturedActor!.IsAdmin);
+        Assert.Equal("network_access_required", payloadBWithOwnPending.GetProperty("code").GetString());
+        Assert.Equal("user-b-target.example", payloadBWithOwnPending.GetProperty("destination").GetString());
+        Assert.Equal(443, payloadBWithOwnPending.GetProperty("port").GetInt32());
+        Assert.Equal("/network-access", payloadBWithOwnPending.GetProperty("approvalUrl").GetString());
+    }
+
     private sealed class PortSelectiveTestChecker(int allowedPort) : INetworkAccessChecker
     {
         public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)

@@ -12,7 +12,6 @@ using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Infrastructure.Observability;
-using Kautuka.Manager.Protos;
 using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Agents.AI;
@@ -1153,84 +1152,24 @@ internal sealed partial class AgentChatService
         }
         catch (Exception ex)
         {
-            NetworkAccessDeniedException? nacEx = ex as NetworkAccessDeniedException
-                ?? ex.InnerException as NetworkAccessDeniedException
-                ?? (ex is AggregateException agg ? agg.InnerExceptions.OfType<NetworkAccessDeniedException>().FirstOrDefault() : null);
+            NetworkAccessDeniedException? nacEx = ChatToolNetworkAccessHelper.FindNetworkAccessDeniedException(ex);
 
             if (!string.IsNullOrWhiteSpace(activeToolCallId)
                 && wireEmittedToolCallIds.Contains(activeToolCallId))
             {
-                string outcome = "failed";
-                string code = nacEx?.NaradReason ?? "tool_execution_failed";
-                string toolFailureMessage = ex.Message;
-                string? destination = nacEx?.Destination;
-                int? port = nacEx?.Port;
-                string? requestId = nacEx?.RequestId;
-                string? approvalUrl = nacEx is not null ? "/network-access" : null;
-
-                if (nacEx is null && managerGrpcService is not null)
-                {
-                    try
-                    {
-                        var listResp = await managerGrpcService.Client.ListRequestsAsync(
-                            new NetworkAccessListRequestsRequest
-                            {
-                                Actor = new NetworkAccessActorMessage { UserId = userId ?? string.Empty, IsAdmin = true },
-                            },
-                            deadline: DateTime.UtcNow.AddSeconds(1),
-                            cancellationToken: CancellationToken.None).ConfigureAwait(false);
-
-                        var recent = listResp.Requests.FirstOrDefault(r =>
-                            r.Status == "pending"
-                            && (string.IsNullOrWhiteSpace(r.UserId) || string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase))
-                            && (string.IsNullOrWhiteSpace(r.AgentId) || string.Equals(r.AgentId, agentId, StringComparison.OrdinalIgnoreCase)));
-
-                        if (recent is not null)
-                        {
-                            code = "network_access_required";
-                            destination = recent.Destination;
-                            port = recent.Port;
-                            requestId = recent.Id;
-                            approvalUrl = "/network-access";
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore lookup errors
-                    }
-                }
-
-                var toolFinishedPayload = new JsonObject
-                {
-                    ["toolCallId"] = activeToolCallId,
-                    ["toolName"] = activeToolName,
-                    ["response"] = null,
-                    ["outcome"] = outcome,
-                    ["code"] = code,
-                    ["message"] = toolFailureMessage,
-                };
-                if (!string.IsNullOrWhiteSpace(destination))
-                {
-                    toolFinishedPayload["destination"] = destination;
-                    toolFinishedPayload["reason"] = code;
-                }
-                if (port.HasValue)
-                {
-                    toolFinishedPayload["port"] = port.Value;
-                }
-                if (!string.IsNullOrWhiteSpace(requestId))
-                {
-                    toolFinishedPayload["requestId"] = requestId;
-                }
-                if (!string.IsNullOrWhiteSpace(approvalUrl))
-                {
-                    toolFinishedPayload["approvalUrl"] = approvalUrl;
-                }
+                JsonElement toolFinishedElement = await ChatToolNetworkAccessHelper.BuildToolCallFinishedPayloadAsync(
+                    ex,
+                    nacEx,
+                    activeToolCallId,
+                    activeToolName,
+                    userId,
+                    agentId,
+                    managerGrpcService?.Client).ConfigureAwait(false);
 
                 await eventWriter.WriteRuntimeAsync(
                     writer,
                     NaradEventTypes.ToolCallFinished,
-                    JsonSerializer.SerializeToElement(toolFinishedPayload, KautukaJsonContext.Default.JsonObject),
+                    toolFinishedElement,
                     runtimeEventContext!,
                     CancellationToken.None).ConfigureAwait(false);
             }

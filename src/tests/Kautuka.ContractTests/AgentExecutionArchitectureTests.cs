@@ -19,7 +19,7 @@ public sealed class AgentExecutionArchitectureTests
         Assert.Null(service.GetMethod("WriteRuntimeEventAsync", nonPublicInstance));
 
         string executionDirectory = Path.Combine(ResolveGatewayRoot(), "Domain", "Execution");
-        AssertFileLineLimit(executionDirectory, "AgentChatService.Streaming.cs", 1675);
+        AssertFileLineLimit(executionDirectory, "AgentChatService.Streaming.cs", 1640);
         AssertFileLineLimit(executionDirectory, "AgentExecutionEventWriter.cs", 324);
     }
 
