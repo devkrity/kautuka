@@ -556,6 +556,44 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_RebuildRegistry_SkipsMalformedContainerAndKeepsLaterValidEntry()
+    {
+        string validCid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.Count >= 2 && args[0] == "ps")
+            {
+                return Task.FromResult(new PodmanCommandResult(0,
+                    "[{\"Id\":\"bad\"},{\"Id\":\"" + validCid + "\"}]", string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args.Count >= 2 && args[0] == "inspect" && args[1] == "bad")
+            {
+                return Task.FromResult(new PodmanCommandResult(0, "{", string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args.Count >= 2 && args[0] == "inspect" && args[1] == validCid)
+            {
+                const string inspect = "[{\"Config\":{\"Labels\":{\"io.kautuka.user\":\"u1\",\"io.kautuka.agent\":\"a1\",\"io.kautuka.exec-context\":\"agent-sandbox\",\"io.kautuka.kind\":\"agent-sandbox\",\"io.kautuka.egress\":\"normal\"}},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"10.247.1.10\"}}}}]";
+                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+
+        await manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.True(registry.TryGetByIp("10.247.1.10", out RegistryEntry? entry));
+        Assert.NotNull(entry);
+        Assert.Equal(validCid, entry.ContainerId);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)

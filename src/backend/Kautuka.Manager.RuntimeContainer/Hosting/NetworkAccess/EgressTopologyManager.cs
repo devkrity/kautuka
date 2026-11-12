@@ -247,133 +247,140 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     foreach (JsonElement container in root.EnumerateArray())
                     {
-                        string cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() ?? string.Empty : string.Empty;
-                        if (string.IsNullOrWhiteSpace(cid))
+                        try
                         {
-                            continue;
-                        }
-
-                        // Skip allowlisted infra containers
-                        if (knownInfraContainerIds.Contains(cid))
-                        {
-                            continue;
-                        }
-
-                        // Inspect to extract exact network IP and labels
-                        PodmanCommandResult inspectResult = await podmanRunner
-                            .RunAsync(["inspect", cid], 10, cancellationToken)
-                            .ConfigureAwait(false);
-
-                        if (inspectResult.ExitCode != 0)
-                        {
-                            continue;
-                        }
-
-                        using JsonDocument inspectDoc = JsonDocument.Parse(inspectResult.StdOut);
-                        JsonElement inspected = inspectDoc.RootElement.ValueKind == JsonValueKind.Array
-                            ? inspectDoc.RootElement[0]
-                            : inspectDoc.RootElement;
-
-                        JsonElement config = inspected.GetProperty("Config");
-                        JsonElement labels = config.TryGetProperty("Labels", out JsonElement lElem) ? lElem : default;
-
-                        string user = GetStringProperty(labels, "io.kautuka.user");
-                        string agent = GetStringProperty(labels, "io.kautuka.agent");
-                        string connector = GetStringProperty(labels, "io.kautuka.connector");
-                        string execContext = GetStringProperty(labels, "io.kautuka.exec-context");
-                        string kind = GetStringProperty(labels, "io.kautuka.kind");
-                        string systemwideStr = GetStringProperty(labels, "io.kautuka.systemwide");
-                        string egress = GetStringProperty(labels, "io.kautuka.egress");
-                        string compat = GetStringProperty(labels, "io.kautuka.compat");
-                        string purpose = GetStringProperty(labels, "io.kautuka.purpose");
-
-                        bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
-                        bool isProbe = string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase);
-
-                        // Find IP on kautuka-workload
-                        string ip = string.Empty;
-                        if (inspected.TryGetProperty("NetworkSettings", out JsonElement netSettings)
-                            && netSettings.TryGetProperty("Networks", out JsonElement networks)
-                            && networks.TryGetProperty(WorkloadNetworkName, out JsonElement wlNet)
-                            && wlNet.TryGetProperty("IPAddress", out JsonElement ipElem))
-                        {
-                            ip = ipElem.GetString() ?? string.Empty;
-                        }
-
-                        // Skip sidecars (openobserve, etc.) if not on workload network
-                        if (string.IsNullOrWhiteSpace(ip))
-                        {
-                            continue;
-                        }
-
-                        // Validation of required labels:
-                        bool isValid = !string.IsNullOrWhiteSpace(kind)
-                            && !string.IsNullOrWhiteSpace(execContext);
-
-                        if (isValid && kind is "connector" or "agent-sandbox")
-                        {
-                            if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user))
+                            string cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() ?? string.Empty : string.Empty;
+                            if (string.IsNullOrWhiteSpace(cid))
                             {
-                                isValid = false;
+                                continue;
                             }
-                        }
 
-                        if (!isValid)
-                        {
-                            // Kill and remove unlabelled or invalid workload (Section 4.3.4 item 6)
-                            Interlocked.Increment(ref unlabelledWorkloadCount);
-                            logger.LogWarning("Killing unlabelled/invalid workload container '{ContainerId}'.", cid);
-                            try
+                            // Skip allowlisted infra containers
+                            if (knownInfraContainerIds.Contains(cid))
                             {
-                                await podmanRunner.RunAsync(["rm", "-f", cid], 5, cancellationToken).ConfigureAwait(false);
+                                continue;
                             }
-                            catch
+
+                            // Inspect to extract exact network IP and labels
+                            PodmanCommandResult inspectResult = await podmanRunner
+                                .RunAsync(["inspect", cid], 10, cancellationToken)
+                                .ConfigureAwait(false);
+
+                            if (inspectResult.ExitCode != 0)
                             {
-                                // Ignore cleanup failure
+                                continue;
                             }
-                            continue;
-                        }
 
-                        string attribution;
-                        if (egress is "deny-all" or "proxy-only")
-                        {
-                            attribution = "none";
-                        }
-                        else if (systemwide)
-                        {
-                            attribution = string.IsNullOrWhiteSpace(user) ? "none" : "user";
-                        }
-                        else if (isProbe)
-                        {
-                            attribution = "user";
-                        }
-                        else if (string.IsNullOrWhiteSpace(agent))
-                        {
-                            // v7-26: Non-probe container missing agentId cannot have normal egress
-                            egress = "deny-all";
-                            attribution = "none";
-                        }
-                        else
-                        {
-                            attribution = "user-agent";
-                        }
+                            using JsonDocument inspectDoc = JsonDocument.Parse(inspectResult.StdOut);
+                            JsonElement inspected = inspectDoc.RootElement.ValueKind == JsonValueKind.Array
+                                ? inspectDoc.RootElement[0]
+                                : inspectDoc.RootElement;
 
-                        var entry = new RegistryEntry(
-                            ip,
-                            string.IsNullOrWhiteSpace(user) ? null : user,
-                            string.IsNullOrWhiteSpace(agent) ? null : agent,
-                            cid,
-                            kind,
-                            string.IsNullOrWhiteSpace(connector) ? null : connector,
-                            execContext,
-                            systemwide,
-                            string.IsNullOrWhiteSpace(egress) ? "normal" : egress,
-                            attribution,
-                            string.IsNullOrWhiteSpace(compat) ? null : compat,
-                            DateTimeOffset.UtcNow,
-                            string.IsNullOrWhiteSpace(purpose) ? null : purpose);
+                            JsonElement config = inspected.GetProperty("Config");
+                            JsonElement labels = config.TryGetProperty("Labels", out JsonElement lElem) ? lElem : default;
 
-                        rebuiltEntries.Add(entry);
+                            string user = GetStringProperty(labels, "io.kautuka.user");
+                            string agent = GetStringProperty(labels, "io.kautuka.agent");
+                            string connector = GetStringProperty(labels, "io.kautuka.connector");
+                            string execContext = GetStringProperty(labels, "io.kautuka.exec-context");
+                            string kind = GetStringProperty(labels, "io.kautuka.kind");
+                            string systemwideStr = GetStringProperty(labels, "io.kautuka.systemwide");
+                            string egress = GetStringProperty(labels, "io.kautuka.egress");
+                            string compat = GetStringProperty(labels, "io.kautuka.compat");
+                            string purpose = GetStringProperty(labels, "io.kautuka.purpose");
+
+                            bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
+                            bool isProbe = string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase);
+
+                            // Find IP on kautuka-workload
+                            string ip = string.Empty;
+                            if (inspected.TryGetProperty("NetworkSettings", out JsonElement netSettings)
+                                && netSettings.TryGetProperty("Networks", out JsonElement networks)
+                                && networks.TryGetProperty(WorkloadNetworkName, out JsonElement wlNet)
+                                && wlNet.TryGetProperty("IPAddress", out JsonElement ipElem))
+                            {
+                                ip = ipElem.GetString() ?? string.Empty;
+                            }
+
+                            // Skip sidecars (openobserve, etc.) if not on workload network
+                            if (string.IsNullOrWhiteSpace(ip))
+                            {
+                                continue;
+                            }
+
+                            // Validation of required labels:
+                            bool isValid = !string.IsNullOrWhiteSpace(kind)
+                                && !string.IsNullOrWhiteSpace(execContext);
+
+                            if (isValid && kind is "connector" or "agent-sandbox")
+                            {
+                                if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user))
+                                {
+                                    isValid = false;
+                                }
+                            }
+
+                            if (!isValid)
+                            {
+                                // Kill and remove unlabelled or invalid workload (Section 4.3.4 item 6)
+                                Interlocked.Increment(ref unlabelledWorkloadCount);
+                                logger.LogWarning("Killing unlabelled/invalid workload container '{ContainerId}'.", cid);
+                                try
+                                {
+                                    await podmanRunner.RunAsync(["rm", "-f", cid], 5, cancellationToken).ConfigureAwait(false);
+                                }
+                                catch
+                                {
+                                    // Ignore cleanup failure
+                                }
+                                continue;
+                            }
+
+                            string attribution;
+                            if (egress is "deny-all" or "proxy-only")
+                            {
+                                attribution = "none";
+                            }
+                            else if (systemwide)
+                            {
+                                attribution = string.IsNullOrWhiteSpace(user) ? "none" : "user";
+                            }
+                            else if (isProbe)
+                            {
+                                attribution = "user";
+                            }
+                            else if (string.IsNullOrWhiteSpace(agent))
+                            {
+                                // v7-26: Non-probe container missing agentId cannot have normal egress
+                                egress = "deny-all";
+                                attribution = "none";
+                            }
+                            else
+                            {
+                                attribution = "user-agent";
+                            }
+
+                            var entry = new RegistryEntry(
+                                ip,
+                                string.IsNullOrWhiteSpace(user) ? null : user,
+                                string.IsNullOrWhiteSpace(agent) ? null : agent,
+                                cid,
+                                kind,
+                                string.IsNullOrWhiteSpace(connector) ? null : connector,
+                                execContext,
+                                systemwide,
+                                string.IsNullOrWhiteSpace(egress) ? "normal" : egress,
+                                attribution,
+                                string.IsNullOrWhiteSpace(compat) ? null : compat,
+                                DateTimeOffset.UtcNow,
+                                string.IsNullOrWhiteSpace(purpose) ? null : purpose);
+
+                            rebuiltEntries.Add(entry);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            logger.LogWarning(ex, "Skipping malformed container entry during workload registry rebuild.");
+                        }
                     }
                 }
             }
