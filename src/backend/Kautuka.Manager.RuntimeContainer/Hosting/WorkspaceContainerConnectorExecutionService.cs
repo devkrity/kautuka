@@ -936,7 +936,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     allocatedIp,
                     compatProfile,
                     workloadRegistry,
-                    workspaceContext is null ? [] : [workspaceContext.HostWorkspacePath],
                     cancellationToken).ConfigureAwait(false);
             }
             catch

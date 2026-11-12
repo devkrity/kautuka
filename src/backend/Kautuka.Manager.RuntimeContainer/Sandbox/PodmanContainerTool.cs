@@ -265,8 +265,7 @@ public sealed class PodmanContainerTool(
                 allocatedIp,
                 compatProfile: null,
                 registry: workloadRegistry,
-                cancellationToken: cancellationToken,
-                allowedMountRoots: [context.HostWorkspacePath]).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);

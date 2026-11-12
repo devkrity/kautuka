@@ -21,11 +21,13 @@ public sealed record WorkloadVerificationResult(
 public sealed class WorkloadPostStartVerifier
 {
     private readonly PodmanCommandRunner podmanRunner;
+    private readonly WorkspaceDesiredStateStore? desiredStateStore;
 
-    public WorkloadPostStartVerifier(PodmanCommandRunner podmanRunner)
+    public WorkloadPostStartVerifier(PodmanCommandRunner podmanRunner, WorkspaceDesiredStateStore? desiredStateStore = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         this.podmanRunner = podmanRunner;
+        this.desiredStateStore = desiredStateStore;
     }
 
     /// <summary>
@@ -37,7 +39,6 @@ public sealed class WorkloadPostStartVerifier
         string allocatedIp,
         ImageCompatProfile? compatProfile = null,
         IWorkloadRegistry? registry = null,
-        IReadOnlyList<string>? allowedMountRoots = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
@@ -123,32 +124,18 @@ public sealed class WorkloadPostStartVerifier
                 }
             }
 
-            bool capDropAll;
-            if (allowFileCaps)
-            {
-                capDropAll = true;
-                if (container.TryGetProperty("EffectiveCaps", out JsonElement effElem) && effElem.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (JsonElement cap in effElem.EnumerateArray())
-                    {
-                        string? name = cap.GetString();
-                        if (!string.IsNullOrWhiteSpace(name) && !WorkloadContainerSpec.AllowedFileOwnershipCaps.Contains(name))
-                        {
-                            capDropAll = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                capDropAll = Sandbox.LiveContainerSpec.CapDropIncludesAll(container, hostConfig);
-            }
-
-            if (!capDropAll)
+            if (!hostConfig.TryGetProperty("CapDrop", out JsonElement capDrop)
+                || capDrop.ValueKind != JsonValueKind.Array
+                || !capDrop.EnumerateArray().Any(static cap => string.Equals(cap.GetString(), "ALL", StringComparison.OrdinalIgnoreCase)))
             {
                 throw new InvalidOperationException("Capability check failed: CapDrop does not include 'ALL'.");
             }
+
+            IReadOnlySet<string> allowedCapabilities = allowFileCaps
+                ? WorkloadContainerSpec.AllowedFileOwnershipCaps
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            VerifyCapabilitySet(container, "EffectiveCaps", allowedCapabilities);
+            VerifyCapabilitySet(container, "BoundingCaps", allowedCapabilities);
 
             // 1c. Readonly rootfs
             bool allowWritableRootfs = compatProfile?.Relaxations.Contains(ImageCompatibilityStore.WritableRootfs) == true;
@@ -231,21 +218,32 @@ public sealed class WorkloadPostStartVerifier
             }
 
             // 1h. Mounts
-            if (container.TryGetProperty("Mounts", out JsonElement mountsElem) && mountsElem.ValueKind == JsonValueKind.Array)
+            if (!container.TryGetProperty("Mounts", out JsonElement mountsElem) || mountsElem.ValueKind != JsonValueKind.Array)
             {
-                foreach (JsonElement mount in mountsElem.EnumerateArray())
+                throw new InvalidOperationException("Mount check failed: Podman inspect did not return a mount list.");
+            }
+
+            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots();
+            foreach (JsonElement mount in mountsElem.EnumerateArray())
+            {
+                string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) && typeElem.ValueKind == JsonValueKind.String
+                    ? typeElem.GetString() ?? string.Empty
+                    : string.Empty;
+                if (string.IsNullOrWhiteSpace(mountType))
                 {
-                    string source = mount.TryGetProperty("Source", out JsonElement srcElem) ? srcElem.GetString() ?? string.Empty : string.Empty;
-                    string dest = mount.TryGetProperty("Destination", out JsonElement dstElem) ? dstElem.GetString() ?? string.Empty : string.Empty;
-                    string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) ? typeElem.GetString() ?? string.Empty : string.Empty;
+                    throw new InvalidOperationException("Mount check failed: a mount is missing its type.");
+                }
 
-                    if (mountType.Equals("bind", StringComparison.OrdinalIgnoreCase)
-                        && (allowedMountRoots is null || allowedMountRoots.Count == 0 || !IsWithinAllowedRoot(source, allowedMountRoots)))
-                    {
-                        throw new InvalidOperationException($"Mount check failed: bind source '{source}' is outside the workspace mount allowlist.");
-                    }
+                string source = mount.TryGetProperty("Source", out JsonElement srcElem) ? srcElem.GetString() ?? string.Empty : string.Empty;
+                string dest = mount.TryGetProperty("Destination", out JsonElement dstElem) ? dstElem.GetString() ?? string.Empty : string.Empty;
 
-                    if (source.Contains("docker.sock", StringComparison.OrdinalIgnoreCase)
+                if (!mountType.Equals("tmpfs", StringComparison.OrdinalIgnoreCase)
+                    && (string.IsNullOrWhiteSpace(source) || !IsWithinAllowedRoot(source, allowedMountRoots)))
+                {
+                    throw new InvalidOperationException($"Mount check failed: {mountType} source '{source}' is outside the configured workspace roots.");
+                }
+
+                if (source.Contains("docker.sock", StringComparison.OrdinalIgnoreCase)
                         || source.Contains("podman.sock", StringComparison.OrdinalIgnoreCase)
                         || source.Equals("/proc", StringComparison.OrdinalIgnoreCase)
                         || source.StartsWith("/proc/", StringComparison.OrdinalIgnoreCase)
@@ -254,9 +252,8 @@ public sealed class WorkloadPostStartVerifier
                         || source.Equals("/dev", StringComparison.OrdinalIgnoreCase)
                         || source.StartsWith("/dev/", StringComparison.OrdinalIgnoreCase)
                         || source.EndsWith(".key", StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new InvalidOperationException($"Mount check failed: prohibited mount source '{source}'.");
-                    }
+                {
+                    throw new InvalidOperationException($"Mount check failed: prohibited mount source '{source}' at '{dest}'.");
                 }
             }
 
@@ -307,6 +304,35 @@ public sealed class WorkloadPostStartVerifier
             throw new InvalidOperationException(
                 $"WorkloadPostStartVerifier failed for '{containerId}' at '{allocatedIp}' after {exposureMs} ms: {ex.Message}",
                 ex);
+        }
+    }
+
+    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots()
+    {
+        string? configuredRoot = desiredStateStore?.Snapshot.RuntimeSettings?.Workspace.BaseRoot;
+        if (string.IsNullOrWhiteSpace(configuredRoot))
+        {
+            return [];
+        }
+
+        return [WorkspaceAuthorityPolicy.CanonicalizeRoot(configuredRoot)];
+    }
+
+    private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
+    {
+        if (!container.TryGetProperty(propertyName, out JsonElement capabilities)
+            || capabilities.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException($"Capability check failed: {propertyName} is missing or null.");
+        }
+
+        foreach (JsonElement capability in capabilities.EnumerateArray())
+        {
+            string? name = capability.ValueKind == JsonValueKind.String ? capability.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name) || !allowed.Contains(name))
+            {
+                throw new InvalidOperationException($"Capability check failed: {propertyName} contains a prohibited or invalid capability.");
+            }
         }
     }
 
