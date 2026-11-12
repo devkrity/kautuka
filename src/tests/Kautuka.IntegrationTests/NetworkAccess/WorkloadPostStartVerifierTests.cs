@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Configuration;
+using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 using Kautuka.Manager.Protos;
 using Kautuka.NetworkAccessController;
 
@@ -89,6 +90,30 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
+    public async Task BindMountFromAnotherUsersWorkspaceInsideBaseRootFailsAndCleansUp()
+    {
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => VerifyAsync(
+            Inspect(mountType: "bind", mountSource: "{{OTHER_USER_WORKSPACE}}"),
+            calls, registry));
+
+        Assert.Contains("Mount check failed", exception.InnerException?.Message ?? exception.Message, StringComparison.OrdinalIgnoreCase);
+        AssertCleanup(calls, registry);
+    }
+
+    [Fact]
+    public async Task BindMountFromMatchingDesiredWorkspacePasses()
+    {
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        await VerifyAsync(Inspect(mountType: "bind", mountSource: "{{OWNER_WORKSPACE}}"), calls, registry);
+
+        Assert.Equal(1, registry.Count);
+        Assert.DoesNotContain(calls, static call => call[0] is "kill" or "rm");
+    }
+
+    [Fact]
     public async Task VolumeMountOutsideConfiguredRootFailsAndCleansUp()
     {
         var calls = new List<string[]>();
@@ -131,6 +156,13 @@ public sealed class WorkloadPostStartVerifierTests
         Directory.CreateDirectory(workspaceRoot);
         try
         {
+            string ownerWorkspacePath = Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-alpha");
+            inspectJson = inspectJson
+                .Replace("{{OWNER_WORKSPACE}}", JsonSerializer.Serialize(ownerWorkspacePath)[1..^1], StringComparison.Ordinal)
+                .Replace(
+                    "{{OTHER_USER_WORKSPACE}}",
+                    JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-beta"))[1..^1],
+                    StringComparison.Ordinal);
             string ipRules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
                 .Replace("{{IP}}", AllocatedIp, StringComparison.Ordinal);
             var runner = new PodmanCommandRunner((args, _) =>
@@ -156,7 +188,9 @@ public sealed class WorkloadPostStartVerifierTests
                     new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot },
                     new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
-                [], [], []);
+                [new ContainerContext(
+                    "agent", "agent-alpha", "user-alpha", ownerWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>())],
+                [], []);
 
             await new WorkloadPostStartVerifier(runner, desiredState).VerifyWorkloadAsync(
                 ContainerId, AllocatedIp, compatProfile, registry, CancellationToken.None);

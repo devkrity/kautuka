@@ -222,7 +222,8 @@ public sealed class WorkloadPostStartVerifier
                 throw new InvalidOperationException("Mount check failed: Podman inspect did not return a mount list.");
             }
 
-            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots();
+            RegistryEntry? workloadIdentity = registry?.FindByIp(allocatedIp);
+            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots(workloadIdentity);
             foreach (JsonElement mount in mountsElem.EnumerateArray())
             {
                 string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) && typeElem.ValueKind == JsonValueKind.String
@@ -306,15 +307,24 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots()
+    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity)
     {
-        string? configuredRoot = desiredStateStore?.Snapshot.RuntimeSettings?.Workspace.BaseRoot;
-        if (string.IsNullOrWhiteSpace(configuredRoot))
+        if (workloadIdentity is null
+            || string.IsNullOrWhiteSpace(workloadIdentity.UserId)
+            || string.IsNullOrWhiteSpace(workloadIdentity.AgentId)
+            || desiredStateStore is null)
         {
             return [];
         }
 
-        return [WorkspaceAuthorityPolicy.CanonicalizeRoot(configuredRoot)];
+        return [.. desiredStateStore.Snapshot.DesiredWorkspaces
+            .Where(context => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(context.ScopeId, workloadIdentity.AgentId, StringComparison.Ordinal)
+                && string.Equals(context.UserId, workloadIdentity.UserId, StringComparison.Ordinal))
+            .Select(static context => context.HostWorkspacePath)
+            .Where(static path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.Ordinal)
+            .Select(WorkspaceAuthorityPolicy.CanonicalizeRoot)];
     }
 
     private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
