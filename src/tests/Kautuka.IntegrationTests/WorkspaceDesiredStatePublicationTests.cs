@@ -50,6 +50,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
                     ContainerCommand = "npx",
                     ContainerArgs = ["-y", "@modelcontextprotocol/server-filesystem"],
                     Enabled = true,
+                    Scope = GatewayOwnershipScopes.System,
                 },
             ]);
 
@@ -61,6 +62,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         WorkspaceDesiredStatePayload payload = resolver.ResolveDesiredState();
         WorkspaceMcpContainerConnectorPayload connector = Assert.Single(payload.ContainerConnectors, item =>
             string.Equals(item.ServerId, "filesystem", StringComparison.Ordinal));
+        Assert.Equal(GatewayOwnershipScopes.System, connector.CatalogScope);
 
         Dictionary<string, string> environment = connector.Environment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         Assert.Equal("http://kautuka-pkgs-proxy:20101/npm/", environment["NPM_CONFIG_REGISTRY"]);
@@ -370,6 +372,45 @@ public sealed class WorkspaceDesiredStatePublicationTests
             item.ScopeId.Contains("agent-alpha", StringComparison.Ordinal));
 
         Assert.Equal(["user-a::own-bundle"], binding.ConnectorIds);
+    }
+
+    [Fact]
+    public void ResolveDesiredStateCreatesSystemScopedConnectorInstancesPerUser()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var users = new SqliteGatewayUserCommandRepository(database);
+        users.Upsert(new GatewayUser("user-a", "a", "Testing1", "user", true, null, null));
+        users.Upsert(new GatewayUser("user-b", "b", "Testing1", "user", true, null, null));
+
+        PlatformConfiguration platformConfiguration = CreatePlatformConfiguration(
+            mcpServers:
+            [
+                new McpServerDefinition
+                {
+                    Id = "shared-provider",
+                    Name = "Shared Provider",
+                    Transport = McpTransport.Container,
+                    ContainerImage = "ghcr.io/example/shared-provider:latest",
+                    Enabled = true,
+                    Scope = GatewayOwnershipScopes.System,
+                },
+            ]);
+        var resolver = new WorkspaceRuntimeContextResolver(
+            new StaticPlatformConfigurationProvider(platformConfiguration),
+            configuration,
+            database);
+
+        WorkspaceDesiredStatePayload payload = resolver.ResolveDesiredState();
+        WorkspaceMcpContainerConnectorPayload[] instances = [.. payload.ContainerConnectors
+            .Where(connector => connector.ServerId == "shared-provider")];
+
+        Assert.Equal(
+            ["system::shared-provider", "user-a::shared-provider", "user-b::shared-provider"],
+            instances.Select(static connector => connector.ConnectorId).Order(StringComparer.Ordinal));
+        Assert.All(instances, connector => Assert.Equal(GatewayOwnershipScopes.System, connector.CatalogScope));
     }
 
     [Fact]

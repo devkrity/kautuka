@@ -180,6 +180,7 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
             ServerType = connector.ServerType ?? string.Empty,
             IsInternalSystemConnector = connector.IsInternalSystemConnector,
             McpProtocolVersion = connector.McpProtocolVersion ?? string.Empty,
+            CatalogScope = connector.CatalogScope,
         };
 
         message.Args.AddRange(connector.Args);

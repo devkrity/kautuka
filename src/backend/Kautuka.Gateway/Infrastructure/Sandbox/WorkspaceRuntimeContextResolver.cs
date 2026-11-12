@@ -73,7 +73,8 @@ internal sealed class WorkspaceRuntimeContextResolver(
                     ResolveConnectorEnvironment(server, platformConfiguration.Kautuka.Sandbox.ContainerEnvironment),
                     server.ReadinessTimeoutSeconds ?? 30,
                     server.JitCooldownSeconds ?? 600,
-                    server.McpProtocolVersion)))];
+                    server.McpProtocolVersion,
+                    server.Scope)))];
         WorkspaceSandboxConnectorBindingsPayload[] sandboxConnectorBindings = [.. platformConfiguration.Agents
             .Select(agent => ResolveSandboxConnectorBindings(platformConfiguration, agent, workspaceByAgentId[agent.Id], activeUserIds))];
 
@@ -538,7 +539,8 @@ internal sealed record WorkspaceMcpContainerConnectorPayload(
     IReadOnlyList<KeyValuePair<string, string>> Environment,
     int ReadinessTimeoutSeconds,
     int JitCooldownSeconds,
-    string? McpProtocolVersion = null);
+    string? McpProtocolVersion = null,
+    string CatalogScope = "user");
 
 internal sealed record WorkspaceDesiredStatePayload(
     ManagerRuntimeSettingsPayload RuntimeSettings,

@@ -92,6 +92,7 @@ public sealed class McpAgentToolProviderTests
                 string.Empty, [], true, true, null, null, [], 30, 600);
             ConnectorContainerSpecBuilder.ConnectorIdentity identity =
                 ConnectorContainerSpecBuilder.ResolveIdentity(connector, launchContext, purpose: null);
+            Assert.False(identity.Systemwide);
             Assert.Equal("deny-all", identity.Egress);
             Assert.Equal("system", identity.Kind);
             Assert.Equal("user-alpha", identity.UserId);

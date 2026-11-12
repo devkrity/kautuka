@@ -314,6 +314,7 @@ message WorkspaceMcpContainerConnectorMessage {
   string server_type = 10;
   bool is_internal_system_connector = 11;
   string mcp_protocol_version = 12;
+  string catalog_scope = 13;
 }
 
 message WorkspaceMcpContainerProbeRequest {

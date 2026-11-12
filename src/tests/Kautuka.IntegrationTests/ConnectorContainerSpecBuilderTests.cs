@@ -3,6 +3,7 @@ using System.Reflection;
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 
 namespace Kautuka.IntegrationTests;
 
@@ -30,7 +31,11 @@ public sealed class ConnectorContainerSpecBuilderTests
     [Fact]
     public void InternalSystemConnectorIsAlwaysDenyAll()
     {
-        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with { IsInternalSystemConnector = true };
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
+        {
+            IsInternalSystemConnector = true,
+            CatalogScope = "system",
+        };
         ConnectorContainerSpecBuilder.ConnectorIdentity identity =
             ConnectorContainerSpecBuilder.ResolveIdentity(connector, null, purpose: null);
 
@@ -46,6 +51,7 @@ public sealed class ConnectorContainerSpecBuilderTests
         {
             ConnectorId = "system::shared-provider",
             IsInternalSystemConnector = true,
+            CatalogScope = "system",
         };
         ContainerContext userAlpha = CreateWorkspaceContext() with { UserId = "user-alpha" };
         ContainerContext userBeta = CreateWorkspaceContext() with { UserId = "user-beta" };
@@ -68,6 +74,77 @@ public sealed class ConnectorContainerSpecBuilderTests
         Assert.NotEqual(
             InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userAlpha),
             InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userBeta));
+    }
+
+    [Fact]
+    public void SystemScopedConnectorInstancesUsePerUserSystemwideIdentity()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
+        {
+            ConnectorId = "user-alpha::shared-provider",
+            CatalogScope = "system",
+        };
+        ContainerContext userAlpha = CreateWorkspaceContext() with { UserId = "user-alpha" };
+        ContainerContext userBeta = CreateWorkspaceContext() with { UserId = "user-beta" };
+
+        ConnectorContainerSpecBuilder.ConnectorIdentity alpha =
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userAlpha, purpose: null);
+        ConnectorContainerSpecBuilder.ConnectorIdentity beta =
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector with { ConnectorId = "user-beta::shared-provider" }, userBeta, purpose: null);
+        List<string> alphaArgs = ConnectorContainerSpecBuilder.BuildRun(
+            connector, "alpha-container", WorkspaceMcpExecutionContext.Isolated, userAlpha,
+            persistent: true, allocatedIp: "10.247.1.30");
+        List<string> betaArgs = ConnectorContainerSpecBuilder.BuildRun(
+            connector with { ConnectorId = "user-beta::shared-provider" }, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
+            persistent: true, allocatedIp: "10.247.1.31");
+
+        Assert.True(alpha.Systemwide);
+        Assert.True(beta.Systemwide);
+        Assert.Equal("user-alpha", alpha.UserId);
+        Assert.Equal("user-beta", beta.UserId);
+        Assert.Equal(string.Empty, alpha.AgentId);
+        Assert.Equal(string.Empty, beta.AgentId);
+        Assert.Equal("connector", alpha.Kind);
+        Assert.Equal("normal", alpha.Egress);
+        Assert.Contains("io.kautuka.systemwide=true", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.systemwide=true", betaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.user=user-alpha", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
+        Assert.NotEqual(
+            InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userAlpha),
+            InvokeBuildContainerName("user-beta::shared-provider", WorkspaceMcpExecutionContext.Isolated, userBeta));
+
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-system-scope-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var registry = new WorkloadRegistry();
+            registry.Register(new RegistryEntry(
+                "10.247.1.30", alpha.UserId, null, "alpha-container", alpha.Kind, connector.ConnectorId,
+                "isolated", alpha.Systemwide, alpha.Egress, "user", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry(
+                "10.247.1.31", beta.UserId, null, "beta-container", beta.Kind, "user-beta::shared-provider",
+                "isolated", beta.Systemwide, beta.Egress, "user", null, DateTimeOffset.UtcNow));
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, registry);
+            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            _ = policyStore.SetUserPrivileges(admin, "user-alpha", canApproveOwn: true, canAllowAllAgents: true);
+            _ = policyStore.SetRule(
+                admin,
+                new RuleWriteSpec("user", "user-alpha", null, connector.ConnectorId, "example.com", "host", 443, Allowed: true),
+                expectedRevision: policyStore.Revision);
+
+            Assert.True(controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.30", "93.184.216.34", 443, "example.com", true)).Allowed);
+            NetworkAccessDecisionResult betaDecision = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.31", "93.184.216.34", 443, "example.com", true));
+            Assert.False(betaDecision.Allowed);
+            Assert.Equal("no_rule", betaDecision.Reason);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
     }
 
     [Fact]

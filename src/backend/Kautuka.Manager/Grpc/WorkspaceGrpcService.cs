@@ -635,7 +635,10 @@ public sealed partial class WorkspaceGrpcService(
                     [.. connector.Environment.Select(static pair => new KeyValuePair<string, string>(pair.Key, pair.Value))],
                     connector.ReadinessTimeoutSeconds <= 0 ? 30 : connector.ReadinessTimeoutSeconds,
                     connector.JitCooldownSeconds <= 0 ? 600 : connector.JitCooldownSeconds,
-                    string.IsNullOrWhiteSpace(connector.McpProtocolVersion) ? null : connector.McpProtocolVersion))];
+                    string.IsNullOrWhiteSpace(connector.McpProtocolVersion) ? null : connector.McpProtocolVersion)
+                {
+                    CatalogScope = connector.CatalogScope,
+                })];
             IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> desiredSandboxConnectorBindings = [.. request.SandboxConnectorBindings.Select(static binding =>
                 new WorkspaceSandboxConnectorBindingsDefinition(
                     binding.ScopeType,

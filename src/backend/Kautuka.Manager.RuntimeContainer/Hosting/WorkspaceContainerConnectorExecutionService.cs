@@ -1281,6 +1281,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             || !string.Equals(previousConnector.ServerType, nextConnector.ServerType, StringComparison.OrdinalIgnoreCase)
             || previousConnector.Enabled != nextConnector.Enabled
             || previousConnector.IsInternalSystemConnector != nextConnector.IsInternalSystemConnector
+            || !string.Equals(previousConnector.CatalogScope, nextConnector.CatalogScope, StringComparison.OrdinalIgnoreCase)
             || previousConnector.ReadinessTimeoutSeconds != nextConnector.ReadinessTimeoutSeconds
             || previousConnector.JitCooldownSeconds != nextConnector.JitCooldownSeconds
             || !previousConnector.Args.SequenceEqual(nextConnector.Args, StringComparer.Ordinal)

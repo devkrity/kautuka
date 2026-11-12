@@ -605,6 +605,8 @@ public sealed record WorkspaceMcpContainerConnectorDefinition(
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;
+
+    public string CatalogScope { get; init; } = "user";
 }
 
 public sealed record WorkspaceSandboxConnectorBindingsDefinition(

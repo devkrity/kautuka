@@ -35,13 +35,14 @@ internal static class ConnectorContainerSpecBuilder
         string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
             ? (workspaceContext?.ScopeId ?? string.Empty)
             : string.Empty;
+        bool systemwide = string.Equals(connector.CatalogScope, "system", StringComparison.OrdinalIgnoreCase);
 
         if (connector.IsInternalSystemConnector)
         {
             return new ConnectorIdentity(
                 userId,
                 string.Empty,
-                true,
+                systemwide,
                 "deny-all",
                 "system");
         }
@@ -51,12 +52,12 @@ internal static class ConnectorContainerSpecBuilder
             throw new InvalidOperationException("A user identity is required before starting a connector workload.");
         }
 
-        if (string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
+        if (!systemwide && string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
         }
 
-        return new ConnectorIdentity(userId, agentId, false, "normal", "connector");
+        return new ConnectorIdentity(userId, systemwide ? string.Empty : agentId, systemwide, "normal", "connector");
     }
 
     public static List<string> BuildRun(
@@ -251,6 +252,7 @@ internal static class ConnectorContainerSpecBuilder
         Append(builder, connector.Command);
         Append(builder, connector.Enabled ? "1" : "0");
         Append(builder, connector.IsInternalSystemConnector ? "1" : "0");
+        Append(builder, connector.CatalogScope);
         Append(builder, connector.BundlePath ?? string.Empty);
         Append(builder, connector.ServerType ?? string.Empty);
         Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));

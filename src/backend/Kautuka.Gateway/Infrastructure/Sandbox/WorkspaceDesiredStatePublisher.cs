@@ -214,6 +214,7 @@ internal sealed class WorkspaceDesiredStatePublisher(
             Append(builder, connector.Command);
             Append(builder, connector.Enabled ? "1" : "0");
             Append(builder, connector.IsInternalSystemConnector ? "1" : "0");
+            Append(builder, connector.CatalogScope);
             Append(builder, connector.BundlePath ?? string.Empty);
             Append(builder, connector.ServerType ?? string.Empty);
             Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));
