@@ -109,7 +109,7 @@ public sealed class PodmanReconciliationFailureTests
                 var connector = new WorkspaceMcpContainerConnectorDefinition("test", "localhost/test:local", "node", [], true, false, null, null, [], 30, 600);
                 MethodInfo method = typeof(WorkspaceContainerConnectorExecutionService).GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
                 await Assert.ThrowsAsync<ContainerInspectionUnavailableException>(() => (Task)method.Invoke(service,
-                    [connector, "test", "test-container", WorkspaceMcpExecutionContext.Isolated, null, TestContext.Current.CancellationToken, false])!);
+                    [connector, "test", "test-container", WorkspaceMcpExecutionContext.Isolated, null, TestContext.Current.CancellationToken, false, context])!);
             }
             else
             {
