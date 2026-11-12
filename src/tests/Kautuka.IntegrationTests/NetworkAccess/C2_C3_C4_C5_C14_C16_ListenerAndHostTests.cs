@@ -1,9 +1,9 @@
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Runtime.InteropServices;
 
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -104,12 +104,15 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             // Stop A (leaving stale socket on disk if not unlinked), then start B -> B acquires lock and replaces stale socket
             await hostA.StopAsync(TestContext.Current.CancellationToken);
 
-            // Leave a real orphaned AF_UNIX socket by killing its owning child process.
-            using (var orphanOwner = StartOrphanSocketOwner(socketPath))
+            // On Linux, closing a pathname AF_UNIX socket leaves its filesystem entry orphaned.
+            // Windows removes the endpoint on close, so use a stale placeholder there for host portability.
+            if (OperatingSystem.IsLinux())
             {
-                await WaitForSocketAsync(orphanOwner, socketPath, TestContext.Current.CancellationToken);
-                orphanOwner.Kill(entireProcessTree: true);
-                await orphanOwner.WaitForExitAsync(TestContext.Current.CancellationToken);
+                CreateOrphanedUnixSocket(socketPath);
+            }
+            else
+            {
+                await File.WriteAllTextAsync(socketPath, "stale", TestContext.Current.CancellationToken);
             }
             Assert.True(File.Exists(socketPath));
 
@@ -148,6 +151,68 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             TryDeleteDir(tempDir);
         }
     }
+
+    private static void CreateOrphanedUnixSocket(string socketPath)
+    {
+        const int afUnix = 1;
+        const int sockStream = 1;
+        const int sunPathLength = 108;
+        byte[] pathBytes = System.Text.Encoding.UTF8.GetBytes(socketPath);
+        if (pathBytes.Length >= sunPathLength)
+        {
+            throw new ArgumentException("Unix socket path is too long.", nameof(socketPath));
+        }
+
+        var address = new UnixSocketAddress
+        {
+            Family = afUnix,
+            Path = new byte[sunPathLength],
+        };
+        pathBytes.CopyTo(address.Path, 0);
+        IntPtr addressPointer = Marshal.AllocHGlobal(Marshal.SizeOf<UnixSocketAddress>());
+        int descriptor = -1;
+        try
+        {
+            Marshal.StructureToPtr(address, addressPointer, fDeleteOld: false);
+            descriptor = NativeSocket(afUnix, sockStream, 0);
+            if (descriptor < 0 || NativeBind(descriptor, addressPointer, (uint)Marshal.SizeOf<UnixSocketAddress>()) != 0 || NativeListen(descriptor, 1) != 0)
+            {
+                throw new InvalidOperationException($"Could not create orphan socket (errno {Marshal.GetLastPInvokeError()}).");
+            }
+        }
+        finally
+        {
+            if (descriptor >= 0)
+            {
+                _ = NativeClose(descriptor);
+            }
+            Marshal.FreeHGlobal(addressPointer);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnixSocketAddress
+    {
+        public ushort Family;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 108)]
+        public byte[] Path;
+    }
+
+    [DllImport("libc", EntryPoint = "socket", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int NativeSocket(int domain, int type, int protocol);
+
+    [DllImport("libc", EntryPoint = "bind", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int NativeBind(int socket, IntPtr address, uint addressLength);
+
+    [DllImport("libc", EntryPoint = "listen", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int NativeListen(int socket, int backlog);
+
+    [DllImport("libc", EntryPoint = "close", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    private static extern int NativeClose(int socket);
 
     [Fact]
     public async Task C3_SocketPermissions_DedicatedDirectoryAndOwnerOnlyMode_WithNegativeControl()
@@ -203,29 +268,6 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
         {
             TryDeleteDir(tempDir);
         }
-    }
-
-    private static Process StartOrphanSocketOwner(string socketPath)
-    {
-        string quotedSocketPath = socketPath.Replace("'", "''", StringComparison.Ordinal);
-        string script = $"$s=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Unspecified);$s.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new('{quotedSocketPath}'));$s.Listen(1);Write-Output ready;Start-Sleep -Seconds 60";
-        var start = new ProcessStartInfo("pwsh.exe") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
-        start.ArgumentList.Add("-NoProfile");
-        start.ArgumentList.Add("-Command");
-        start.ArgumentList.Add(script);
-        return Process.Start(start) ?? throw new InvalidOperationException("Could not start orphan socket owner.");
-    }
-
-    private static async Task WaitForSocketAsync(Process process, string socketPath, CancellationToken cancellationToken)
-    {
-        Task<string?> ready = process.StandardOutput.ReadLineAsync(cancellationToken).AsTask();
-        Task timeout = Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
-        if (await Task.WhenAny(ready, timeout) != ready)
-        {
-            throw new TimeoutException("Child process did not create its Unix socket.");
-        }
-        Assert.Equal("ready", await ready);
-        Assert.True(File.Exists(socketPath));
     }
 
     [Fact]
