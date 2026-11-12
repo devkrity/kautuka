@@ -795,6 +795,69 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             throw new InvalidOperationException($"Failed to start egress pod '{EgressPodName}' (rc {podStart.ExitCode}): {podStart.StdErr}");
         }
+
+        if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidOperationException($"Egress pod '{EgressPodName}' did not reach a healthy state.");
+        }
+    }
+
+    private async Task<bool> IsEgressPodHealthyAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspect = await podmanRunner
+            .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
+            .ConfigureAwait(false);
+
+        return inspect.ExitCode == 0 && IsEgressPodHealthy(inspect.StdOut);
+    }
+
+    internal static bool IsEgressPodHealthy(string? inspectJson)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement pod = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            if (pod.ValueKind != JsonValueKind.Object
+                || !pod.TryGetProperty("State", out JsonElement state)
+                || !string.Equals(state.GetString(), "Running", StringComparison.OrdinalIgnoreCase)
+                || !pod.TryGetProperty("Containers", out JsonElement containers)
+                || containers.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            var states = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonElement container in containers.EnumerateArray())
+            {
+                string name = GetStringProperty(container, "Name");
+                string containerState = GetStringProperty(container, "State");
+                if (name.Length > 0)
+                {
+                    states[name] = containerState;
+                }
+            }
+
+            bool hasInfra = states.Any(pair => pair.Key.EndsWith("-infra", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(pair.Value, "running", StringComparison.OrdinalIgnoreCase));
+            return hasInfra
+                && states.TryGetValue("kautuka-egress-boundary", out string? boundaryState)
+                && string.Equals(boundaryState, "exited", StringComparison.OrdinalIgnoreCase)
+                && states.TryGetValue("kautuka-egress-dns", out string? dnsState)
+                && string.Equals(dnsState, "running", StringComparison.OrdinalIgnoreCase)
+                && states.TryGetValue("kautuka-egress-envoy", out string? envoyState)
+                && string.Equals(envoyState, "running", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     internal static IReadOnlyList<string> BuildCoreDnsCreateArgs(string corefilePath) =>
@@ -978,6 +1041,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     internal async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
+        if (IsStartupGateOpen && !await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+        {
+            logger.LogError("Egress pod health check failed during reconcile; closing the NAC startup gate.");
+            IsStartupGateOpen = false;
+            return;
+        }
+
         // 1. Compare running containers to registry
         PodmanCommandResult psResult = await podmanRunner
             .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)

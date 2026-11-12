@@ -648,6 +648,42 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_20_ExistingEgressPodMustBeHealthyAndComplete_WithNegativeControl()
+    {
+        const string healthy = "[{\"State\":\"Running\",\"Containers\":["
+            + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
+            + "{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},"
+            + "{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},"
+            + "{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+
+        Assert.True(EgressTopologyManager.IsEgressPodHealthy(healthy));
+
+        // Negative controls: degraded state, a missing required container, or a stopped proxy must fail closed.
+        Assert.False(EgressTopologyManager.IsEgressPodHealthy(healthy.Replace("Running", "Degraded", StringComparison.Ordinal)));
+        Assert.False(EgressTopologyManager.IsEgressPodHealthy(healthy.Replace(",{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"}", string.Empty, StringComparison.Ordinal)));
+        Assert.False(EgressTopologyManager.IsEgressPodHealthy(healthy.Replace("\"State\":\"running\"", "\"State\":\"created\"", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task V7_20_ReconcileClosesStartupGateWhenPodDegrades_WithNegativeControl()
+    {
+        const string degraded = "[{\"State\":\"Degraded\",\"Containers\":[]}]";
+        var podman = new PodmanCommandRunner((args, _) => Task.FromResult(
+            new PodmanCommandResult(0, degraded, string.Empty, ProcessTerminationReason.Completed)));
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-health-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        typeof(EgressTopologyManager)
+            .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+    }
+
+    [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
         if (Environment.IsPrivilegedProcess)
