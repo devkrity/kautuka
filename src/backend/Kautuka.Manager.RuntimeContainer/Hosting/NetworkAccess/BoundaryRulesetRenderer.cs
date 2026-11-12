@@ -138,7 +138,7 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("  }");
         sb.Append("}\n");
 
-        return sb.ToString();
+        return sb.ToString().ReplaceLineEndings("\n");
     }
 
     private static string BuildUpstreamDnsNftRule(IEnumerable<string>? upstreamDnsIps)

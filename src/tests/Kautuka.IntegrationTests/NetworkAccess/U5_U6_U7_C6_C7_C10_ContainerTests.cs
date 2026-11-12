@@ -193,6 +193,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     {
         // 1. Boundary ruleset
         string boundaryNormal = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, decisionEndpointIp: null);
+        Assert.DoesNotContain("\r", boundaryNormal, StringComparison.Ordinal);
         Assert.Contains("table ip kautuka_egress", boundaryNormal, StringComparison.Ordinal);
         Assert.Contains("delete table ip kautuka_egress", boundaryNormal, StringComparison.Ordinal);
         Assert.Contains("table ip6 kautuka_egress", boundaryNormal, StringComparison.Ordinal);
