@@ -189,10 +189,9 @@ public static class BoundaryRulesetRenderer
     /// </summary>
     public static string RenderEnvoyConfig(
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
-        bool isWindowsMtls = false,
-        string? templatePath = null)
+        bool isWindowsMtls = false)
     {
-        string template = ResolveTemplate(templatePath, "envoy.static.yaml.tmpl");
+        string template = ResolveTemplate("envoy.static.yaml.tmpl");
 
         string clusterSnippet = isWindowsMtls
             ? WindowsManagerAuthorizationClusterYaml
@@ -267,20 +266,14 @@ public static class BoundaryRulesetRenderer
     /// Renders the CoreDNS configuration from the template.
     /// </summary>
     public static string RenderCorefile(
-        string dnsIp = "10.247.0.2",
-        string? templatePath = null)
+        string dnsIp = "10.247.0.2")
     {
-        string template = ResolveTemplate(templatePath, "Corefile.tmpl");
+        string template = ResolveTemplate("Corefile.tmpl");
         return template.Replace("{{DNS_IP}}", dnsIp, StringComparison.Ordinal);
     }
 
-    internal static string ResolveTemplate(string? templatePath, string templateFileName)
+    internal static string ResolveTemplate(string templateFileName)
     {
-        if (!string.IsNullOrWhiteSpace(templatePath) && File.Exists(templatePath))
-        {
-            return File.ReadAllText(templatePath);
-        }
-
         var assembly = typeof(BoundaryRulesetRenderer).Assembly;
         string resourceName = $"{assembly.GetName().Name}.Hosting.NetworkAccess.{templateFileName}";
         using Stream? stream = assembly.GetManifestResourceStream(resourceName);

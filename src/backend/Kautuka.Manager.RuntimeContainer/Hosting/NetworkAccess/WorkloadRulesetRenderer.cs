@@ -32,7 +32,7 @@ public static class WorkloadRulesetRenderer
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool includePackageProxy = true)
+    public static string Render(string allocatedIp, bool includePackageProxy = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
@@ -78,7 +78,7 @@ public static class WorkloadRulesetRenderer
     public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
-        string tmpl = BoundaryRulesetRenderer.ResolveTemplate(null, "kautuka_workload.nft.json.tmpl");
+        string tmpl = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl");
         string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);
         return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(goldenJson, RequiredWorkloadComments, allocatedIp.Trim());
     }

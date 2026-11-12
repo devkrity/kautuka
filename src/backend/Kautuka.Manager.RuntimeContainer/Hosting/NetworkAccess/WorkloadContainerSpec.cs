@@ -40,6 +40,7 @@ public sealed record WorkloadContainerSpec
     public IReadOnlyList<string> Args { get; init; } = [];
     public IReadOnlyList<KeyValuePair<string, string>> Environment { get; init; } = [];
     public IReadOnlyList<WorkloadMount> Mounts { get; init; } = [];
+    public IReadOnlyList<string> AllowedMountRoots { get; init; } = [];
     public IReadOnlyList<string> TmpfsMounts { get; init; } = ["/tmp:rw,noexec,nosuid"];
     public IReadOnlyList<string> AddHosts { get; init; } = [];
     public string? WorkingDirectory { get; init; }
@@ -253,19 +254,14 @@ public sealed record WorkloadContainerSpec
             args.AddRange(["--workdir", WorkingDirectory]);
         }
 
-        bool hasPkgProxyHost = false;
         foreach (string host in AddHosts)
         {
-            if (host.StartsWith("kautuka-pkgs-proxy:", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(host, "kautuka-pkgs-proxy:10.247.0.3", StringComparison.OrdinalIgnoreCase))
             {
-                hasPkgProxyHost = true;
+                throw new ArgumentException($"Creation rejected: add-host entry '{host}' is not an approved infrastructure mapping.", nameof(AddHosts));
             }
-            args.AddRange(["--add-host", host]);
-        }
 
-        if (!hasPkgProxyHost)
-        {
-            args.AddRange(["--add-host", "kautuka-pkgs-proxy:10.247.0.3"]);
+            args.AddRange(["--add-host", host]);
         }
 
         foreach (WorkloadMount mount in Mounts)
@@ -360,6 +356,11 @@ public sealed record WorkloadContainerSpec
             string host = mount.HostPath.Replace('\\', '/');
             string container = mount.ContainerPath.Replace('\\', '/');
 
+            if (AllowedMountRoots.Count == 0 || !IsWithinAllowedMountRoot(host))
+            {
+                throw new ArgumentException($"Creation rejected: mount source '{mount.HostPath}' is outside the workspace mount allowlist.", nameof(Mounts));
+            }
+
             if (host.Contains("docker.sock", StringComparison.OrdinalIgnoreCase) || host.Contains("podman.sock", StringComparison.OrdinalIgnoreCase))
             {
                 throw new ArgumentException("Creation rejected: mounting Docker or Podman sockets is prohibited.", nameof(Mounts));
@@ -388,5 +389,35 @@ public sealed record WorkloadContainerSpec
                 throw new ArgumentException("Creation rejected: mounting private key paths is prohibited.", nameof(Mounts));
             }
         }
+    }
+
+    private bool IsWithinAllowedMountRoot(string hostPath)
+    {
+        string fullHostPath = Path.GetFullPath(hostPath);
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (string allowedRoot in AllowedMountRoots)
+        {
+            if (string.IsNullOrWhiteSpace(allowedRoot))
+            {
+                continue;
+            }
+
+            string fullRoot = Path.GetFullPath(allowedRoot);
+            if (string.Equals(fullHostPath, fullRoot, comparison))
+            {
+                return true;
+            }
+
+            string relative = Path.GetRelativePath(fullRoot, fullHostPath);
+            if (!Path.IsPathRooted(relative)
+                && !string.Equals(relative, "..", comparison)
+                && !relative.StartsWith(".." + Path.DirectorySeparatorChar, comparison)
+                && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, comparison))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -143,6 +143,7 @@ internal static class ConnectorContainerSpecBuilder
             ManagerRole = "connector",
             Environment = envList,
             Mounts = mounts,
+            AllowedMountRoots = workspaceContext is null ? [] : [workspaceContext.HostWorkspacePath],
             Command = command,
             Args = cmdArgs,
             PidsLimit = 128,

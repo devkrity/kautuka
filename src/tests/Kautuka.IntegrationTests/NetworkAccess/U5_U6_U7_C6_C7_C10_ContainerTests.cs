@@ -32,7 +32,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
-    public void U5_SpecBuilder_RejectsProhibitedFlagsAndHardensDefaults_WithNegativeControl()
+    public void U5a_SpecBuilder_ValidatesTypedFieldsAndHardensDefaults()
     {
         // 1. IP validation (10.247.1.1 to 10.247.255.254 only, never 10.247.0.0/24, never .0 or .255)
         const string pinnedImage = "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -71,13 +71,53 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Throws<InvalidOperationException>(() => specGateClosed.Render());
 
         // 5. Mounts validation
+        var mountRoot = Path.Combine(tempDir, "workspace");
+        Directory.CreateDirectory(mountRoot);
         var specWithBadMount = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            AllowedMountRoots = [mountRoot],
             Mounts = [new WorkloadMount("/var/run/docker.sock", "/var/run/docker.sock")]
         };
         Assert.Throws<ArgumentException>(() => specWithBadMount.Render());
+
+        // 6. Mounts must be rooted under an explicit workspace allowlist; NAC state is outside it.
+        var stateMount = specWithBadMount with
+        {
+            Mounts = [new WorkloadMount(Path.Combine(tempDir, "nac-state"), "/run/kautuka-nac")]
+        };
+        Assert.Throws<ArgumentException>(() => stateMount.Render());
+
+        string allowedChild = Path.Combine(mountRoot, "files");
+        Directory.CreateDirectory(allowedChild);
+        var allowedWorkspaceMount = specWithBadMount with
+        {
+            Mounts = [new WorkloadMount(allowedChild, "/workspace/files", ReadOnly: true)]
+        };
+        Assert.Contains($"{allowedChild}:/workspace/files:ro", allowedWorkspaceMount.Render(), StringComparer.Ordinal);
+
+        // 7. Only the one fixed Phase 6 package-proxy mapping may be supplied.
+        var badHostMapping = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            AddHosts = ["metadata.internal:169.254.169.254"]
+        };
+        Assert.Throws<ArgumentException>(() => badHostMapping.Render());
+
+        // 8. Application arguments after the image may contain Podman flag names safely.
+        var applicationFlagArgs = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            Persistent = false,
+            Command = "connector-tool",
+            Args = ["--network", "host"]
+        };
+        IReadOnlyList<string> appArgs = applicationFlagArgs.Render();
+        int imageIndex = Array.IndexOf(appArgs.ToArray(), pinnedImage);
+        Assert.Equal(["connector-tool", "--network", "host"], appArgs.Skip(imageIndex + 1));
 
         // 6. Proper rendering with default hardening
         var validSpec = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
@@ -110,6 +150,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("io.kautuka.user=user-1", string.Join(" ", args), StringComparison.Ordinal);
         Assert.Contains("io.kautuka.agent=agent-1", string.Join(" ", args), StringComparison.Ordinal);
         Assert.Contains("io.kautuka.connector=search", string.Join(" ", args), StringComparison.Ordinal);
+        Assert.DoesNotContain("--add-host", args, StringComparer.Ordinal);
 
         // 5. Compatibility profile
         var compatProfile = new ImageCompatProfile(
@@ -401,6 +442,12 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public void C7_AtomicRulesetApply_Idempotence_WithNegativeControl()
     {
+        string goldenPath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "kautuka-workload.nft");
+        string golden = File.ReadAllText(goldenPath).Replace("\r\n", "\n", StringComparison.Ordinal);
+        string defaultRuleset = WorkloadRulesetRenderer.Render("10.247.1.20").Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Equal(golden, defaultRuleset);
+        Assert.DoesNotContain("20101", defaultRuleset, StringComparison.Ordinal);
+
         string workloadRuleset = WorkloadRulesetRenderer.Render("10.247.1.20", includePackageProxy: true);
 
         // MF7: Idempotent atomic transaction structure
@@ -422,8 +469,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public void C10_EnvoyConfig_TimeoutAndFailClosedGuards_WithNegativeControl()
     {
-        string templatePath = Path.Combine(AppContext.BaseDirectory, "Hosting", "NetworkAccess", "envoy.static.yaml.tmpl");
-        string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(templatePath: templatePath);
+        string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig();
 
         // Assert 2s ext_authz timeout and fail-closed guards
         Assert.Contains("timeout: 2s", envoyConfig, StringComparison.Ordinal);
@@ -519,7 +565,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         IReadOnlyList<string>? capturedArgs = null;
         string goldenJson = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash("10.247.1.12");
-        string tmplJson = BoundaryRulesetRenderer.ResolveTemplate(null, "kautuka_workload.nft.json.tmpl")
+        string tmplJson = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
             .Replace("{{IP}}", "10.247.1.12", StringComparison.Ordinal);
 
         bool returnMismatch = false;

@@ -172,6 +172,10 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             # Default include_pkgs_proxy=False per v7-11
             rules = render_ruleset(ip, include_pkgs_proxy=False)
 
+            if ip == "10.247.1.20":
+                with open(os.path.join(SCRIPT_DIR, "golden", "kautuka-workload.nft"), encoding="utf-8") as golden_file:
+                    self.assertEqual(golden_file.read(), rules, "Hook rendering must match the checked-in cross-language golden")
+
             # Atomic transaction headers
             self.assertTrue(
                 rules.startswith("table inet kautuka_workload\ndelete table inet kautuka_workload\ntable inet kautuka_workload {"),
