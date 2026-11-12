@@ -64,12 +64,17 @@ internal static partial class GatewaySettingsEndpointMappings
 
         app.MapPost("/api/settings/providers/test", async (JsonElement body, IProviderValidationService providerValidationService, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: adminUser.Id,
+                agentId: "gateway",
+                purpose: "provider-test",
+                service: "ai-provider");
             GatewayProviderTestResult result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false);
             return Results.Json(
                 new GatewayProviderTestResponse(result.Success, result.Message),

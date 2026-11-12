@@ -503,12 +503,20 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
                 ? new TestServerCallContextWithCert(ManagerClientIdentities.ChannelHostCommonName)
                 : new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName);
 
+            string effectiveUserId = target.ExecutionContext == "channelhost"
+                ? string.Empty
+                : (target.UserId?.Trim() ?? string.Empty);
+            if (target.ExecutionContext != "channelhost" && string.IsNullOrEmpty(effectiveUserId))
+            {
+                return NetworkAccessCheckResult.CreateDenied("unknown_source");
+            }
+
             var req = new NetworkAccessCheckOutboundRequest
             {
                 Host = target.Host,
                 Port = target.Port,
-                UserId = target.ExecutionContext == "channelhost" ? string.Empty : (target.UserId ?? "system"),
-                AgentId = target.ExecutionContext == "channelhost" ? string.Empty : (target.AgentId ?? "gateway"),
+                UserId = effectiveUserId,
+                AgentId = target.ExecutionContext == "channelhost" ? string.Empty : (target.AgentId ?? string.Empty),
                 ConnectorId = target.ConnectorId ?? string.Empty,
                 Systemwide = target.Systemwide,
                 Purpose = target.Purpose ?? string.Empty,
@@ -590,5 +598,53 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             httpContext.Connection.ClientCertificate = cert;
             UserStateCore["__HttpContext"] = httpContext;
         }
+    }
+
+    [Fact]
+    public async Task V7_6_MissingAmbientUserId_FailsClosedInsteadOfSystem_AndBrakedUserCannotBypass_WithNegativeControl()
+    {
+        var checker = new GrpcNetworkAccessChecker(new InProcCheckOutboundClient(grpcService));
+        var transport = new TrackingHttpHandler();
+        using var http = new HttpClient(new NetworkAccessCheckHandler(checker, transport));
+
+        var targetUri = new Uri("https://api.openai.com/v1/models");
+
+        // 1. Outbound call to a system-seeded destination (api.openai.com) with NO NetworkAccessContext
+        //    must fail closed with unknown_source instead of defaulting to "system".
+        NetworkAccessDeniedException noCtxEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+            _ = await http.GetAsync(targetUri));
+        Assert.Equal("unknown_source", noCtxEx.Reason);
+        Assert.Equal(0, transport.CallCount);
+
+        // 2. Braked user executing discovery/OAuth under their explicit NetworkAccessContext cannot bypass their brake.
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        nacController.PolicyStore.SetBrake(admin, scope: "user", targetUserId: "user-braked", on: true);
+
+        using (NetworkAccessContext.BeginScope(userId: "user-braked", agentId: "gateway", purpose: "ai-discovery", service: "ai-model"))
+        {
+            NetworkAccessDeniedException brakedEx = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+                _ = await http.GetAsync(targetUri));
+            Assert.Equal(NetworkAccessDenialKind.Paused, brakedEx.Kind);
+            Assert.Equal("brake_user", brakedEx.Reason);
+            Assert.Equal(0, transport.CallCount);
+        }
+
+        // Negative control (.NC): legitimate system-scoped call explicitly bound to "system" reaches system-seeded host.
+        using (NetworkAccessContext.BeginScope(userId: "system", agentId: "system", purpose: "oidc-login", service: "external-auth"))
+        {
+            using HttpResponseMessage okResp = await http.GetAsync(targetUri);
+            Assert.Equal(HttpStatusCode.OK, okResp.StatusCode);
+            Assert.Equal(1, transport.CallCount);
+        }
+    }
+
+    private sealed class InProcCheckOutboundClient(WorkspaceGrpcService grpc) : ManagerService.ManagerServiceClient
+    {
+        private static readonly TestServerCallContext callCtx = new();
+
+        public override AsyncUnaryCall<NetworkAccessCheckOutboundResponse> CheckOutboundAsync(
+            NetworkAccessCheckOutboundRequest request,
+            CallOptions options)
+            => new(grpc.CheckOutbound(request, callCtx), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
     }
 }

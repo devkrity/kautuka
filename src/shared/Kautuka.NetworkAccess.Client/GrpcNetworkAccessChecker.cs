@@ -43,9 +43,13 @@ public sealed partial class GrpcNetworkAccessChecker(
         }
         else
         {
-            effectiveUserId = !string.IsNullOrWhiteSpace(target.UserId)
-                ? target.UserId.Trim()
-                : "system";
+            effectiveUserId = target.UserId?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(effectiveUserId))
+            {
+                // Fail closed when a non-ChannelHost caller lacks an explicit user context (v7-6);
+                // never default to "system".
+                return NetworkAccessCheckResult.CreateDenied("unknown_source");
+            }
 
             effectiveAgentId = !string.IsNullOrWhiteSpace(target.AgentId)
                 ? target.AgentId.Trim()

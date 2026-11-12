@@ -37,6 +37,11 @@ internal static class GatewayManagementEndpointMappings
             if (!IPAddress.IsLoopback(context.Connection.RemoteIpAddress ?? IPAddress.None)) return Results.StatusCode(403);
             if (!Uri.TryCreate(endpoint.Host, UriKind.Absolute, out Uri? origin)) return Results.StatusCode(503);
             if (!sessions.TryBeginBrokerRotation()) return Results.Conflict();
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: "system",
+                agentId: "system",
+                purpose: "broker-installation",
+                service: "connector-auth");
             try
             {
                 await registration.RegisterAsync(origin, ct).ConfigureAwait(false);

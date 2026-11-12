@@ -173,6 +173,7 @@ internal static partial class GatewayAuthEndpointMappings
             return Results.Json(new AuthErrorResponse(rejectedDetail), KautukaJsonContext.Default.AuthErrorResponse, statusCode: StatusCodes.Status401Unauthorized);
         }
 
+        string oidcUserId = "system";
         if (session.Intent == "LINK")
         {
             if (!auth.TryAuthorize(context, out GatewayUser? actor)
@@ -184,7 +185,15 @@ internal static partial class GatewayAuthEndpointMappings
                 LogExternalSignInRejected(logger, remote, "link_actor_mismatch");
                 return Results.Json(new AuthErrorResponse(rejectedDetail), KautukaJsonContext.Default.AuthErrorResponse, statusCode: StatusCodes.Status401Unauthorized);
             }
+
+            oidcUserId = actor.Id;
         }
+
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: oidcUserId,
+            agentId: oidcUserId == "system" ? "system" : "gateway",
+            purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
+            service: "external-auth");
 
         string? token = await identities.ExchangeCodeAsync(
             session.Provider,

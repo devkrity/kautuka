@@ -51,6 +51,11 @@ internal sealed class GatewayHostedCatalogInstaller(
             throw new InvalidOperationException($"Unsupported catalog item kind '{item.Kind}'.");
         }
 
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: string.Equals(item.Kind, "connector", StringComparison.OrdinalIgnoreCase) ? item.Id : null,
+            purpose: "catalog-install",
+            service: "catalog");
         DownloadedCatalogArtifact artifact = await DownloadArtifactAsync(item, cancellationToken).ConfigureAwait(false);
         string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, requestedScope);
         string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);

@@ -60,6 +60,14 @@ internal sealed partial class AgentMemoryEmbeddingService(
             return;
         }
 
+        using IDisposable? nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.Current is null
+            ? Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: string.IsNullOrWhiteSpace(agent!.OwnerUserId) ? "system" : agent.OwnerUserId,
+                agentId: agent.Id,
+                purpose: "memory-embedding",
+                service: "ai-model")
+            : null;
+
         try
         {
             string modelKey = BuildModelKey(resolvedProvider.Id, resolvedModel.ModelName);
