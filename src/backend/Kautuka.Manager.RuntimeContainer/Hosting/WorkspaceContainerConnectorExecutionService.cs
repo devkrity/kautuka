@@ -573,15 +573,23 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     isProbe ? "probe" : null));
             }
 
-            arguments = ConnectorContainerSpecBuilder.BuildRun(
-                connector,
-                containerName,
-                effectiveExecutionContext,
-                ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
-                persistent: false,
-                allocatedIp: allocatedIp,
-                purpose: isProbe ? "probe" : null,
-                compatProfile: compatProfile);
+            try
+            {
+                arguments = BuildConnectorWorkloadRunArguments(
+                    connector,
+                    containerName,
+                    effectiveExecutionContext,
+                    workspaceContext,
+                    persistent: false,
+                    allocatedIp: allocatedIp,
+                    purpose: isProbe ? "probe" : null,
+                    compatProfile: compatProfile);
+            }
+            catch
+            {
+                workloadRegistry?.Deregister(allocatedIp, containerName);
+                throw;
+            }
         }
         else
         {
@@ -592,7 +600,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 effectiveExecutionContext,
                 ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
                 cancellationToken,
-                isProbe: isProbe).ConfigureAwait(false);
+                isProbe: isProbe,
+                identityContext: workspaceContext).ConfigureAwait(false);
             arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
         }
 
@@ -828,7 +837,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
         CancellationToken cancellationToken,
-        bool isProbe = false)
+        bool isProbe = false,
+        ContainerContext? identityContext = null)
     {
         await using var connectorLease = (await connectorLocks
             .AcquireAsync(runtimeKey, cancellationToken)
@@ -851,7 +861,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
             connector,
-            workspaceContext,
+            identityContext ?? workspaceContext,
             isProbe ? "probe" : null);
         string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
             .AllocateNextIp(workloadRegistry);
@@ -876,11 +886,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 isProbe ? "probe" : null));
         }
 
-        var runArgs = ConnectorContainerSpecBuilder.BuildRun(
+        var runArgs = BuildConnectorWorkloadRunArguments(
             connector,
             containerName,
             executionContext,
-            workspaceContext,
+            identityContext ?? workspaceContext,
             persistent: true,
             allocatedIp: allocatedIp,
             purpose: isProbe ? "probe" : null,
@@ -1270,6 +1280,26 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         return null;
     }
+
+    internal static List<string> BuildConnectorWorkloadRunArguments(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string containerName,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? identityContext,
+        bool persistent,
+        string allocatedIp,
+        string? purpose = null,
+        NetworkAccess.ImageCompatProfile? compatProfile = null)
+        => ConnectorContainerSpecBuilder.BuildRun(
+            connector,
+            containerName,
+            executionContext,
+            ResolveMountedWorkspace(executionContext, identityContext),
+            persistent,
+            allocatedIp,
+            purpose,
+            compatProfile,
+            identityContext);
 
     private static string BuildContainerName(
         string connectorId,

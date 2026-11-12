@@ -3,6 +3,7 @@ using System.Reflection;
 
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
@@ -271,6 +272,105 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.StartsWith(ConnectorContainerSpecBuilder.WorkloadNetworkName, arguments[networkIndex + 1], StringComparison.Ordinal);
         Assert.DoesNotContain("/Users/username/Desktop:/opt/kautuka/hostpaths/0:ro", arguments, StringComparer.Ordinal);
         Assert.Contains("/Users/username/Desktop", arguments, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void IsolatedAgentAndProbeRunsKeepIdentityWhenWorkspaceMountIsFilteredOut()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = new(
+            "connector-one",
+            "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+            "node",
+            ["server.js"],
+            true,
+            false,
+            null,
+            null,
+            [],
+            30,
+            600);
+        ContainerContext agentContext = CreateWorkspaceContext();
+
+        List<string> agentArgs = WorkspaceContainerConnectorExecutionService.BuildConnectorWorkloadRunArguments(
+            connector,
+            "isolated-agent",
+            WorkspaceMcpExecutionContext.Isolated,
+            agentContext,
+            persistent: false,
+            allocatedIp: "10.247.1.20");
+
+        Assert.Contains("io.kautuka.user=test-user", agentArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.agent=test-agent", agentArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain("--volume", agentArgs, StringComparer.Ordinal);
+
+        var probeContext = new ContainerContext(
+            "user",
+            "test-user",
+            "test-user",
+            Path.GetTempPath(),
+            "/workspace",
+            "image@sha256:digest",
+            1,
+            "512m",
+            30,
+            [],
+            new Dictionary<string, string>());
+        List<string> probeArgs = WorkspaceContainerConnectorExecutionService.BuildConnectorWorkloadRunArguments(
+            connector,
+            "isolated-probe",
+            WorkspaceMcpExecutionContext.Isolated,
+            probeContext,
+            persistent: false,
+            allocatedIp: "10.247.1.21",
+            purpose: "probe");
+
+        Assert.Contains("io.kautuka.user=test-user", probeArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain(probeArgs, static arg => arg.StartsWith("io.kautuka.agent=", StringComparison.Ordinal));
+        Assert.Contains("io.kautuka.purpose=probe", probeArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain("--volume", probeArgs, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public async Task IsolatedProbeWithoutUserFailsBeforeRegisteringWorkload()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-probe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var registry = new Kautuka.NetworkAccessController.WorkloadRegistry();
+            var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Podman must not run without identity."));
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                registry);
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "connector-one",
+                "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+                "",
+                [],
+                true,
+                false,
+                null,
+                null,
+                [],
+                30,
+                600);
+
+            var result = await service.ProbeConnectorAsync(connector, 15, CancellationToken.None);
+
+            Assert.False(result.Ok);
+            Assert.Equal(WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, result.UnavailabilityReason);
+            Assert.Contains("user identity is required", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, registry.Count);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
     }
 
     [Fact]

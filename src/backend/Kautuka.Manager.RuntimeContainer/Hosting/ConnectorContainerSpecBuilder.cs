@@ -62,13 +62,14 @@ internal static class ConnectorContainerSpecBuilder
         bool persistent,
         string allocatedIp,
         string? purpose = null,
-        ImageCompatProfile? compatProfile = null)
+        ImageCompatProfile? compatProfile = null,
+        ContainerContext? identityContext = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
 
-        ConnectorIdentity identity = ResolveIdentity(connector, workspaceContext, purpose);
+        ConnectorIdentity identity = ResolveIdentity(connector, identityContext ?? workspaceContext, purpose);
         string userId = identity.UserId;
         string agentId = identity.AgentId;
 
