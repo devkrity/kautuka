@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text.Json;
 
@@ -7,62 +9,168 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging.Abstractions;
 
 using ModelContextProtocol.Client;
 
+using ManagerSandboxRuntimeDefinition = Kautuka.Manager.RuntimeContainer.Configuration.SandboxRuntimeDefinition;
+using ManagerWorkspaceDefinition = Kautuka.Manager.RuntimeContainer.Configuration.WorkspaceDefinition;
+
 namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
     [Fact]
-    public async Task V7_18_EphemeralWorkloadIsVerifiedAndDeregisteredAtTransportEnd()
+    public async Task V7_48_OverlappingCallsVerifyAndDeregisterTheirOwnEphemeralWorkloads()
     {
-        const string connectorId = "ephemeral-test";
-        const string ip = "10.247.1.90";
-        var podmanCalls = new List<string[]>();
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        const string connectorId = "overlap-ephemeral-test";
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-overlap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        string server = "import socket,sys\ns=socket.create_connection(('127.0.0.1'," + port + "))\ns.sendall(b'R')\ns.recv(1)\ns.close()\nimport json\n" +
+            "for line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'ok'}],'isError':False}}),flush=True)\n";
+        var inspectedNames = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var pidIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+        int nextPid = 4242;
+        var registry = new WorkloadRegistry();
         var runner = new PodmanCommandRunner((args, _) =>
         {
-            podmanCalls.Add([.. args]);
-            return Task.FromResult(new PodmanCommandResult(0, "{}", string.Empty, ProcessTerminationReason.Completed));
+            if (args[0] == "inspect")
+            {
+                inspectedNames.Add(args[1]);
+                RegistryEntry entry = Assert.Single(registry.GetAll(), item => item.ContainerId == args[1]);
+                int pid = Interlocked.Increment(ref nextPid);
+                pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
+                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args[0] == "unshare")
+            {
+                string ip = pidIps[args[3]];
+                string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", ip, StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, nft, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
         });
-        var registry = new WorkloadRegistry();
+        var desired = new WorkspaceDesiredStateStore();
+        string ownerWorkspace = Path.Combine(workspaceRoot, "users", "u", "agents", "a");
+        Directory.CreateDirectory(ownerWorkspace);
+        var workspace = new ContainerContext("agent", "a", "u", ownerWorkspace, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        var connector = new WorkspaceMcpContainerConnectorDefinition(connectorId, "localhost/test:latest", "", [], true, false, null, null, [], 30, 600);
         await using var service = new WorkspaceContainerConnectorExecutionService(
-            new WorkspaceDesiredStateStore(), runner,
+            desired, runner,
             new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
             new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
             workloadRegistry: registry,
-            postStartVerifier: new WorkloadPostStartVerifier(runner));
+            postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            stdioCommand: "python3",
+            stdioArgumentsPrefix: ["-u", "-c", server]);
 
-        MethodInfo buildName = typeof(WorkspaceContainerConnectorExecutionService)
-            .GetMethod("BuildContainerName", BindingFlags.Static | BindingFlags.NonPublic)!;
-        string containerName = (string)buildName.Invoke(null, [connectorId, WorkspaceMcpExecutionContext.Isolated, null])!;
-        registry.Register(new RegistryEntry(ip, null, null, containerName, "connector", connectorId, "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+        try
+        {
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], []);
+            Task<(bool Ok, string? Result, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> first = service.CallToolAsync(connectorId, null, "echo", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, CancellationToken.None);
+            Task<(bool Ok, string? Result, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> second = service.CallToolAsync(connectorId, null, "echo", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, CancellationToken.None);
+            Task<(bool Ok, string? Result, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)[]> calls = Task.WhenAll(first, second);
 
-        Type? workloadType = typeof(WorkspaceContainerConnectorExecutionService).GetNestedType("EphemeralWorkload", BindingFlags.NonPublic);
-        Assert.NotNull(workloadType);
-        ConstructorInfo workloadConstructor = workloadType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .Single(static constructor => constructor.GetParameters().Length == 2);
-        object workload = workloadConstructor.Invoke([ip, null]);
-        object? workloadMap = typeof(WorkspaceContainerConnectorExecutionService)
-            .GetField("ephemeralWorkloads", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service);
-        Assert.NotNull(workloadMap);
-        _ = workloadMap.GetType().GetMethod("TryAdd")!.Invoke(workloadMap, [containerName, workload]);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            Task<TcpClient> firstConnection = listener.AcceptTcpClientAsync(timeout.Token).AsTask();
+            if (await Task.WhenAny(calls, firstConnection) == calls)
+            {
+                var earlyResults = await calls;
+                Assert.All(earlyResults, result => Assert.True(result.Ok, result.FailureMessage));
+                Assert.Fail("The MCP subprocesses completed without reaching the overlap barrier.");
+            }
+            using TcpClient clientA = await firstConnection;
+            using TcpClient clientB = await listener.AcceptTcpClientAsync(timeout.Token);
+            RegistryEntry[] concurrentEntries = [.. registry.GetAll()];
+            Assert.Equal(2, concurrentEntries.Length);
+            Assert.Equal(2, concurrentEntries.Select(static entry => entry.ContainerId).Distinct(StringComparer.Ordinal).Count());
+            Assert.All(concurrentEntries, entry =>
+            {
+                Assert.Equal("u", entry.UserId);
+                Assert.Equal("a", entry.AgentId);
+            });
+            foreach (TcpClient client in new[] { clientA, clientB })
+            {
+                NetworkStream stream = client.GetStream();
+                _ = await stream.ReadAsync(new byte[1], timeout.Token);
+            }
+            foreach (TcpClient client in new[] { clientA, clientB })
+            {
+                await client.GetStream().WriteAsync(new byte[] { 1 }, timeout.Token);
+            }
 
-        MethodInfo verify = typeof(WorkspaceContainerConnectorExecutionService)
-            .GetMethod("VerifyEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Task verifyTask = (Task)verify.Invoke(service, [connectorId, WorkspaceMcpExecutionContext.Isolated, null, CancellationToken.None])!;
-        await Assert.ThrowsAsync<InvalidOperationException>(() => verifyTask);
-        Assert.Contains(podmanCalls, static call => call[0] == "inspect");
+            var results = await calls;
+            Assert.All(results, result => Assert.True(result.Ok, result.FailureMessage));
+            Assert.Equal(2, inspectedNames.Count);
+            Assert.Equal(2, inspectedNames.Distinct(StringComparer.Ordinal).Count());
+            Assert.Empty(registry.GetAll());
+        }
+        finally
+        {
+            listener.Stop();
+            Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
 
-        // Model the transport process still being registered at disposal time, independently of verifier failure cleanup.
-        registry.Register(new RegistryEntry(ip, null, null, containerName, "connector", connectorId, "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
-        MethodInfo complete = typeof(WorkspaceContainerConnectorExecutionService)
-            .GetMethod("CompleteEphemeralWorkload", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Assert.True((bool)complete.Invoke(service, [connectorId, WorkspaceMcpExecutionContext.Isolated, null])!);
-        Assert.Empty(registry.GetAll());
+    [Fact]
+    public async Task V7_18_EphemeralCallRefusesWhenPostStartVerifierIsUnavailable()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        const string connectorId = "unverified-ephemeral-test";
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-unverified-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+        var registry = new WorkloadRegistry();
+        var desired = new WorkspaceDesiredStateStore();
+        string ownerWorkspace = Path.Combine(workspaceRoot, "users", "u", "agents", "a");
+        Directory.CreateDirectory(ownerWorkspace);
+        var workspace = new ContainerContext("agent", "a", "u", ownerWorkspace, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        var connector = new WorkspaceMcpContainerConnectorDefinition(connectorId, "localhost/test:latest", "", [], true, false, null, null, [], 30, 600);
+        _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+            [workspace], [connector], []);
+        const string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'called'}],'isError':False}}),flush=True)\n";
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            desired, runner, new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
+            workloadRegistry: registry,
+            postStartVerifier: null,
+            stdioCommand: "python3",
+            stdioArgumentsPrefix: ["-u", "-c", server]);
+
+        try
+        {
+            var result = await service.CallToolAsync(connectorId, null, "echo", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, CancellationToken.None);
+            Assert.False(result.Ok);
+            Assert.Contains("post-start verifier is unavailable", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(registry.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(workspaceRoot, recursive: true);
+        }
     }
 
     [Theory]

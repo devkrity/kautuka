@@ -269,7 +269,7 @@ public sealed class WorkloadPostStartVerifier
             }
 
             stopwatch.Stop();
-            return new WorkloadVerificationResult(containerId, allocatedIp, true, stopwatch.ElapsedMilliseconds);
+            return new WorkloadVerificationResult(registeredId, allocatedIp, true, stopwatch.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
