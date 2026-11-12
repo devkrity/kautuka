@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
@@ -71,11 +73,74 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
         IReadOnlyList<string> renderedEnvoyRanges = NetworkAddressClassifier.ExtractRangesFromEnvoyFilterYaml(renderedEnvoyConfig);
         Assert.Equal(goldenNonPublicV4, renderedEnvoyRanges);
 
+        IReadOnlyList<IReadOnlyList<string>> renderedEnvoyFilters = ExtractAllResolvedAddressFilters(renderedEnvoyConfig);
+        Assert.Equal(4, renderedEnvoyFilters.Count);
+        Assert.Equal(goldenNonPublicV4, renderedEnvoyFilters[0]);
+        string[] expectedLanRanges =
+        [
+            .. goldenNonPublicV4.Where(static cidr =>
+                cidr is not "10.0.0.0/8" and not "172.16.0.0/12" and not "192.168.0.0/16"),
+            NetworkAddressClassifier.WorkloadSubnetCidr,
+        ];
+        Assert.Equal(expectedLanRanges, renderedEnvoyFilters[1]);
+        Assert.Equal(goldenNonPublicV4, renderedEnvoyFilters[2]);
+        Assert.Equal(expectedLanRanges, renderedEnvoyFilters[3]);
+
         // Negative control (.NC): remove one range from the Envoy rendering only -> golden comparison fails
         string incompleteEnvoyYaml = NetworkAddressClassifier.RenderEnvoyResolvedAddressFilterYaml(
             NetworkAddressClassifier.NonPublicV4.Take(NetworkAddressClassifier.NonPublicV4.Count - 1));
         IReadOnlyList<string> incompleteEnvoyRanges = NetworkAddressClassifier.ExtractRangesFromEnvoyFilterYaml(incompleteEnvoyYaml);
         Assert.NotEqual(goldenNonPublicV4, incompleteEnvoyRanges);
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> ExtractAllResolvedAddressFilters(string yaml)
+    {
+        string[] lines = yaml.Split(['\r', '\n'], StringSplitOptions.None);
+        var filters = new List<IReadOnlyList<string>>();
+        for (int index = 0; index < lines.Length; index++)
+        {
+            string line = lines[index];
+            if (!line.Trim().Equals("resolved_address_filter:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int filterIndent = line.Length - line.TrimStart().Length;
+            var ranges = new List<string>();
+            string? addressPrefix = null;
+            for (int next = index + 1; next < lines.Length; next++)
+            {
+                string candidate = lines[next];
+                if (string.IsNullOrWhiteSpace(candidate))
+                {
+                    continue;
+                }
+
+                int indent = candidate.Length - candidate.TrimStart().Length;
+                if (indent <= filterIndent)
+                {
+                    break;
+                }
+
+                Match address = Regex.Match(candidate.Trim(), "^- address_prefix: (?<address>[^\\s]+)$", RegexOptions.CultureInvariant);
+                if (address.Success)
+                {
+                    addressPrefix = address.Groups["address"].Value;
+                    continue;
+                }
+
+                Match prefixLength = Regex.Match(candidate.Trim(), "^prefix_len: (?<length>\\d+)$", RegexOptions.CultureInvariant);
+                if (prefixLength.Success && addressPrefix is not null)
+                {
+                    ranges.Add(addressPrefix + "/" + prefixLength.Groups["length"].Value);
+                    addressPrefix = null;
+                }
+            }
+
+            filters.Add(ranges);
+        }
+
+        return filters;
     }
 
     [Fact]

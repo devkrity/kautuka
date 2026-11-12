@@ -921,7 +921,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.True(pubSni.OpenInternetBadge);
 
             // 2. Every NonPublicV4 representative address is denied by the controller (not_public / sinkhole_plain)
-            // and is covered by both the Envoy resolved_address_filter and nft private_reject renderers.
+            // This loop checks the controller decision layer. Rendered Envoy and nft artifacts are asserted separately in U8.
             string[] nonPublicSamples =
             [
                 "10.0.0.1",

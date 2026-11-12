@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -103,8 +104,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             // Stop A (leaving stale socket on disk if not unlinked), then start B -> B acquires lock and replaces stale socket
             await hostA.StopAsync(TestContext.Current.CancellationToken);
 
-            // Create a stale socket placeholder file after A stopped
-            await File.WriteAllTextAsync(socketPath, "stale", TestContext.Current.CancellationToken);
+            // Leave a real orphaned AF_UNIX socket by killing its owning child process.
+            using (var orphanOwner = StartOrphanSocketOwner(socketPath))
+            {
+                await WaitForSocketAsync(orphanOwner, socketPath, TestContext.Current.CancellationToken);
+                orphanOwner.Kill(entireProcessTree: true);
+                await orphanOwner.WaitForExitAsync(TestContext.Current.CancellationToken);
+            }
             Assert.True(File.Exists(socketPath));
 
             await hostB.StartAsync(TestContext.Current.CancellationToken);
@@ -175,15 +181,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                 Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, sockMode);
                 Assert.False(HasWorldOrGroupPermissions(sockMode));
 
-                // C3.NC: Setting mode 0777 on a test file is caught by HasWorldOrGroupPermissions.
-                string ncFile = Path.Combine(tempDir, "nc-world-writable");
-                await File.WriteAllTextAsync(ncFile, "nc", TestContext.Current.CancellationToken);
+                // C3.NC: weakening the actual listener socket permissions is caught by the same check.
                 File.SetUnixFileMode(
-                    ncFile,
+                    socketPath,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
                     UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
                     UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
-                UnixFileMode ncMode = File.GetUnixFileMode(ncFile);
+                UnixFileMode ncMode = File.GetUnixFileMode(socketPath);
                 Assert.True(HasWorldOrGroupPermissions(ncMode));
             }
             else
@@ -199,6 +203,29 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
         {
             TryDeleteDir(tempDir);
         }
+    }
+
+    private static Process StartOrphanSocketOwner(string socketPath)
+    {
+        string quotedSocketPath = socketPath.Replace("'", "''", StringComparison.Ordinal);
+        string script = $"$s=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::Unix,[Net.Sockets.SocketType]::Stream,[Net.Sockets.ProtocolType]::Unspecified);$s.Bind([Net.Sockets.UnixDomainSocketEndPoint]::new('{quotedSocketPath}'));$s.Listen(1);Write-Output ready;Start-Sleep -Seconds 60";
+        var start = new ProcessStartInfo("pwsh.exe") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add(script);
+        return Process.Start(start) ?? throw new InvalidOperationException("Could not start orphan socket owner.");
+    }
+
+    private static async Task WaitForSocketAsync(Process process, string socketPath, CancellationToken cancellationToken)
+    {
+        Task<string?> ready = process.StandardOutput.ReadLineAsync(cancellationToken).AsTask();
+        Task timeout = Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+        if (await Task.WhenAny(ready, timeout) != ready)
+        {
+            throw new TimeoutException("Child process did not create its Unix socket.");
+        }
+        Assert.Equal("ready", await ready);
+        Assert.True(File.Exists(socketPath));
     }
 
     [Fact]
