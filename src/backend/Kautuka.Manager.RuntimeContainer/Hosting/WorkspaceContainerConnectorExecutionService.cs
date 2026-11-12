@@ -275,13 +275,21 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             MarkConnectorFailed(connectorId, "probe-startup-failed");
             logger.LogWarning(ex, "[ContainerConnector] Container startup failed for connector '{ConnectorId}'", connectorId);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, DescribeFailure(ex));
+            string failureMessage = await DescribeFailureAsync(
+                ex,
+                ResolveFailureContainerId(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext, ephemeralWorkload),
+                CancellationToken.None).ConfigureAwait(false);
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, failureMessage);
         }
         catch (Exception ex)
         {
             MarkConnectorFailed(connectorId, "probe-failed");
             logger.LogError(ex, "[ContainerConnector] Unexpected error probing connector '{ConnectorId}'", connectorId);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, DescribeFailure(ex));
+            string failureMessage = await DescribeFailureAsync(
+                ex,
+                ResolveFailureContainerId(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext, ephemeralWorkload),
+                CancellationToken.None).ConfigureAwait(false);
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
         }
         finally
         {
@@ -369,9 +377,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             MarkConnectorFailed(connectorId, "list-failed");
             logger.LogError(ex, "[ContainerConnector] Error listing tools from connector '{ConnectorId}'", connectorId);
-            string failureMessage = connector is null
-                ? DescribeFailure(ex)
-                : DescribeFailure(ex);
+            string failureMessage = await DescribeFailureAsync(
+                ex,
+                connector is null ? null : ResolveFailureContainerId(connectorId, executionContext, workspaceContext, ephemeralWorkload),
+                CancellationToken.None).ConfigureAwait(false);
             return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
         }
         finally
@@ -459,9 +468,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             MarkConnectorFailed(connectorId, "call-failed");
             logger.LogError(ex, "[ContainerConnector] Error calling tool '{ToolName}' on connector '{ConnectorId}'", toolName, connectorId);
-            string failureMessage = connector is null
-                ? DescribeFailure(ex)
-                : DescribeFailure(ex);
+            string failureMessage = await DescribeFailureAsync(
+                ex,
+                connector is null ? null : ResolveFailureContainerId(connectorId, executionContext, workspaceContext, ephemeralWorkload),
+                CancellationToken.None).ConfigureAwait(false);
             return (false, null, WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
         }
         finally
@@ -511,6 +521,59 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         return string.Join(" | ", parts);
+    }
+
+    private async Task<string> DescribeFailureAsync(Exception exception, string? containerId, CancellationToken cancellationToken)
+    {
+        string failure = DescribeFailure(exception);
+        if (string.IsNullOrWhiteSpace(containerId)
+            || (!failure.Contains("server shut down unexpectedly", StringComparison.OrdinalIgnoreCase)
+                && !failure.Contains("server process exited unexpectedly", StringComparison.OrdinalIgnoreCase)))
+        {
+            return failure;
+        }
+
+        try
+        {
+            PodmanCommandResult logs = await podmanCommandRunner
+                .RunAsync(["logs", "--tail", "100", containerId], 10, cancellationToken)
+                .ConfigureAwait(false);
+            string details = string.Join("\n", new[] { logs.StdOut, logs.StdErr }
+                .Where(static text => !string.IsNullOrWhiteSpace(text)))
+                .Trim();
+            if (logs.ExitCode == 0 && !string.IsNullOrWhiteSpace(details))
+            {
+                const int maxLogCharacters = 8192;
+                if (details.Length > maxLogCharacters)
+                {
+                    details = details[^maxLogCharacters..];
+                }
+
+                return failure + " | Container logs: " + details;
+            }
+        }
+        catch (Exception logException)
+        {
+            logger.LogDebug(logException, "Could not read Podman logs for failed connector container '{ContainerId}'", containerId);
+        }
+
+        return failure;
+    }
+
+    private static string? ResolveFailureContainerId(
+        string connectorId,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        EphemeralWorkload? ephemeralWorkload)
+    {
+        if (ephemeralWorkload is not null)
+        {
+            return ephemeralWorkload.ContainerName;
+        }
+
+        return NormalizeExecutionContext(executionContext) == WorkspaceMcpExecutionContext.AgentSandbox
+            ? null
+            : BuildContainerName(connectorId, executionContext, workspaceContext);
     }
 
     private async Task<TransportLaunch> CreateTransportAsync(

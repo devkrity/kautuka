@@ -24,6 +24,93 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
     [Fact]
+    public async Task V7_41_ConnectorStartupFailureIncludesContainerLogs_WithNegativeControl()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("The stdio process failure reproduction uses a Linux Python process.");
+        }
+
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-connector-diagnostics-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            const string diagnostic = "synthetic connector startup diagnostic from Podman";
+            const string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/list': sys.exit(7)\n";
+            var registry = new WorkloadRegistry();
+            var commands = new List<string[]>();
+            var pidIps = new Dictionary<string, string>(StringComparer.Ordinal);
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add([.. args]);
+                if (args[0] == "run")
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    RegistryEntry entry = Assert.Single(registry.GetAll());
+                    const int pid = 4242;
+                    pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
+                    string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                    return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "unshare")
+                {
+                    string ip = pidIps[args[3]];
+                    string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
+                        .Replace("{{IP}}", ip, StringComparison.Ordinal);
+                    return Task.FromResult(new PodmanCommandResult(0, nft, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "logs")
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, diagnostic, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+            var desired = new WorkspaceDesiredStateStore();
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "diagnostic-probe",
+                "localhost/test:latest",
+                string.Empty,
+                [],
+                true,
+                false,
+                null,
+                null,
+                [],
+                30,
+                600);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired,
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                workloadRegistry: registry,
+                postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+                stdioCommand: "python3",
+                stdioArgumentsPrefix: ["-u", "-c", server]);
+
+            var result = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "user-a");
+
+            Assert.False(result.Ok);
+            Assert.Contains(diagnostic, result.FailureMessage, StringComparison.Ordinal);
+            Assert.Contains(commands, static args => args[0] == "logs");
+            Assert.Empty(registry.GetAll());
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task V7_45_BrakedProbeIsRefusedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-launch-gate-" + Guid.NewGuid().ToString("N"));
