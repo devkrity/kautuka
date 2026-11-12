@@ -9,6 +9,9 @@ using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 using Kautuka.Protos;
 
 using Microsoft.Extensions.Configuration;
@@ -20,6 +23,102 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class McpAgentToolProviderTests
 {
+    [Fact]
+    public async Task InternalParserBoundToAgentRemainsDenyAllAndCannotCreateApprovalCard_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-parser-agent-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(policyStore, registry);
+            var grpcService = new CapturingWorkspaceGrpcService();
+            var provider = new McpAgentToolProvider(
+                new StaticPlatformConfigurationProvider(new PlatformConfiguration
+                {
+                    McpServers =
+                    [
+                        new McpServerDefinition
+                        {
+                            Id = "markitdown",
+                            Name = "MarkItDown",
+                            Scope = GatewayOwnershipScopes.User,
+                            OwnerUserId = "user-alpha",
+                            Transport = McpTransport.Container,
+                            ContainerImage = "docker.io/mcp/markitdown@sha256:" + new string('a', 64),
+                            Enabled = true,
+                            IsInternalSystemConnector = true,
+                        },
+                    ],
+                }),
+                CreateNoOpCredentialResolver(),
+                new CapturingMcpHttpClientFactory(),
+                grpcService,
+                new ToolExecutionPolicyService(),
+                NullLogger<McpAgentToolProvider>.Instance);
+
+            var agent = new AgentDefinition
+            {
+                Id = "agent-alpha",
+                Name = "Agent Alpha",
+                Sandbox = new AgentSandboxDefinition { Enabled = false },
+                McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "markitdown", Context = "Parse local files" }],
+            };
+            _ = await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-alpha"), CancellationToken.None);
+
+            WorkspaceMcpContainerCallRequest request = Assert.IsType<WorkspaceMcpContainerCallRequest>(grpcService.LastListToolsRequest);
+            Assert.True(request.AllowInternalSystemConnector);
+            Assert.Equal("user-alpha::markitdown", request.ConnectorId);
+            Assert.NotNull(request.WorkspaceContext);
+            Assert.Equal("agent", request.WorkspaceContext.ScopeType);
+            Assert.Equal("agent-alpha", request.WorkspaceContext.ScopeId);
+            Assert.Equal("user-alpha", request.WorkspaceContext.UserId);
+
+            ContainerContext launchContext = new(
+                request.WorkspaceContext.ScopeType,
+                request.WorkspaceContext.ScopeId,
+                request.WorkspaceContext.UserId,
+                request.WorkspaceContext.HostWorkspacePath,
+                request.WorkspaceContext.ContainerWorkspacePath,
+                request.WorkspaceContext.Image,
+                request.WorkspaceContext.DefaultTimeoutSeconds,
+                "512m",
+                30,
+                [],
+                new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                request.ConnectorId, "docker.io/mcp/markitdown@sha256:" + new string('a', 64),
+                string.Empty, [], true, true, null, null, [], 30, 600);
+            ConnectorContainerSpecBuilder.ConnectorIdentity identity =
+                ConnectorContainerSpecBuilder.ResolveIdentity(connector, launchContext, purpose: null);
+            Assert.Equal("deny-all", identity.Egress);
+            Assert.Equal("system", identity.Kind);
+            Assert.Equal("user-alpha", identity.UserId);
+
+            List<string> runArguments = ConnectorContainerSpecBuilder.BuildRun(
+                connector, "internal-markitdown", WorkspaceMcpExecutionContext.Isolated, launchContext,
+                persistent: true, allocatedIp: "10.247.1.44");
+            Assert.Contains("io.kautuka.user=user-alpha", runArguments, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.egress=deny-all", runArguments, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.kind=system", runArguments, StringComparer.Ordinal);
+
+            registry.Register(new RegistryEntry(
+                "10.247.1.44", identity.UserId, null, "internal-markitdown", identity.Kind,
+                request.ConnectorId, "isolated", identity.Systemwide, identity.Egress, "none", null,
+                DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.44", "93.184.216.34", 443, "parser-egress.example", true));
+            Assert.False(decision.Allowed);
+            Assert.Equal("deny_all", decision.Reason);
+            Assert.Empty(policyStore.ListRequests(new NetworkAccessActor("admin-1", IsAdmin: true)).Requests);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public void PersonalHttpOverrideDoesNotAllowPrivateConnectForASystemConnector()
     {

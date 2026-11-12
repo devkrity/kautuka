@@ -40,7 +40,7 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
-    public void SystemwideConnectorInstancesCarryUserIdentityAndUseSeparateContainers()
+    public void InternalConnectorInstancesCarryUserIdentityButRemainDenyAll()
     {
         WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
         {
@@ -61,8 +61,10 @@ public sealed class ConnectorContainerSpecBuilderTests
         Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.systemwide=true", alphaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.systemwide=true", betaArgs, StringComparer.Ordinal);
-        Assert.Contains("io.kautuka.kind=connector", alphaArgs, StringComparer.Ordinal);
-        Assert.Contains("io.kautuka.egress=normal", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.kind=system", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.kind=system", betaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.egress=deny-all", alphaArgs, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.egress=deny-all", betaArgs, StringComparer.Ordinal);
         Assert.NotEqual(
             InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userAlpha),
             InvokeBuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, userBeta));

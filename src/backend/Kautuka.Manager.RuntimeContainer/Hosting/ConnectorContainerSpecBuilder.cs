@@ -22,8 +22,8 @@ internal static class ConnectorContainerSpecBuilder
 
     /// <summary>
     /// Single source of truth for connector workload identity (v7-22). The owner comes only from the
-    /// workspace context; it is never guessed from the connector name. A non-internal connector with
-    /// no owner is not systemwide and gets deny-all egress.
+    /// workspace context; it is never guessed from the connector name. Internal system connectors remain
+    /// deny-all even when a user context is present; a non-internal connector with no owner also gets deny-all.
     /// </summary>
     internal static ConnectorIdentity ResolveIdentity(
         WorkspaceMcpContainerConnectorDefinition connector,
@@ -42,8 +42,8 @@ internal static class ConnectorContainerSpecBuilder
                 userId,
                 string.Empty,
                 true,
-                string.IsNullOrWhiteSpace(userId) ? "deny-all" : "normal",
-                string.IsNullOrWhiteSpace(userId) ? "system" : "connector");
+                "deny-all",
+                "system");
         }
 
         if (string.IsNullOrWhiteSpace(userId))
