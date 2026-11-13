@@ -489,6 +489,133 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V7_18_EphemeralToolListingFailureCleansUpBeforeUseOrAfterCancellation_WithNegativeControl(bool cancelWhileListing)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("The ephemeral stdio reproduction uses a Linux Python process.");
+        }
+
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-list-failure-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        string requestLogPath = Path.Combine(workspaceRoot, "mcp-methods.log");
+        string server = "import json,sys,time\nlog_path=" + JsonSerializer.Serialize(requestLogPath) + "\n" +
+            "for line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n open(log_path,'a').write(m+'\\n')\n" +
+            " if m=='server/discover': print(json.dumps({'jsonrpc':'2.0','id':i,'error':{'code':-32601,'message':'Method not found'}}),flush=True)\n" +
+            " elif m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n" +
+            " elif m=='tools/list':\n" + (cancelWhileListing ? "  time.sleep(60)\n" : "  print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n");
+        var registry = new WorkloadRegistry();
+        var commands = new System.Collections.Concurrent.ConcurrentBag<string[]>();
+        var pidIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+        int nextPid = 7000;
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            if (args[0] == "run")
+            {
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args[0] == "inspect")
+            {
+                if (!cancelWhileListing)
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic inspect failure", ProcessTerminationReason.NonZeroExit));
+                }
+
+                RegistryEntry entry = Assert.Single(registry.GetAll());
+                int pid = Interlocked.Increment(ref nextPid);
+                pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
+                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args[0] == "unshare")
+            {
+                if (args.Contains("cat", StringComparer.Ordinal))
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                string ip = pidIps[args[3]];
+                string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", ip, StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, nft, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var desired = new WorkspaceDesiredStateStore();
+        const string connectorId = "ephemeral-list-cleanup-test";
+        var connector = new WorkspaceMcpContainerConnectorDefinition(connectorId, "localhost/test:latest", "", [], true, false, null, null, [], 30, 600);
+        string ownerWorkspace = Path.Combine(workspaceRoot, "users", "user-a", "agents", "agent-a");
+        Directory.CreateDirectory(ownerWorkspace);
+        var workspace = new ContainerContext("agent", "agent-a", "user-a", ownerWorkspace, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+            [workspace], [connector], []);
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            desired,
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
+            workloadRegistry: registry,
+            postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            stdioCommand: "python3",
+            stdioArgumentsPrefix: ["-u", "-c", server]);
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> listing = service.ListToolsAsync(
+                connectorId, null, 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, timeout.Token);
+            if (cancelWhileListing)
+            {
+                bool reachedList = false;
+                while (!timeout.IsCancellationRequested && !reachedList)
+                {
+                    if (File.Exists(requestLogPath))
+                    {
+                        string[] observedMethods = await File.ReadAllLinesAsync(requestLogPath, TestContext.Current.CancellationToken);
+                        reachedList = observedMethods.Contains("tools/list", StringComparer.Ordinal);
+                    }
+
+                    if (!reachedList)
+                    {
+                        await Task.Delay(20, TestContext.Current.CancellationToken);
+                    }
+                }
+
+                Assert.True(reachedList, "The connector did not receive tools/list before the safety timeout.");
+                await timeout.CancelAsync();
+            }
+
+            var result = await listing;
+            Assert.False(result.Ok);
+            Assert.Contains(commands, static args => args[0] == "inspect");
+            Assert.Empty(registry.GetAll());
+            string[] methods = File.Exists(requestLogPath)
+                ? await File.ReadAllLinesAsync(requestLogPath, TestContext.Current.CancellationToken)
+                : [];
+            if (cancelWhileListing)
+            {
+                Assert.Contains("tools/list", methods, StringComparer.Ordinal);
+            }
+            else
+            {
+                Assert.Equal(["server/discover", "initialize", "notifications/initialized"], methods);
+            }
+        }
+        finally
+        {
+            Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
+
+    [Theory]
     [InlineData("node", "abcdef0123456789", "localhost/kautuka-mcpb-node:")]
     [InlineData("UV", "0123deadbeef", "localhost/kautuka-mcpb-uv:")]
     public void BuildLocalImageReferenceUsesRecipeVersionedContentAddressedLocalTag(string serverType, string digest, string expectedPrefix)
