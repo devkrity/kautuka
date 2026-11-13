@@ -54,6 +54,52 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_21_LiveModeUsesTheProductionTopologyPath()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        CompilationUnitSyntax source = CSharpSyntaxTree.ParseText(
+            await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken),
+            cancellationToken: TestContext.Current.CancellationToken).GetCompilationUnitRoot(TestContext.Current.CancellationToken);
+        MethodDeclarationSyntax main = source.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Single(method => method.Identifier.ValueText == "Main");
+        string[] calls = main.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Select(invocation => invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+                IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                _ => string.Empty,
+            })
+            .ToArray();
+
+        Assert.DoesNotContain("RunLiveFedoraAcceptanceAsync", calls, StringComparer.Ordinal);
+        Assert.True(calls.Count(call => string.Equals(call, "RunProductionTopologyProofAsync", StringComparison.Ordinal)) >= 2,
+            "Both --live and --prod-run must use the production topology acceptance path.");
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_21_LanFixtureUsesTheHostNetworkAddress()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+        int productionStart = source.IndexOf("private static async Task<int> RunProductionTopologyProofAsync", StringComparison.Ordinal);
+        int fixtureStart = source.IndexOf("var (lanServerRc", productionStart, StringComparison.Ordinal);
+        int fixtureEnd = source.IndexOf("int lanFixtureHealthRc", fixtureStart, StringComparison.Ordinal);
+        Assert.True(fixtureStart >= 0 && fixtureEnd > fixtureStart, "Could not locate the LAN fixture setup in the production acceptance.");
+        string fixtureSetup = source[fixtureStart..fixtureEnd];
+
+        Assert.Contains("string lanHostAddress = ResolveHostLanAddress()", source[productionStart..fixtureStart], StringComparison.Ordinal);
+        Assert.Contains("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
+        Assert.DoesNotContain("OutsideNetworkName", fixtureSetup, StringComparison.Ordinal);
+        Assert.DoesNotContain("10.248.0.4", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;

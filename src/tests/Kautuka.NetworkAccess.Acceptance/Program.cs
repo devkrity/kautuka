@@ -155,11 +155,13 @@ public static class Program
 
         if (!OperatingSystem.IsLinux())
         {
-            await Console.Error.WriteLineAsync("--live mode requires Linux with rootless Podman, nftables, nsenter, Envoy distroless-v1.40.2, and CoreDNS 1.14.6.").ConfigureAwait(false);
+            await Console.Error.WriteLineAsync("--live mode requires Linux with rootless Podman.").ConfigureAwait(false);
             return 1;
         }
 
-        return await RunLiveFedoraAcceptanceAsync(args).ConfigureAwait(false);
+        int liveIdx = Array.FindIndex(args, a => string.Equals(a, "--live", StringComparison.OrdinalIgnoreCase));
+        string? liveOutPath = liveIdx + 1 < args.Length ? args[liveIdx + 1] : null;
+        return await RunProductionTopologyProofAsync(liveOutPath).ConfigureAwait(false);
     }
 
     private static async Task<int> RunLiveFedoraAcceptanceAsync(string[] args)
@@ -521,6 +523,29 @@ public static class Program
         }
     }
 
+    private static string ResolveHostLanAddress()
+    {
+        using var socket = new System.Net.Sockets.Socket(
+            System.Net.Sockets.AddressFamily.InterNetwork,
+            System.Net.Sockets.SocketType.Dgram,
+            System.Net.Sockets.ProtocolType.Udp);
+        socket.Connect(new System.Net.IPEndPoint(System.Net.IPAddress.Parse("1.1.1.1"), 443));
+        if (socket.LocalEndPoint is not System.Net.IPEndPoint endpoint)
+        {
+            throw new InvalidOperationException("Could not determine the host's LAN address for the production LAN fixture.");
+        }
+
+        string address = endpoint.Address.ToString();
+        if (endpoint.Address.Equals(System.Net.IPAddress.Any)
+            || System.Net.IPAddress.IsLoopback(endpoint.Address)
+            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(endpoint.Address))
+        {
+            throw new InvalidOperationException($"The host LAN fixture address '{address}' is not a private IPv4 address.");
+        }
+
+        return address;
+    }
+
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -773,6 +798,7 @@ public static class Program
             "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
             1, "512m", 30, [], new Dictionary<string, string>()));
         string lanFixtureName = $"nac-lan-fixture-{Guid.NewGuid():N}"[..31];
+        string lanHostAddress = ResolveHostLanAddress();
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
@@ -926,8 +952,7 @@ public static class Program
                 "podman",
                 [
                     "run", "-d", "--name", lanFixtureName,
-                    "--network", EgressTopologyManager.OutsideNetworkName,
-                    "--ip", "10.248.0.4",
+                    "--network", "host",
                     "--volume", $"{lanCertificatePath}:/tmp/lan-fixture.crt:ro",
                     "--volume", $"{lanPrivateKeyPath}:/tmp/lan-fixture.key:ro",
                     "--volume", $"{lanAccessLogPath}:/tmp/lan-fixture-access.log:rw",
@@ -959,7 +984,7 @@ public static class Program
             }
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
-                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage, "--insecure", "--silent", "--show-error", "--max-time", "4", "https://10.248.0.4:8443/"]).ConfigureAwait(false);
+                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage, "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
@@ -982,7 +1007,7 @@ public static class Program
                 StringComparison.Ordinal);
             corefile = corefile.Replace(
                 envoyDnsBind,
-                envoyDnsBind + "\n    hosts {\n        10.248.0.5 rebind.nac.test\n        10.248.0.4 lan.nac.test\n        fallthrough\n    }",
+                envoyDnsBind + $"\n    hosts {{\n        10.248.0.5 rebind.nac.test\n        {lanHostAddress} lan.nac.test\n        fallthrough\n    }}",
                 StringComparison.Ordinal);
             await File.WriteAllTextAsync(corefilePath, corefile).ConfigureAwait(false);
             var (dnsRestartRc, _, dnsRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-dns"]).ConfigureAwait(false);
