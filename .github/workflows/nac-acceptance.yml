@@ -63,7 +63,16 @@ jobs:
 
       - name: Run Production NAC and C6 Acceptance
         run: |
-          dotnet src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll --prod-run
+          dotnet src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll --prod-run "$GITHUB_WORKSPACE/nac-prod-report.json"
+
+      - name: Upload production acceptance report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nac-prod-report-${{ github.sha }}
+          path: nac-prod-report.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Run Integration Tests
         run: |
