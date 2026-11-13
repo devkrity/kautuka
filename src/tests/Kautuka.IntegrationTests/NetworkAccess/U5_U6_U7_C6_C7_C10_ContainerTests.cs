@@ -304,6 +304,23 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_21_ApprovedLanSourceIsTranslatedToPodmanAssignedOutsideAddress()
+    {
+        string boundary = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
+
+        Assert.Contains("ip saddr 10.248.0.3 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != 10.247.0.0/16 counter accept comment \"lan_approved\"", boundary, StringComparison.Ordinal);
+        Assert.Contains("chain postrouting", boundary, StringComparison.Ordinal);
+        Assert.Contains("ip saddr 10.248.0.3 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != 10.247.0.0/16 counter snat to 10.248.0.2 comment \"lan_source_masquerade\"", boundary, StringComparison.Ordinal);
+
+        string negativeControl = boundary.Replace(
+            "    ip saddr 10.248.0.3 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != 10.247.0.0/16 counter snat to 10.248.0.2 comment \"lan_source_masquerade\"\n",
+            string.Empty,
+            StringComparison.Ordinal);
+        Assert.NotEqual(boundary, negativeControl);
+        Assert.DoesNotContain("lan_source_masquerade", negativeControl, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void V7_50_LanSourceAddressUsesOutsidePodInterface_NotAnInterfaceName()
     {
         string command = EgressTopologyManager.BuildOutsideLanSourceAddressSetupCommand();

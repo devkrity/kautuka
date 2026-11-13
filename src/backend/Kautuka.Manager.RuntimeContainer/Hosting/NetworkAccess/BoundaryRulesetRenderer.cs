@@ -128,6 +128,13 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ip daddr 10.247.0.0/16 counter reject comment \"wl_net_reject\"");
         sb.AppendLine("    accept");
         sb.AppendLine("  }");
+        if (includeLanGrants)
+        {
+            sb.AppendLine("  chain postrouting {");
+            sb.AppendLine("    type nat hook postrouting priority srcnat; policy accept;");
+            sb.AppendLine($"    ip saddr {EgressTopologyManager.OutsideLanSourceIp} ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ip daddr != 10.247.0.0/16 counter snat to {EgressTopologyManager.OutsidePodIp} comment \"lan_source_masquerade\"");
+            sb.AppendLine("  }");
+        }
         sb.AppendLine("}");
         sb.AppendLine("table ip6 kautuka_egress");
         sb.AppendLine("delete table ip6 kautuka_egress");

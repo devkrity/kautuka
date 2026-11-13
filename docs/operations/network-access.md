@@ -223,8 +223,8 @@ Validate the rendered boundary ruleset:
 nft -c -f /path/to/rendered/boundary.nft
 ```
 
-### 3.5 Live Container Acceptance `[Linux CI partial; LAN grant still failing]`
-The NAC acceptance workflow runs `--prod-run` against rootless Podman on Linux with `nf_tables` and `crun`; its production path includes the C6 post-start verifier and its tampering negative control. On commit `5a674f2`, CI run [43473795138](https://github.com/devkrity/kautuka/actions/runs/43473795138) passed topology startup, the canary, and C6, but the overall run failed at `PROD_LAN_GRANT`: the approved request did not increment `lan_approved` and the host fixture response was not received. The next test attempt bound the fixture to the host's private route source, but the rootless Podman outside network could not connect directly to that address. The current unverified attempt routes the host LAN `/32` through the discovered Podman host gateway; it still needs Linux CI proof. End-to-end NAC acceptance is therefore not yet passing.
+### 3.5 Live Container Acceptance `[Linux CI: LAN proof pending]`
+The NAC acceptance workflow runs `--prod-run` against rootless Podman on Linux with `nf_tables` and `crun`; its production path includes the C6 post-start verifier and its tampering negative control. On commit `123200a`, CI run [43493361422](https://github.com/devkrity/kautuka/actions/runs/43493361422) passed topology startup, the canary, C6, and six of seven production scenarios, but `PROD_LAN_GRANT` did not receive the host fixture response after approval. The `lan_approved` counter incremented, and the observed Envoy route used the production outside-network gateway. The current change keeps the approval match on `10.248.0.3` and adds postrouting SNAT to Podman's assigned outside address `10.248.0.2`; this change still needs a Linux `--prod-run` result before end-to-end LAN approval can be claimed.
 
 The non-Linux Podman Machine verifier command is covered by an integration test that forces the machine path and rejects a partial ruleset; that path has not been exercised against a live Podman Machine in CI.
 
