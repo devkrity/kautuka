@@ -56,7 +56,7 @@ public sealed record EnvoyAuthorizationHostOptions
 /// <item>Maps <b>only</b> <see cref="EnvoyAuthorizationService"/> (<c>envoy.service.auth.v3.Authorization/Check</c>) — none of Manager's own gRPC services (C16).</item>
 /// <item>Sets <c>AllowAlternateSchemes = true</c> on this host only so Envoy's <c>:scheme http</c> over TLS is accepted.</item>
 /// <item>Acquires an exclusive lock on <c>networkaccess.lock</c> <b>before</b> unlinking any stale UDS socket (MF2 / C2).</item>
-/// <item>Creates a dedicated <c>0700</c> directory and <c>0600</c> socket on Linux (MF3 / C3).</item>
+/// <item>Creates a dedicated <c>0710</c> directory and <c>0660</c> socket on Linux for rootless Envoy group access (MF3 / C3).</item>
 /// <item>Validates the dedicated mTLS CA, server SAN, client SAN, and non-wildcard bind address on Windows TCP+mTLS (MF4, MF5 / C4, C5).</item>
 /// </list>
 /// </summary>
@@ -207,8 +207,11 @@ public sealed class EnvoyAuthorizationHost : IHostedService, IAsyncDisposable
                 string fullSocketPath = Path.GetFullPath(options.SocketPath!);
                 if (OperatingSystem.IsLinux() && File.Exists(fullSocketPath))
                 {
-                    // MF3 / C3: Socket mode is strictly 0600 (owner read/write only), never 0777 or group/world writable.
-                    File.SetUnixFileMode(fullSocketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    // MF3 / C3: Envoy uses Podman's keep-groups feature to access the host service group.
+                    // Permit that group only; no other users can traverse the dedicated directory or access the socket.
+                    File.SetUnixFileMode(
+                        fullSocketPath,
+                        UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite);
                 }
             }
             else
@@ -303,7 +306,7 @@ public sealed class EnvoyAuthorizationHost : IHostedService, IAsyncDisposable
     {
         if (OperatingSystem.IsLinux())
         {
-            const UnixFileMode dirMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute; // 0700
+            const UnixFileMode dirMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupExecute; // 0710
             Directory.CreateDirectory(socketDir, dirMode);
             File.SetUnixFileMode(socketDir, dirMode);
         }

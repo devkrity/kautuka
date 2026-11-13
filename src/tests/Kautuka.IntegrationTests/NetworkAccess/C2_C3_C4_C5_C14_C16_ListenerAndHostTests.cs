@@ -215,7 +215,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     private static extern int NativeClose(int socket);
 
     [Fact]
-    public async Task C3_SocketPermissions_DedicatedDirectoryAndOwnerOnlyMode_WithNegativeControl()
+    public async Task C3_SocketPermissions_DedicatedDirectoryAndServiceGroupMode_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
         try
@@ -242,26 +242,31 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                 UnixFileMode dirMode = File.GetUnixFileMode(socketDir);
                 UnixFileMode sockMode = File.GetUnixFileMode(socketPath);
 
-                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, dirMode);
-                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, sockMode);
-                Assert.False(HasWorldOrGroupPermissions(sockMode));
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupExecute,
+                    dirMode);
+                Assert.Equal(
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite,
+                    sockMode);
+                Assert.False(HasOtherPermissions(dirMode));
+                Assert.False(HasOtherPermissions(sockMode));
 
-                // C3.NC: weakening the actual listener socket permissions is caught by the same check.
+                // C3.NC: making the actual listener socket world-accessible is caught by the same check.
                 File.SetUnixFileMode(
                     socketPath,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
                     UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
                     UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute);
                 UnixFileMode ncMode = File.GetUnixFileMode(socketPath);
-                Assert.True(HasWorldOrGroupPermissions(ncMode));
+                Assert.True(HasOtherPermissions(ncMode));
             }
             else
             {
-                // On Windows, verify the permission-check helper still flips on 0777 vs 0600 modes.
+                // On Windows, verify the permission-check helper still flips on 0777 vs 0660 modes.
                 const UnixFileMode secureMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
                 const UnixFileMode insecureMode = secureMode | UnixFileMode.OtherRead | UnixFileMode.OtherWrite;
-                Assert.False(HasWorldOrGroupPermissions(secureMode));
-                Assert.True(HasWorldOrGroupPermissions(insecureMode));
+                Assert.False(HasOtherPermissions(secureMode));
+                Assert.True(HasOtherPermissions(insecureMode));
             }
         }
         finally
@@ -783,12 +788,10 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
         return true;
     }
 
-    private static bool HasWorldOrGroupPermissions(UnixFileMode mode)
+    private static bool HasOtherPermissions(UnixFileMode mode)
     {
-        const UnixFileMode groupOrOther =
-            UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
-        return (mode & groupOrOther) != 0;
+        const UnixFileMode other = UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+        return (mode & other) != 0;
     }
 
     private static bool ContainsWildcardBindAddress(IEnumerable<string> boundAddresses)

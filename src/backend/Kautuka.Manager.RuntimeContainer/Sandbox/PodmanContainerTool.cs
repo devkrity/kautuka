@@ -615,6 +615,8 @@ public sealed class PodmanContainerTool(
             DesiredStateVersion = context.DesiredStateVersion,
             SpecFingerprint = context.SpecFingerprint,
             ManagerRole = "agent",
+            StartupGateOpen = true,
+            IsBraked = false,
             CpuLimit = context.DefaultCpuLimit,
             MemoryLimit = !string.IsNullOrWhiteSpace(context.DefaultMemoryLimit) ? context.DefaultMemoryLimit : null,
             PidsLimit = 256,

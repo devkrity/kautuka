@@ -266,10 +266,33 @@ public static class BoundaryRulesetRenderer
     /// Renders the CoreDNS configuration from the template.
     /// </summary>
     public static string RenderCorefile(
-        string dnsIp = "10.247.0.2")
+        string dnsIp = "10.247.0.2",
+        IEnumerable<string>? upstreamDnsIps = null)
     {
         string template = ResolveTemplate("Corefile.tmpl");
-        return template.Replace("{{DNS_IP}}", dnsIp, StringComparison.Ordinal);
+        var upstreams = new List<string>();
+        if (upstreamDnsIps is not null)
+        {
+            foreach (string candidate in upstreamDnsIps)
+            {
+                if (System.Net.IPAddress.TryParse(candidate, out System.Net.IPAddress? address)
+                    && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+                    && !upstreams.Contains(address.ToString(), StringComparer.Ordinal))
+                {
+                    upstreams.Add(address.ToString());
+                }
+            }
+        }
+
+        if (upstreams.Count == 0)
+        {
+            upstreams.Add("10.248.0.1");
+        }
+
+        string forwarders = string.Join(" ", upstreams);
+        return template
+            .Replace("{{DNS_IP}}", dnsIp, StringComparison.Ordinal)
+            .Replace("{{UPSTREAM_DNS}}", forwarders, StringComparison.Ordinal);
     }
 
     internal static string ResolveTemplate(string templateFileName)

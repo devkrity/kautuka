@@ -140,6 +140,8 @@ internal static class ConnectorContainerSpecBuilder
             DesiredStateVersion = connector.DesiredStateVersion,
             SpecFingerprint = ComputeWorkloadFingerprint(connector, identity, executionContext, compatProfile),
             ManagerRole = "connector",
+            StartupGateOpen = true,
+            IsBraked = false,
             Environment = envList,
             Mounts = mounts,
             AllowedMountRoots = workspaceContext is null ? [] : [workspaceContext.HostWorkspacePath],

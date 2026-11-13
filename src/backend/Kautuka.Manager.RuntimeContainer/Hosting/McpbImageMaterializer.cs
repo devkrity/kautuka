@@ -601,6 +601,8 @@ public sealed class McpbImageMaterializer(
             Persistent = false,
             Replace = true,
             ManagerRole = "builder",
+            StartupGateOpen = true,
+            IsBraked = false,
             Environment = indexEnvironment,
             CompatibilityProfile = builderCompat,
             Command = "/bin/sh",

@@ -426,6 +426,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 Egress = "deny-all",
                 Persistent = true,
                 StartupGateOpen = true,
+                IsBraked = false,
             };
 
             IReadOnlyList<string> runArgs = spec.Render();
@@ -696,7 +697,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         IReadOnlyList<string> upstreamDnsIps = await DiscoverUpstreamDnsIpsAsync(cancellationToken).ConfigureAwait(false);
         string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, upstreamDnsIps);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(isWindowsMtls: isWindowsHostNativeDev);
-        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
+        string[] directUpstreamDnsIps = upstreamDnsIps
+            .Where(static ip => !string.Equals(ip, "10.248.0.1", StringComparison.Ordinal))
+            .ToArray();
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, directUpstreamDnsIps);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
         string boundaryPath = Path.Combine(nacDir, "boundary.nft");
@@ -724,7 +728,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 "--sysctl", "net.ipv4.ip_forward=0",
                 "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"
             ];
-
             PodmanCommandResult podResult = await podmanRunner
                 .RunAsync(createPodArgs, 30, cancellationToken)
                 .ConfigureAwait(false);
@@ -804,7 +807,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         // 3. Envoy container (runs natively as uid 65532 mapped via pod keep-id to host user)
         Directory.CreateDirectory(envoySocketHostDir);
         string adminSocketDir = Path.Combine(stateDirectory, "admin-socket");
-        Directory.CreateDirectory(adminSocketDir);
+        if (OperatingSystem.IsLinux())
+        {
+            const UnixFileMode adminSocketDirMode =
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                UnixFileMode.GroupWrite | UnixFileMode.GroupExecute;
+            Directory.CreateDirectory(adminSocketDir, adminSocketDirMode);
+            File.SetUnixFileMode(adminSocketDir, adminSocketDirMode);
+        }
+        else
+        {
+            Directory.CreateDirectory(adminSocketDir);
+        }
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-envoy",
             "egress-envoy",
@@ -1090,6 +1104,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         "create",
         "--pod", EgressPodName,
         "--name", "kautuka-egress-envoy",
+        "--group-add", "keep-groups",
         "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro",
         "-v", $"{envoySocketHostDir}:/run/kautuka-nac:z",
         "-v", $"{adminSocketDir}:/run/kautuka-admin:z",

@@ -46,6 +46,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            StartupGateOpen = true,
+            IsBraked = false,
             Environment = [new KeyValuePair<string, string>("HTTP_PROXY", "http://evil:8080")]
         };
         Assert.Throws<ArgumentException>(() => specWithProxyEnv.Render());
@@ -57,7 +59,9 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             AgentId = "",
             ConnectorId = "search",
             Egress = "normal",
-            Systemwide = false
+            Systemwide = false,
+            StartupGateOpen = true,
+            IsBraked = false,
         };
         Assert.Throws<ArgumentException>(() => specMissingAgent.Render());
 
@@ -70,6 +74,25 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         };
         Assert.Throws<InvalidOperationException>(() => specGateClosed.Render());
 
+        var specWithoutStartupApproval = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            ConnectorId = "connector-1",
+            Egress = "normal",
+        };
+        Assert.Throws<InvalidOperationException>(() => specWithoutStartupApproval.Render());
+
+        var specWithoutBrakeApproval = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            ConnectorId = "connector-1",
+            Egress = "normal",
+            StartupGateOpen = true,
+        };
+        Assert.Throws<InvalidOperationException>(() => specWithoutBrakeApproval.Render());
+
         // 5. Mounts validation
         var mountRoot = Path.Combine(tempDir, "workspace");
         Directory.CreateDirectory(mountRoot);
@@ -78,6 +101,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             UserId = "user-1",
             AgentId = "agent-1",
             AllowedMountRoots = [mountRoot],
+            StartupGateOpen = true,
+            IsBraked = false,
             Mounts = [new WorkloadMount("/var/run/docker.sock", "/var/run/docker.sock")]
         };
         Assert.Throws<ArgumentException>(() => specWithBadMount.Render());
@@ -102,6 +127,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            StartupGateOpen = true,
+            IsBraked = false,
             AddHosts = ["metadata.internal:169.254.169.254"]
         };
         Assert.Throws<ArgumentException>(() => badHostMapping.Render());
@@ -111,6 +138,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            StartupGateOpen = true,
+            IsBraked = false,
             Persistent = false,
             Command = "connector-tool",
             Args = ["--network", "host"]
@@ -129,6 +158,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             Kind = "connector",
             Systemwide = false,
             Egress = "normal",
+            StartupGateOpen = true,
+            IsBraked = false,
         };
 
         IReadOnlyList<string> args = validSpec.Render();
@@ -215,7 +246,12 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("bind 10.247.0.2", corefile, StringComparison.Ordinal);
         Assert.Contains("198.18.250.250", corefile, StringComparison.Ordinal);
         Assert.Contains("bind 127.0.0.1", corefile, StringComparison.Ordinal);
-        Assert.Contains("forward . /etc/resolv.conf", corefile, StringComparison.Ordinal);
+        Assert.Contains("forward . 10.248.0.1", corefile, StringComparison.Ordinal);
+        Assert.DoesNotContain("forward . /etc/resolv.conf", corefile, StringComparison.Ordinal);
+
+        string corefileForHostResolver = BoundaryRulesetRenderer.RenderCorefile("10.247.0.2", ["10.255.255.254"]);
+        Assert.Contains("forward . 10.255.255.254", corefileForHostResolver, StringComparison.Ordinal);
+        Assert.DoesNotContain("forward . 10.248.0.1", corefileForHostResolver, StringComparison.Ordinal);
 
         // Negative Control (.NC): Mutated CoreDNS IP changes output
         string corefileMutated = BoundaryRulesetRenderer.RenderCorefile("10.247.0.99");
@@ -646,6 +682,25 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("NET_BIND_SERVICE", dnsArgs);
         Assert.Contains(EgressTopologyManager.CoreDnsPinnedImage, dnsArgs);
         Assert.Contains(EgressTopologyManager.EnvoyPinnedImage, envoyArgs);
+    }
+
+    [Fact]
+    public void V7_20_RootlessEnvoyKeepsHostGroupsWithoutRunningAsRoot_WithNegativeControl()
+    {
+        IReadOnlyList<string> envoyArgs = EgressTopologyManager.BuildEnvoyCreateArgs(
+            "/state/envoy.yaml",
+            "/state/sockets",
+            "/state/admin-socket");
+
+        int groupAddIndex = envoyArgs.ToList().IndexOf("--group-add");
+        Assert.True(groupAddIndex >= 0 && groupAddIndex + 1 < envoyArgs.Count);
+        Assert.Equal("keep-groups", envoyArgs[groupAddIndex + 1]);
+        Assert.DoesNotContain("--user", envoyArgs);
+
+        // Negative control: dropping keep-groups removes Envoy's access to the group-owned 0660 socket.
+        string[] withoutHostGroups = [.. envoyArgs.Where((_, index) => index != groupAddIndex && index != groupAddIndex + 1)];
+        Assert.DoesNotContain("--group-add", withoutHostGroups);
+        Assert.NotEqual(envoyArgs, withoutHostGroups);
     }
 
     [Fact]

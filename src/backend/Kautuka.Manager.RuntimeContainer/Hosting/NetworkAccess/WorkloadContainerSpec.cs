@@ -66,8 +66,8 @@ public sealed record WorkloadContainerSpec
     public string ManagerRole { get; init; } = "connector";
 
     // Gates and profiles:
-    public bool StartupGateOpen { get; init; } = true;
-    public bool IsBraked { get; init; }
+    public bool StartupGateOpen { get; init; }
+    public bool IsBraked { get; init; } = true;
     public ImageCompatProfile? CompatibilityProfile { get; init; }
 
     public WorkloadContainerSpec(
