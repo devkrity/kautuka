@@ -552,29 +552,6 @@ public static class Program
         return address.ToString();
     }
 
-    private static async Task<string> ResolvePodmanHostGatewayAddressAsync(string baseImage)
-    {
-        var (exitCode, output, error) = await ExecAsync(
-            "podman",
-            ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "python3", baseImage,
-                "-c", "import socket; print(socket.gethostbyname('host.containers.internal'))"],
-            timeoutSeconds: 120).ConfigureAwait(false);
-        if (exitCode != 0 || !System.Net.IPAddress.TryParse(output.Trim(), out System.Net.IPAddress? address))
-        {
-            throw new InvalidOperationException($"Could not resolve the rootless Podman host gateway for the production LAN route (rc={exitCode}; output={output}; error={error}).");
-        }
-
-        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
-            || System.Net.IPAddress.IsLoopback(address)
-            || address.Equals(System.Net.IPAddress.Any)
-            || address.Equals(System.Net.IPAddress.Broadcast))
-        {
-            throw new InvalidOperationException($"The rootless Podman host gateway '{address}' is not a usable IPv4 next hop.");
-        }
-
-        return address.ToString();
-    }
-
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -938,20 +915,12 @@ public static class Program
 
             const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
             string lanHostAddress = await ResolveHostLanAddressAsync().ConfigureAwait(false);
-            string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage).ConfigureAwait(false);
             Console.WriteLine($"[PROD_STAGE] host LAN fixture bound to {lanHostAddress}");
             int envoyLanRoutePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            var (lanRouteRc, lanRouteOut, lanRouteErr) = await ExecAsync(
-                "podman",
-                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route", "replace", $"{lanHostAddress}/32", "via", lanGatewayAddress, "dev", outsideNetworkDevice, "onlink"]).ConfigureAwait(false);
-            if (lanRouteRc != 0)
-            {
-                throw new InvalidOperationException($"Could not route the production LAN fixture through the rootless Podman host gateway (rc={lanRouteRc}; output={lanRouteOut}; error={lanRouteErr}).");
-            }
             var (lanRouteGetRc, lanRouteGetOut, lanRouteGetErr) = await ExecAsync(
                 "podman",
                 ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route", "get", lanHostAddress, "from", EgressTopologyManager.OutsideLanSourceIp]).ConfigureAwait(false);
-            Console.WriteLine($"[PROD_STAGE] LAN fixture route: host={lanHostAddress}; gateway={lanGatewayAddress}; device={outsideNetworkDevice}; rc={lanRouteGetRc}; route={lanRouteGetOut.Trim()}; error={lanRouteGetErr.Trim()}");
+            Console.WriteLine($"[PROD_STAGE] LAN fixture route: host={lanHostAddress}; outsideDevice={outsideNetworkDevice}; rc={lanRouteGetRc}; route={lanRouteGetOut.Trim()}; error={lanRouteGetErr.Trim()}");
             string lanCertificatePath = Path.Combine(tempRoot, "lan-fixture.crt");
             string lanPrivateKeyPath = Path.Combine(tempRoot, "lan-fixture.key");
             string lanAccessLogPath = Path.Combine(tempRoot, "lan-fixture-access.log");
@@ -1362,7 +1331,7 @@ public static class Program
                     string envoyAddresses = (await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "address"]).ConfigureAwait(false)).StdOut;
                     string envoyNeighbors = (await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "neighbor"]).ConfigureAwait(false)).StdOut;
                     string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
-                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; envoyNeighbors={envoyNeighbors}; host={lanHostAddress}; gateway={lanGatewayAddress}; outsideDevice={outsideNetworkDevice}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; envoyNeighbors={envoyNeighbors}; host={lanHostAddress}; outsideDevice={outsideNetworkDevice}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
