@@ -974,17 +974,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    private async Task<string> ReadRenderedBoundaryRulesetHashAsync(CancellationToken cancellationToken)
+    internal async Task<string> ReadRenderedBoundaryRulesetHashAsync(CancellationToken cancellationToken)
     {
         string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
         const string ipv6Marker = "__KUTUKA_IPV6_BOUNDARY__";
+        string script =
+            $"nft -f \"$1\" && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress";
         PodmanCommandResult rendered = await podmanRunner.RunAsync(
             [
-                "run", "--rm", "--network", "none", "--cap-add", "NET_ADMIN", "--user", "0:0",
-                "-v", $"{boundaryPath}:/etc/nftables.conf:ro",
-                BoundaryInitImage,
-                "/bin/sh", "-c",
-                $"nft -f /etc/nftables.conf && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress"
+                "unshare", "unshare", "-n", "sh", "-c", script, "sh", boundaryPath
             ],
             30,
             cancellationToken).ConfigureAwait(false);

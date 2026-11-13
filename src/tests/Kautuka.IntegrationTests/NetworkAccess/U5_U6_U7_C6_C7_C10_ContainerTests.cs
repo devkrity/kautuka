@@ -399,6 +399,39 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_11_NativeBoundaryRenderingUsesPodmanUnshareWithoutLaunchingAContainer()
+    {
+        string boundaryPath = Path.Combine(tempDir, "nac", "boundary.nft");
+        Directory.CreateDirectory(Path.GetDirectoryName(boundaryPath)!);
+        await File.WriteAllTextAsync(boundaryPath, "native nft fixture", TestContext.Current.CancellationToken);
+        const string ipv4 = "{\"nftables\":[{\"rule\":{\"comment\":\"private_reject\",\"expr\":[]}},{\"rule\":{\"comment\":\"wl_net_reject\",\"expr\":[]}}]}";
+        const string ipv6 = "{\"nftables\":[{\"rule\":{\"comment\":\"ipv6_drop_pod\",\"expr\":[]}}]}";
+        IReadOnlyList<string>? observedArgs = null;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            observedArgs = args.ToArray();
+            return Task.FromResult(new PodmanCommandResult(
+                0,
+                $"{ipv4}\n__KUTUKA_IPV6_BOUNDARY__\n{ipv6}",
+                string.Empty,
+                ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "cursor.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+
+        string hash = await manager.ReadRenderedBoundaryRulesetHashAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4, ipv6), hash);
+        Assert.NotNull(observedArgs);
+        Assert.Equal("unshare", observedArgs![0]);
+        Assert.Equal("-n", observedArgs[2]);
+        Assert.Contains("nft -f", observedArgs[5], StringComparison.Ordinal);
+        Assert.DoesNotContain("run", observedArgs, StringComparer.Ordinal);
+    }
+
+    [Fact]
     public void U7_AddressAllocator_MonotonicCursorPersistenceAndWrap_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "ip-cursor.json");
