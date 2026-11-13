@@ -191,6 +191,71 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
+    public async Task V7_20_ReconcileLaunchChecksBrakeBeforeRecreate_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-reconcile-brake-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            policyStore.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "user", "user-alpha", on: true);
+            var commands = new List<string[]>();
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add([.. args]);
+                if (args[0] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "missing", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "container")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "missing", ProcessTerminationReason.NonZeroExit));
+                }
+
+                return Task.FromResult(Success(string.Empty));
+            });
+            var workspace = FingerprintContext("agent-alpha", Path.Combine(stateDirectory, "workspace"));
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "user-alpha::brake-reconcile",
+                "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+                "server",
+                [], true, false, null, null, [], 30, 600);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                workloadRegistry: new WorkloadRegistry(),
+                workloadLaunchGate: new WorkloadLaunchGate(new TestWorkloadStartupState(true), policyStore));
+
+            MethodInfo ensure = typeof(WorkspaceContainerConnectorExecutionService)
+                .GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("EnsureConnectorContainerRunningAsync method was not found.");
+            Task launch = Assert.IsAssignableFrom<Task>(ensure.Invoke(service, [
+                connector,
+                "runtime-key",
+                "brake-reconcile-container",
+                WorkspaceMcpExecutionContext.Isolated,
+                workspace,
+                CancellationToken.None,
+                false,
+                workspace,
+            ]));
+
+            InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => launch);
+            Assert.Contains("user network brake is active", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(commands, static args => args[0] is "run" or "rm");
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task V7_48_OverlappingCallsVerifyAndDeregisterTheirOwnEphemeralWorkloads()
     {
         if (!OperatingSystem.IsLinux())

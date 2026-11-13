@@ -1032,6 +1032,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return;
         }
 
+        workloadLaunchGate?.EnsureLaunchAllowed(string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId);
+
         if (inspection.Exists)
         {
             if (!await RemoveConnectorContainerAsync(containerName, cancellationToken).ConfigureAwait(false))
