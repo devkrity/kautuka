@@ -79,7 +79,8 @@ internal static partial class GatewaySettingsEndpointMappings
                 userId: adminUser.Id,
                 agentId: "gateway",
                 purpose: "provider-test",
-                service: "ai-provider");
+                service: "ai-provider",
+                systemwide: true);
             GatewayProviderTestResult result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false);
             return Results.Json(
                 new GatewayProviderTestResponse(result.Success, result.Message),

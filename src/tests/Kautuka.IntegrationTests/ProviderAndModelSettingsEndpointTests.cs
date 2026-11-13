@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
@@ -13,6 +14,7 @@ using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Protos;
 using Kautuka.NetworkAccess.Client;
 using Kautuka.NetworkAccessController;
@@ -25,6 +27,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Xunit.Sdk;
 
@@ -46,7 +49,17 @@ public sealed class ProviderSettingsEndpointTests
         {
             var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var controller = new NetworkAccessController.NetworkAccessController(policyStore, new WorkloadRegistry());
-            var validation = new NetworkAccessProviderTestProbe(controller);
+            var providerTypeCatalog = new SeededProviderTypeCatalog();
+            var checker = new ProviderTestNetworkAccessChecker(controller);
+            var aiClientFactory = new KautukaAiClientFactory(
+                [new OpenAiCompatibleProvider("openai", checker: checker)],
+                new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())),
+                providerTypeCatalog);
+            var validation = new ProviderValidationService(
+                DispatchProxy.Create<IGatewayCatalogStore, EmptyProviderCatalogStoreProxy>(),
+                aiClientFactory,
+                providerTypeCatalog,
+                NullLogger<ProviderValidationService>.Instance);
             var builder = WebApplication.CreateBuilder();
             builder.WebHost.UseTestServer();
             builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
@@ -61,24 +74,30 @@ public sealed class ProviderSettingsEndpointTests
 
                 using HttpResponseMessage response = await client.PostAsJsonAsync(
                     "/api/settings/providers/test",
-                    new { provider_id = "ollama-local" },
+                    new
+                    {
+                        provider_id = "custom-openai",
+                        type = "openai",
+                        settings = new
+                        {
+                            base_url = "https://api.provider.test/v1",
+                            api_key = "test-key",
+                        },
+                    },
                     cancellationToken: TestContext.Current.CancellationToken);
                 Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-                Assert.Equal("no_rule", validation.Decision?.Reason);
-                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), validation.Scope);
+                Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
+                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider", Systemwide: true), checker.Scope);
 
                 var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
                 NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
                     .Select(static view => view.Request)
-                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443);
+                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
                 Assert.NotNull(pending);
+                Assert.True(pending.Systemwide);
+                Assert.Null(pending.AgentId);
+                Assert.Equal("user", pending.Attribution);
                 Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
-
-                _ = policyStore.SetRule(admin,
-                    new RuleWriteSpec("system", null, null, null, "api.provider.test", "host", 443, Allowed: true),
-                    policyStore.Revision);
-                Assert.True(controller.EvaluateOutboundCheck(new OutboundCheckInput(
-                    "admin-1", "gateway", null, false, "api.provider.test", 443, "provider-test", null)).Allowed);
             }
         }
         finally
@@ -87,18 +106,52 @@ public sealed class ProviderSettingsEndpointTests
         }
     }
 
-    private sealed class NetworkAccessProviderTestProbe(NetworkAccessController.NetworkAccessController controller) : IProviderValidationService
+    private sealed class ProviderTestNetworkAccessChecker(NetworkAccessController.NetworkAccessController controller) : INetworkAccessChecker
     {
         public NetworkAccessScope? Scope { get; private set; }
-        public NetworkAccessDecisionResult? Decision { get; private set; }
+        public List<OutboundTarget> Targets { get; } = [];
 
-        public Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
         {
             Scope = NetworkAccessContext.Current;
-            Decision = controller.EvaluateOutboundCheck(new OutboundCheckInput(
-                Scope?.UserId ?? string.Empty, Scope?.AgentId ?? string.Empty, null, false,
-                "api.provider.test", 443, Scope?.Purpose ?? string.Empty, Scope?.Service));
-            return Task.FromResult(new GatewayProviderTestResult(false, "network approval required"));
+            Targets.Add(target);
+            NetworkAccessDecisionResult decision = controller.EvaluateOutboundCheck(new OutboundCheckInput(
+                target.UserId ?? string.Empty,
+                target.AgentId ?? string.Empty,
+                target.ConnectorId,
+                target.Systemwide,
+                target.Host,
+                target.Port,
+                target.Purpose,
+                target.CorrelationId));
+            return Task.FromResult(new NetworkAccessCheckResult(
+                decision.Allowed,
+                decision.Reason,
+                decision.RequestId,
+                decision.OpenInternetBadge,
+                NetworkAccessDenialKind.Denied));
+        }
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1852", Justification = "DispatchProxy must derive from an unsealed proxy base.")]
+    private class EmptyProviderCatalogStoreProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IGatewayCatalogStore.TryGetProvider))
+            {
+                args![1] = null;
+                return false;
+            }
+
+            if (targetMethod is null || targetMethod.ReturnType == typeof(void))
+            {
+                return null;
+            }
+
+            return targetMethod.ReturnType.IsValueType
+                ? Activator.CreateInstance(targetMethod.ReturnType)
+                : null;
         }
     }
 
