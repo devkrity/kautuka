@@ -87,15 +87,15 @@ public sealed class NetworkAccessArchitectureContractTests
         string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
         string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
         int productionStart = source.IndexOf("private static async Task<int> RunProductionTopologyProofAsync", StringComparison.Ordinal);
-        int fixtureStart = source.IndexOf("var (lanCreateRc", productionStart, StringComparison.Ordinal);
+        int fixtureStart = source.IndexOf("string lanServerScriptPath", productionStart, StringComparison.Ordinal);
         int fixtureEnd = source.IndexOf("int lanFixtureHealthRc", fixtureStart, StringComparison.Ordinal);
         Assert.True(fixtureStart >= 0 && fixtureEnd > fixtureStart, "Could not locate the LAN fixture setup in the production acceptance.");
         string fixtureSetup = source[fixtureStart..fixtureEnd];
 
         Assert.Contains("string lanHostAddress = ResolveHostLanAddress()", source[productionStart..fixtureStart], StringComparison.Ordinal);
-        Assert.Contains("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
-        Assert.Contains("AddTemporaryHostNetworkFixtureAllowlistAsync", fixtureSetup, StringComparison.Ordinal);
-        Assert.Contains("[\"start\", lanFixtureName]", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("Process.Start(lanServerStartInfo)", fixtureSetup, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("OutsideNetworkName", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("10.248.0.4", source, StringComparison.Ordinal);
     }

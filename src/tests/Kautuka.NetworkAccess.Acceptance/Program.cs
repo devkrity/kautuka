@@ -546,58 +546,6 @@ public static class Program
         return address;
     }
 
-    private static async Task AddTemporaryHostNetworkFixtureAllowlistAsync(string allowlistPath, string originalAllowlist, string containerId)
-    {
-        var (addressRc, addressesJson, addressErr) = await ExecAsync("ip", ["-j", "-4", "addr", "show"]).ConfigureAwait(false);
-        if (addressRc != 0)
-        {
-            throw new InvalidOperationException($"Could not inspect host IPv4 addresses for the controlled LAN fixture (rc={addressRc}; {addressErr}).");
-        }
-
-        var hostIpv4 = new HashSet<string>(StringComparer.Ordinal);
-        using (JsonDocument addresses = JsonDocument.Parse(addressesJson))
-        {
-            foreach (JsonElement iface in addresses.RootElement.EnumerateArray())
-            {
-                if (!iface.TryGetProperty("addr_info", out JsonElement addressInfo) || addressInfo.ValueKind != JsonValueKind.Array)
-                {
-                    continue;
-                }
-
-                foreach (JsonElement address in addressInfo.EnumerateArray())
-                {
-                    string? local = address.TryGetProperty("local", out JsonElement localElement) ? localElement.GetString() : null;
-                    if (!string.IsNullOrWhiteSpace(local) && !string.Equals(local, "127.0.0.1", StringComparison.Ordinal))
-                    {
-                        hostIpv4.Add(local);
-                    }
-                }
-            }
-        }
-
-        using JsonDocument document = JsonDocument.Parse(originalAllowlist);
-        if (!document.RootElement.TryGetProperty("entries", out JsonElement entries) || entries.ValueKind != JsonValueKind.Array)
-        {
-            throw new InvalidOperationException("The Manager hook allowlist has no entries array.");
-        }
-
-        int entriesEnd = originalAllowlist.LastIndexOf(']');
-        if (entriesEnd < 0)
-        {
-            throw new InvalidOperationException("The Manager hook allowlist is malformed.");
-        }
-
-        string separator = entries.GetArrayLength() == 0 ? string.Empty : ",";
-        string expectedIpv4Json = string.Join(",", hostIpv4.Order(StringComparer.Ordinal).Select(address => $"\"{address}\""));
-        string fixtureEntry = $"{separator}{{\"id\":\"{containerId}\",\"role\":\"acceptance-lan-fixture\",\"expected_ipv4\":[{expectedIpv4Json}],\"image_digest\":\"acceptance-fixture\"}}";
-        string updatedAllowlist = originalAllowlist.Insert(entriesEnd, fixtureEntry);
-        await File.WriteAllTextAsync(allowlistPath, updatedAllowlist).ConfigureAwait(false);
-        if (OperatingSystem.IsLinux())
-        {
-            File.SetUnixFileMode(allowlistPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-    }
-
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -849,8 +797,8 @@ public static class Program
             "agent", "a1", "u1", Path.Combine(tempRoot, "workspaces", "users", "u1", "agents", "a1"), "/workspace",
             "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
             1, "512m", 30, [], new Dictionary<string, string>()));
-        string lanFixtureName = $"nac-lan-fixture-{Guid.NewGuid():N}"[..31];
         string lanHostAddress = ResolveHostLanAddress();
+        Process? lanFixtureProcess = null;
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
@@ -979,8 +927,9 @@ public static class Program
             }
 
             const string lanServer = """
-                import http.server, ssl
-                access=open('/tmp/lan-fixture-access.log','a',buffering=1)
+                import http.server, ssl, sys
+                cert_path, key_path, access_path = sys.argv[1:4]
+                access=open(access_path,'a',buffering=1)
                 def record(message): print(message, file=access, flush=True)
                 class Handler(http.server.BaseHTTPRequestHandler):
                     def setup(self):
@@ -996,61 +945,36 @@ public static class Program
                     def log_message(self, fmt, *args): record(fmt % args)
                 server=http.server.ThreadingHTTPServer(('0.0.0.0',8443),Handler)
                 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                context.load_cert_chain('/tmp/lan-fixture.crt','/tmp/lan-fixture.key')
+                context.load_cert_chain(cert_path,key_path)
                 server.socket=context.wrap_socket(server.socket,server_side=True)
                 server.serve_forever()
                 """;
-            var (lanCreateRc, lanCreateOut, lanCreateErr) = await ExecAsync(
-                "podman",
-                [
-                    "create", "--name", lanFixtureName,
-                    "--network", "host",
-                    "--volume", $"{lanCertificatePath}:/tmp/lan-fixture.crt:ro",
-                    "--volume", $"{lanPrivateKeyPath}:/tmp/lan-fixture.key:ro",
-                    "--volume", $"{lanAccessLogPath}:/tmp/lan-fixture-access.log:rw",
-                    "--entrypoint", "python3", baseImage, "-u", "-c", lanServer,
-                ]).ConfigureAwait(false);
-            if (lanCreateRc != 0 || string.IsNullOrWhiteSpace(lanCreateOut))
+            string lanServerScriptPath = Path.Combine(tempRoot, "lan-fixture.py");
+            await File.WriteAllTextAsync(lanServerScriptPath, lanServer).ConfigureAwait(false);
+            var lanServerStartInfo = new ProcessStartInfo("python3")
             {
-                throw new InvalidOperationException($"Could not create the controlled LAN fixture (rc={lanCreateRc}; {lanCreateErr}).");
-            }
-            var (lanInspectRc, lanContainerId, lanInspectErr) = await ExecAsync(
-                "podman", ["inspect", "--format", "{{.Id}}", lanFixtureName]).ConfigureAwait(false);
-            if (lanInspectRc != 0 || string.IsNullOrWhiteSpace(lanContainerId))
-            {
-                throw new InvalidOperationException($"Could not inspect the controlled LAN fixture (rc={lanInspectRc}; {lanInspectErr}).");
-            }
-
-            string allowlistPath = Path.Combine(nacStateDir, "infra-allowlist.json");
-            string originalAllowlist = await File.ReadAllTextAsync(allowlistPath).ConfigureAwait(false);
-            try
-            {
-                await AddTemporaryHostNetworkFixtureAllowlistAsync(allowlistPath, originalAllowlist, lanContainerId.Trim()).ConfigureAwait(false);
-                var (lanStartRc, _, lanStartErr) = await ExecAsync("podman", ["start", lanFixtureName]).ConfigureAwait(false);
-                if (lanStartRc != 0)
-                {
-                    string hookLog = File.Exists(Path.Combine(nacStateDir, "hook.log"))
-                        ? await File.ReadAllTextAsync(Path.Combine(nacStateDir, "hook.log")).ConfigureAwait(false)
-                        : string.Empty;
-                    throw new InvalidOperationException($"Could not start the controlled LAN fixture (rc={lanStartRc}; {lanStartErr}; hookLog={hookLog}).");
-                }
-            }
-            finally
-            {
-                await File.WriteAllTextAsync(allowlistPath, originalAllowlist).ConfigureAwait(false);
-                if (OperatingSystem.IsLinux())
-                {
-                    File.SetUnixFileMode(allowlistPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-                }
-            }
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            lanServerStartInfo.ArgumentList.Add("-u");
+            lanServerStartInfo.ArgumentList.Add(lanServerScriptPath);
+            lanServerStartInfo.ArgumentList.Add(lanCertificatePath);
+            lanServerStartInfo.ArgumentList.Add(lanPrivateKeyPath);
+            lanServerStartInfo.ArgumentList.Add(lanAccessLogPath);
+            lanFixtureProcess = Process.Start(lanServerStartInfo)
+                ?? throw new InvalidOperationException("Could not start the host LAN fixture process.");
             int lanFixtureHealthRc = 1;
             string lanFixtureHealthOut = string.Empty;
             string lanFixtureHealthErr = string.Empty;
             for (int attempt = 0; attempt < 10 && lanFixtureHealthRc != 0; attempt++)
             {
                 (lanFixtureHealthRc, lanFixtureHealthOut, lanFixtureHealthErr) = await ExecAsync(
-                    "podman",
-                    ["exec", lanFixtureName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "2", "https://127.0.0.1:8443/"]).ConfigureAwait(false);
+                    "curl",
+                    ["--insecure", "--silent", "--show-error", "--max-time", "2", "https://127.0.0.1:8443/"]).ConfigureAwait(false);
+                if (lanFixtureHealthRc != 0 && lanFixtureProcess.HasExited)
+                {
+                    break;
+                }
                 if (lanFixtureHealthRc != 0)
                 {
                     await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
@@ -1058,10 +982,9 @@ public static class Program
             }
             if (lanFixtureHealthRc != 0 || !lanFixtureHealthOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
-                var (_, lanFixtureLogs, _) = await ExecAsync("podman", ["logs", lanFixtureName]).ConfigureAwait(false);
-                var (_, lanFixtureState, _) = await ExecAsync("podman", ["inspect", lanFixtureName, "--format", "{{json .State}}"]).ConfigureAwait(false);
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
-                throw new InvalidOperationException($"Controlled LAN fixture did not become healthy (rc={lanFixtureHealthRc}; {lanFixtureHealthErr}; state={lanFixtureState}; logs={lanFixtureLogs}; access={lanFixtureAccessLog}).");
+                string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
+                throw new InvalidOperationException($"Controlled host LAN fixture did not become healthy (rc={lanFixtureHealthRc}; {lanFixtureHealthErr}; state={lanFixtureState}; access={lanFixtureAccessLog}).");
             }
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
@@ -1376,12 +1299,12 @@ public static class Program
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
                 if (lanAllowedRc != 0)
                 {
-                    var (_, lanFixtureLogs, _) = await ExecAsync("podman", ["logs", lanFixtureName]).ConfigureAwait(false);
                     string envoyLogs = (await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false)).StdOut;
                     string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
                     string envoyRoutes = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "route"]).ConfigureAwait(false)).StdOut;
                     string envoyAddresses = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "-4", "address"]).ConfigureAwait(false)).StdOut;
-                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: server={lanFixtureLogs}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
+                    string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
@@ -1638,7 +1561,15 @@ public static class Program
             {
                 _ = await ExecAsync("podman", ["rm", "-f", entry.ContainerId]).ConfigureAwait(false);
             }
-            await ExecAsync("podman", ["rm", "-f", lanFixtureName]).ConfigureAwait(false);
+            if (lanFixtureProcess is not null)
+            {
+                if (!lanFixtureProcess.HasExited)
+                {
+                    lanFixtureProcess.Kill(entireProcessTree: true);
+                    await lanFixtureProcess.WaitForExitAsync().ConfigureAwait(false);
+                }
+                lanFixtureProcess.Dispose();
+            }
             await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
                 "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
                 "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
