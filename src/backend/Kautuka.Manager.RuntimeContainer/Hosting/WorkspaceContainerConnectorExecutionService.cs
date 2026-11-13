@@ -593,7 +593,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string failure = DescribeFailure(exception);
         if (string.IsNullOrWhiteSpace(containerId)
             || (!failure.Contains("server shut down unexpectedly", StringComparison.OrdinalIgnoreCase)
-                && !failure.Contains("server process exited unexpectedly", StringComparison.OrdinalIgnoreCase)))
+                && !failure.Contains("server process exited unexpectedly", StringComparison.OrdinalIgnoreCase)
+                && !failure.Contains("transport was closed", StringComparison.OrdinalIgnoreCase)))
         {
             return failure;
         }

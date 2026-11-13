@@ -137,6 +137,8 @@ Network isolation, OCI hook firewall rules, and approval card requirements remai
 ### 3.1 Inspecting Hook State & Logs
 The OCI runtime hook logs execution events to `$XDG_STATE_HOME/kautuka/nac/hook.log` (default: `~/.local/state/kautuka/nac/hook.log`).
 
+When an ephemeral connector's MCP transport closes unexpectedly, Gateway includes up to the last 100 Podman log lines in the failure details when its container ID is available. Returned log text is capped at 8,192 characters.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .
