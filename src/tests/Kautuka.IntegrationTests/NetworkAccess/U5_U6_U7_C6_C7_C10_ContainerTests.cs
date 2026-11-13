@@ -767,6 +767,11 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         int metricIndex = Array.IndexOf(workloadCreate, "metric=1000");
         Assert.True(metricIndex > 0, "The workload network must use a higher default-route metric than the outside network.");
         Assert.Equal("--opt", workloadCreate[metricIndex - 1]);
+        int workloadRouteIndex = Array.IndexOf(workloadCreate, "--route");
+        Assert.True(workloadRouteIndex >= 0, "The workload network must preserve the explicit deny-path default route.");
+        Assert.Equal(
+            "0.0.0.0/0,10.247.0.2,1000",
+            workloadCreate[workloadRouteIndex + 1]);
         string[] outsideCreate = createCalls.Single(args =>
             args.Length > 2
             && args[0] == "network"

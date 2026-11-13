@@ -612,7 +612,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 "--opt", $"metric={WorkloadNetworkRouteMetric}",
                 "--subnet", WorkloadSubnet,
                 "--gateway", "10.247.0.1",
-                "--route", "0.0.0.0/0,10.247.0.2",
+                "--route", $"0.0.0.0/0,10.247.0.2,{WorkloadNetworkRouteMetric}",
                 WorkloadNetworkName
             ];
 
