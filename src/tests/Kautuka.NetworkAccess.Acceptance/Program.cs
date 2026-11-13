@@ -528,7 +528,8 @@ public static class Program
         var (exitCode, output, error) = await ExecAsync(
             "podman",
             ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "python3", baseImage,
-                "-c", "import socket; print(socket.gethostbyname('host.containers.internal'))"]).ConfigureAwait(false);
+                "-c", "import socket; print(socket.gethostbyname('host.containers.internal'))"],
+            timeoutSeconds: 120).ConfigureAwait(false);
         if (exitCode != 0 || !System.Net.IPAddress.TryParse(output.Trim(), out System.Net.IPAddress? address))
         {
             throw new InvalidOperationException($"Could not resolve the rootless Podman host gateway for the production LAN fixture (rc={exitCode}; output={output}; error={error}).");
@@ -865,6 +866,7 @@ public static class Program
             {
                 throw new InvalidOperationException("EgressTopologyManager startup gate remained closed after InitializeAsync.");
             }
+            Console.WriteLine("[PROD_STAGE] production topology initialized and canary passed");
 
             int egressPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (routeExitCode, routeOutput, routeError) = await ExecAsync(
@@ -1192,6 +1194,7 @@ public static class Program
                     parserNcObservation,
                     "normal=True:kindConnector=True:approvalCreated=True");
             }
+            Console.WriteLine("[PROD_STAGE] parser attribution and approval checks completed");
 
             _ = policyStore.SetRule(
                 admin,
@@ -1258,6 +1261,7 @@ public static class Program
                 _ = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
                 await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
             }
+            Console.WriteLine("[PROD_STAGE] resolved-address rebinding check completed");
 
             OciSandboxSession lanSession = await containerTool.SpawnSandboxAsync(lanContext, CancellationToken.None).ConfigureAwait(false);
             string lanWorkloadName = lanSession.ContainerName;
@@ -1314,6 +1318,7 @@ public static class Program
                 "beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:body=True",
                 lanNcObservation,
                 "beforeApprovalBlocked=True:cardCreated=True");
+            Console.WriteLine("[PROD_STAGE] approved LAN traffic check completed");
 
             // v7-28: ReconcileOnceAsync preserves running container (even if previously registered by name, now promoted to hex ID)
             await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
@@ -1603,7 +1608,10 @@ public static class Program
         }
     }
 
-    private static async Task<(int ExitCode, string StdOut, string StdErr)> ExecAsync(string fileName, IReadOnlyList<string> args)
+    private static async Task<(int ExitCode, string StdOut, string StdErr)> ExecAsync(
+        string fileName,
+        IReadOnlyList<string> args,
+        int timeoutSeconds = 60)
     {
         using var proc = new Process();
         proc.StartInfo = new ProcessStartInfo { FileName = fileName, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -1612,9 +1620,32 @@ public static class Program
             proc.StartInfo.ArgumentList.Add(a);
         }
         proc.Start();
-        string stdOut = await proc.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
-        string stdErr = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-        await proc.WaitForExitAsync().ConfigureAwait(false);
+        Task<string> stdOutTask = proc.StandardOutput.ReadToEndAsync();
+        Task<string> stdErrTask = proc.StandardError.ReadToEndAsync();
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
+        try
+        {
+            await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                proc.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            await proc.WaitForExitAsync().ConfigureAwait(false);
+            string timeoutError = await stdErrTask.ConfigureAwait(false);
+            timeoutError = string.IsNullOrWhiteSpace(timeoutError) ? string.Empty : timeoutError + Environment.NewLine;
+            timeoutError += $"Process '{fileName}' exceeded the {timeoutSeconds}s acceptance-command timeout.";
+            return (124, await stdOutTask.ConfigureAwait(false), timeoutError);
+        }
+
+        string stdOut = await stdOutTask.ConfigureAwait(false);
+        string stdErr = await stdErrTask.ConfigureAwait(false);
         return (proc.ExitCode, stdOut, stdErr);
     }
 }

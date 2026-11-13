@@ -103,6 +103,20 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_21_ProductionAcceptanceCommandsHaveTimeoutsAndPhaseMarkers()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+
+        Assert.Contains("int timeoutSeconds = 60", source, StringComparison.Ordinal);
+        Assert.Contains("WaitForExitAsync(timeoutCts.Token)", source, StringComparison.Ordinal);
+        Assert.Contains("Process '{fileName}' exceeded the {timeoutSeconds}s acceptance-command timeout.", source, StringComparison.Ordinal);
+        Assert.Contains("[PROD_STAGE] approved LAN traffic check completed", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
