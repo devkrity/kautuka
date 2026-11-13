@@ -1013,6 +1013,11 @@ public static class Program
                 "podman",
                 ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage,
                     "--connect-to", $"{lanHostAddress}:8443:host.containers.internal:8443", "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+            var (lanDirectProbeRc, lanDirectProbeOut, lanDirectProbeErr) = await ExecAsync(
+                "podman",
+                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage,
+                    "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+            Console.WriteLine($"[PROD_STAGE] direct host LAN probe: rc={lanDirectProbeRc}; body={lanDirectProbeOut.Trim()}; error={lanDirectProbeErr.Trim()}");
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
@@ -1330,11 +1335,12 @@ public static class Program
                 {
                     string envoyLogs = (await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false)).StdOut;
                     string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
-                    var (envoyRouteRc, envoyRoutes, envoyRouteErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route"]).ConfigureAwait(false);
-                    var (envoyAddressRc, envoyAddresses, envoyAddressErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "address"]).ConfigureAwait(false);
-                    var (envoyNeighborRc, envoyNeighbors, envoyNeighborErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "neighbor"]).ConfigureAwait(false);
+                    int envoyFailurePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                    var (envoyRouteRc, envoyRoutes, envoyRouteErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyFailurePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route"]).ConfigureAwait(false);
+                    var (envoyAddressRc, envoyAddresses, envoyAddressErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyFailurePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "address"]).ConfigureAwait(false);
+                    var (envoyNeighborRc, envoyNeighbors, envoyNeighborErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyFailurePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "neighbor"]).ConfigureAwait(false);
                     string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
-                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRouteRc={envoyRouteRc}; envoyRoutes={envoyRoutes}; envoyRouteErr={envoyRouteErr}; envoyAddressRc={envoyAddressRc}; envoyAddresses={envoyAddresses}; envoyAddressErr={envoyAddressErr}; envoyNeighborRc={envoyNeighborRc}; envoyNeighbors={envoyNeighbors}; envoyNeighborErr={envoyNeighborErr}; host={lanHostAddress}; outsideDevice={outsideNetworkDevice}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}; lanMasqueradeDelta={lanMasqueradeDelta}; nft={lanCountersAfter}").ConfigureAwait(false);
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyPid={envoyFailurePid}; envoyRouteRc={envoyRouteRc}; envoyRoutes={envoyRoutes}; envoyRouteErr={envoyRouteErr}; envoyAddressRc={envoyAddressRc}; envoyAddresses={envoyAddresses}; envoyAddressErr={envoyAddressErr}; envoyNeighborRc={envoyNeighborRc}; envoyNeighbors={envoyNeighbors}; envoyNeighborErr={envoyNeighborErr}; host={lanHostAddress}; outsideDevice={outsideNetworkDevice}; directProbeRc={lanDirectProbeRc}; directProbeBody={lanDirectProbeOut}; directProbeErr={lanDirectProbeErr}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}; lanMasqueradeDelta={lanMasqueradeDelta}; nft={lanCountersAfter}").ConfigureAwait(false);
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
