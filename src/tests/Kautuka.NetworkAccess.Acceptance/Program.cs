@@ -964,8 +964,10 @@ public static class Program
             }
 
             const string lanServer = """
-                import http.server, ssl, sys
-                _, cert_path, key_path, access_path = sys.argv[1:5]
+                import http.server, os, ssl, sys
+                _, cert_path, key_path, access_path, pid_path = sys.argv[1:6]
+                with open(pid_path, 'w') as pid_file:
+                    pid_file.write(str(os.getpid()))
                 access=open(access_path,'a',buffering=1)
                 def record(message): print(message, file=access, flush=True)
                 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1004,6 +1006,8 @@ public static class Program
             lanServerStartInfo.ArgumentList.Add(lanCertificatePath);
             lanServerStartInfo.ArgumentList.Add(lanPrivateKeyPath);
             lanServerStartInfo.ArgumentList.Add(lanAccessLogPath);
+            string lanFixturePidPath = Path.Combine(tempRoot, "lan-fixture.pid");
+            lanServerStartInfo.ArgumentList.Add(lanFixturePidPath);
             lanFixtureProcess = Process.Start(lanServerStartInfo)
                 ?? throw new InvalidOperationException("Could not start the host LAN fixture process.");
             int lanFixtureHealthRc = 1;
@@ -1623,8 +1627,29 @@ public static class Program
             {
                 if (!lanFixtureProcess.HasExited)
                 {
-                    lanFixtureProcess.Kill(entireProcessTree: true);
-                    await lanFixtureProcess.WaitForExitAsync().ConfigureAwait(false);
+                    int? fixturePid = null;
+                    if (File.Exists(Path.Combine(tempRoot, "lan-fixture.pid"))
+                        && int.TryParse(await File.ReadAllTextAsync(Path.Combine(tempRoot, "lan-fixture.pid")).ConfigureAwait(false), NumberStyles.None, CultureInfo.InvariantCulture, out int parsedFixturePid)
+                        && parsedFixturePid > 0)
+                    {
+                        fixturePid = parsedFixturePid;
+                    }
+
+                    _ = await ExecAsync(
+                        "sudo",
+                        ["kill", "-TERM", (fixturePid ?? lanFixtureProcess.Id).ToString(CultureInfo.InvariantCulture)]).ConfigureAwait(false);
+                    using var fixtureShutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    try
+                    {
+                        await lanFixtureProcess.WaitForExitAsync(fixtureShutdownCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _ = await ExecAsync(
+                            "sudo",
+                            ["kill", "-KILL", (fixturePid ?? lanFixtureProcess.Id).ToString(CultureInfo.InvariantCulture)]).ConfigureAwait(false);
+                        await lanFixtureProcess.WaitForExitAsync().ConfigureAwait(false);
+                    }
                 }
                 lanFixtureProcess.Dispose();
             }
