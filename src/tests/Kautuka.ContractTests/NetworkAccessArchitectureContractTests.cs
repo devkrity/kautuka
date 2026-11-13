@@ -45,11 +45,22 @@ public sealed class NetworkAccessArchitectureContractTests
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string guide = File.ReadAllText(Path.Combine(repositoryRoot, "docs", "operations", "network-access.md"));
+        string reportPath = Path.Combine(repositoryRoot, "docs", "verification", "nac-v7-production-rootless-run.json");
+        using JsonDocument report = JsonDocument.Parse(File.ReadAllText(reportPath));
 
         Assert.DoesNotContain("live connector launch still need their own production evidence", guide, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("uses a dedicated service group", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("nac-v7-prod-report-135bc40.json", guide, StringComparison.Ordinal);
         Assert.Contains("CallToolAsync", guide, StringComparison.Ordinal);
         Assert.Contains("keep-groups", guide, StringComparison.Ordinal);
+        Assert.Contains("source SHA `97b66ca`", guide, StringComparison.Ordinal);
+        Assert.Contains("does not establish CI results or physical-host LAN behavior", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("97b66ca", report.RootElement.GetProperty("gitSha").GetString());
+        Assert.Equal("7/7 PASS, 0 FAIL", report.RootElement.GetProperty("summary").GetString());
+        Assert.Contains(report.RootElement.GetProperty("observations").EnumerateArray(), observation =>
+            observation.GetProperty("testId").GetString() == "PROD_E_PARSER"
+            && observation.GetProperty("observedValue").GetString() == "denyAll=True:kindSystem=True:noApproval=True"
+            && observation.GetProperty("ncFlipped").GetBoolean());
     }
 
     [Fact]
