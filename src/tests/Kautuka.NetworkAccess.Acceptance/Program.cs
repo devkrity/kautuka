@@ -525,23 +525,28 @@ public static class Program
         }
     }
 
-    private static async Task<string> ResolvePodmanHostGatewayAddressAsync(string baseImage)
+    private static async Task<string> ResolveHostLanAddressAsync()
     {
         var (exitCode, output, error) = await ExecAsync(
-            "podman",
-            ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "python3", baseImage,
-                "-c", "import socket; print(socket.gethostbyname('host.containers.internal'))"],
-            timeoutSeconds: 120).ConfigureAwait(false);
-        if (exitCode != 0 || !System.Net.IPAddress.TryParse(output.Trim(), out System.Net.IPAddress? address))
+            "ip",
+            ["-4", "route", "get", "1.1.1.1"]).ConfigureAwait(false);
+        string[] routeTokens = output.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        int sourceIndex = Array.FindIndex(routeTokens, static token => string.Equals(token, "src", StringComparison.Ordinal));
+        if (exitCode != 0
+            || sourceIndex < 0
+            || sourceIndex + 1 >= routeTokens.Length
+            || !System.Net.IPAddress.TryParse(routeTokens[sourceIndex + 1], out System.Net.IPAddress? address))
         {
-            throw new InvalidOperationException($"Could not resolve the rootless Podman host gateway for the production LAN fixture (rc={exitCode}; output={output}; error={error}).");
+            throw new InvalidOperationException($"Could not determine the host LAN source address for the production fixture (rc={exitCode}; output={output}; error={error}).");
         }
 
         if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
             || System.Net.IPAddress.IsLoopback(address)
-            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(address))
+            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(address)
+            || System.Net.IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)
+            || System.Net.IPNetwork.Parse(EgressTopologyManager.WorkloadSubnet).Contains(address))
         {
-            throw new InvalidOperationException($"The rootless Podman host gateway '{address}' is not a private IPv4 address.");
+            throw new InvalidOperationException($"The host route source '{address}' is not a host LAN address outside the NAC container networks.");
         }
 
         return address.ToString();
@@ -902,7 +907,8 @@ public static class Program
             }
 
             const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
-            string lanHostAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage).ConfigureAwait(false);
+            string lanHostAddress = await ResolveHostLanAddressAsync().ConfigureAwait(false);
+            Console.WriteLine($"[PROD_STAGE] host LAN fixture bound to {lanHostAddress}");
             string lanCertificatePath = Path.Combine(tempRoot, "lan-fixture.crt");
             string lanPrivateKeyPath = Path.Combine(tempRoot, "lan-fixture.key");
             string lanAccessLogPath = Path.Combine(tempRoot, "lan-fixture-access.log");
@@ -932,7 +938,7 @@ public static class Program
 
             const string lanServer = """
                 import http.server, ssl, sys
-                cert_path, key_path, access_path = sys.argv[1:4]
+                bind_address, cert_path, key_path, access_path = sys.argv[1:5]
                 access=open(access_path,'a',buffering=1)
                 def record(message): print(message, file=access, flush=True)
                 class Handler(http.server.BaseHTTPRequestHandler):
@@ -947,7 +953,7 @@ public static class Program
                         self.end_headers()
                         self.wfile.write(body)
                     def log_message(self, fmt, *args): record(fmt % args)
-                server=http.server.ThreadingHTTPServer(('0.0.0.0',8443),Handler)
+                server=http.server.ThreadingHTTPServer((bind_address,8443),Handler)
                 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(cert_path,key_path)
                 server.socket=context.wrap_socket(server.socket,server_side=True)
@@ -962,6 +968,7 @@ public static class Program
             };
             lanServerStartInfo.ArgumentList.Add("-u");
             lanServerStartInfo.ArgumentList.Add(lanServerScriptPath);
+            lanServerStartInfo.ArgumentList.Add(lanHostAddress);
             lanServerStartInfo.ArgumentList.Add(lanCertificatePath);
             lanServerStartInfo.ArgumentList.Add(lanPrivateKeyPath);
             lanServerStartInfo.ArgumentList.Add(lanAccessLogPath);
@@ -974,7 +981,7 @@ public static class Program
             {
                 (lanFixtureHealthRc, lanFixtureHealthOut, lanFixtureHealthErr) = await ExecAsync(
                     "curl",
-                    ["--insecure", "--silent", "--show-error", "--max-time", "2", "https://127.0.0.1:8443/"]).ConfigureAwait(false);
+                    ["--insecure", "--silent", "--show-error", "--max-time", "2", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
                 if (lanFixtureHealthRc != 0 && lanFixtureProcess.HasExited)
                 {
                     break;

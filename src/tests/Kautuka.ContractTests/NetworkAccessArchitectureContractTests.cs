@@ -92,24 +92,27 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
-    public async Task V7_21_LanFixtureUsesTheRootlessPodmanHostGateway()
+    public async Task V7_21_LanFixtureBindsHostLanAddress()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
         string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
         int productionStart = source.IndexOf("private static async Task<int> RunProductionTopologyProofAsync", StringComparison.Ordinal);
-        int fixtureStart = source.IndexOf("string lanServerScriptPath", productionStart, StringComparison.Ordinal);
+        int fixtureStart = source.IndexOf("const string lanServer =", productionStart, StringComparison.Ordinal);
         int fixtureEnd = source.IndexOf("int lanFixtureHealthRc", fixtureStart, StringComparison.Ordinal);
         Assert.True(fixtureStart >= 0 && fixtureEnd > fixtureStart, "Could not locate the LAN fixture setup in the production acceptance.");
         string fixtureSetup = source[fixtureStart..fixtureEnd];
 
-        Assert.Contains("string lanHostAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", source, StringComparison.Ordinal);
-        Assert.Contains("socket.gethostbyname('host.containers.internal')", source, StringComparison.Ordinal);
+        string productionSource = source[productionStart..];
+        Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
+        Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("ThreadingHTTPServer((bind_address,8443)", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("Process.Start(lanServerStartInfo)", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("OutsideNetworkName", fixtureSetup, StringComparison.Ordinal);
-        Assert.DoesNotContain("10.248.0.4", source, StringComparison.Ordinal);
     }
 
     [Fact]
