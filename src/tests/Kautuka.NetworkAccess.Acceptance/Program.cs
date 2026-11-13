@@ -920,6 +920,13 @@ public static class Program
                 throw new InvalidOperationException(
                     $"The live egress pod routes did not prefer the outside gateway (rc={routeExitCode}; routes={routeOutput}; err={routeError}).");
             }
+            string[] outsideRouteTokens = outsideDefaultRoute.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            int outsideDeviceIndex = Array.IndexOf(outsideRouteTokens, "dev");
+            if (outsideDeviceIndex < 0 || outsideDeviceIndex + 1 >= outsideRouteTokens.Length)
+            {
+                throw new InvalidOperationException($"The live outside default route has no device (route={outsideDefaultRoute}).");
+            }
+            string outsideNetworkDevice = outsideRouteTokens[outsideDeviceIndex + 1];
             string egressDefaultRoutes = string.Join('\n', outsideDefaultRoute, workloadDefaultRoute);
 
             string boundaryPath = Path.Combine(stateDir, "nac", "boundary.nft");
@@ -936,7 +943,7 @@ public static class Program
             int envoyLanRoutePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (lanRouteRc, lanRouteOut, lanRouteErr) = await ExecAsync(
                 "podman",
-                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route", "replace", $"{lanHostAddress}/32", "via", lanGatewayAddress, "onlink"]).ConfigureAwait(false);
+                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route", "replace", $"{lanHostAddress}/32", "via", lanGatewayAddress, "dev", outsideNetworkDevice, "onlink"]).ConfigureAwait(false);
             if (lanRouteRc != 0)
             {
                 throw new InvalidOperationException($"Could not route the production LAN fixture through the rootless Podman host gateway (rc={lanRouteRc}; output={lanRouteOut}; error={lanRouteErr}).");
@@ -1032,7 +1039,7 @@ public static class Program
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
                 ["run", "--rm", "--cap-add", "NET_ADMIN", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "sh", baseImage,
-                    "-c", $"ip route replace {lanHostAddress}/32 via {lanGatewayAddress} onlink && exec curl --insecure --silent --show-error --max-time 4 https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+                    "-c", $"lan_dev=$(ip -o -4 route get 1.1.1.1 | awk '{{for(i=1;i<=NF;i++) if($i==\"dev\"){{print $(i+1); exit}}}}'); test -n \"$lan_dev\" && ip route replace {lanHostAddress}/32 via {lanGatewayAddress} dev \"$lan_dev\" onlink && exec curl --insecure --silent --show-error --max-time 4 https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);

@@ -106,9 +106,10 @@ public sealed class NetworkAccessArchitectureContractTests
         string productionSource = source[productionStart..];
         Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
         Assert.Contains("string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("outsideNetworkDevice", productionSource, StringComparison.Ordinal);
         Assert.Contains("ip route replace {lanHostAddress}/32 via {lanGatewayAddress}", productionSource, StringComparison.Ordinal);
-        Assert.Contains("via {lanGatewayAddress} onlink", productionSource, StringComparison.Ordinal);
-        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress, \"onlink\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("via {lanGatewayAddress} dev", productionSource, StringComparison.Ordinal);
+        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress, \"dev\", outsideNetworkDevice, \"onlink\"", productionSource, StringComparison.Ordinal);
         Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
         int gatewayStart = source.IndexOf("private static async Task<string> ResolvePodmanHostGatewayAddressAsync", StringComparison.Ordinal);
         int gatewayEnd = source.IndexOf("private static string FindRepoRoot()", gatewayStart, StringComparison.Ordinal);
