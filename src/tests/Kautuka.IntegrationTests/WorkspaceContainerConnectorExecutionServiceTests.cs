@@ -180,6 +180,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.True(commands.Any(static args => args[0] == "run"), allowedUser.FailureMessage);
             string[] run = Assert.Single(commands, static args => args[0] == "run");
             Assert.Contains("io.kautuka.user=other-user", run, StringComparer.Ordinal);
+            Assert.DoesNotContain(run, static argument => argument.StartsWith("io.kautuka.agent=", StringComparison.Ordinal));
             Assert.Contains("io.kautuka.purpose=probe", run, StringComparer.Ordinal);
             Assert.Empty(registry.GetAll());
         }
@@ -203,9 +204,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        string server = "import socket,sys\ns=socket.create_connection(('127.0.0.1'," + port + "))\ns.sendall(b'R')\ns.recv(1)\ns.close()\nimport json\n" +
+        string server = "import socket,sys,json\ns=socket.create_connection(('127.0.0.1'," + port + "))\ns.sendall(json.dumps(sys.argv[1:]).encode()+b'\\n')\ns.recv(1)\ns.close()\n" +
             "for line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'ok'}],'isError':False}}),flush=True)\n";
         var inspectedNames = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var launchArguments = new System.Collections.Concurrent.ConcurrentBag<string[]>();
         var pidIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
         int nextPid = 4242;
         var registry = new WorkloadRegistry();
@@ -280,7 +282,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             foreach (TcpClient client in new[] { clientA, clientB })
             {
                 NetworkStream stream = client.GetStream();
-                _ = await stream.ReadAsync(new byte[1], timeout.Token);
+                using var reader = new StreamReader(stream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+                string argumentJson = await reader.ReadLineAsync(timeout.Token) ?? throw new EndOfStreamException("Connector launch arguments were not received.");
+                string[] arguments = Assert.IsType<string[]>(JsonSerializer.Deserialize<string[]>(argumentJson));
+                launchArguments.Add(arguments);
             }
             foreach (TcpClient client in new[] { clientA, clientB })
             {
@@ -291,11 +296,84 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.All(results, result => Assert.True(result.Ok, result.FailureMessage));
             Assert.Equal(2, inspectedNames.Count);
             Assert.Equal(2, inspectedNames.Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal(2, launchArguments.Count);
+            Assert.All(launchArguments, run =>
+            {
+                Assert.Contains("io.kautuka.user=u", run, StringComparer.Ordinal);
+                Assert.Contains("io.kautuka.agent=a", run, StringComparer.Ordinal);
+                Assert.DoesNotContain(run, static argument => argument.StartsWith("io.kautuka.purpose=", StringComparison.Ordinal));
+            });
             Assert.Empty(registry.GetAll());
         }
         finally
         {
             listener.Stop();
+            Directory.Delete(workspaceRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task V7_45_PersistentIsolatedAgentLaunchUsesIdentityContextLabels()
+    {
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-persistent-identity-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspaceRoot);
+        try
+        {
+            var runArguments = new List<string[]>();
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                if (args[0] == "run")
+                {
+                    runArguments.Add([.. args]);
+                    return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "sha256:synthetic", string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+            string ownerWorkspace = Path.Combine(workspaceRoot, "users", "user-persistent", "agents", "agent-persistent");
+            Directory.CreateDirectory(ownerWorkspace);
+            var workspace = new ContainerContext("agent", "agent-persistent", "user-persistent", ownerWorkspace, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "persistent-identity-test", "localhost/test:latest", "test-command", [], true, false, null, null, [], 30, 600);
+            var desired = new WorkspaceDesiredStateStore();
+            _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+                [workspace], [connector], []);
+            const string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n";
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired, runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
+                stdioCommand: "python3",
+                stdioArgumentsPrefix: ["-u", "-c", server]);
+
+            var result = await service.ListToolsAsync(
+                connector.ConnectorId, null, 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, CancellationToken.None);
+
+            Assert.True(result.Ok, result.FailureMessage);
+            string[] run = Assert.Single(runArguments);
+            Assert.Contains("io.kautuka.user=user-persistent", run, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.agent=agent-persistent", run, StringComparer.Ordinal);
+            Assert.DoesNotContain(run, static argument => argument.StartsWith("io.kautuka.purpose=", StringComparison.Ordinal));
+        }
+        finally
+        {
             Directory.Delete(workspaceRoot, recursive: true);
         }
     }
