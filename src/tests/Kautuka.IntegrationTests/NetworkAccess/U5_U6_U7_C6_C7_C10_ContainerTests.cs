@@ -736,6 +736,82 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_WorkloadNetworkPrefersOutsideDefaultRoute_WithNegativeControl()
+    {
+        var createCalls = new List<string[]>();
+        var creatingPodman = new PodmanCommandRunner((args, _) =>
+        {
+            string[] copied = [.. args];
+            createCalls.Add(copied);
+            bool isInspect = copied.Length > 1 && copied[0] == "network" && copied[1] == "inspect";
+            return Task.FromResult(new PodmanCommandResult(
+                isInspect ? 125 : 0,
+                string.Empty,
+                isInspect ? "missing" : string.Empty,
+                ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-route-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(creatingPodman);
+        await using var creatingManager = new EgressTopologyManager(creatingPodman, allocator, verifier, registry, tempDir);
+        System.Reflection.MethodInfo ensureNetworks = typeof(EgressTopologyManager).GetMethod(
+            "EnsureNetworksAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        await ((Task)ensureNetworks.Invoke(creatingManager, [CancellationToken.None])!).ConfigureAwait(false);
+
+        string[] workloadCreate = createCalls.Single(args =>
+            args.Length > 2
+            && args[0] == "network"
+            && args[1] == "create"
+            && args[^1] == EgressTopologyManager.WorkloadNetworkName);
+        int metricIndex = Array.IndexOf(workloadCreate, "metric=1000");
+        Assert.True(metricIndex > 0, "The workload network must use a higher default-route metric than the outside network.");
+        Assert.Equal("--opt", workloadCreate[metricIndex - 1]);
+        string[] outsideCreate = createCalls.Single(args =>
+            args.Length > 2
+            && args[0] == "network"
+            && args[1] == "create"
+            && args[^1] == EgressTopologyManager.OutsideNetworkName);
+        int outsideMetricIndex = Array.IndexOf(outsideCreate, "metric=100");
+        Assert.True(outsideMetricIndex > 0);
+        Assert.Equal("--opt", outsideCreate[outsideMetricIndex - 1]);
+
+        const string wrongMetricInspect = "[{\"internal\":true,\"dns_enabled\":false,\"options\":{\"metric\":\"100\"}}]";
+        var existingPodman = new PodmanCommandRunner((args, _) =>
+        {
+            bool isInspect = args.Count > 1 && args[0] == "network" && args[1] == "inspect";
+            bool isWorkloadInspect = isInspect && args.Contains(EgressTopologyManager.WorkloadNetworkName);
+            return Task.FromResult(new PodmanCommandResult(
+                isWorkloadInspect ? 0 : isInspect ? 125 : 0,
+                isWorkloadInspect ? wrongMetricInspect : string.Empty,
+                string.Empty,
+                ProcessTerminationReason.Completed));
+        });
+        var existingVerifier = new WorkloadPostStartVerifier(existingPodman);
+        await using var existingManager = new EgressTopologyManager(existingPodman, allocator, existingVerifier, registry, tempDir);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)ensureNetworks.Invoke(existingManager, [CancellationToken.None])!);
+
+        const string correctWorkloadInspect = "[{\"internal\":true,\"dns_enabled\":false,\"options\":{\"metric\":\"1000\"}}]";
+        const string wrongOutsideInspect = "[{\"options\":{\"metric\":\"200\"}}]";
+        var wrongOutsidePodman = new PodmanCommandRunner((args, _) =>
+        {
+            bool isInspect = args.Count > 1 && args[0] == "network" && args[1] == "inspect";
+            bool isWorkloadInspect = isInspect && args.Contains(EgressTopologyManager.WorkloadNetworkName);
+            bool isOutsideInspect = isInspect && args.Contains(EgressTopologyManager.OutsideNetworkName);
+            return Task.FromResult(new PodmanCommandResult(
+                isWorkloadInspect || isOutsideInspect ? 0 : isInspect ? 125 : 0,
+                isWorkloadInspect ? correctWorkloadInspect : isOutsideInspect ? wrongOutsideInspect : string.Empty,
+                string.Empty,
+                ProcessTerminationReason.Completed));
+        });
+        var wrongOutsideVerifier = new WorkloadPostStartVerifier(wrongOutsidePodman);
+        await using var wrongOutsideManager = new EgressTopologyManager(wrongOutsidePodman, allocator, wrongOutsideVerifier, registry, tempDir);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)ensureNetworks.Invoke(wrongOutsideManager, [CancellationToken.None])!);
+    }
+
+    [Fact]
     public async Task V7_20_ReconcileClosesStartupGateWhenPodDegrades_WithNegativeControl()
     {
         const string degraded = "[{\"State\":\"Degraded\",\"Containers\":[]}]";

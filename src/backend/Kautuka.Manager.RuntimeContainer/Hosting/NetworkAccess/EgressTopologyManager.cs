@@ -48,6 +48,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public const string PackageProxyIp = "10.247.0.3";
     public const string WorkloadSubnet = "10.247.0.0/16";
 
+    private const string WorkloadNetworkRouteMetric = "1000";
+    private const string OutsideNetworkRouteMetric = "100";
+
     public const string EnvoyPinnedImage = "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded";
     public const string CoreDnsPinnedImage = "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea";
     public const string BoundaryInitImage = "localhost/kautuka-egress-boundary:local";
@@ -590,10 +593,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     : netDoc.RootElement;
                 bool isInternal = netElem.TryGetProperty("internal", out JsonElement intElem) && intElem.GetBoolean();
                 bool dnsEnabled = netElem.TryGetProperty("dns_enabled", out JsonElement dnsElem) && dnsElem.GetBoolean();
-                if (!isInternal || dnsEnabled)
+                string routeMetric = ReadNetworkRouteMetric(netElem);
+                if (!isInternal || dnsEnabled || !string.Equals(routeMetric, WorkloadNetworkRouteMetric, StringComparison.Ordinal))
                 {
                     IsStartupGateOpen = false;
-                    throw new InvalidOperationException($"Existing network '{WorkloadNetworkName}' drifted (internal={isInternal}, dns_enabled={dnsEnabled}).");
+                    throw new InvalidOperationException($"Existing network '{WorkloadNetworkName}' drifted (internal={isInternal}, dns_enabled={dnsEnabled}, metric={routeMetric}).");
                 }
             }
         }
@@ -605,6 +609,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 "network", "create",
                 "--internal",
                 "--disable-dns",
+                "--opt", $"metric={WorkloadNetworkRouteMetric}",
                 "--subnet", WorkloadSubnet,
                 "--gateway", "10.247.0.1",
                 "--route", "0.0.0.0/0,10.247.0.2",
@@ -626,11 +631,27 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             .RunAsync(["network", "inspect", OutsideNetworkName], 10, cancellationToken)
             .ConfigureAwait(false);
 
-        if (inspectOut.ExitCode != 0)
+        if (inspectOut.ExitCode == 0)
+        {
+            if (OperatingSystem.IsLinux() && !string.IsNullOrWhiteSpace(inspectOut.StdOut))
+            {
+                using JsonDocument netDoc = JsonDocument.Parse(inspectOut.StdOut);
+                JsonElement netElem = netDoc.RootElement.ValueKind == JsonValueKind.Array && netDoc.RootElement.GetArrayLength() > 0
+                    ? netDoc.RootElement[0]
+                    : netDoc.RootElement;
+                string routeMetric = ReadNetworkRouteMetric(netElem);
+                if (!string.Equals(routeMetric, OutsideNetworkRouteMetric, StringComparison.Ordinal))
+                {
+                    IsStartupGateOpen = false;
+                    throw new InvalidOperationException($"Existing network '{OutsideNetworkName}' drifted (metric={routeMetric}).");
+                }
+            }
+        }
+        else
         {
             logger.LogInformation("Creating {NetworkName}...", OutsideNetworkName);
             PodmanCommandResult createOut = await podmanRunner
-                .RunAsync(["network", "create", "--subnet", OutsideSubnet, "--gateway", "10.248.0.1", OutsideNetworkName], 30, cancellationToken)
+                .RunAsync(["network", "create", "--opt", $"metric={OutsideNetworkRouteMetric}", "--subnet", OutsideSubnet, "--gateway", "10.248.0.1", OutsideNetworkName], 30, cancellationToken)
                 .ConfigureAwait(false);
 
             if (createOut.ExitCode != 0)
@@ -638,6 +659,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 throw new InvalidOperationException($"Failed to create network {OutsideNetworkName}: {createOut.StdErr}");
             }
         }
+    }
+
+    private static string ReadNetworkRouteMetric(JsonElement network)
+    {
+        if (!network.TryGetProperty("options", out JsonElement options)
+            || options.ValueKind != JsonValueKind.Object
+            || !options.TryGetProperty("metric", out JsonElement metric))
+        {
+            return string.Empty;
+        }
+
+        return metric.ValueKind == JsonValueKind.String
+            ? metric.GetString() ?? string.Empty
+            : metric.ToString();
     }
 
     public void WriteInfraAllowlist(IReadOnlyList<InfraAllowlistEntry>? entries = null)
@@ -697,10 +732,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         IReadOnlyList<string> upstreamDnsIps = await DiscoverUpstreamDnsIpsAsync(cancellationToken).ConfigureAwait(false);
         string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, upstreamDnsIps);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(isWindowsMtls: isWindowsHostNativeDev);
-        string[] directUpstreamDnsIps = upstreamDnsIps
-            .Where(static ip => !string.Equals(ip, "10.248.0.1", StringComparison.Ordinal))
-            .ToArray();
-        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, directUpstreamDnsIps);
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
         string boundaryPath = Path.Combine(nacDir, "boundary.nft");
@@ -1285,7 +1317,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 if (string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash)
                     || !string.Equals(liveBoundaryHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
                 {
-                    logger.LogError("Boundary nft ruleset hash changed during reconcile; closing the NAC startup gate.");
+                    logger.LogError(
+                        "Boundary nft ruleset hash changed during reconcile (expected {ExpectedHash}, observed {ObservedHash}); closing the NAC startup gate.",
+                        expectedBoundaryRulesetHash,
+                        liveBoundaryHash);
                     IsStartupGateOpen = false;
                     return;
                 }
