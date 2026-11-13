@@ -138,6 +138,29 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
             .Select(static rule => rule.GetProperty("comment").GetString()!)
             .ToArray();
 
+        string jsonCompact = JsonSerializer.Serialize(document.RootElement);
+        (string TextRule, string JsonExpression)[] crossLanguageRules =
+        [
+            ("iifname \"lo\" accept", "\"key\":\"iifname\""),
+            ("ct state established,related accept", "\"key\":\"state\""),
+            ("counter drop comment \"input_drop\"", "\"comment\":\"input_drop\""),
+            ("oifname \"lo\" accept", "\"key\":\"oifname\""),
+            ("meta nfproto ipv6 counter drop comment \"ipv6_drop\"", "\"left\":{\"meta\":{\"key\":\"nfproto\"}},\"right\":\"ipv6\""),
+            ("oifname != \"lo\" ip saddr != 10.247.1.20 counter drop comment \"spoof_drop\"", "\"left\":{\"payload\":{\"protocol\":\"ip\",\"field\":\"saddr\"}},\"right\":\"10.247.1.20\""),
+            ("ip daddr 10.247.0.2 tcp dport 15001 accept", "\"left\":{\"payload\":{\"protocol\":\"tcp\",\"field\":\"dport\"}},\"right\":15001"),
+            ("ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept", "\"left\":{\"meta\":{\"key\":\"l4proto\"}},\"right\":{\"set\":[\"tcp\",\"udp\"]}"),
+            ("ip daddr 10.247.0.0/16 counter drop comment \"wl_net_drop\"", "\"prefix\":{\"addr\":\"10.247.0.0\",\"len\":16}"),
+            ("ip daddr { 169.254.0.0/16, 168.63.129.16 } counter drop comment \"meta_drop\"", "\"168.63.129.16\""),
+            ("meta l4proto udp counter drop comment \"udp_drop\"", "\"left\":{\"meta\":{\"key\":\"l4proto\"}},\"right\":\"udp\""),
+            ("meta l4proto tcp accept", "\"left\":{\"meta\":{\"key\":\"l4proto\"}},\"right\":\"tcp\""),
+            ("counter drop comment \"final_drop\"", "\"comment\":\"final_drop\""),
+        ];
+        foreach ((string textRule, string jsonExpression) in crossLanguageRules)
+        {
+            Assert.Contains(textRule, textGolden, StringComparison.Ordinal);
+            Assert.Contains(jsonExpression, jsonCompact, StringComparison.Ordinal);
+        }
+
         Assert.Equal(expectedComments, textComments);
         Assert.Equal(expectedComments, jsonComments);
         Assert.Contains("oifname != \"lo\" ip saddr != 10.247.1.20 counter drop comment \"spoof_drop\"", textGolden, StringComparison.Ordinal);
