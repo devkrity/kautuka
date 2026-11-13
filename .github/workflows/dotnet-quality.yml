@@ -124,6 +124,9 @@ jobs:
       - name: Test Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Test Linux installer NAC hook payload
+        run: bash ./scripts/test-linux-installer-nac-hook.sh
+
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 

@@ -309,6 +309,13 @@ fail() {
     exit 1
 }
 
+install_nac_hook_payload() {
+    local hook_source="$1"
+    local hook_destination="$2"
+    [[ -f "$hook_source" ]] || fail "required network access hook payload is missing: $hook_source"
+    install -m 0755 -- "$hook_source" "$hook_destination"
+}
+
 require_root() {
     if [[ ${EUID} -ne 0 ]]; then
         fail "this installer must run as root"
@@ -2845,11 +2852,8 @@ PY
     chmod +x "$version_root/kautuka-manager"
 
     local hooks_dir="$service_home/.config/containers/hooks.d"
-    if [[ -f "$version_root/scripts/kautuka_hook.py" ]]; then
-        cp -p "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
-        chmod 0755 "$hooks_dir/kautuka_hook.py"
-        chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
-    fi
+    install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
