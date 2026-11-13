@@ -546,6 +546,58 @@ public static class Program
         return address;
     }
 
+    private static async Task AddTemporaryHostNetworkFixtureAllowlistAsync(string allowlistPath, string originalAllowlist, string containerId)
+    {
+        var (addressRc, addressesJson, addressErr) = await ExecAsync("ip", ["-j", "-4", "addr", "show"]).ConfigureAwait(false);
+        if (addressRc != 0)
+        {
+            throw new InvalidOperationException($"Could not inspect host IPv4 addresses for the controlled LAN fixture (rc={addressRc}; {addressErr}).");
+        }
+
+        var hostIpv4 = new HashSet<string>(StringComparer.Ordinal);
+        using (JsonDocument addresses = JsonDocument.Parse(addressesJson))
+        {
+            foreach (JsonElement iface in addresses.RootElement.EnumerateArray())
+            {
+                if (!iface.TryGetProperty("addr_info", out JsonElement addressInfo) || addressInfo.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement address in addressInfo.EnumerateArray())
+                {
+                    string? local = address.TryGetProperty("local", out JsonElement localElement) ? localElement.GetString() : null;
+                    if (!string.IsNullOrWhiteSpace(local) && !string.Equals(local, "127.0.0.1", StringComparison.Ordinal))
+                    {
+                        hostIpv4.Add(local);
+                    }
+                }
+            }
+        }
+
+        using JsonDocument document = JsonDocument.Parse(originalAllowlist);
+        if (!document.RootElement.TryGetProperty("entries", out JsonElement entries) || entries.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException("The Manager hook allowlist has no entries array.");
+        }
+
+        int entriesEnd = originalAllowlist.LastIndexOf(']');
+        if (entriesEnd < 0)
+        {
+            throw new InvalidOperationException("The Manager hook allowlist is malformed.");
+        }
+
+        string separator = entries.GetArrayLength() == 0 ? string.Empty : ",";
+        string expectedIpv4Json = string.Join(",", hostIpv4.Order(StringComparer.Ordinal).Select(address => $"\"{address}\""));
+        string fixtureEntry = $"{separator}{{\"id\":\"{containerId}\",\"role\":\"acceptance-lan-fixture\",\"expected_ipv4\":[{expectedIpv4Json}],\"image_digest\":\"acceptance-fixture\"}}";
+        string updatedAllowlist = originalAllowlist.Insert(entriesEnd, fixtureEntry);
+        await File.WriteAllTextAsync(allowlistPath, updatedAllowlist).ConfigureAwait(false);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(allowlistPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
     private static string FindRepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
@@ -948,19 +1000,48 @@ public static class Program
                 server.socket=context.wrap_socket(server.socket,server_side=True)
                 server.serve_forever()
                 """;
-            var (lanServerRc, lanServerOut, lanServerErr) = await ExecAsync(
+            var (lanCreateRc, lanCreateOut, lanCreateErr) = await ExecAsync(
                 "podman",
                 [
-                    "run", "-d", "--name", lanFixtureName,
+                    "create", "--name", lanFixtureName,
                     "--network", "host",
                     "--volume", $"{lanCertificatePath}:/tmp/lan-fixture.crt:ro",
                     "--volume", $"{lanPrivateKeyPath}:/tmp/lan-fixture.key:ro",
                     "--volume", $"{lanAccessLogPath}:/tmp/lan-fixture-access.log:rw",
                     "--entrypoint", "python3", baseImage, "-u", "-c", lanServer,
                 ]).ConfigureAwait(false);
-            if (lanServerRc != 0 || string.IsNullOrWhiteSpace(lanServerOut))
+            if (lanCreateRc != 0 || string.IsNullOrWhiteSpace(lanCreateOut))
             {
-                throw new InvalidOperationException($"Could not start the controlled LAN fixture (rc={lanServerRc}; {lanServerErr}).");
+                throw new InvalidOperationException($"Could not create the controlled LAN fixture (rc={lanCreateRc}; {lanCreateErr}).");
+            }
+            var (lanInspectRc, lanContainerId, lanInspectErr) = await ExecAsync(
+                "podman", ["inspect", "--format", "{{.Id}}", lanFixtureName]).ConfigureAwait(false);
+            if (lanInspectRc != 0 || string.IsNullOrWhiteSpace(lanContainerId))
+            {
+                throw new InvalidOperationException($"Could not inspect the controlled LAN fixture (rc={lanInspectRc}; {lanInspectErr}).");
+            }
+
+            string allowlistPath = Path.Combine(nacStateDir, "infra-allowlist.json");
+            string originalAllowlist = await File.ReadAllTextAsync(allowlistPath).ConfigureAwait(false);
+            try
+            {
+                await AddTemporaryHostNetworkFixtureAllowlistAsync(allowlistPath, originalAllowlist, lanContainerId.Trim()).ConfigureAwait(false);
+                var (lanStartRc, _, lanStartErr) = await ExecAsync("podman", ["start", lanFixtureName]).ConfigureAwait(false);
+                if (lanStartRc != 0)
+                {
+                    string hookLog = File.Exists(Path.Combine(nacStateDir, "hook.log"))
+                        ? await File.ReadAllTextAsync(Path.Combine(nacStateDir, "hook.log")).ConfigureAwait(false)
+                        : string.Empty;
+                    throw new InvalidOperationException($"Could not start the controlled LAN fixture (rc={lanStartRc}; {lanStartErr}; hookLog={hookLog}).");
+                }
+            }
+            finally
+            {
+                await File.WriteAllTextAsync(allowlistPath, originalAllowlist).ConfigureAwait(false);
+                if (OperatingSystem.IsLinux())
+                {
+                    File.SetUnixFileMode(allowlistPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                }
             }
             int lanFixtureHealthRc = 1;
             string lanFixtureHealthOut = string.Empty;
