@@ -938,6 +938,44 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_StartupRejectsMisconfiguredExistingPodAtCallSite_WithNegativeControl()
+    {
+        var calls = new List<string[]>();
+        const string misconfiguredPod = "[{\"CreateCommand\":[\"podman\",\"pod\",\"create\",\"--name\",\"kautuka-egress\",\"--network\",\"kautuka-workload:ip=10.247.0.3\"]}]";
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add([.. args]);
+            if (args.SequenceEqual(["network", "inspect", EgressTopologyManager.OutsideNetworkName]))
+            {
+                return Task.FromResult(new PodmanCommandResult(125, string.Empty, "missing", ProcessTerminationReason.NonZeroExit));
+            }
+
+            if (args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]))
+            {
+                return Task.FromResult(new PodmanCommandResult(0, misconfiguredPod, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            throw new InvalidOperationException("Startup continued past a misconfigured existing pod: " + string.Join(' ', args));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-existing-pod-callsite-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        System.Reflection.MethodInfo ensurePod = typeof(EgressTopologyManager).GetMethod(
+            "EnsureEgressPodAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("EnsureEgressPodAsync method was not found.");
+
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)ensurePod.Invoke(manager, [false, null, false, CancellationToken.None])!).ConfigureAwait(false);
+
+        Assert.Contains("does not have the required workload/outside network addresses", failure.Message, StringComparison.Ordinal);
+        Assert.Single(calls, args => args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]));
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "create"])
+            || args.SequenceEqual(["pod", "start", EgressTopologyManager.EgressPodName]));
+    }
+
+    [Fact]
     public async Task V7_20_WorkloadNetworkPrefersOutsideDefaultRoute_WithNegativeControl()
     {
         var createCalls = new List<string[]>();
