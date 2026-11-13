@@ -1,4 +1,7 @@
+using System.Net.Sockets;
+
 using Grpc.Core;
+using Grpc.Net.Client;
 
 using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Hosting;
@@ -8,6 +11,10 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using ManagerSandboxRuntimeDefinition = Kautuka.Manager.RuntimeContainer.Configuration.SandboxRuntimeDefinition;
@@ -42,42 +49,63 @@ public sealed class WorkspaceGrpcServiceTests
         var update = new ManagerDesiredStateUpdateRequest(desiredState, 1, WorkspaceDesiredStateSyncReason.Bootstrap, Guid.NewGuid().ToString("D"), "gateway-v7-40-test");
 
         var store = new WorkspaceDesiredStateStore();
-        var managerConnector = new WorkspaceMcpContainerConnectorDefinition(
-            gatewayConnector.ConnectorId,
-            gatewayConnector.Image,
-            gatewayConnector.Command,
-            gatewayConnector.Args,
-            gatewayConnector.Enabled,
-            gatewayConnector.IsInternalSystemConnector,
-            gatewayConnector.BundlePath,
-            gatewayConnector.ServerType,
-            gatewayConnector.Environment,
-            gatewayConnector.ReadinessTimeoutSeconds,
-            gatewayConnector.JitCooldownSeconds,
-            gatewayConnector.McpProtocolVersion)
-        {
-            CatalogScope = "system",
-        };
-        var runtimeSettings = new ManagerRuntimeSettings(
-            new ManagerWorkspaceDefinition { BaseRoot = "/tmp/kautuka-workspaces" },
-            new ManagerSandboxRuntimeDefinition { Image = "ghcr.io/example/sandbox:latest", DefaultCpus = 2, DefaultMemory = "2g", DefaultTimeout = 3600 },
-            new WorkspaceTelemetryDefinition());
-        store.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap, runtimeSettings, [], [managerConnector], [], "gateway-v7-40-test");
-        Assert.True(store.TryMarkReconciled(1, WorkspaceReconcileTriggerKind.DesiredStateAccepted, DateTimeOffset.UtcNow));
-
         var readiness = new WorkspaceReadinessGate();
         readiness.SignalReady();
+        await using var connectorExecution = new WorkspaceContainerConnectorExecutionService(
+            store,
+            new PodmanCommandRunner(),
+            new McpbImageMaterializer(new PodmanCommandRunner(), NullLogger<McpbImageMaterializer>.Instance),
+            null!,
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
         var service = new WorkspaceGrpcService(
-            null!, store, readiness, new WorkspaceExecTracker(), new StubRuntimeHealthProbe(true),
-            null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
-        var client = new ManagerGrpcServiceClient(
-            new DesiredStateServiceCallInvoker(request => service.UpdateDesiredState(request, TestServerCallContext.Instance)),
-            "in-process-test");
-        DesiredStateUpdateResponse response = await client.UpdateDesiredStateAsync(update, TestContext.Current.CancellationToken);
+            null!, store, readiness, new WorkspaceExecTracker(), new StubRuntimeHealthProbe(true), connectorExecution,
+            null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
+        string socketDirectory = Path.Combine(Path.GetTempPath(), $"kautuka-v7-40-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(socketDirectory);
+        string socketPath = Path.Combine(socketDirectory, "manager.sock");
+        try
+        {
+            WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+            builder.WebHost.ConfigureKestrel(kestrel =>
+                kestrel.ListenUnixSocket(socketPath, listen => listen.Protocols = HttpProtocols.Http2));
+            builder.Services.AddGrpc();
+            builder.Services.AddSingleton(service);
+            await using WebApplication app = builder.Build();
+            app.MapGrpcService<WorkspaceGrpcService>();
+            await app.StartAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(DesiredStateUpdateOutcome.Replayed, response.Outcome);
-        WorkspaceMcpContainerConnectorDefinition saved = Assert.Single(store.Snapshot.DesiredContainerConnectors);
-        Assert.Equal("system", saved.CatalogScope);
+            var endpoint = new UnixDomainSocketEndPoint(socketPath);
+            var handler = new SocketsHttpHandler
+            {
+                ConnectCallback = async (_, cancellationToken) =>
+                {
+                    var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                    try
+                    {
+                        await socket.ConnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                },
+            };
+            using GrpcChannel channel = GrpcChannel.ForAddress("http://localhost", new GrpcChannelOptions { HttpHandler = handler });
+            var client = new ManagerGrpcServiceClient(channel.CreateCallInvoker(), "unix://manager.sock");
+            DesiredStateUpdateResponse response = await client.UpdateDesiredStateAsync(update, TestContext.Current.CancellationToken);
+
+            Assert.Equal(DesiredStateUpdateOutcome.Applied, response.Outcome);
+            WorkspaceMcpContainerConnectorDefinition saved = Assert.Single(store.Snapshot.DesiredContainerConnectors);
+            Assert.Equal(gatewayConnector.ConnectorId, saved.ConnectorId);
+            Assert.Equal("system", saved.CatalogScope);
+            await app.StopAsync(TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            Directory.Delete(socketDirectory, recursive: true);
+        }
     }
 
     [Theory]
@@ -595,44 +623,6 @@ public sealed class WorkspaceGrpcServiceTests
             => throw new NotSupportedException();
 
         public Task CloseSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-    }
-
-    private sealed class DesiredStateServiceCallInvoker(
-        Func<WorkspaceDesiredStateUpdate, Task<DesiredStateUpdateResponse>> updateDesiredState) : CallInvoker
-    {
-        public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(
-            Method<TRequest, TResponse> method,
-            string? host,
-            CallOptions options,
-            TRequest request)
-        {
-            if (request is not WorkspaceDesiredStateUpdate update || typeof(TResponse) != typeof(DesiredStateUpdateResponse))
-            {
-                throw new NotSupportedException($"Unexpected gRPC method '{method.Name}'.");
-            }
-
-            async Task<TResponse> InvokeAsync()
-                => (TResponse)(object)await updateDesiredState(update).ConfigureAwait(false);
-
-            return new AsyncUnaryCall<TResponse>(
-                InvokeAsync(),
-                Task.FromResult(new Metadata()),
-                static () => Status.DefaultSuccess,
-                static () => new Metadata(),
-                static () => { });
-        }
-
-        public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
-            => throw new NotSupportedException();
-
-        public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
-            => throw new NotSupportedException();
-
-        public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
-            => throw new NotSupportedException();
-
-        public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options)
             => throw new NotSupportedException();
     }
 
