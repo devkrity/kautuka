@@ -107,8 +107,13 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
         Assert.Contains("string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", productionSource, StringComparison.Ordinal);
         Assert.Contains("ip route replace {lanHostAddress}/32 via {lanGatewayAddress}", productionSource, StringComparison.Ordinal);
-        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress", productionSource, StringComparison.Ordinal);
+        Assert.Contains("via {lanGatewayAddress} onlink", productionSource, StringComparison.Ordinal);
+        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress, \"onlink\"", productionSource, StringComparison.Ordinal);
         Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
+        int gatewayStart = source.IndexOf("private static async Task<string> ResolvePodmanHostGatewayAddressAsync", StringComparison.Ordinal);
+        int gatewayEnd = source.IndexOf("private static string FindRepoRoot()", gatewayStart, StringComparison.Ordinal);
+        Assert.True(gatewayStart >= 0 && gatewayEnd > gatewayStart);
+        Assert.DoesNotContain("OutsideSubnet", source[gatewayStart..gatewayEnd], StringComparison.Ordinal);
         Assert.DoesNotContain("lanHostAddress = await ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("ThreadingHTTPServer((bind_address,8443)", fixtureSetup, StringComparison.Ordinal);

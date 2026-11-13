@@ -565,9 +565,11 @@ public static class Program
         }
 
         if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
-            || !System.Net.IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address))
+            || System.Net.IPAddress.IsLoopback(address)
+            || address.Equals(System.Net.IPAddress.Any)
+            || address.Equals(System.Net.IPAddress.Broadcast))
         {
-            throw new InvalidOperationException($"The rootless Podman host gateway '{address}' is not inside the outside network.");
+            throw new InvalidOperationException($"The rootless Podman host gateway '{address}' is not a usable IPv4 next hop.");
         }
 
         return address.ToString();
@@ -934,7 +936,7 @@ public static class Program
             int envoyLanRoutePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (lanRouteRc, lanRouteOut, lanRouteErr) = await ExecAsync(
                 "podman",
-                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route", "replace", $"{lanHostAddress}/32", "via", lanGatewayAddress]).ConfigureAwait(false);
+                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route", "replace", $"{lanHostAddress}/32", "via", lanGatewayAddress, "onlink"]).ConfigureAwait(false);
             if (lanRouteRc != 0)
             {
                 throw new InvalidOperationException($"Could not route the production LAN fixture through the rootless Podman host gateway (rc={lanRouteRc}; output={lanRouteOut}; error={lanRouteErr}).");
@@ -1030,7 +1032,7 @@ public static class Program
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
                 ["run", "--rm", "--cap-add", "NET_ADMIN", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "sh", baseImage,
-                    "-c", $"ip route replace {lanHostAddress}/32 via {lanGatewayAddress} && exec curl --insecure --silent --show-error --max-time 4 https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+                    "-c", $"ip route replace {lanHostAddress}/32 via {lanGatewayAddress} onlink && exec curl --insecure --silent --show-error --max-time 4 https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
