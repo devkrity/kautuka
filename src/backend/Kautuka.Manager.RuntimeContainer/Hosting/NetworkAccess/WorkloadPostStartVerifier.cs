@@ -262,7 +262,13 @@ public sealed class WorkloadPostStartVerifier
             }
             else
             {
-                VerifyInspectIpv6Disable(hostConfig);
+                if (pid <= 0)
+                {
+                    throw new InvalidOperationException($"Process check failed: invalid or non-positive PID ({pid}) in the Podman machine.");
+                }
+
+                await VerifyPodmanMachineNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
+                await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken).ConfigureAwait(false);
             }
 
             stopwatch.Stop();
@@ -436,6 +442,28 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
+    private async Task VerifyPodmanMachineNetnsIpv6DisableAsync(int pid, CancellationToken cancellationToken)
+    {
+        const string sysctlPath = "/proc/sys/net/ipv6/conf/all/disable_ipv6";
+        string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        PodmanCommandResult result = await podmanRunner
+            .RunAsync(
+                ["machine", "ssh", "podman", "unshare", "nsenter", "-t", pidText, "-n", "cat", sysctlPath],
+                10,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"podman machine ssh could not read the IPv6 disable sysctl (rc {result.ExitCode}): {result.StdErr}");
+        }
+
+        string actualValue = result.StdOut.Trim();
+        if (!string.Equals(actualValue, "1", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Network check failed: IPv6 disable sysctl is '{actualValue}' in the workload network namespace.");
+        }
+    }
+
     internal async Task VerifyNetnsRulesetAsync(
         int pid,
         string allocatedIp,
@@ -443,7 +471,22 @@ public sealed class WorkloadPostStartVerifier
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string stdOut;
-        if (!Environment.IsPrivilegedProcess)
+        if (!OperatingSystem.IsLinux())
+        {
+            PodmanCommandResult nftResult = await podmanRunner
+                .RunAsync(
+                    ["machine", "ssh", "podman", "unshare", "nsenter", "-t", pidText, "-n", "nft", "-j", "list", "table", "inet", WorkloadRulesetRenderer.WorkloadTableName],
+                    10,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (nftResult.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"podman machine ssh nft -j list table failed (rc {nftResult.ExitCode}): {nftResult.StdErr}");
+            }
+
+            stdOut = nftResult.StdOut;
+        }
+        else if (!Environment.IsPrivilegedProcess)
         {
             // Rootless Podman places container netns inside the user namespace; direct nsenter fails with EPERM.
             PodmanCommandResult nftResult = await podmanRunner

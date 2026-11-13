@@ -134,6 +134,25 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
+    public async Task NonLinuxHostVerifiesNetnsRulesetThroughPodmanMachine()
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        var calls = new List<string[]>();
+        WorkloadRegistry registry = CreateRegistry();
+        await VerifyAsync(Inspect(), calls, registry);
+
+        Assert.Contains(calls, static call => call.Length > 2
+            && call[0] == "machine"
+            && call[1] == "ssh"
+            && call.Contains("nsenter", StringComparer.Ordinal)
+            && call.Contains(WorkloadRulesetRenderer.WorkloadTableName, StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task BindMountOutsideConfiguredRootFailsAndCleansUp()
     {
         var calls = new List<string[]>();
@@ -247,6 +266,16 @@ public sealed class WorkloadPostStartVerifierTests
                 }
 
                 if (args[0] == "unshare")
+                {
+                    if (args.Contains("cat", StringComparer.Ordinal))
+                    {
+                        return Task.FromResult(Success(ipv6SysctlValue));
+                    }
+
+                    return Task.FromResult(Success(ipRules));
+                }
+
+                if (args.Count > 1 && args[0] == "machine" && args[1] == "ssh")
                 {
                     if (args.Contains("cat", StringComparer.Ordinal))
                     {
