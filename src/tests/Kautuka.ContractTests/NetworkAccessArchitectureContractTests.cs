@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -30,7 +31,41 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.DoesNotContain("runtime reconciliation supplies the launch identity", guide, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("### 3.4 Validating Static Templates `[Built]`", guide, StringComparison.Ordinal);
         Assert.DoesNotContain("### 2.1 Approval Cards `[Built]`", guide, StringComparison.Ordinal);
-        Assert.Contains("full egress pod and end-to-end acceptance still need real Podman/nft proof", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("nac-v7-production-rootless-run.json", guide, StringComparison.Ordinal);
+        Assert.DoesNotContain("[Tested]", guide, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string reportPath = Path.Combine(repositoryRoot, "docs", "verification", "nac-v7-production-rootless-run.json");
+        using JsonDocument report = JsonDocument.Parse(File.ReadAllText(reportPath));
+
+        Assert.Equal("97b66ca", report.RootElement.GetProperty("gitSha").GetString());
+        Assert.Equal("7/7 PASS, 0 FAIL", report.RootElement.GetProperty("summary").GetString());
+
+        JsonElement observations = report.RootElement.GetProperty("observations");
+        Assert.Equal(7, observations.GetArrayLength());
+        string[] expectedTestIds =
+        [
+            "PROD_E_PARSER",
+            "PROD_E_REBIND",
+            "PROD_LAN_GRANT",
+            "PROD_CARD_AND_RULE",
+            "PROD_V7_28_RECONCILE",
+            "PROD_V7_29_VERIFIER",
+            "PROD_V7_33_DNS_UPSTREAM",
+        ];
+        Assert.Equal(expectedTestIds, observations.EnumerateArray()
+            .Select(static observation => observation.GetProperty("testId").GetString())
+            .ToArray());
+        Assert.All(observations.EnumerateArray(), static observation =>
+        {
+            Assert.Equal("PASS", observation.GetProperty("outcome").GetString());
+            Assert.True(observation.GetProperty("ncFlipped").GetBoolean());
+        });
     }
 
     [Fact]
