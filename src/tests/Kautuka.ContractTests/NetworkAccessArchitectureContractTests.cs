@@ -106,10 +106,10 @@ public sealed class NetworkAccessArchitectureContractTests
         string productionSource = source[productionStart..];
         Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
         Assert.Contains("string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("--connect-to", productionSource, StringComparison.Ordinal);
         Assert.Contains("outsideNetworkDevice", productionSource, StringComparison.Ordinal);
-        Assert.Contains("ip route replace {lanHostAddress}/32 via {lanGatewayAddress}", productionSource, StringComparison.Ordinal);
-        Assert.Contains("via {lanGatewayAddress} dev", productionSource, StringComparison.Ordinal);
         Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress, \"dev\", outsideNetworkDevice, \"onlink\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains(":8443:host.containers.internal:8443", productionSource, StringComparison.Ordinal);
         Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
         int gatewayStart = source.IndexOf("private static async Task<string> ResolvePodmanHostGatewayAddressAsync", StringComparison.Ordinal);
         int gatewayEnd = source.IndexOf("private static string FindRepoRoot()", gatewayStart, StringComparison.Ordinal);
@@ -117,7 +117,7 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.DoesNotContain("OutsideSubnet", source[gatewayStart..gatewayEnd], StringComparison.Ordinal);
         Assert.DoesNotContain("lanHostAddress = await ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
-        Assert.Contains("ThreadingHTTPServer((bind_address,8443)", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("ThreadingHTTPServer(('0.0.0.0',8443)", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("Process.Start(lanServerStartInfo)", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);

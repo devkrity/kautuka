@@ -977,7 +977,7 @@ public static class Program
 
             const string lanServer = """
                 import http.server, ssl, sys
-                bind_address, cert_path, key_path, access_path = sys.argv[1:5]
+                _, cert_path, key_path, access_path = sys.argv[1:5]
                 access=open(access_path,'a',buffering=1)
                 def record(message): print(message, file=access, flush=True)
                 class Handler(http.server.BaseHTTPRequestHandler):
@@ -992,7 +992,7 @@ public static class Program
                         self.end_headers()
                         self.wfile.write(body)
                     def log_message(self, fmt, *args): record(fmt % args)
-                server=http.server.ThreadingHTTPServer((bind_address,8443),Handler)
+                server=http.server.ThreadingHTTPServer(('0.0.0.0',8443),Handler)
                 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 context.load_cert_chain(cert_path,key_path)
                 server.socket=context.wrap_socket(server.socket,server_side=True)
@@ -1038,8 +1038,8 @@ public static class Program
             }
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
-                ["run", "--rm", "--cap-add", "NET_ADMIN", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "sh", baseImage,
-                    "-c", $"lan_dev=$(ip -o -4 route get 1.1.1.1 | awk '{{for(i=1;i<=NF;i++) if($i==\"dev\"){{print $(i+1); exit}}}}'); test -n \"$lan_dev\" && ip route replace {lanHostAddress}/32 via {lanGatewayAddress} dev \"$lan_dev\" onlink && exec curl --insecure --silent --show-error --max-time 4 https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage,
+                    "--connect-to", $"{lanHostAddress}:8443:host.containers.internal:8443", "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
