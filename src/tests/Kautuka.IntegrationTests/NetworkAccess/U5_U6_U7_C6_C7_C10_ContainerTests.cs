@@ -959,6 +959,60 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_ReconcileClosesGateWhenRenderedBoundaryFileChanges_WithNegativeControl()
+    {
+        const string healthyPod = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra-id\",\"Containers\":["
+            + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
+            + "{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},"
+            + "{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+        const string boundarySuccess = "[{\"State\":{\"Status\":\"exited\",\"ExitCode\":0}}]";
+        const string infraInspect = "[{\"State\":{\"Pid\":4242}}]";
+        const string ipv4Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
+        const string ipv6Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip6\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip6\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
+        string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
+        string nacDirectory = Path.Combine(tempDir, "nac");
+        Directory.CreateDirectory(nacDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(nacDirectory, "boundary.nft"),
+            rendered + "# changed",
+            TestContext.Current.CancellationToken);
+
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            string output = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"])
+                ? healthyPod
+                : args.SequenceEqual(["inspect", "kautuka-egress-boundary", "--format", "json"])
+                    ? boundarySuccess
+                    : args.SequenceEqual(["inspect", "infra-id", "--format", "json"])
+                        ? infraInspect
+                        : args.SequenceEqual(["unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "ip", "kautuka_egress"])
+                            ? ipv4Rules
+                            : args.SequenceEqual(["unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "ip6", "kautuka_egress"])
+                                ? ipv6Rules
+                                : "[]";
+            return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-source-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman, new WorkspaceDesiredStateStore());
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        typeof(EgressTopologyManager)
+            .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+        typeof(EgressTopologyManager)
+            .GetField("expectedBoundaryRulesetHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4Rules, ipv6Rules));
+        var renderedHashField = typeof(EgressTopologyManager)
+            .GetField("expectedBoundaryNftSourceHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(renderedHashField);
+        renderedHashField!.SetValue(manager, EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+    }
+
+    [Fact]
     public async Task V7_20_ReconcileClosesStartupGateWhenPodDegrades_WithNegativeControl()
     {
         const string degraded = "[{\"State\":\"Degraded\",\"Containers\":[]}]";
@@ -968,6 +1022,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-health-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, true);
@@ -1001,6 +1056,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-failure-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, true);
@@ -1057,6 +1113,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-drift-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, true);
@@ -1157,5 +1214,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         // Negative Control (.NC): without upstreamDnsIps, dns_upstream rule is omitted and 10.248.0.1 hits private_reject (10.0.0.0/8).
         string withoutDns = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, decisionEndpointIp: null, upstreamDnsIps: null);
         Assert.DoesNotContain("comment \"dns_upstream\"", withoutDns, StringComparison.Ordinal);
+    }
+
+    private async Task SetExpectedBoundarySourceAsync(EgressTopologyManager manager, CancellationToken cancellationToken)
+    {
+        string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
+        string nacDirectory = Path.Combine(tempDir, "nac");
+        Directory.CreateDirectory(nacDirectory);
+        await File.WriteAllTextAsync(Path.Combine(nacDirectory, "boundary.nft"), rendered, cancellationToken);
+        typeof(EgressTopologyManager)
+            .GetField("expectedBoundaryNftSourceHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
     }
 }

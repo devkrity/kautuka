@@ -70,6 +70,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
     private string? expectedBoundaryRulesetHash;
+    private string? expectedBoundaryNftSourceHash;
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
@@ -760,6 +761,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string envoyPath = Path.Combine(nacDir, "envoy.yaml");
         string corefilePath = Path.Combine(nacDir, "Corefile");
 
+        expectedBoundaryNftSourceHash = ComputeBoundaryNftSourceHash(boundaryNft);
         await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
@@ -950,6 +952,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             ipv6RulesJson,
             ["ipv6_drop_pod"]);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(ipv4Hash + ":" + ipv6Hash)));
+    }
+
+    internal static string ComputeBoundaryNftSourceHash(string renderedBoundaryNft)
+    {
+        ArgumentNullException.ThrowIfNull(renderedBoundaryNft);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(renderedBoundaryNft)));
     }
 
     private async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)
@@ -1339,6 +1347,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     internal async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
+        if (IsStartupGateOpen && !await IsRenderedBoundaryNftUnchangedAsync(cancellationToken).ConfigureAwait(false))
+        {
+            logger.LogError("Rendered boundary nft source changed during reconcile; closing the NAC startup gate.");
+            IsStartupGateOpen = false;
+            return;
+        }
+
         if (IsStartupGateOpen && !await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
         {
             logger.LogError("Egress pod health check failed during reconcile; closing the NAC startup gate.");
@@ -1557,6 +1572,30 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return prop.GetString() ?? string.Empty;
         }
         return string.Empty;
+    }
+
+    private async Task<bool> IsRenderedBoundaryNftUnchangedAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash))
+        {
+            return false;
+        }
+
+        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+        try
+        {
+            string currentSource = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
+            string currentHash = ComputeBoundaryNftSourceHash(currentSource);
+            return string.Equals(currentHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     public async ValueTask DisposeAsync()
