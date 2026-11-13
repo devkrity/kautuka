@@ -525,31 +525,43 @@ public static class Program
         }
     }
 
-    private static async Task<string> ResolveHostLanAddressAsync()
+    private static async Task<(string NamespaceName, string HostDevice, string Address)> CreateRoutedLanFixtureAsync()
     {
-        var (exitCode, output, error) = await ExecAsync(
-            "ip",
-            ["-4", "route", "get", "1.1.1.1"]).ConfigureAwait(false);
-        string[] routeTokens = output.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        int sourceIndex = Array.FindIndex(routeTokens, static token => string.Equals(token, "src", StringComparison.Ordinal));
-        if (exitCode != 0
-            || sourceIndex < 0
-            || sourceIndex + 1 >= routeTokens.Length
-            || !System.Net.IPAddress.TryParse(routeTokens[sourceIndex + 1], out System.Net.IPAddress? address))
+        string suffix = Guid.NewGuid().ToString("N")[..8];
+        string namespaceName = $"nac-lan-{suffix}";
+        string hostDevice = $"nch{suffix}";
+        string lanDevice = $"ncl{suffix}";
+        const string hostAddress = "192.168.248.1/24";
+        const string fixtureAddress = "192.168.248.2";
+
+        async Task RunIpAsync(params string[] arguments)
         {
-            throw new InvalidOperationException($"Could not determine the host LAN source address for the production fixture (rc={exitCode}; output={output}; error={error}).");
+            var (exitCode, output, error) = await ExecAsync("sudo", ["ip", .. arguments]).ConfigureAwait(false);
+            if (exitCode != 0)
+            {
+                throw new InvalidOperationException($"LAN fixture network command failed (sudo ip {string.Join(' ', arguments)}; rc={exitCode}; output={output}; error={error}).");
+            }
         }
 
-        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
-            || System.Net.IPAddress.IsLoopback(address)
-            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(address)
-            || System.Net.IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)
-            || System.Net.IPNetwork.Parse(EgressTopologyManager.WorkloadSubnet).Contains(address))
+        await RunIpAsync("netns", "add", namespaceName).ConfigureAwait(false);
+        try
         {
-            throw new InvalidOperationException($"The host route source '{address}' is not a host LAN address outside the NAC container networks.");
+            await RunIpAsync("link", "add", hostDevice, "type", "veth", "peer", "name", lanDevice).ConfigureAwait(false);
+            await RunIpAsync("link", "set", lanDevice, "netns", namespaceName).ConfigureAwait(false);
+            await RunIpAsync("addr", "add", hostAddress, "dev", hostDevice).ConfigureAwait(false);
+            await RunIpAsync("link", "set", hostDevice, "up").ConfigureAwait(false);
+            await RunIpAsync("-n", namespaceName, "addr", "add", $"{fixtureAddress}/24", "dev", lanDevice).ConfigureAwait(false);
+            await RunIpAsync("-n", namespaceName, "link", "set", "lo", "up").ConfigureAwait(false);
+            await RunIpAsync("-n", namespaceName, "link", "set", lanDevice, "up").ConfigureAwait(false);
+            await RunIpAsync("-n", namespaceName, "route", "add", "default", "via", "192.168.248.1").ConfigureAwait(false);
+            return (namespaceName, hostDevice, fixtureAddress);
         }
-
-        return address.ToString();
+        catch
+        {
+            _ = await ExecAsync("sudo", ["ip", "link", "del", hostDevice]).ConfigureAwait(false);
+            _ = await ExecAsync("sudo", ["ip", "netns", "del", namespaceName]).ConfigureAwait(false);
+            throw;
+        }
     }
 
     private static string FindRepoRoot()
@@ -806,6 +818,9 @@ public static class Program
             "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
             1, "512m", 30, [], new Dictionary<string, string>()));
         Process? lanFixtureProcess = null;
+        string? lanFixtureNamespaceName = null;
+        string? lanFixtureHostDevice = null;
+        string lanHostAddress = string.Empty;
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
@@ -914,8 +929,8 @@ public static class Program
             }
 
             const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
-            string lanHostAddress = await ResolveHostLanAddressAsync().ConfigureAwait(false);
-            Console.WriteLine($"[PROD_STAGE] host LAN fixture bound to {lanHostAddress}");
+            (lanFixtureNamespaceName, lanFixtureHostDevice, lanHostAddress) = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
+            Console.WriteLine($"[PROD_STAGE] routed LAN fixture address={lanHostAddress}; namespace={lanFixtureNamespaceName}");
             int envoyLanRoutePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (lanRouteGetRc, lanRouteGetOut, lanRouteGetErr) = await ExecAsync(
                 "podman",
@@ -973,11 +988,16 @@ public static class Program
                 """;
             string lanServerScriptPath = Path.Combine(tempRoot, "lan-fixture.py");
             await File.WriteAllTextAsync(lanServerScriptPath, lanServer).ConfigureAwait(false);
-            var lanServerStartInfo = new ProcessStartInfo("python3")
+            var lanServerStartInfo = new ProcessStartInfo("sudo")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
+            lanServerStartInfo.ArgumentList.Add("ip");
+            lanServerStartInfo.ArgumentList.Add("netns");
+            lanServerStartInfo.ArgumentList.Add("exec");
+            lanServerStartInfo.ArgumentList.Add(lanFixtureNamespaceName!);
+            lanServerStartInfo.ArgumentList.Add("python3");
             lanServerStartInfo.ArgumentList.Add("-u");
             lanServerStartInfo.ArgumentList.Add(lanServerScriptPath);
             lanServerStartInfo.ArgumentList.Add(lanHostAddress);
@@ -1012,16 +1032,11 @@ public static class Program
             var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
                 "podman",
                 ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage,
-                    "--connect-to", $"{lanHostAddress}:8443:host.containers.internal:8443", "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
-            var (lanDirectProbeRc, lanDirectProbeOut, lanDirectProbeErr) = await ExecAsync(
-                "podman",
-                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage,
                     "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
-            Console.WriteLine($"[PROD_STAGE] direct host LAN probe: rc={lanDirectProbeRc}; body={lanDirectProbeOut.Trim()}; error={lanDirectProbeErr.Trim()}");
             if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
             {
                 string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
-                throw new InvalidOperationException($"Controlled LAN fixture could not be reached from the outside network before the NAC flow (rc={lanNetworkProbeRc}; body={lanNetworkProbeOut}; error={lanNetworkProbeErr}; access={lanFixtureAccessLog}).");
+                throw new InvalidOperationException($"Routed LAN fixture could not be reached from the outside network before the NAC flow (rc={lanNetworkProbeRc}; body={lanNetworkProbeOut}; error={lanNetworkProbeErr}; access={lanFixtureAccessLog}).");
             }
 
             string corefilePath = Path.Combine(stateDir, "nac", "Corefile");
@@ -1340,7 +1355,7 @@ public static class Program
                     var (envoyAddressRc, envoyAddresses, envoyAddressErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyFailurePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "address"]).ConfigureAwait(false);
                     var (envoyNeighborRc, envoyNeighbors, envoyNeighborErr) = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyFailurePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "neighbor"]).ConfigureAwait(false);
                     string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
-                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyPid={envoyFailurePid}; envoyRouteRc={envoyRouteRc}; envoyRoutes={envoyRoutes}; envoyRouteErr={envoyRouteErr}; envoyAddressRc={envoyAddressRc}; envoyAddresses={envoyAddresses}; envoyAddressErr={envoyAddressErr}; envoyNeighborRc={envoyNeighborRc}; envoyNeighbors={envoyNeighbors}; envoyNeighborErr={envoyNeighborErr}; host={lanHostAddress}; outsideDevice={outsideNetworkDevice}; directProbeRc={lanDirectProbeRc}; directProbeBody={lanDirectProbeOut}; directProbeErr={lanDirectProbeErr}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}; lanMasqueradeDelta={lanMasqueradeDelta}; nft={lanCountersAfter}").ConfigureAwait(false);
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyPid={envoyFailurePid}; envoyRouteRc={envoyRouteRc}; envoyRoutes={envoyRoutes}; envoyRouteErr={envoyRouteErr}; envoyAddressRc={envoyAddressRc}; envoyAddresses={envoyAddresses}; envoyAddressErr={envoyAddressErr}; envoyNeighborRc={envoyNeighborRc}; envoyNeighbors={envoyNeighbors}; envoyNeighborErr={envoyNeighborErr}; fixture={lanHostAddress}; namespace={lanFixtureNamespaceName}; outsideDevice={outsideNetworkDevice}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}; lanMasqueradeDelta={lanMasqueradeDelta}; nft={lanCountersAfter}").ConfigureAwait(false);
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
@@ -1612,6 +1627,14 @@ public static class Program
                     await lanFixtureProcess.WaitForExitAsync().ConfigureAwait(false);
                 }
                 lanFixtureProcess.Dispose();
+            }
+            if (!string.IsNullOrWhiteSpace(lanFixtureNamespaceName))
+            {
+                if (!string.IsNullOrWhiteSpace(lanFixtureHostDevice))
+                {
+                    _ = await ExecAsync("sudo", ["ip", "link", "del", lanFixtureHostDevice]).ConfigureAwait(false);
+                }
+                _ = await ExecAsync("sudo", ["ip", "netns", "del", lanFixtureNamespaceName]).ConfigureAwait(false);
             }
             await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
                 "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
