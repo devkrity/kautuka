@@ -425,8 +425,8 @@ public static class BoundaryRulesetRenderer
                 {
                     var zeroCounter = new JsonObject
                     {
-                        ["packets"] = 0,
                         ["bytes"] = 0,
+                        ["packets"] = 0,
                     };
                     canonicalObj[key] = zeroCounter;
                     continue;

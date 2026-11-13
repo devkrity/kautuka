@@ -1,5 +1,7 @@
 # Network Access Control (NAC) v7 Operations & User Guide
 
+> **Current verification:** The latest rootless Podman run on `nac-v7` reached the production canary but failed closed because C# and the Python hook serialized normalized nft counters in different property orders. The canonical hash implementation now emits counter keys in the same `bytes`, `packets` order as the hook. A regression test covers this ordering, including a negative control. The full Linux IntegrationTests suite passed after the fix (2,229 passed, 5 skipped); a post-fix rootless Podman/Envoy acceptance run is still required. Do not treat the earlier 7/7 report as evidence for the current commit.
+
 This guide describes the architecture, approval workflows, operational procedures, and troubleshooting diagnostics for **Kautuka Network Access Control (NAC) v7**.
 
 ---

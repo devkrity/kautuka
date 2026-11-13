@@ -451,6 +451,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_11_CanonicalCounterHashMatchesPythonHookOrdering()
+    {
+        const string nftJson = "[{\"rule\":{\"counter\":{\"packets\":7,\"bytes\":3}}}]";
+
+        string hash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(nftJson);
+
+        Assert.Equal("897706c133a741af021b35116e1def3d54b9f5f0e1ccdb17294ed4bd32699203", hash);
+    }
+
+    [Fact]
     public void C6_CanonicalNftHash_DetectsTampering_WithNegativeControl()
     {
         // Construct canonical nft JSON representing live workload table
