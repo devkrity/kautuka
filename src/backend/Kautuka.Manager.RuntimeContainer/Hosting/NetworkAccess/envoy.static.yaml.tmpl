@@ -259,7 +259,7 @@ static_resources:
       lb_policy: CLUSTER_PROVIDED
       upstream_bind_config:
         source_address:
-          address: 192.0.0.8
+          address: {{LAN_SOURCE_IP}}
           port_value: 0
       cluster_type:
         name: envoy.clusters.dynamic_forward_proxy
@@ -285,5 +285,5 @@ static_resources:
       connect_timeout: 2s
       upstream_bind_config:
         source_address:
-          address: 192.0.0.8
+          address: {{LAN_SOURCE_IP}}
           port_value: 0

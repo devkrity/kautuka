@@ -45,6 +45,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public const string EgressPodIp = "10.247.0.2";
     public const string OutsidePodIp = "10.248.0.2";
     public const string OutsideSubnet = "10.248.0.0/24";
+    public const string OutsideLanSourceIp = NetworkAddressClassifier.LanSourceBindAddress;
     public const string PackageProxyIp = "10.247.0.3";
     public const string WorkloadSubnet = "10.247.0.0/16";
 
@@ -679,9 +680,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         entries ??=
         [
-            new(EgressPodName, "egress-pod", [EgressPodIp], "pinned"),
-            new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp], EnvoyPinnedImage),
-            new("kautuka-egress-dns", "egress-dns", [EgressPodIp], CoreDnsPinnedImage),
+            new(EgressPodName, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"),
+            new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
+            new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
             new(PackageProxyContainerName, "pkgs-proxy", [PackageProxyIp], "pinned"),
         ];
 
@@ -822,7 +823,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 "--entrypoint", "/bin/sh",
                 "-v", $"{boundaryPath}:/etc/nftables.conf:ro",
                 BoundaryInitImage,
-                "-c", "ip route replace local 192.0.0.8 dev lo 2>/dev/null || true; exec /usr/sbin/nft -f /etc/nftables.conf"
+                "-c", $"{BuildOutsideLanSourceAddressSetupCommand()} && exec /usr/sbin/nft -f /etc/nftables.conf"
             ],
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
@@ -916,6 +917,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return false;
         }
     }
+
+    internal static string BuildOutsideLanSourceAddressSetupCommand() =>
+        $"ip address replace {OutsideLanSourceIp}/24 dev eth0";
 
     internal static string ComputeBoundaryRulesetHash(string ipv4RulesJson, string ipv6RulesJson)
     {
@@ -1187,13 +1191,26 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         if (!string.IsNullOrWhiteSpace(containerId))
         {
             knownInfraContainerIds.Add(containerId);
-            if (!allowlistEntries.Any(e => string.Equals(e.Id, containerId, StringComparison.OrdinalIgnoreCase)))
+            string[] expectedIps = GetExpectedInfraIpv4(role);
+            int existingEntryIndex = allowlistEntries.FindIndex(e => string.Equals(e.Id, containerId, StringComparison.OrdinalIgnoreCase));
+            var entry = new InfraAllowlistEntry(containerId, role, expectedIps, imageDigest);
+            if (existingEntryIndex < 0)
             {
-                allowlistEntries.Add(new(containerId, role, [EgressPodIp, OutsidePodIp], imageDigest));
+                allowlistEntries.Add(entry);
+            }
+            else
+            {
+                allowlistEntries[existingEntryIndex] = entry;
             }
             WriteInfraAllowlist(allowlistEntries);
         }
     }
+
+    internal static string[] GetExpectedInfraIpv4(string role) =>
+        string.Equals(role, "egress-envoy", StringComparison.Ordinal)
+        || string.Equals(role, "egress-dns", StringComparison.Ordinal)
+            ? [EgressPodIp, OutsidePodIp, OutsideLanSourceIp]
+            : [EgressPodIp, OutsidePodIp];
 
     internal static async Task WriteConfigAtomicallyAsync(
         string path,

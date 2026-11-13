@@ -81,7 +81,7 @@ public static class BoundaryRulesetRenderer
         string dnsUpstreamRule = BuildUpstreamDnsNftRule(upstreamDnsIps);
 
         string lanApprovedRule = includeLanGrants
-            ? "    ip saddr 192.0.0.8 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != 10.247.0.0/16 counter accept comment \"lan_approved\""
+            ? $"    ip saddr {EgressTopologyManager.OutsideLanSourceIp} ip daddr {{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }} ip daddr != 10.247.0.0/16 counter accept comment \"lan_approved\""
             : string.Empty;
 
         string privateRejectRule = NetworkAddressClassifier.RenderNftPrivateRejectRule();
@@ -209,6 +209,7 @@ public static class BoundaryRulesetRenderer
 
         string rendered = template
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
+            .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
             .Replace("{{MANAGER_AUTHORIZATION_CLUSTER}}", clusterSnippet, StringComparison.Ordinal);
 
         rendered = ReplaceIndentedPlaceholder(rendered, "{{RESOLVED_FILTER_PUBLIC}}", publicCidrs);

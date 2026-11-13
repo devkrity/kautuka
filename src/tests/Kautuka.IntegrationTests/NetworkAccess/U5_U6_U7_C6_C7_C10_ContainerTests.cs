@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 
 using Kautuka.Manager.RuntimeContainer.Hosting;
@@ -256,6 +257,20 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         // Negative Control (.NC): Mutated CoreDNS IP changes output
         string corefileMutated = BoundaryRulesetRenderer.RenderCorefile("10.247.0.99");
         Assert.NotEqual(corefile, corefileMutated);
+    }
+
+    [Fact]
+    public void V7_20_LanEgressBindsToRoutableOutsideAddress_WithNegativeControl()
+    {
+        string boundary = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig();
+
+        Assert.Contains("ip saddr 10.248.0.3 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }", boundary, StringComparison.Ordinal);
+        Assert.Equal(2, Regex.Count(envoy, "address: 10\\.248\\.0\\.3\\r?\\n\\s+port_value: 0", RegexOptions.CultureInvariant));
+        Assert.DoesNotContain("192.0.0.8", boundary + envoy, StringComparison.Ordinal);
+        Assert.Equal("ip address replace 10.248.0.3/24 dev eth0", EgressTopologyManager.BuildOutsideLanSourceAddressSetupCommand());
+        Assert.Equal(["10.247.0.2", "10.248.0.2", "10.248.0.3"], EgressTopologyManager.GetExpectedInfraIpv4("egress-envoy"));
+        Assert.Equal(["10.247.0.2", "10.248.0.2"], EgressTopologyManager.GetExpectedInfraIpv4("egress-boundary"));
     }
 
     [Fact]
