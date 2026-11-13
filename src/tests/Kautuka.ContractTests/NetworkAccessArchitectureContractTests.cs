@@ -105,8 +105,11 @@ public sealed class NetworkAccessArchitectureContractTests
 
         string productionSource = source[productionStart..];
         Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ip route replace {lanHostAddress}/32 via {lanGatewayAddress}", productionSource, StringComparison.Ordinal);
+        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress", productionSource, StringComparison.Ordinal);
         Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("lanHostAddress = await ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("ThreadingHTTPServer((bind_address,8443)", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", fixtureSetup, StringComparison.Ordinal);
