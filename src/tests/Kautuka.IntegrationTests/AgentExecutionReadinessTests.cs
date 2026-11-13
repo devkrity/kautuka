@@ -1,11 +1,18 @@
+using System.Text.Json;
+
 using Grpc.Core;
 
 using Kautuka.Gateway.Domain.AgentFiles;
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Usage;
+using Kautuka.Gateway.Infrastructure.ModelCapability;
+using Kautuka.Gateway.Infrastructure.ProviderPathPolicy;
 using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccess.Client;
 
+using Microsoft.Agents.AI;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests;
@@ -213,6 +220,68 @@ public sealed class AgentExecutionReadinessTests
         Assert.DoesNotContain(events, static item => item.EventType == NaradEventTypes.RunError);
     }
 
+    [Fact]
+    public async Task V7_35_G2_NetworkDenialFromAgentChatServiceEmitsAdminApprovalRunError()
+    {
+        var denial = new NetworkAccessDeniedException(
+            "api.custom-ai-models.com",
+            443,
+            "https",
+            NetworkAccessDenialKind.Denied,
+            "no_rule",
+            requestId: "request-provider-denied",
+            userId: "user-alpha",
+            service: "ai-provider",
+            purpose: "provider-test");
+        var runtimeFactory = new DeniedProviderRuntimeFactory(denial);
+        var service = new AgentChatService(
+            runtimeFactory: runtimeFactory,
+            capabilityService: null!,
+            observationStore: null!,
+            mediator: null!,
+            logger: NullLogger<AgentChatService>.Instance,
+            approvalStore: null!,
+            continuationStore: null!,
+            resumeTokenProvider: null!,
+            assetStore: null!,
+            assetIngestionService: null!,
+            gatewayState: null!,
+            agentRunMetrics: new NoOpAgentRunMetrics(),
+            usageCaptureAccessor: new GatewayUsageCaptureAccessor(),
+            sessionStore: null!,
+            agentToolInvocationLinkStore: null!,
+            runWaitStateStore: null!,
+            platformConfigurationProvider: null!,
+            toolExecutionPolicyService: null!,
+            runtimeEventPublisher: new TestRuntimeEventPublisher(),
+            modelTurnOrdinalCounter: new ModelTurnOrdinalCounter(),
+            runtimeEventHistoryReader: new EmptyRuntimeEventHistoryReader(),
+            executionReadinessService: new FixedReadinessService(new AgentExecutionReadiness(true, "READY", "ready", [])),
+            configuration: new ConfigurationBuilder().Build());
+
+        NaradPersistedEvent[] events = await CollectAsync(service.StreamAsync(
+            "agent-007",
+            "session-provider-denial",
+            "user-alpha",
+            "chat",
+            "hello",
+            null,
+            [],
+            [],
+            [],
+            null,
+            null,
+            ct: TestContext.Current.CancellationToken)).ConfigureAwait(true);
+
+        NaradPersistedEvent runError = Assert.Single(events, static item => item.EventType == NaradEventTypes.RunError);
+        JsonElement body = NaradPersistedEventReader.ParseBody(runError);
+        Assert.Equal("network_access_required", body.GetProperty("code").GetString());
+        Assert.Equal("api.custom-ai-models.com", body.GetProperty("destination").GetString());
+        Assert.Equal(443, body.GetProperty("port").GetInt32());
+        Assert.Equal("request-provider-denied", body.GetProperty("requestId").GetString());
+        Assert.Equal("/network-access", body.GetProperty("approvalUrl").GetString());
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(false, true)]
@@ -327,6 +396,94 @@ public sealed class AgentExecutionReadinessTests
 
         public ValueTask SaveSessionAsync(AgentRuntime runtime, CancellationToken ct)
             => throw new NotSupportedException();
+    }
+
+    private sealed class DeniedProviderRuntimeFactory(NetworkAccessDeniedException denial) : IAgentRuntimeFactory
+    {
+        public async ValueTask<AgentRuntimeResult> BuildAsync(
+            string agentId,
+            string sessionId,
+            string? userId,
+            string? stageTransitionId,
+            IReadOnlyList<InjectedMemoryFact> memoryFacts,
+            bool isContinuationResume,
+            bool requireApprovalForAllTools,
+            string? sessionStateOverrideJson,
+            string? effectiveBehaviorOverrideJson,
+            CancellationToken ct)
+        {
+            var chatClient = new DeniedProviderChatClient(denial);
+            AIAgent agent = chatClient.AsAIAgent(new ChatClientAgentOptions { Id = agentId });
+            AgentSession session = await agent.CreateSessionAsync(ct).ConfigureAwait(false);
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            ModelCapabilityProfile capabilityProfile = ModelCapabilityProfile.CreateNew(
+                new ModelCapabilityKey("provider-test", new Uri("https://provider.test/"), "test-model", null, 1),
+                new DeclaredCapabilities { SupportsStreaming = true },
+                new ProbedCapabilities { SupportsStreaming = true });
+            var behavior = new EffectiveRunBehavior(
+                agentId,
+                "Provider test agent",
+                "provider-test",
+                "test",
+                "https://provider.test/",
+                "test-model",
+                "Test model",
+                new EffectivePersonaProfile("neutral", "neutral", "concise"),
+                new EffectiveRuntimeGrounding(now.ToString("O"), now.ToString("O"), "en", "UTC"),
+                new EffectiveSamplingPolicy(0, 1),
+                [],
+                string.Empty,
+                "{}",
+                string.Empty,
+                string.Empty,
+                string.Empty,
+                0,
+                new EffectiveToolingSnapshot([], "auto", false));
+            return AgentRuntimeResult.Success(new AgentRuntime(
+                agent,
+                session,
+                sessionId,
+                agentId,
+                "Provider test agent",
+                capabilityProfile,
+                new ProviderPathKey("test", "https://provider.test/", "synthetic", "test-model"),
+                chatClient,
+                "none",
+                sandboxEnabled: false,
+                behavior,
+                requireApprovalForAllTools));
+        }
+
+        public ValueTask SaveSessionAsync(AgentRuntime runtime, CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    private sealed class DeniedProviderChatClient(NetworkAccessDeniedException denial) : IChatClient
+    {
+        public ChatClientMetadata Metadata { get; } = new("provider-test", null, null);
+
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            CancellationToken cancellationToken = default)
+            => Task.FromException<ChatResponse>(denial);
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.CompletedTask.ConfigureAwait(false);
+            throw denial;
+#pragma warning disable CS0162
+            yield break;
+#pragma warning restore CS0162
+        }
+
+        public object? GetService(Type serviceType, object? key = null) => null;
+
+        public void Dispose()
+        {
+        }
     }
 
     private sealed class NoOpAgentRunMetrics : IAgentRunMetrics

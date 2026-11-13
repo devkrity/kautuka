@@ -74,7 +74,7 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
-    public async Task G2_AiProvider_SeedHostAllowed_CustomHostDenied_EmitsRunError_WithNegativeControl()
+    public async Task G2_AiProvider_SeedHostAllowed_CustomHostDeniedRecordsRequest_WithNegativeControl()
     {
         var checker = new DirectNacChecker(grpcService);
         var mockTransport = new TrackingHttpHandler();
@@ -93,22 +93,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Assert.Equal("api.custom-ai-models.com", ex.Destination);
             Assert.Equal(443, ex.Port);
             Assert.False(string.IsNullOrWhiteSpace(ex.RequestId));
-
-            // Verify mapping to Narad RunError
-            var runError = NaradEventBodies.RunError(
-                code: ex.NaradReason,
-                message: ex.Message,
-                usage: null,
-                destination: ex.Destination,
-                port: ex.Port,
-                requestId: ex.RequestId,
-                approvalUrl: "/network-access");
-
-            Assert.Equal("network_access_required", runError.GetProperty("code").GetString());
-            Assert.Equal("api.custom-ai-models.com", runError.GetProperty("destination").GetString());
-            Assert.Equal(443, runError.GetProperty("port").GetInt32());
-            Assert.Equal(ex.RequestId, runError.GetProperty("requestId").GetString());
-            Assert.Equal("/network-access", runError.GetProperty("approvalUrl").GetString());
 
             // Verify pending request was recorded in NAC
             var adminCtx = new TestServerCallContext();
