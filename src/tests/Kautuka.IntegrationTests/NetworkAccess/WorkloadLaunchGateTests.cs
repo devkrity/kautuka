@@ -44,6 +44,24 @@ public sealed class WorkloadLaunchGateTests
         gate.EnsureLaunchAllowed(null);
     }
 
+    [Fact]
+    public void SpecBrakeStateComesFromPersistedSystemAndUserBrakes()
+    {
+        using var temp = new TemporaryDirectory();
+        using var store = new NetworkAccessPolicyStore(Path.Combine(temp.Path, "state.json"));
+        var gate = new WorkloadLaunchGate(new FakeStartupState(true), store);
+
+        Assert.False(gate.IsBraked("user-a"));
+
+        store.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "user", "user-a", true);
+        Assert.True(gate.IsBraked("user-a"));
+        Assert.False(gate.IsBraked("user-b"));
+
+        store.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "system", null, true);
+        Assert.True(gate.IsBraked("user-b"));
+        Assert.True(gate.IsBraked(null));
+    }
+
     private sealed class FakeStartupState(bool isStartupGateOpen) : IWorkloadStartupState
     {
         public bool IsStartupGateOpen { get; } = isStartupGateOpen;

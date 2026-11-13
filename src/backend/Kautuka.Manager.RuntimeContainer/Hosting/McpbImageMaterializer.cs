@@ -37,6 +37,7 @@ public sealed class McpbImageMaterializer(
 
     public async Task<string> EnsureImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connector);
@@ -139,6 +140,7 @@ public sealed class McpbImageMaterializer(
                     connector,
                     serverType,
                     forSandboxArtifact: false,
+                    isBraked,
                     cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -169,6 +171,7 @@ public sealed class McpbImageMaterializer(
     public async Task<string> EnsureSandboxArtifactImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string installRoot,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connector);
@@ -250,6 +253,7 @@ public sealed class McpbImageMaterializer(
                     connector,
                     connector.ServerType!,
                     forSandboxArtifact: true,
+                    isBraked,
                     cancellationToken).ConfigureAwait(false);
 
                 string scratchPath = Path.Combine(buildContextPath, "Containerfile.scratch");
@@ -574,7 +578,8 @@ public sealed class McpbImageMaterializer(
         string systemImage,
         IReadOnlyList<KeyValuePair<string, string>> indexEnvironment,
         string installScript,
-        string allocatedIp)
+        string allocatedIp,
+        bool isBraked)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(systemImage);
@@ -602,7 +607,7 @@ public sealed class McpbImageMaterializer(
             Replace = true,
             ManagerRole = "builder",
             StartupGateOpen = true,
-            IsBraked = false,
+            IsBraked = isBraked,
             Environment = indexEnvironment,
             CompatibilityProfile = builderCompat,
             Command = "/bin/sh",
@@ -618,6 +623,7 @@ public sealed class McpbImageMaterializer(
         WorkspaceMcpContainerConnectorDefinition connector,
         string serverType,
         bool forSandboxArtifact,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         if (string.Equals(serverType, "binary", StringComparison.OrdinalIgnoreCase))
@@ -667,7 +673,8 @@ public sealed class McpbImageMaterializer(
             systemImage,
             indexEnvironment,
             installScript,
-            allocatedIp);
+            allocatedIp,
+            isBraked);
 
         try
         {

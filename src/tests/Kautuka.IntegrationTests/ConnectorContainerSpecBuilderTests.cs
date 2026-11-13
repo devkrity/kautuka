@@ -29,6 +29,21 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
+    public void BuilderUsesCurrentBrakeStateInsteadOfClearingIt()
+    {
+        InvalidOperationException exception = Assert.Throws<InvalidOperationException>(() => ConnectorContainerSpecBuilder.BuildRun(
+            CreateConnector(),
+            "braked-connector",
+            WorkspaceMcpExecutionContext.Isolated,
+            CreateWorkspaceContext(),
+            persistent: true,
+            allocatedIp: "10.247.1.9",
+            isBraked: true));
+
+        Assert.Contains("Network paused", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InternalSystemConnectorIsAlwaysDenyAll()
     {
         WorkspaceMcpContainerConnectorDefinition connector = CreateConnector() with
@@ -58,10 +73,10 @@ public sealed class ConnectorContainerSpecBuilderTests
 
         List<string> alphaArgs = ConnectorContainerSpecBuilder.BuildRun(
             connector, "alpha-container", WorkspaceMcpExecutionContext.Isolated, userAlpha,
-            persistent: true, allocatedIp: "10.247.1.30");
+            persistent: true, allocatedIp: "10.247.1.30", isBraked: false);
         List<string> betaArgs = ConnectorContainerSpecBuilder.BuildRun(
             connector, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
-            persistent: true, allocatedIp: "10.247.1.31");
+            persistent: true, allocatedIp: "10.247.1.31", isBraked: false);
 
         Assert.Contains("io.kautuka.user=user-alpha", alphaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
@@ -93,10 +108,10 @@ public sealed class ConnectorContainerSpecBuilderTests
             ConnectorContainerSpecBuilder.ResolveIdentity(connector with { ConnectorId = "user-beta::shared-provider" }, userBeta, purpose: null);
         List<string> alphaArgs = ConnectorContainerSpecBuilder.BuildRun(
             connector, "alpha-container", WorkspaceMcpExecutionContext.Isolated, userAlpha,
-            persistent: true, allocatedIp: "10.247.1.30");
+            persistent: true, allocatedIp: "10.247.1.30", isBraked: false);
         List<string> betaArgs = ConnectorContainerSpecBuilder.BuildRun(
             connector with { ConnectorId = "user-beta::shared-provider" }, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
-            persistent: true, allocatedIp: "10.247.1.31");
+            persistent: true, allocatedIp: "10.247.1.31", isBraked: false);
 
         Assert.True(alpha.Systemwide);
         Assert.True(beta.Systemwide);
@@ -157,7 +172,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             WorkspaceMcpExecutionContext.Isolated,
             CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         AssertOption(arguments, "--cap-drop", "ALL");
@@ -190,7 +206,8 @@ public sealed class ConnectorContainerSpecBuilderTests
                 WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
                 context,
                 persistent: true,
-                allocatedIp: "10.247.1.1"));
+                allocatedIp: "10.247.1.1",
+                isBraked: false));
         }
         finally
         {
@@ -229,7 +246,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspace,
             persistent: true,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.Contains("/srv/kautuka/alpha:/workspace:ro", arguments);
@@ -256,7 +274,8 @@ public sealed class ConnectorContainerSpecBuilderTests
                 WorkspaceMcpExecutionContext.Isolated,
                 workspace,
                 persistent: false,
-                allocatedIp: "10.247.1.1");
+                allocatedIp: "10.247.1.1",
+                isBraked: false);
 
             Assert.DoesNotContain(arguments, argument => argument.Contains("/kautuka/mail", StringComparison.Ordinal));
             Assert.DoesNotContain(arguments, argument => argument.Contains(":/workspace", StringComparison.Ordinal));
@@ -280,7 +299,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             executionContext,
             CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
         Assert.DoesNotContain("none", arguments, StringComparer.Ordinal);
@@ -301,7 +321,8 @@ public sealed class ConnectorContainerSpecBuilderTests
                 WorkspaceMcpExecutionContext.Isolated,
                 CreateWorkspaceContext(),
                 persistent: false,
-                allocatedIp: "10.247.1.1"));
+                allocatedIp: "10.247.1.1",
+                isBraked: false));
 
         Assert.Contains("must be pinned", exception.Message, StringComparison.Ordinal);
     }
@@ -319,7 +340,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             WorkspaceMcpExecutionContext.Isolated,
             CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         Assert.Contains(image, arguments);
     }
@@ -347,7 +369,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             WorkspaceMcpExecutionContext.Isolated,
             CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         int commandIndex = arguments.IndexOf("npx");
         Assert.True(commandIndex >= 0);
@@ -384,7 +407,8 @@ public sealed class ConnectorContainerSpecBuilderTests
             WorkspaceMcpExecutionContext.Isolated,
             CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
 
         int commandIndex = arguments.IndexOf("uvx");
         Assert.True(commandIndex >= 0);

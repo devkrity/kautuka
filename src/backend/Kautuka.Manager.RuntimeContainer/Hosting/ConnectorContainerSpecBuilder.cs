@@ -67,6 +67,7 @@ internal static class ConnectorContainerSpecBuilder
         ContainerContext? workspaceContext,
         bool persistent,
         string allocatedIp,
+        bool isBraked,
         string? purpose = null,
         ImageCompatProfile? compatProfile = null,
         ContainerContext? identityContext = null)
@@ -141,7 +142,7 @@ internal static class ConnectorContainerSpecBuilder
             SpecFingerprint = ComputeWorkloadFingerprint(connector, identity, executionContext, compatProfile),
             ManagerRole = "connector",
             StartupGateOpen = true,
-            IsBraked = false,
+            IsBraked = isBraked,
             Environment = envList,
             Mounts = mounts,
             AllowedMountRoots = workspaceContext?.WorkspaceBaseRoot is { } workspaceBaseRoot ? [workspaceBaseRoot] : [],

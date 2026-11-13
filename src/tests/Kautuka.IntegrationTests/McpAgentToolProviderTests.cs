@@ -99,7 +99,7 @@ public sealed class McpAgentToolProviderTests
 
             List<string> runArguments = ConnectorContainerSpecBuilder.BuildRun(
                 connector, "internal-markitdown", WorkspaceMcpExecutionContext.Isolated, launchContext,
-                persistent: true, allocatedIp: "10.247.1.44");
+                persistent: true, allocatedIp: "10.247.1.44", isBraked: false);
             Assert.Contains("io.kautuka.user=user-alpha", runArguments, StringComparer.Ordinal);
             Assert.Contains("io.kautuka.egress=deny-all", runArguments, StringComparer.Ordinal);
             Assert.Contains("io.kautuka.kind=system", runArguments, StringComparer.Ordinal);

@@ -46,9 +46,9 @@ public sealed class McpbImageMaterializerConcurrencyTests
             "test", [], true, true, null, "binary", [], 30, 600);
         CancellationToken token = TestContext.Current.CancellationToken;
 
-        Task<string> first = materializer.EnsureImageAsync(connector, token);
+        Task<string> first = materializer.EnsureImageAsync(connector, isBraked: false, cancellationToken: token);
         await buildStarted.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
-        Task<string> second = materializer.EnsureImageAsync(connector, token);
+        Task<string> second = materializer.EnsureImageAsync(connector, isBraked: false, cancellationToken: token);
         await secondCheck.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
         finishBuild.TrySetResult();
 

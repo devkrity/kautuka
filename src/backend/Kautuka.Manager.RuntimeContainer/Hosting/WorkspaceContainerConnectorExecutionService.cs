@@ -118,7 +118,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     try
                     {
                         workloadLaunchGate?.EnsureLaunchAllowed(workspace.UserId);
-                        runtimeConnector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
+                        bool isBraked = workloadLaunchGate?.IsBraked(workspace.UserId) ?? true;
+                        runtimeConnector = await PrepareRuntimeConnectorAsync(connector, isBraked, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is InvalidOperationException or IOException)
                     {
@@ -230,10 +231,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ArgumentNullException.ThrowIfNull(desiredConnectorIds);
 
         string sandboxProvisionKey = BuildSandboxProvisionKey(workspaceContext);
+        workloadLaunchGate?.EnsureLaunchAllowed(workspaceContext.UserId);
+        bool isBraked = workloadLaunchGate?.IsBraked(workspaceContext.UserId) ?? true;
         await using var sandboxProvisionLease = (await sandboxProvisionLocks
             .AcquireAsync(sandboxProvisionKey, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
-        AgentSandboxInstalledManifest desiredManifest = await BuildDesiredAgentSandboxManifestAsync(desiredConnectorIds, cancellationToken).ConfigureAwait(false);
+        AgentSandboxInstalledManifest desiredManifest = await BuildDesiredAgentSandboxManifestAsync(desiredConnectorIds, isBraked, cancellationToken).ConfigureAwait(false);
         OciSandboxSession session = await containerTool.SpawnSandboxAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
         AgentSandboxInstalledManifest? installedManifest = await TryReadAgentSandboxManifestAsync(workspaceContext, cancellationToken).ConfigureAwait(false);
 
@@ -673,7 +676,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             connector,
             workspaceContext,
             isProbe ? "probe" : null);
-        workloadLaunchGate?.EnsureLaunchAllowed(string.IsNullOrWhiteSpace(launchIdentity.UserId) ? null : launchIdentity.UserId);
+        string? launchUserId = string.IsNullOrWhiteSpace(launchIdentity.UserId) ? null : launchIdentity.UserId;
+        workloadLaunchGate?.EnsureLaunchAllowed(launchUserId);
+        bool isBraked = workloadLaunchGate?.IsBraked(launchUserId) ?? true;
 
         WorkspaceMcpExecutionContext effectiveExecutionContext = NormalizeExecutionContext(executionContext);
 
@@ -702,7 +707,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }), null);
         }
 
-        connector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
+        connector = await PrepareRuntimeConnectorAsync(connector, isBraked, cancellationToken).ConfigureAwait(false);
 
         string runtimeKey = BuildRuntimeKey(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
         string containerName = BuildContainerName(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
@@ -750,6 +755,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     WithConfiguredWorkspaceRoot(workspaceContext),
                     persistent: false,
                     allocatedIp: allocatedIp,
+                    isBraked: isBraked,
                     purpose: isProbe ? "probe" : null,
                     compatProfile: compatProfile);
                 ephemeralWorkload = new EphemeralWorkload(containerName, allocatedIp, compatProfile);
@@ -785,6 +791,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task<AgentSandboxInstalledManifest> BuildDesiredAgentSandboxManifestAsync(
         IReadOnlyList<string> desiredConnectorIds,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         List<AgentSandboxInstalledContract> contracts = [];
@@ -799,7 +806,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             string installRoot = AgentSandboxInstallContract.BuildInstallRoot(sourceConnector);
             string artifactImage = await mcpbImageMaterializer
-                .EnsureSandboxArtifactImageAsync(sourceConnector, installRoot, cancellationToken)
+                .EnsureSandboxArtifactImageAsync(sourceConnector, installRoot, isBraked, cancellationToken)
                 .ConfigureAwait(false);
 
             (string executablePath, IReadOnlyList<string> argsTemplate) = AgentSandboxInstallContract.RewriteLaunch(
@@ -974,6 +981,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
     private async Task<WorkspaceMcpContainerConnectorDefinition> PrepareRuntimeConnectorAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         string? serverType = connector.ServerType;
@@ -988,7 +996,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         string runtimeImage = await mcpbImageMaterializer
-            .EnsureImageAsync(connector, cancellationToken)
+            .EnsureImageAsync(connector, isBraked, cancellationToken)
             .ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(connector.BundlePath))
@@ -1033,7 +1041,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return;
         }
 
-        workloadLaunchGate?.EnsureLaunchAllowed(string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId);
+        string? launchUserId = string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId;
+        workloadLaunchGate?.EnsureLaunchAllowed(launchUserId);
+        bool isBraked = workloadLaunchGate?.IsBraked(launchUserId) ?? true;
 
         if (inspection.Exists)
         {
@@ -1074,6 +1084,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
             persistent: true,
             allocatedIp: allocatedIp,
+            isBraked: isBraked,
             purpose: isProbe ? "probe" : null,
             compatProfile: compatProfile);
 
@@ -1481,6 +1492,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? identityContext,
         bool persistent,
         string allocatedIp,
+        bool isBraked,
         string? purpose = null,
         NetworkAccess.ImageCompatProfile? compatProfile = null)
         => ConnectorContainerSpecBuilder.BuildRun(
@@ -1490,6 +1502,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             ResolveMountedWorkspace(executionContext, identityContext),
             persistent,
             allocatedIp,
+            isBraked,
             purpose,
             compatProfile,
             identityContext);

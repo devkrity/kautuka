@@ -32,4 +32,10 @@ public sealed class WorkloadLaunchGate(
             throw new InvalidOperationException($"Workload launch rejected: the user network brake is active for '{userId}'.");
         }
     }
+
+    public bool IsBraked(string? userId)
+    {
+        BrakeState brake = policyStore.GetBrakeSnapshot();
+        return brake.System || brake.IsUserBraked(userId);
+    }
 }

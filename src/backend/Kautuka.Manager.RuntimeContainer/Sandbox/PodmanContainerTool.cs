@@ -242,7 +242,7 @@ public sealed class PodmanContainerTool(
         }
 
         ContainerExecutionResult createResult = await RunPodmanAsync(
-            BuildRunArguments(context, containerName, allocatedIp),
+            BuildRunArguments(context, containerName, allocatedIp, workloadLaunchGate?.IsBraked(context.UserId) ?? true),
             context.DefaultTimeoutSeconds,
             cancellationToken,
             containerName,
@@ -580,7 +580,8 @@ public sealed class PodmanContainerTool(
     public static IReadOnlyList<string> BuildRunArguments(
         ContainerContext context,
         string containerName,
-        string allocatedIp)
+        string allocatedIp,
+        bool isBraked)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
@@ -616,7 +617,7 @@ public sealed class PodmanContainerTool(
             SpecFingerprint = context.SpecFingerprint,
             ManagerRole = "agent",
             StartupGateOpen = true,
-            IsBraked = false,
+            IsBraked = isBraked,
             CpuLimit = context.DefaultCpuLimit,
             MemoryLimit = !string.IsNullOrWhiteSpace(context.DefaultMemoryLimit) ? context.DefaultMemoryLimit : null,
             PidsLimit = 256,

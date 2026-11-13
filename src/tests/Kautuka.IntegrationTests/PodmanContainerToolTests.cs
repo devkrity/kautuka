@@ -194,7 +194,7 @@ public sealed class PodmanContainerToolTests
             ContainerEnvironment: new Dictionary<string, string>());
 
         ArgumentException exception = Assert.Throws<ArgumentException>(
-            () => PodmanContainerTool.BuildRunArguments(context, "kautuka-user-user-alpha", "10.247.1.10"));
+            () => PodmanContainerTool.BuildRunArguments(context, "kautuka-user-user-alpha", "10.247.1.10", isBraked: false));
 
         Assert.Contains("agentId", exception.Message, StringComparison.Ordinal);
     }
@@ -218,7 +218,8 @@ public sealed class PodmanContainerToolTests
             Assert.Throws<ArgumentException>(() => PodmanContainerTool.BuildRunArguments(
                 context,
                 "sandbox-agent-a",
-                "10.247.1.10"));
+                "10.247.1.10",
+                isBraked: false));
         }
         finally
         {
@@ -296,7 +297,7 @@ public sealed class PodmanContainerToolTests
             .GetMethod("BuildRunArguments", BindingFlags.Static | BindingFlags.Public)
             ?? throw new InvalidOperationException("BuildRunArguments method was not found.");
 
-        object? result = method.Invoke(null, [context, containerName, "10.247.1.10"]);
+        object? result = method.Invoke(null, [context, containerName, "10.247.1.10", false]);
         return Assert.IsAssignableFrom<IReadOnlyList<string>>(result).ToList();
     }
 

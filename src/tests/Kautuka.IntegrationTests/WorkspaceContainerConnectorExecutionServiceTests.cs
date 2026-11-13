@@ -23,6 +23,10 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
+    private static readonly WorkloadLaunchGate TestOpenWorkloadLaunchGate = new(
+        new TestWorkloadStartupState(true),
+        new NetworkAccessPolicyStore(Path.Combine(Path.GetTempPath(), $"nac-test-open-gate-{Guid.NewGuid():N}.json")));
+
     [Fact]
     public async Task V7_41_ConnectorStartupFailureIncludesContainerLogs_WithNegativeControl()
     {
@@ -99,6 +103,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
                 workloadRegistry: registry,
                 postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+                workloadLaunchGate: TestOpenWorkloadLaunchGate,
                 stdioCommand: "python3",
                 stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -314,6 +319,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
             workloadRegistry: registry,
             postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            workloadLaunchGate: TestOpenWorkloadLaunchGate,
             stdioCommand: "python3",
             stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -380,6 +386,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     [Fact]
     public async Task V7_45_PersistentIsolatedAgentLaunchUsesIdentityContextLabels()
     {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("The MCP server launch reproduction uses a Linux Python process.");
+        }
+
         string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-persistent-identity-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspaceRoot);
         try
@@ -425,6 +436,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
                 new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
                 addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
+                workloadLaunchGate: TestOpenWorkloadLaunchGate,
                 stdioCommand: "python3",
                 stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -471,6 +483,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
             workloadRegistry: registry,
             postStartVerifier: null,
+            workloadLaunchGate: TestOpenWorkloadLaunchGate,
             stdioCommand: "python3",
             stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -535,6 +548,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
             workloadRegistry: registry,
             postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            workloadLaunchGate: TestOpenWorkloadLaunchGate,
             stdioCommand: "python3",
             stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -629,6 +643,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(workspaceRoot, "ip-cursor.json")),
             workloadRegistry: registry,
             postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+            workloadLaunchGate: TestOpenWorkloadLaunchGate,
             stdioCommand: "python3",
             stdioArgumentsPrefix: ["-u", "-c", server]);
 
@@ -831,7 +846,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             "localhost/kautuka-mcpb-uv:sys",
             [new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")],
             "uv sync --no-dev",
-            "10.247.1.10");
+            "10.247.1.10",
+            isBraked: false);
 
         Assert.DoesNotContain("--entrypoint", arguments, StringComparer.Ordinal);
         Assert.Contains("--network", arguments, StringComparer.Ordinal);
@@ -839,6 +855,18 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.Equal("/bin/sh", arguments[^3]);
         Assert.Equal("-lc", arguments[^2]);
         Assert.Equal("uv sync --no-dev", arguments[^1]);
+    }
+
+    [Fact]
+    public void V7_20_PackageBuilderPreservesBrakeState()
+    {
+        Assert.Throws<InvalidOperationException>(() => McpbImageMaterializer.BuildLanguagePackageRunArguments(
+            "kautuka-mcpb-pkg-braked",
+            "localhost/kautuka-mcpb-uv:sys",
+            [new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")],
+            "uv sync --no-dev",
+            "10.247.1.11",
+            isBraked: true));
     }
 
     [Fact]
@@ -962,7 +990,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             WorkspaceMcpExecutionContext.Isolated,
             agentContext,
             persistent: false,
-            allocatedIp: "10.247.1.20");
+            allocatedIp: "10.247.1.20",
+            isBraked: false);
 
         Assert.Contains("io.kautuka.user=test-user", agentArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.agent=test-agent", agentArgs, StringComparer.Ordinal);
@@ -987,6 +1016,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             probeContext,
             persistent: false,
             allocatedIp: "10.247.1.21",
+            isBraked: false,
             purpose: "probe");
 
         Assert.Contains("io.kautuka.user=test-user", probeArgs, StringComparer.Ordinal);
@@ -1011,7 +1041,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 new PodmanContainerTool(runner),
                 NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
                 new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
-                registry);
+                registry,
+                workloadLaunchGate: TestOpenWorkloadLaunchGate);
             var connector = new WorkspaceMcpContainerConnectorDefinition(
                 "connector-one",
                 "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
@@ -1099,7 +1130,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 new PodmanContainerTool(runner),
                 NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
                 new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
-                registry);
+                registry,
+                workloadLaunchGate: TestOpenWorkloadLaunchGate);
             var connector = new WorkspaceMcpContainerConnectorDefinition(
                 "user-alpha::shared",
                 "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
@@ -1235,7 +1267,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             new PodmanContainerTool(runner),
             NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(allocatorDirectory, "ip-cursor.json")),
-            workloadRegistry: registry);
+            workloadRegistry: registry,
+            workloadLaunchGate: TestOpenWorkloadLaunchGate);
         Assert.Contains(containerName, service.DesiredIsolatedContainerNames([connector]), StringComparer.OrdinalIgnoreCase);
 
         MethodInfo ensure = typeof(WorkspaceContainerConnectorExecutionService)
@@ -1863,7 +1896,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspaceContext ?? CreateWorkspaceContext(),
             persistent: false,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
     }
 
     private static string InvokeBuildContainerName(
@@ -1921,7 +1955,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             workspaceContext is null ? WorkspaceMcpExecutionContext.Isolated : WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
             workspaceContext ?? CreateWorkspaceContext(),
             persistent: true,
-            allocatedIp: "10.247.1.1");
+            allocatedIp: "10.247.1.1",
+            isBraked: false);
     }
 
     private static ContainerContext FingerprintContext(string agentId, string hostPath)
@@ -2016,7 +2051,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             .GetMethod("PrepareRuntimeConnectorAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("PrepareRuntimeConnectorAsync method was not found.");
 
-        var task = (Task)method.Invoke(service, [connector, CancellationToken.None])!;
+        var task = (Task)method.Invoke(service, [connector, false, CancellationToken.None])!;
         await task.ConfigureAwait(false);
         var resultProperty = task.GetType().GetProperty("Result")!;
         return (WorkspaceMcpContainerConnectorDefinition)resultProperty.GetValue(task)!;
