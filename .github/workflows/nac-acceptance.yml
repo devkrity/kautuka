@@ -55,6 +55,12 @@ jobs:
         run: |
           dotnet build src/Kautuka.slnx -c Release
 
+      - name: Prepare rootless Podman runtime directory
+        run: |
+          runtime_dir="/run/user/$(id -u)"
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$runtime_dir"
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+
       - name: Run Production NAC Acceptance
         run: |
           dotnet src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll --prod-run

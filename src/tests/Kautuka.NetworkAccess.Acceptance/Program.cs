@@ -741,7 +741,22 @@ public static class Program
         await File.WriteAllTextAsync(Path.Combine(hooksDir, "kautuka_hook.json"), hookJson).ConfigureAwait(false);
 
         string podmanGraphRoot = Path.Combine(podmanStorageDir, "graphroot");
-        string podmanRunRoot = Path.Combine(podmanStorageDir, "runroot");
+        string podmanRuntimeDirectory = OperatingSystem.IsLinux()
+            ? Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") is { Length: > 0 } runtimeDirectory
+                ? runtimeDirectory
+                : Path.Combine(tempRoot, "xdg-runtime")
+            : podmanStorageDir;
+        Directory.CreateDirectory(podmanRuntimeDirectory);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(podmanRuntimeDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        string podmanRunRoot = Path.Combine(podmanRuntimeDirectory, $"kautuka-nac-{Path.GetFileName(tempRoot)}");
+        Directory.CreateDirectory(podmanRunRoot);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(podmanRunRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
         string storageConfigPath = Path.Combine(tempRoot, "storage.conf");
         await File.WriteAllTextAsync(
             storageConfigPath,

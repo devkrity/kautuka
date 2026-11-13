@@ -116,6 +116,9 @@ public sealed class NetworkAccessArchitectureContractTests
             "The topology reconcile loop must stop before the acceptance harness removes Podman resources.");
         string workflow = await File.ReadAllTextAsync(workflowPath, cancellationToken);
         Assert.Contains("--prod-run", workflow, StringComparison.Ordinal);
+        string acceptanceSource = await File.ReadAllTextAsync(acceptancePath, cancellationToken);
+        Assert.Contains("Environment.GetEnvironmentVariable(\"XDG_RUNTIME_DIR\")", acceptanceSource, StringComparison.Ordinal);
+        Assert.Contains("podmanRunRoot", acceptanceSource, StringComparison.Ordinal);
     }
 
     [Fact]
