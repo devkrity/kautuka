@@ -121,7 +121,10 @@ public sealed class PodmanContainerToolTests
                 ["UV_INDEX_URL"] = "https://gateway.example.invalid/uv/simple",
                 ["PIP_INDEX_URL"] = "https://gateway.example.invalid/pip/simple",
                 ["LOG_LEVEL"] = "debug",
-            });
+            })
+        {
+            WorkspaceBaseRoot = "/tmp/kautuka",
+        };
 
         List<string> arguments = InvokeBuildRunArguments(context, "kautuka-agent-alpha");
 
@@ -154,6 +157,7 @@ public sealed class PodmanContainerToolTests
         {
             DesiredStateVersion = 7,
             SpecFingerprint = "abc123",
+            WorkspaceBaseRoot = "/tmp/kautuka",
         };
 
         List<string> arguments = InvokeBuildRunArguments(context, "kautuka-agent-admin-research");
@@ -193,6 +197,34 @@ public sealed class PodmanContainerToolTests
             () => PodmanContainerTool.BuildRunArguments(context, "kautuka-user-user-alpha", "10.247.1.10"));
 
         Assert.Contains("agentId", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void V7_23_SandboxMountMustStayUnderConfiguredWorkspaceBaseRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-v7-23-sandbox-root-" + Guid.NewGuid().ToString("N"));
+        string outside = Path.Combine(Path.GetTempPath(), "nac-v7-23-sandbox-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(outside);
+        try
+        {
+            var context = new ContainerContext(
+                "agent", "agent-a", "user-a", outside, "/workspace", "image@sha256:digest",
+                1, "512m", 30, [], new Dictionary<string, string>())
+            {
+                WorkspaceBaseRoot = root,
+            };
+
+            Assert.Throws<ArgumentException>(() => PodmanContainerTool.BuildRunArguments(
+                context,
+                "sandbox-agent-a",
+                "10.247.1.10"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outside, recursive: true);
+        }
     }
 
     private static void AssertOption(List<string> arguments, string option, string value)
@@ -289,7 +321,10 @@ public sealed class PodmanContainerToolTests
             "2g",
             120,
             [],
-            new Dictionary<string, string>());
+            new Dictionary<string, string>())
+        {
+            WorkspaceBaseRoot = Path.GetDirectoryName(hostPath),
+        };
 
     private sealed class TestWorkloadStartupState(bool isStartupGateOpen) : IWorkloadStartupState
     {

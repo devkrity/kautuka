@@ -144,7 +144,7 @@ internal static class ConnectorContainerSpecBuilder
             IsBraked = false,
             Environment = envList,
             Mounts = mounts,
-            AllowedMountRoots = workspaceContext is null ? [] : [workspaceContext.HostWorkspacePath],
+            AllowedMountRoots = workspaceContext?.WorkspaceBaseRoot is { } workspaceBaseRoot ? [workspaceBaseRoot] : [],
             Command = command,
             Args = cmdArgs,
             PidsLimit = 128,

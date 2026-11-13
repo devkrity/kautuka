@@ -1015,8 +1015,20 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         try
         {
             var registry = new Kautuka.NetworkAccessController.WorkloadRegistry();
+            var desiredState = new WorkspaceDesiredStateStore();
+            ContainerContext agentAlpha = FingerprintContext("agent-alpha", hostWorkspace);
+            _ = desiredState.ApplyDesiredState(
+                7,
+                WorkspaceDesiredStateSyncReason.Bootstrap,
+                new ManagerRuntimeSettings(
+                    new ManagerWorkspaceDefinition { BaseRoot = "/tmp" },
+                    new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
+                    new WorkspaceTelemetryDefinition()),
+                [agentAlpha],
+                [],
+                []);
             await using var service = new WorkspaceContainerConnectorExecutionService(
-                new WorkspaceDesiredStateStore(),
+                desiredState,
                 runner,
                 new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
                 new PodmanContainerTool(runner),
@@ -1032,8 +1044,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 DesiredStateVersion = 7,
                 SpecFingerprint = "state-store-fingerprint-without-agent",
             };
-            ContainerContext agentAlpha = FingerprintContext("agent-alpha", hostWorkspace);
-
             MethodInfo ensure = typeof(WorkspaceContainerConnectorExecutionService)
                 .GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("EnsureConnectorContainerRunningAsync method was not found.");
@@ -1660,7 +1670,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             "512m",
             30,
             [],
-            new Dictionary<string, string>());
+            new Dictionary<string, string>())
+        {
+            WorkspaceBaseRoot = "/host",
+        };
 
         List<string> arguments = InvokeBuildPodmanRunArguments(service, connector, "test-container", workspaceContext);
 

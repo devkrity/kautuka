@@ -746,7 +746,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     connector,
                     containerName,
                     effectiveExecutionContext,
-                    workspaceContext,
+                    WithConfiguredWorkspaceRoot(workspaceContext),
                     persistent: false,
                     allocatedIp: allocatedIp,
                     purpose: isProbe ? "probe" : null,
@@ -1068,7 +1068,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             connector,
             containerName,
             executionContext,
-            identityContext ?? workspaceContext,
+            WithConfiguredWorkspaceRoot(identityContext ?? workspaceContext),
             persistent: true,
             allocatedIp: allocatedIp,
             purpose: isProbe ? "probe" : null,
@@ -1490,6 +1490,17 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             purpose,
             compatProfile,
             identityContext);
+
+    private ContainerContext? WithConfiguredWorkspaceRoot(ContainerContext? context)
+    {
+        if (context is null)
+        {
+            return null;
+        }
+
+        string? configuredRoot = desiredStateStore.Snapshot.RuntimeSettings?.Workspace.BaseRoot;
+        return context with { WorkspaceBaseRoot = configuredRoot };
+    }
 
     private static string BuildContainerName(
         string connectorId,

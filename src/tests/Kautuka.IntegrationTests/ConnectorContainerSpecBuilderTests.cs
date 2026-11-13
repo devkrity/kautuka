@@ -170,6 +170,36 @@ public sealed class ConnectorContainerSpecBuilderTests
     }
 
     [Fact]
+    public void V7_23_ConnectorMountMustStayUnderConfiguredWorkspaceBaseRoot()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-v7-23-root-" + Guid.NewGuid().ToString("N"));
+        string outside = Path.Combine(Path.GetTempPath(), "nac-v7-23-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(outside);
+        try
+        {
+            ContainerContext context = CreateWorkspaceContext() with
+            {
+                HostWorkspacePath = outside,
+                WorkspaceBaseRoot = root,
+            };
+
+            Assert.Throws<ArgumentException>(() => ConnectorContainerSpecBuilder.BuildRun(
+                CreateConnector(),
+                "connector-test",
+                WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
+                context,
+                persistent: true,
+                allocatedIp: "10.247.1.1"));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(outside, recursive: true);
+        }
+    }
+
+    [Fact]
     public void RuntimeEnvironmentOverrideCannotSetHostProcessControls()
     {
         Assert.False(ConnectorContainerSpecBuilder.AllowsRuntimeEnvironmentOverride("PATH"));
@@ -189,7 +219,10 @@ public sealed class ConnectorContainerSpecBuilderTests
     {
         ContainerContext workspace = new(
             "agent", "alpha", "user", "/srv/kautuka/alpha", "/workspace", "image@sha256:digest",
-            1, "512m", 30, [], new Dictionary<string, string>());
+            1, "512m", 30, [], new Dictionary<string, string>())
+        {
+            WorkspaceBaseRoot = "/srv/kautuka",
+        };
         List<string> arguments = ConnectorContainerSpecBuilder.BuildRun(
             CreateConnector(),
             "connector-test",
@@ -433,7 +466,10 @@ public sealed class ConnectorContainerSpecBuilderTests
 
     private static ContainerContext CreateWorkspaceContext()
         => new("agent", "agent-alpha", "user-alpha", "/tmp/agent-alpha", "/workspace", "image@sha256:digest",
-            1, "512m", 30, [], new Dictionary<string, string>());
+            1, "512m", 30, [], new Dictionary<string, string>())
+        {
+            WorkspaceBaseRoot = "/tmp",
+        };
 
     private static string InvokeBuildContainerName(
         string connectorId,

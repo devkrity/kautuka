@@ -221,6 +221,36 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_23_MountAllowlistRejectsSymlinkEscapingConfiguredWorkspaceRoot()
+    {
+        string workspaceRoot = Path.Combine(tempDir, "workspace-root");
+        string outsideRoot = Path.Combine(tempDir, "outside-root");
+        Directory.CreateDirectory(workspaceRoot);
+        Directory.CreateDirectory(outsideRoot);
+        string link = Path.Combine(workspaceRoot, "linked-workspace");
+        try
+        {
+            Directory.CreateSymbolicLink(link, outsideRoot);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or PlatformNotSupportedException or IOException)
+        {
+            return;
+        }
+
+        var spec = new WorkloadContainerSpec("test-workload", "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "10.247.1.10")
+        {
+            UserId = "user-1",
+            AgentId = "agent-1",
+            StartupGateOpen = true,
+            IsBraked = false,
+            AllowedMountRoots = [workspaceRoot],
+            Mounts = [new WorkloadMount(link, "/workspace", ReadOnly: true)],
+        };
+
+        Assert.Throws<ArgumentException>(() => spec.Render());
+    }
+
+    [Fact]
     public void U6_Renderers_EnvoyAndBoundary_WithNegativeControl()
     {
         // 1. Boundary ruleset

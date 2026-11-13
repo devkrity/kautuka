@@ -19,4 +19,7 @@ public sealed record ContainerContext(
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;
+
+    /// <summary>Configured workspace authority root supplied by the Manager desired-state store.</summary>
+    public string? WorkspaceBaseRoot { get; init; }
 }

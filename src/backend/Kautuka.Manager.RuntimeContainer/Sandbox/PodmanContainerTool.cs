@@ -610,7 +610,7 @@ public sealed class PodmanContainerTool(
             Persistent = true,
             WorkingDirectory = context.ContainerWorkspacePath,
             Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath)],
-            AllowedMountRoots = [context.HostWorkspacePath],
+            AllowedMountRoots = context.WorkspaceBaseRoot is null ? [] : [context.WorkspaceBaseRoot],
             TmpfsMounts = ["/tmp:rw,noexec,nosuid", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777"],
             DesiredStateVersion = context.DesiredStateVersion,
             SpecFingerprint = context.SpecFingerprint,

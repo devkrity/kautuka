@@ -129,7 +129,11 @@ public sealed class WorkspaceDesiredStateStore
             IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> previousConnectors = [.. desiredContainerConnectors];
             long previousAcceptedVersion = acceptedDesiredStateVersion;
             runtimeSettings = nextRuntimeSettings;
-            desiredWorkspaces = EnrichDesiredWorkspaces(nextDesiredStateVersion, nextDesiredWorkspaces, nextSandboxConnectorBindings);
+            desiredWorkspaces = EnrichDesiredWorkspaces(
+                nextDesiredStateVersion,
+                nextRuntimeSettings.Workspace.BaseRoot,
+                nextDesiredWorkspaces,
+                nextSandboxConnectorBindings);
             desiredContainerConnectors = [.. nextContainerConnectors.Select(connector =>
                 connector with
                 {
@@ -556,6 +560,7 @@ public sealed class WorkspaceDesiredStateStore
 
     private static IReadOnlyList<ContainerContext> EnrichDesiredWorkspaces(
         long desiredStateVersion,
+        string? workspaceBaseRoot,
         IReadOnlyList<ContainerContext> workspaces,
         IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> bindings)
     {
@@ -571,6 +576,7 @@ public sealed class WorkspaceDesiredStateStore
             {
                 DesiredStateVersion = desiredStateVersion,
                 SpecFingerprint = WorkspaceContainerSpecFingerprint.Compute(workspace, connectorIds),
+                WorkspaceBaseRoot = workspaceBaseRoot,
             };
         })];
     }

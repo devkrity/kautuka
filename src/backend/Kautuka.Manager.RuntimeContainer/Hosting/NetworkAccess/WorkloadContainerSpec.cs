@@ -393,8 +393,6 @@ public sealed record WorkloadContainerSpec
 
     private bool IsWithinAllowedMountRoot(string hostPath)
     {
-        string fullHostPath = Path.GetFullPath(hostPath);
-        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (string allowedRoot in AllowedMountRoots)
         {
             if (string.IsNullOrWhiteSpace(allowedRoot))
@@ -402,19 +400,17 @@ public sealed record WorkloadContainerSpec
                 continue;
             }
 
-            string fullRoot = Path.GetFullPath(allowedRoot);
-            if (string.Equals(fullHostPath, fullRoot, comparison))
+            try
             {
+                _ = Kautuka.Manager.RuntimeContainer.Hosting.WorkspaceAuthorityPolicy.ValidateDescendant(
+                    Kautuka.Manager.RuntimeContainer.Hosting.WorkspaceAuthorityPolicy.CanonicalizeRoot(allowedRoot),
+                    hostPath);
                 return true;
             }
-
-            string relative = Path.GetRelativePath(fullRoot, fullHostPath);
-            if (!Path.IsPathRooted(relative)
-                && !string.Equals(relative, "..", comparison)
-                && !relative.StartsWith(".." + Path.DirectorySeparatorChar, comparison)
-                && !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, comparison))
+            catch (InvalidOperationException)
             {
-                return true;
+                // A failed root/path check does not grant access. Another configured root
+                // may still contain the mount.
             }
         }
 
