@@ -967,6 +967,55 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         Assert.Equal("/network-access", payloadBWithOwnPending.GetProperty("approvalUrl").GetString());
     }
 
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
+    public async Task V7_30_ToolFailureLookup_SelectsMostRecentlySeenMatchingRequest_WithNegativeControl()
+    {
+        NetworkAccessActorMessage? capturedActor = null;
+        Task<NetworkAccessListRequestsResponse> ListRequestsAsync(NetworkAccessListRequestsRequest req)
+        {
+            capturedActor = req.Actor;
+            var response = new NetworkAccessListRequestsResponse();
+            response.Requests.Add(new NetworkAccessRequestMessage
+            {
+                Id = "older-request",
+                UserId = "user-a",
+                AgentId = "agent-a",
+                Destination = "older.example",
+                Port = 443,
+                Status = "pending",
+                LastSeenUtc = "2026-01-01T00:00:00+00:00",
+            });
+            response.Requests.Add(new NetworkAccessRequestMessage
+            {
+                Id = "newer-request",
+                UserId = "user-a",
+                AgentId = "agent-a",
+                Destination = "newer.example",
+                Port = 8443,
+                Status = "pending",
+                LastSeenUtc = "2026-01-02T00:00:00+00:00",
+            });
+            return Task.FromResult(response);
+        }
+
+        var payload = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper
+            .BuildToolCallFinishedPayloadAsync(
+                new InvalidOperationException("Generic tool failure"),
+                nacEx: null,
+                activeToolCallId: "tc-latest",
+                activeToolName: "fetch",
+                userId: "user-a",
+                agentId: "agent-a",
+                listRequestsAsync: ListRequestsAsync);
+
+        Assert.NotNull(capturedActor);
+        Assert.False(capturedActor!.IsAdmin);
+        Assert.Equal("newer.example", payload.GetProperty("destination").GetString());
+        Assert.Equal(8443, payload.GetProperty("port").GetInt32());
+        Assert.Equal("newer-request", payload.GetProperty("requestId").GetString());
+    }
+
     private sealed class PortSelectiveTestChecker(int allowedPort) : INetworkAccessChecker
     {
         public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)

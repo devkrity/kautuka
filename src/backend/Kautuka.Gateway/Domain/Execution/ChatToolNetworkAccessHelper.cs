@@ -81,13 +81,22 @@ internal static class ChatToolNetworkAccessHelper
                         },
                     }).ConfigureAwait(false);
 
-                NetworkAccessRequestMessage? recent = listResp.Requests.FirstOrDefault(r =>
-                    string.Equals(r.Status, "pending", StringComparison.Ordinal)
-                    && !r.Systemwide
-                    && !string.IsNullOrWhiteSpace(r.UserId)
-                    && string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(r.AgentId)
-                    && string.Equals(r.AgentId, agentId, StringComparison.OrdinalIgnoreCase));
+                NetworkAccessRequestMessage? recent = listResp.Requests
+                    .Where(r =>
+                        string.Equals(r.Status, "pending", StringComparison.Ordinal)
+                        && !r.Systemwide
+                        && !string.IsNullOrWhiteSpace(r.UserId)
+                        && string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(r.AgentId)
+                        && string.Equals(r.AgentId, agentId, StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(static r => DateTimeOffset.TryParse(
+                        r.LastSeenUtc,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind,
+                        out DateTimeOffset lastSeen)
+                            ? lastSeen
+                            : DateTimeOffset.MinValue)
+                    .FirstOrDefault();
 
                 if (recent is not null)
                 {
