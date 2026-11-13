@@ -523,27 +523,25 @@ public static class Program
         }
     }
 
-    private static string ResolveHostLanAddress()
+    private static async Task<string> ResolvePodmanHostGatewayAddressAsync(string baseImage)
     {
-        using var socket = new System.Net.Sockets.Socket(
-            System.Net.Sockets.AddressFamily.InterNetwork,
-            System.Net.Sockets.SocketType.Dgram,
-            System.Net.Sockets.ProtocolType.Udp);
-        socket.Connect(new System.Net.IPEndPoint(System.Net.IPAddress.Parse("1.1.1.1"), 443));
-        if (socket.LocalEndPoint is not System.Net.IPEndPoint endpoint)
+        var (exitCode, output, error) = await ExecAsync(
+            "podman",
+            ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "python3", baseImage,
+                "-c", "import socket; print(socket.gethostbyname('host.containers.internal'))"]).ConfigureAwait(false);
+        if (exitCode != 0 || !System.Net.IPAddress.TryParse(output.Trim(), out System.Net.IPAddress? address))
         {
-            throw new InvalidOperationException("Could not determine the host's LAN address for the production LAN fixture.");
+            throw new InvalidOperationException($"Could not resolve the rootless Podman host gateway for the production LAN fixture (rc={exitCode}; output={output}; error={error}).");
         }
 
-        string address = endpoint.Address.ToString();
-        if (endpoint.Address.Equals(System.Net.IPAddress.Any)
-            || System.Net.IPAddress.IsLoopback(endpoint.Address)
-            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(endpoint.Address))
+        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork
+            || System.Net.IPAddress.IsLoopback(address)
+            || !Kautuka.NetworkAccessController.NetworkAddressClassifier.IsNonPublicV4(address))
         {
-            throw new InvalidOperationException($"The host LAN fixture address '{address}' is not a private IPv4 address.");
+            throw new InvalidOperationException($"The rootless Podman host gateway '{address}' is not a private IPv4 address.");
         }
 
-        return address;
+        return address.ToString();
     }
 
     private static string FindRepoRoot()
@@ -797,7 +795,6 @@ public static class Program
             "agent", "a1", "u1", Path.Combine(tempRoot, "workspaces", "users", "u1", "agents", "a1"), "/workspace",
             "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
             1, "512m", 30, [], new Dictionary<string, string>()));
-        string lanHostAddress = ResolveHostLanAddress();
         Process? lanFixtureProcess = null;
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
@@ -899,6 +896,7 @@ public static class Program
             }
 
             const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+            string lanHostAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage).ConfigureAwait(false);
             string lanCertificatePath = Path.Combine(tempRoot, "lan-fixture.crt");
             string lanPrivateKeyPath = Path.Combine(tempRoot, "lan-fixture.key");
             string lanAccessLogPath = Path.Combine(tempRoot, "lan-fixture-access.log");

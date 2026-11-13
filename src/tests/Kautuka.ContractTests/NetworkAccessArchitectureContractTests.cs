@@ -81,7 +81,7 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
-    public async Task V7_21_LanFixtureUsesTheHostNetworkAddress()
+    public async Task V7_21_LanFixtureUsesTheRootlessPodmanHostGateway()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
@@ -92,7 +92,8 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.True(fixtureStart >= 0 && fixtureEnd > fixtureStart, "Could not locate the LAN fixture setup in the production acceptance.");
         string fixtureSetup = source[fixtureStart..fixtureEnd];
 
-        Assert.Contains("string lanHostAddress = ResolveHostLanAddress()", source[productionStart..fixtureStart], StringComparison.Ordinal);
+        Assert.Contains("string lanHostAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", source, StringComparison.Ordinal);
+        Assert.Contains("socket.gethostbyname('host.containers.internal')", source, StringComparison.Ordinal);
         Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
         Assert.Contains("Process.Start(lanServerStartInfo)", fixtureSetup, StringComparison.Ordinal);
         Assert.DoesNotContain("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
