@@ -174,9 +174,14 @@ public sealed partial class WorkspaceGrpcService
             (string? execContext, string? attribution) = ResolveAuthoritativeRuleContextAndAttribution(
                 targetConnectorId,
                 targetUserId,
-                string.IsNullOrWhiteSpace(request.ExecContext) ? null : request.ExecContext,
-                string.IsNullOrWhiteSpace(request.Attribution) ? null : request.Attribution);
-
+                targetAgentId);
+            if (string.Equals(request.DestKind, "any-public", StringComparison.OrdinalIgnoreCase)
+                && request.Actor?.IsAdmin == true
+                && targetConnectorId is not null
+                && (string.IsNullOrWhiteSpace(execContext) || string.IsNullOrWhiteSpace(attribution)))
+            {
+                throw new ArgumentException("scope_not_enforceable: Manager cannot establish an enforceable context for this connector.", nameof(request));
+            }
             (long revision, NetworkAccessRuleView rule) = Nac.PolicyStore.SetRule(
                 ToActor(request.Actor),
                 new RuleWriteSpec(
@@ -204,17 +209,16 @@ public sealed partial class WorkspaceGrpcService
     private (string? ExecContext, string? Attribution) ResolveAuthoritativeRuleContextAndAttribution(
         string? connectorId,
         string? userId,
-        string? requestedExecContext,
-        string? requestedAttribution)
+        string? agentId)
     {
         if (string.IsNullOrWhiteSpace(connectorId))
         {
-            return (requestedExecContext, requestedAttribution);
+            return (null, null);
         }
 
         string trimmedConnectorId = connectorId.Trim();
 
-        // 1. Authoritative live container registry metadata takes precedence over caller-supplied values.
+        // 1. Authoritative live container registry metadata is the strongest context source.
         RegistryEntry[] registryMatches =
         [
             .. Nac.Registry.GetAll().Where(entry =>
@@ -232,15 +236,18 @@ public sealed partial class WorkspaceGrpcService
             return (authoritative.ExecContext, authoritative.Attribution);
         }
 
-        // 2. Desired state snapshot synced from Gateway (sandbox bindings and internal connectors).
+        // 2. Desired state snapshot synced from Gateway (sandbox bindings and connector catalogue scope).
         if (desiredStateStore is not null)
         {
             WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
-            bool isInternal = snapshot.DesiredContainerConnectors.Any(connector =>
-                connector.IsInternalSystemConnector
-                && (string.Equals(connector.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
+            WorkspaceMcpContainerConnectorDefinition[] desiredMatches =
+            [
+                .. snapshot.DesiredContainerConnectors.Where(connector =>
+                    string.Equals(connector.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
                     || (!string.IsNullOrWhiteSpace(userId)
-                        && string.Equals(connector.ConnectorId, $"{userId}::{trimmedConnectorId}", StringComparison.Ordinal))));
+                        && string.Equals(connector.ConnectorId, $"{userId}::{trimmedConnectorId}", StringComparison.Ordinal))),
+            ];
+            bool isInternal = desiredMatches.Any(static connector => connector.IsInternalSystemConnector);
             if (isInternal)
             {
                 return ("system", "none");
@@ -248,14 +255,19 @@ public sealed partial class WorkspaceGrpcService
 
             bool boundToSandbox = snapshot.DesiredSandboxConnectorBindings.Any(binding =>
                 binding.ConnectorIds.Any(id => string.Equals(id, trimmedConnectorId, StringComparison.Ordinal)));
-            bool hasStandaloneIsolated = snapshot.DesiredContainerConnectors.Any(connector =>
-                !connector.IsInternalSystemConnector
-                && (string.Equals(connector.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
-                    || (!string.IsNullOrWhiteSpace(userId)
-                        && string.Equals(connector.ConnectorId, $"{userId}::{trimmedConnectorId}", StringComparison.Ordinal))));
+            bool hasStandaloneIsolated = desiredMatches.Length > 0;
             if (boundToSandbox && !hasStandaloneIsolated)
             {
-                return ("agent-sandbox", requestedAttribution);
+                return ("agent-sandbox", string.IsNullOrWhiteSpace(userId) ? null : "user-agent");
+            }
+
+            if (hasStandaloneIsolated)
+            {
+                WorkspaceMcpContainerConnectorDefinition desired = desiredMatches[0];
+                string attribution = string.Equals(desired.CatalogScope, "system", StringComparison.OrdinalIgnoreCase)
+                    ? "user"
+                    : string.IsNullOrWhiteSpace(userId) ? "none" : string.IsNullOrWhiteSpace(agentId) ? "user" : "user-agent";
+                return ("isolated", attribution);
             }
         }
 
@@ -266,10 +278,10 @@ public sealed partial class WorkspaceGrpcService
             && (string.IsNullOrWhiteSpace(userId) || req.Systemwide || string.Equals(req.UserId, userId, StringComparison.Ordinal)));
         if (recordedUnattributed)
         {
-            return (requestedExecContext, "none");
+            return (null, "none");
         }
 
-        return (requestedExecContext, requestedAttribution);
+        return (null, null);
     }
 
     public override Task<NetworkAccessDeleteRuleResponse> DeleteRule(

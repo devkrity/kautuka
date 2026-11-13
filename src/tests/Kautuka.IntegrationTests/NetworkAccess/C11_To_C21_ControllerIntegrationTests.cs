@@ -177,6 +177,19 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "none",
                 null,
                 DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry(
+                "10.247.0.24",
+                "user-a",
+                null,
+                "c-iso",
+                "connector",
+                "conn-iso",
+                "isolated",
+                true,
+                "normal",
+                "user",
+                null,
+                DateTimeOffset.UtcNow));
 
             ServerCallContext ctx = CreateCallContext();
             var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
@@ -1685,6 +1698,43 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             }, ctx);
             Assert.True(allowedIso.Rule.Allowed);
             Assert.True(allowedIso.Rule.OpenInternetBadge);
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task V7_7_UnknownConnectorCannotReceiveAnyPublicRuleFromCallerContext_WithNegativeControl()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out _);
+            ServerCallContext ctx = CreateCallContext();
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+
+            RpcException exception = await Assert.ThrowsAsync<RpcException>(async () =>
+            {
+                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                {
+                    Actor = admin,
+                    ScopeKind = "user",
+                    UserId = "user-a",
+                    ConnectorId = "not-in-registry-or-catalog",
+                    Destination = "*",
+                    DestKind = "any-public",
+                    Port = 0,
+                    Allowed = true,
+                    ExecContext = "isolated",
+                    Attribution = "user",
+                    ExpectedRevision = controller.PolicyStore.Revision,
+                }, ctx);
+            });
+
+            Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);
+            Assert.Contains("scope_not_enforceable", exception.Status.Detail, StringComparison.Ordinal);
         }
         finally
         {
