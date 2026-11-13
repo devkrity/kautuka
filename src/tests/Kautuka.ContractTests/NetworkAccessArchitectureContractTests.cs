@@ -98,6 +98,21 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("InitializeProductionAsync", calls, StringComparer.Ordinal);
         Assert.DoesNotContain("InitializeAsync", calls, StringComparer.Ordinal);
         Assert.Equal(5, calls.Count(call => string.Equals(call, "ResolveDesiredWorkspaceContext", StringComparison.Ordinal)));
+
+        FinallyClauseSyntax cleanup = productionRun.DescendantNodes().OfType<FinallyClauseSyntax>().Last();
+        string[] cleanupCalls = cleanup.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Select(invocation => invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+                IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                _ => string.Empty,
+            })
+            .ToArray();
+        int topologyDisposeIndex = Array.IndexOf(cleanupCalls, "DisposeAsync");
+        int podmanCleanupIndex = Array.IndexOf(cleanupCalls, "ExecAsync");
+        Assert.True(topologyDisposeIndex >= 0 && topologyDisposeIndex < podmanCleanupIndex,
+            "The topology reconcile loop must stop before the acceptance harness removes Podman resources.");
     }
 
     [Fact]

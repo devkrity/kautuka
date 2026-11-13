@@ -778,8 +778,6 @@ public static class Program
             loggerFactory.CreateLogger<EgressTopologyManager>(),
             envoySocketHostDir: socketDir,
             hookStateDirectory: nacStateDir);
-        await using var topologyScope = topology.ConfigureAwait(false);
-
         string sockPath = Path.Combine(socketDir, "envoy.sock");
         string lockPath = Path.Combine(socketDir, "networkaccess.lock");
         var authHost = EnvoyAuthorizationHost.Create(
@@ -1514,6 +1512,7 @@ public static class Program
         }
         finally
         {
+            await topology.DisposeAsync().ConfigureAwait(false);
             foreach (RegistryEntry entry in registry.GetAll())
             {
                 _ = await ExecAsync("podman", ["rm", "-f", entry.ContainerId]).ConfigureAwait(false);
