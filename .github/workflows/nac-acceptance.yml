@@ -45,7 +45,7 @@ jobs:
       - name: Install system prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y nftables util-linux podman
+          sudo apt-get install -y nftables util-linux podman conntrack
 
       - name: Run Hook Unit Tests
         run: |

@@ -3,6 +3,19 @@ namespace Kautuka.IntegrationTests;
 public sealed class NacAcceptanceWorkflowTests
 {
     [Fact]
+    public void NacAcceptanceWorkflowInstallsConntrackBeforeProductionAcceptance()
+    {
+        string root = FindRepositoryRoot();
+        string workflow = File.ReadAllText(Path.Combine(root, ".github", "workflows", "nac-acceptance.yml"));
+
+        int installPrerequisites = workflow.IndexOf("sudo apt-get install -y nftables util-linux podman conntrack", StringComparison.Ordinal);
+        int productionAcceptance = workflow.IndexOf("--prod-run", StringComparison.Ordinal);
+
+        Assert.True(installPrerequisites >= 0, "The Linux production acceptance runner must install conntrack for the DNS negative control.");
+        Assert.True(productionAcceptance > installPrerequisites, "conntrack must be installed before the production acceptance run.");
+    }
+
+    [Fact]
     public void NacAcceptanceWorkflowInstallsPinnedPnpmDependenciesBeforeIntegrationTests()
     {
         string root = FindRepositoryRoot();
