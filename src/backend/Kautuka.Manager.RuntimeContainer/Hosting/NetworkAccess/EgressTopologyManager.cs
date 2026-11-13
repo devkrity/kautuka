@@ -925,7 +925,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     internal static string BuildOutsideLanSourceAddressSetupCommand() =>
-        $"ip address replace {OutsideLanSourceIp}/24 dev eth0";
+        $"lan_dev=$(ip -o -4 addr show | awk '$4 ~ /^10\\.248\\.0\\.2\\// {{ print $2; exit }}'); test -n \"$lan_dev\" && ip address replace {OutsideLanSourceIp}/24 dev \"$lan_dev\"";
 
     internal static string ComputeBoundaryRulesetHash(string ipv4RulesJson, string ipv6RulesJson)
     {

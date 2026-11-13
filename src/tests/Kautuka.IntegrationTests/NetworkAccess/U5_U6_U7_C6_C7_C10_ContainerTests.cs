@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 
@@ -298,9 +299,60 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("ip saddr 10.248.0.3 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 }", boundary, StringComparison.Ordinal);
         Assert.Equal(2, Regex.Count(envoy, "address: 10\\.248\\.0\\.3\\r?\\n\\s+port_value: 0", RegexOptions.CultureInvariant));
         Assert.DoesNotContain("192.0.0.8", boundary + envoy, StringComparison.Ordinal);
-        Assert.Equal("ip address replace 10.248.0.3/24 dev eth0", EgressTopologyManager.BuildOutsideLanSourceAddressSetupCommand());
         Assert.Equal(["10.247.0.2", "10.248.0.2", "10.248.0.3"], EgressTopologyManager.GetExpectedInfraIpv4("egress-envoy"));
         Assert.Equal(["10.247.0.2", "10.248.0.2"], EgressTopologyManager.GetExpectedInfraIpv4("egress-boundary"));
+    }
+
+    [Fact]
+    public void V7_50_LanSourceAddressUsesOutsidePodInterface_NotAnInterfaceName()
+    {
+        string command = EgressTopologyManager.BuildOutsideLanSourceAddressSetupCommand();
+
+        Assert.Contains("ip -o -4 addr show", command, StringComparison.Ordinal);
+        Assert.Contains(@"10\.248\.0\.2", command, StringComparison.Ordinal);
+        Assert.Contains("10.248.0.3/24", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("dev eth0", command, StringComparison.Ordinal);
+        Assert.DoesNotContain("dev eth1", command, StringComparison.Ordinal);
+
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string fakeBin = Path.Combine(tempDir, "v750-bin");
+        Directory.CreateDirectory(fakeBin);
+        string capturePath = Path.Combine(tempDir, "v750-ip-command.txt");
+        string fakeIp = Path.Combine(fakeBin, "ip");
+        File.WriteAllText(fakeIp,
+            "#!/bin/sh\n"
+            + "if [ \"$1\" = \"-o\" ]; then\n"
+            + "  printf '%s\\n' '1: eth0 inet 10.247.0.2/16 scope global eth0' '2: enp0s8 inet 10.248.0.2/24 scope global enp0s8'\n"
+            + "else\n"
+            + "  printf '%s\\n' \"$*\" > \"$NAC_IP_CAPTURE\"\n"
+            + "fi\n");
+        File.SetUnixFileMode(fakeIp,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "/bin/sh",
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            },
+        };
+        process.StartInfo.ArgumentList.Add("-c");
+        process.StartInfo.ArgumentList.Add(command);
+        process.StartInfo.Environment["PATH"] = $"{fakeBin}:/usr/bin:/bin";
+        process.StartInfo.Environment["NAC_IP_CAPTURE"] = capturePath;
+        Assert.True(process.Start());
+        Assert.True(process.WaitForExit(5000), "LAN interface selection command timed out.");
+        Assert.Equal(0, process.ExitCode);
+        Assert.Equal("address replace 10.248.0.3/24 dev enp0s8", File.ReadAllText(capturePath).Trim());
     }
 
     [Fact]
