@@ -389,6 +389,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void V7_11_RenderedAndLiveBoundaryHashesMustMatch_WithNegativeControl()
+    {
+        EgressTopologyManager.RequireMatchingBoundaryRulesetHash("rendered-native-hash", "rendered-native-hash");
+
+        InvalidOperationException error = Assert.Throws<InvalidOperationException>(
+            () => EgressTopologyManager.RequireMatchingBoundaryRulesetHash("rendered-native-hash", "live-drifted-hash"));
+        Assert.Contains("does not match the native rendering", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void U7_AddressAllocator_MonotonicCursorPersistenceAndWrap_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "ip-cursor.json");

@@ -225,7 +225,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (OperatingSystem.IsLinux())
         {
-            expectedBoundaryRulesetHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+            string renderedBoundaryHash = await ReadRenderedBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+            string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+            RequireMatchingBoundaryRulesetHash(renderedBoundaryHash, liveBoundaryHash);
+            expectedBoundaryRulesetHash = renderedBoundaryHash;
         }
 
         // 3. Rebuild registry from live containers before opening listener (Section 4.3.4 item 6)
@@ -958,6 +961,47 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         ArgumentNullException.ThrowIfNull(renderedBoundaryNft);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(renderedBoundaryNft)));
+    }
+
+    internal static void RequireMatchingBoundaryRulesetHash(string renderedNativeHash, string liveHash)
+    {
+        if (string.IsNullOrWhiteSpace(renderedNativeHash)
+            || string.IsNullOrWhiteSpace(liveHash)
+            || !string.Equals(renderedNativeHash, liveHash, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Live boundary nft ruleset hash '{liveHash}' does not match the native rendering '{renderedNativeHash}'.");
+        }
+    }
+
+    private async Task<string> ReadRenderedBoundaryRulesetHashAsync(CancellationToken cancellationToken)
+    {
+        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+        const string ipv6Marker = "__KUTUKA_IPV6_BOUNDARY__";
+        PodmanCommandResult rendered = await podmanRunner.RunAsync(
+            [
+                "run", "--rm", "--network", "none", "--cap-add", "NET_ADMIN", "--user", "0:0",
+                "-v", $"{boundaryPath}:/etc/nftables.conf:ro",
+                BoundaryInitImage,
+                "/bin/sh", "-c",
+                $"nft -f /etc/nftables.conf && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress"
+            ],
+            30,
+            cancellationToken).ConfigureAwait(false);
+
+        if (rendered.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Native nft rendering of the generated boundary ruleset failed (rc {rendered.ExitCode}): {rendered.StdErr}");
+        }
+
+        string[] tables = rendered.StdOut.Split($"\n{ipv6Marker}\n", StringSplitOptions.TrimEntries);
+        if (tables.Length != 2 || string.IsNullOrWhiteSpace(tables[0]) || string.IsNullOrWhiteSpace(tables[1]))
+        {
+            throw new InvalidOperationException("Native nft rendering did not return both IPv4 and IPv6 boundary tables.");
+        }
+
+        return ComputeBoundaryRulesetHash(tables[0], tables[1]);
     }
 
     private async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)

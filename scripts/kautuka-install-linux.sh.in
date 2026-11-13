@@ -314,6 +314,10 @@ install_nac_hook_payload() {
     local hook_destination="$2"
     [[ -f "$hook_source" ]] || fail "required network access hook payload is missing: $hook_source"
     install -m 0755 -- "$hook_source" "$hook_destination"
+    local ruleset_source="${hook_source%kautuka_hook.py}kautuka_workload.nft.json.tmpl"
+    local ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_workload.nft.json.tmpl"
+    [[ -f "$ruleset_source" ]] || fail "required network access ruleset template is missing: $ruleset_source"
+    install -m 0644 -- "$ruleset_source" "$ruleset_destination"
 }
 
 require_root() {
@@ -2854,6 +2858,7 @@ PY
     local hooks_dir="$service_home/.config/containers/hooks.d"
     install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
     chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"

@@ -506,13 +506,45 @@ class TestKautukaHookMainFailClosedPaths(unittest.TestCase):
     @unittest.mock.patch("sys.exit")
     @unittest.mock.patch("kautuka_hook.subprocess.run")
     @unittest.mock.patch("sys.stdin")
+    def test_main_rejects_post_apply_ruleset_drift_with_negative_control(self, mock_stdin, mock_subp, mock_exit):
+        mock_stdin.read.return_value = json.dumps({"id": "c1", "pid": 12345})
+        mock_exit.side_effect = SystemExit(1)
+
+        template_path = os.path.join(SCRIPT_DIR, "kautuka_workload.nft.json.tmpl")
+        with open(template_path, "r", encoding="utf-8") as f:
+            altered_ruleset = json.loads(f.read().replace("{{IP}}", "10.247.1.5"))
+        for item in altered_ruleset["nftables"]:
+            rule = item.get("rule", {})
+            if rule.get("chain") == "output" and not rule.get("comment"):
+                # Negative control: preserve required comments and the workload IP, but change an allow rule.
+                rule["expr"][0]["match"]["right"] = "10.247.0.99"
+                break
+        else:
+            self.fail("Golden fixture did not contain a non-commented output allow rule")
+
+        res_ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
+        res_apply = unittest.mock.Mock(returncode=0, stdout="")
+        res_verify = unittest.mock.Mock(returncode=0, stdout=json.dumps(altered_ruleset))
+        mock_subp.side_effect = [res_ip, res_apply, res_verify]
+
+        with unittest.mock.patch("kautuka_hook.read_allowlist_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.read_owners_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.write_owners_file"), \
+             unittest.mock.patch("os.stat"):
+            with self.assertRaises(SystemExit):
+                main()
+            mock_exit.assert_called_with(1)
+
+    @unittest.mock.patch("sys.exit")
+    @unittest.mock.patch("kautuka_hook.subprocess.run")
+    @unittest.mock.patch("sys.stdin")
     def test_main_owners_write_failure_fails_closed(self, mock_stdin, mock_subp, mock_exit):
         mock_stdin.read.return_value = json.dumps({"id": "c1", "pid": 12345})
         mock_exit.side_effect = SystemExit(1)
 
-        fixture_path = os.path.join(SCRIPT_DIR, "fixtures", "nft_kautuka_workload_golden.json")
-        with open(fixture_path, "r", encoding="utf-8") as f:
-            golden_json_str = f.read()
+        template_path = os.path.join(SCRIPT_DIR, "kautuka_workload.nft.json.tmpl")
+        with open(template_path, "r", encoding="utf-8") as f:
+            golden_json_str = f.read().replace("{{IP}}", "10.247.1.5")
 
         res_ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
         res_apply = unittest.mock.Mock(returncode=0, stdout="")

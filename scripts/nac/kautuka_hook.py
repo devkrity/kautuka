@@ -466,6 +466,19 @@ def canonicalize_nft_json(nft_json_data, required_comments=None, required_worklo
     return canonical_json, canonical_hash
 
 
+def expected_rendered_ruleset_hash(workload_ip, required_comments):
+    """Hash the independent rendered nft JSON golden for the workload address."""
+    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kautuka_workload.nft.json.tmpl")
+    with open(template_path, "r", encoding="utf-8") as template_file:
+        template = template_file.read().replace("{{IP}}", workload_ip)
+    _, expected_hash = canonicalize_nft_json(
+        template,
+        required_comments=required_comments,
+        required_workload_ip=workload_ip,
+    )
+    return expected_hash
+
+
 def render_ruleset(ip, include_pkgs_proxy=False):
     """
     Renders idempotent, atomic table inet kautuka_workload ruleset (Section 4.3.2).
@@ -625,6 +638,9 @@ def main():
                 required_comments=expected_comments,
                 required_workload_ip=workload_ip,
             )
+            expected_hash = expected_rendered_ruleset_hash(workload_ip, expected_comments)
+            if canonical_hash != expected_hash:
+                raise ValueError("Applied workload ruleset does not match the rendered ruleset")
             rules_sha = canonical_hash
         except Exception:
             dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0

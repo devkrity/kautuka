@@ -24,7 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Hosting\NetworkAccess\*.tmpl" />
+    <EmbeddedResource Include="Hosting\NetworkAccess\*.tmpl" Exclude="Hosting\NetworkAccess\kautuka_workload.nft.json.tmpl" />
+    <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_workload.nft.json.tmpl">
+      <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_workload.nft.json.tmpl</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

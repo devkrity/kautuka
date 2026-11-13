@@ -55,6 +55,11 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Include="..\..\..\scripts\nac\kautuka_workload.nft.json.tmpl">
+      <TargetPath>scripts\kautuka_workload.nft.json.tmpl</TargetPath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <Content Include="..\..\images\openobserve\README.txt">
       <TargetPath>sidecar-assets\openobserve\README.txt</TargetPath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
