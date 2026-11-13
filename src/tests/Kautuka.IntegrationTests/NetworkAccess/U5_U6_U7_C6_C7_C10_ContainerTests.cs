@@ -1216,9 +1216,9 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
-        if (Environment.IsPrivilegedProcess)
+        if (!OperatingSystem.IsLinux() || Environment.IsPrivilegedProcess)
         {
-            return;
+            Assert.Skip("The rootless Podman namespace verification test requires an unprivileged Linux process.");
         }
 
         IReadOnlyList<string>? capturedArgs = null;
