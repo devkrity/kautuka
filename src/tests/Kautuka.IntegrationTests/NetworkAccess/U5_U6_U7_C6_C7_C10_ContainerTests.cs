@@ -304,6 +304,39 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_51_ProductionHostedStartupEnablesLanGrants_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), $"nac-v751-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
+                0,
+                string.Empty,
+                string.Empty,
+                ProcessTerminationReason.Completed)));
+            var registry = new WorkloadRegistry();
+            var allocator = new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json"));
+            var verifier = new WorkloadPostStartVerifier(podman);
+            await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, stateDirectory);
+
+            // Exercise the hosted-service entry point used by production Manager startup.
+            await manager.StartAsync(TestContext.Current.CancellationToken);
+
+            string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+            string boundary = await File.ReadAllTextAsync(boundaryPath, TestContext.Current.CancellationToken);
+            Assert.Contains("lan_approved", boundary, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(stateDirectory))
+            {
+                Directory.Delete(stateDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void U7_AddressAllocator_MonotonicCursorPersistenceAndWrap_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "ip-cursor.json");

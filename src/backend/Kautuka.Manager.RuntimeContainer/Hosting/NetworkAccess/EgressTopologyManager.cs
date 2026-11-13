@@ -156,7 +156,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         try
         {
-            await InitializeAsync(registry, isWindowsHostNativeDev: !OperatingSystem.IsLinux(), cancellationToken: cancellationToken).ConfigureAwait(false);
+            await InitializeAsync(
+                registry,
+                isWindowsHostNativeDev: !OperatingSystem.IsLinux(),
+                includeLanGrants: true,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
