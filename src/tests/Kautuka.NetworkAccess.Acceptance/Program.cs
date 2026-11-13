@@ -948,6 +948,10 @@ public static class Program
             {
                 throw new InvalidOperationException($"Could not route the production LAN fixture through the rootless Podman host gateway (rc={lanRouteRc}; output={lanRouteOut}; error={lanRouteErr}).");
             }
+            var (lanRouteGetRc, lanRouteGetOut, lanRouteGetErr) = await ExecAsync(
+                "podman",
+                ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route", "get", lanHostAddress, "from", EgressTopologyManager.OutsideLanSourceIp]).ConfigureAwait(false);
+            Console.WriteLine($"[PROD_STAGE] LAN fixture route: host={lanHostAddress}; gateway={lanGatewayAddress}; device={outsideNetworkDevice}; rc={lanRouteGetRc}; route={lanRouteGetOut.Trim()}; error={lanRouteGetErr.Trim()}");
             string lanCertificatePath = Path.Combine(tempRoot, "lan-fixture.crt");
             string lanPrivateKeyPath = Path.Combine(tempRoot, "lan-fixture.key");
             string lanAccessLogPath = Path.Combine(tempRoot, "lan-fixture-access.log");
@@ -1346,7 +1350,7 @@ public static class Program
                 lanRule = lanDecision.Rule;
                 var (lanAllowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
                     "podman",
-                    ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
                 string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
@@ -1354,10 +1358,11 @@ public static class Program
                 {
                     string envoyLogs = (await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false)).StdOut;
                     string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
-                    string envoyRoutes = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "route"]).ConfigureAwait(false)).StdOut;
-                    string envoyAddresses = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "-4", "address"]).ConfigureAwait(false)).StdOut;
+                    string envoyRoutes = (await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route"]).ConfigureAwait(false)).StdOut;
+                    string envoyAddresses = (await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "address"]).ConfigureAwait(false)).StdOut;
+                    string envoyNeighbors = (await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyLanRoutePid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "neighbor"]).ConfigureAwait(false)).StdOut;
                     string lanFixtureState = lanFixtureProcess.HasExited ? $"exited:{lanFixtureProcess.ExitCode}" : "running";
-                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: serverState={lanFixtureState}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; envoyNeighbors={envoyNeighbors}; host={lanHostAddress}; gateway={lanGatewayAddress}; outsideDevice={outsideNetworkDevice}; curlOut={lanAllowedOut}; curlErr={lanAllowedErr}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
