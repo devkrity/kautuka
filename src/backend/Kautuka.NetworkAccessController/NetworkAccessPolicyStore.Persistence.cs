@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading.Channels;
 
+using Microsoft.Extensions.Logging;
+
 namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDisposable
@@ -20,6 +22,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     private readonly Action<string>? beforeRenameHook;
     private readonly Action? beforeBackgroundDiskLockHook;
     private readonly Action? beforeBackgroundDrainHook;
+    private readonly ILogger<NetworkAccessPolicyStore>? logger;
     private readonly IReadOnlyList<NetworkAccessRule> seedRules;
     private readonly NetworkAccessAuditRing? auditRing;
 
@@ -39,8 +42,9 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     public NetworkAccessPolicyStore(
         string path,
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
-        NetworkAccessAuditRing? auditRing = null)
-        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing)
+        NetworkAccessAuditRing? auditRing = null,
+        ILogger<NetworkAccessPolicyStore>? logger = null)
+        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing, logger: logger)
     {
     }
 
@@ -51,7 +55,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
         NetworkAccessAuditRing? auditRing = null,
         Action? beforeBackgroundDiskLockHook = null,
-        Action? beforeBackgroundDrainHook = null)
+        Action? beforeBackgroundDrainHook = null,
+        ILogger<NetworkAccessPolicyStore>? logger = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(syncDirectory);
@@ -60,6 +65,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         this.beforeRenameHook = beforeRenameHook;
         this.beforeBackgroundDiskLockHook = beforeBackgroundDiskLockHook;
         this.beforeBackgroundDrainHook = beforeBackgroundDrainHook;
+        this.logger = logger;
         this.seedRules = seedRules ?? NetworkAccessDefaultSeeds.DefaultRules;
         this.auditRing = auditRing;
 
@@ -116,9 +122,10 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
     public async ValueTask DisposeAsync()
     {
+        pendingRequestWriterChannel?.Writer.TryComplete();
+        await cts.CancelAsync().ConfigureAwait(false);
         if (pendingRequestWriterChannel is not null)
         {
-            pendingRequestWriterChannel.Writer.TryComplete();
             try
             {
                 if (pendingRequestWriterTask is not null)
@@ -131,15 +138,15 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             }
         }
 
-        await cts.CancelAsync().ConfigureAwait(false);
         cts.Dispose();
     }
 
     public void Dispose()
     {
+        pendingRequestWriterChannel?.Writer.TryComplete();
+        cts.Cancel();
         if (pendingRequestWriterChannel is not null)
         {
-            pendingRequestWriterChannel.Writer.TryComplete();
             try
             {
                 pendingRequestWriterTask?.Wait(TimeSpan.FromSeconds(1));
@@ -149,7 +156,6 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             }
         }
 
-        cts.Cancel();
         cts.Dispose();
     }
 
@@ -171,7 +177,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
                 {
                 }
 
-                DrainPendingWrites(token);
+                await DrainPendingWritesAsync(token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -194,9 +200,10 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         }
     }
 
-    private void DrainPendingWrites(CancellationToken token)
+    private async Task DrainPendingWritesAsync(CancellationToken token)
     {
         beforeBackgroundDrainHook?.Invoke();
+        int retryAttempt = 0;
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -212,17 +219,29 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
                 break;
             }
 
+            TimeSpan? retryDelay = null;
             try
             {
                 PersistLatestSnapshotIfNewer();
+                retryAttempt = 0;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 Interlocked.Increment(ref backgroundWriteErrorCount);
+                retryAttempt++;
+                retryDelay = GetBackgroundRetryDelay(retryAttempt);
+                Volatile.Write(ref pendingWriteRequested, 1);
+                logger?.LogError(ex, "Failed to persist network access policy state; retrying in {RetryDelayMs} ms.", retryDelay.Value.TotalMilliseconds);
             }
             finally
             {
                 Interlocked.Exchange(ref backgroundWriteInProgress, 0);
+            }
+
+            if (retryDelay is TimeSpan delay)
+            {
+                await Task.Delay(delay, token).ConfigureAwait(false);
+                continue;
             }
 
             if (Volatile.Read(ref pendingWriteRequested) == 0)
@@ -230,6 +249,12 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
                 break;
             }
         }
+    }
+
+    private static TimeSpan GetBackgroundRetryDelay(int retryAttempt)
+    {
+        int exponent = Math.Min(Math.Max(retryAttempt - 1, 0), 6);
+        return TimeSpan.FromMilliseconds(Math.Min(5_000, 100 * (1 << exponent)));
     }
 
     private void PersistLatestSnapshotIfNewer()
@@ -297,8 +322,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
     private void SaveSync(NetworkAccessPolicyState next)
     {
-        state = next;
-        long seq = ++inMemoryMutationSeq;
+        long seq = inMemoryMutationSeq + 1;
         lock (diskWriteLock)
         {
             if (seq > lastWrittenMutationSeq)
@@ -306,6 +330,9 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
                 WriteStateToDisk(next, syncDir: true);
                 lastWrittenMutationSeq = seq;
             }
+
+            state = next;
+            inMemoryMutationSeq = seq;
         }
     }
 

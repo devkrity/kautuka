@@ -56,8 +56,10 @@ builder.Services.AddSingleton(static sp =>
 // -----------------------------------------------------------------------
 builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
     new WorkloadRegistry(sp.GetRequiredService<ILogger<WorkloadRegistry>>()));
-builder.Services.AddSingleton(_ =>
-    new NetworkAccessPolicyStore(Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json")));
+builder.Services.AddSingleton(sp =>
+    new NetworkAccessPolicyStore(
+        Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
+        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
 builder.Services.AddSingleton(_ =>
     new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl")));
 builder.Services.AddSingleton(_ =>

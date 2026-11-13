@@ -1,5 +1,9 @@
 using Kautuka.NetworkAccessController;
 
+using Microsoft.Extensions.Logging;
+
+using System.Collections.Concurrent;
+
 namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class U2_PolicyStoreTests : IDisposable
@@ -338,6 +342,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
         string statePath = Path.Combine(dir, "state.json");
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
         int failRemaining = 1;
+        var loggedErrors = new ConcurrentQueue<string>();
 
         using var store = new NetworkAccessPolicyStore(
             statePath,
@@ -348,9 +353,10 @@ public sealed class U2_PolicyStoreTests : IDisposable
                 {
                     throw new IOException("Simulated transient disk failure");
                 }
-            });
+            },
+            logger: new CapturingLogger<NetworkAccessPolicyStore>(loggedErrors));
 
-        // 1. First background write hits transient error; error is counted and .tmp file is cleaned up.
+        // 1. First background write hits a transient error, logs it, retries after backoff, and cleans .tmp files.
         store.RecordOrUpdatePendingRequest(
             "user-1",
             "agent-1",
@@ -364,10 +370,11 @@ public sealed class U2_PolicyStoreTests : IDisposable
             origin: "container");
         await store.FlushPendingWritesAsync();
         Assert.Equal(1, store.BackgroundWriteErrorCount);
-        Assert.Equal(0, store.DiskWriteCount);
+        Assert.Equal(1, store.DiskWriteCount);
+        Assert.Contains(loggedErrors, message => message.Contains("retrying in", StringComparison.OrdinalIgnoreCase));
         Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
 
-        // 2. Subsequent background write continues working and flushes both err1 and err2 to disk.
+        // 2. A later write continues normally after the retry and is also persisted.
         store.RecordOrUpdatePendingRequest(
             "user-1",
             "agent-1",
@@ -380,7 +387,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
             actorKind: "agent",
             origin: "container");
         await store.FlushPendingWritesAsync();
-        Assert.Equal(1, store.DiskWriteCount);
+        Assert.Equal(2, store.DiskWriteCount);
         Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
 
         using (var reopened = new NetworkAccessPolicyStore(statePath))
@@ -394,5 +401,89 @@ public sealed class U2_PolicyStoreTests : IDisposable
         Interlocked.Exchange(ref failRemaining, 1);
         Assert.Throws<IOException>(() => store.SetBrake(admin, scope: "system", targetUserId: null, on: true));
         Assert.Empty(Directory.GetFiles(dir, "*.tmp"));
+    }
+
+    [Fact]
+    public void V7_27_SyncSaveFailureDoesNotPublishUncommittedState_WithNegativeControl()
+    {
+        string statePath = Path.Combine(tempDir, "v7-27-sync-failure", "state.json");
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        int failNextRename = 1;
+        using var store = new NetworkAccessPolicyStore(
+            statePath,
+            _ => { },
+            _ =>
+            {
+                if (Interlocked.Exchange(ref failNextRename, 0) == 1)
+                {
+                    throw new IOException("Simulated synchronous persistence failure");
+                }
+            });
+
+        Assert.Throws<IOException>(() => store.SetBrake(admin, scope: "system", targetUserId: null, on: true));
+
+        Assert.False(store.GetBrakeSnapshot().System, "A failed durable write must not publish the brake in memory.");
+        using (var reopened = new NetworkAccessPolicyStore(statePath))
+        {
+            Assert.False(reopened.GetBrakeSnapshot().System, "A failed durable write must not appear after reopening the store.");
+        }
+
+        // Negative control (.NC): after the transient failure, a successful sync write publishes and persists.
+        store.SetBrake(admin, scope: "system", targetUserId: null, on: true);
+        Assert.True(store.GetBrakeSnapshot().System);
+        using var reopenedAfterSuccess = new NetworkAccessPolicyStore(statePath);
+        Assert.True(reopenedAfterSuccess.GetBrakeSnapshot().System);
+    }
+
+    [Fact]
+    public async Task V7_27_BackgroundRetryStopsPromptlyOnDispose_WithNegativeControl()
+    {
+        string statePath = Path.Combine(tempDir, "v7-27-dispose-retry", "state.json");
+        var store = new NetworkAccessPolicyStore(
+            statePath,
+            _ => { },
+            beforeRenameHook: _ => throw new IOException("Simulated persistent disk failure"));
+
+        store.RecordOrUpdatePendingRequest(
+            "user-1",
+            "agent-1",
+            connectorId: null,
+            systemwide: false,
+            attribution: "user-agent",
+            destKind: "host",
+            destination: "dispose-retry.example.com",
+            port: 443,
+            actorKind: "agent",
+            origin: "container");
+        for (int attempt = 0; attempt < 100 && store.BackgroundWriteErrorCount == 0; attempt++)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(store.BackgroundWriteErrorCount > 0);
+        try
+        {
+            await store.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        }
+        catch (TimeoutException)
+        {
+            await Task.Run(store.Dispose, TestContext.Current.CancellationToken);
+            throw;
+        }
+    }
+
+    private sealed class CapturingLogger<T>(ConcurrentQueue<string> messages) : ILogger<T>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Error)
+            {
+                messages.Enqueue(formatter(state, exception));
+            }
+        }
     }
 }
