@@ -78,6 +78,7 @@ public sealed class NetworkAccessArchitectureContractTests
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        string workflowPath = Path.Combine(repositoryRoot, ".github", "workflows", "nac-acceptance.yml");
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         CompilationUnitSyntax source = CSharpSyntaxTree.ParseText(
             await File.ReadAllTextAsync(acceptancePath, cancellationToken),
@@ -113,6 +114,8 @@ public sealed class NetworkAccessArchitectureContractTests
         int podmanCleanupIndex = Array.IndexOf(cleanupCalls, "ExecAsync");
         Assert.True(topologyDisposeIndex >= 0 && topologyDisposeIndex < podmanCleanupIndex,
             "The topology reconcile loop must stop before the acceptance harness removes Podman resources.");
+        string workflow = await File.ReadAllTextAsync(workflowPath, cancellationToken);
+        Assert.Contains("--prod-run", workflow, StringComparison.Ordinal);
     }
 
     [Fact]
