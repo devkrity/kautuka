@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -754,6 +757,7 @@ public static class Program
             "agent", "a1", "u1", Path.Combine(tempRoot, "workspaces", "users", "u1", "agents", "a1"), "/workspace",
             "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
             1, "512m", 30, [], new Dictionary<string, string>()));
+        string lanFixtureName = $"nac-lan-fixture-{Guid.NewGuid():N}"[..31];
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
@@ -809,7 +813,7 @@ public static class Program
             await authHost.StartAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
-                await topology.InitializeAsync(registry, isWindowsHostNativeDev: false, decisionEndpointIp: null, includeLanGrants: false, CancellationToken.None).ConfigureAwait(false);
+                await topology.InitializeAsync(registry, isWindowsHostNativeDev: false, decisionEndpointIp: null, includeLanGrants: true, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
@@ -850,16 +854,188 @@ public static class Program
 
             string boundaryPath = Path.Combine(stateDir, "nac", "boundary.nft");
             string boundaryText = await File.ReadAllTextAsync(boundaryPath).ConfigureAwait(false);
+            if (!boundaryText.Contains("comment \"lan_approved\"", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("LAN acceptance requires the production boundary to admit LAN packets to Envoy for policy enforcement.");
+            }
+
+            const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+            string lanCertificatePath = Path.Combine(tempRoot, "lan-fixture.crt");
+            string lanPrivateKeyPath = Path.Combine(tempRoot, "lan-fixture.key");
+            string lanAccessLogPath = Path.Combine(tempRoot, "lan-fixture-access.log");
+            await File.WriteAllTextAsync(lanAccessLogPath, string.Empty).ConfigureAwait(false);
+            using (RSA rsa = RSA.Create())
+            {
+                rsa.KeySize = 2048;
+                var certificateRequest = new CertificateRequest(
+                    "CN=kautuka-nac-fixture",
+                    rsa,
+                    HashAlgorithmName.SHA256,
+                    RSASignaturePadding.Pkcs1);
+                certificateRequest.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+                using X509Certificate2 certificate = certificateRequest.CreateSelfSigned(
+                    DateTimeOffset.UtcNow.AddMinutes(-5),
+                    DateTimeOffset.UtcNow.AddHours(1));
+                await File.WriteAllTextAsync(lanCertificatePath, certificate.ExportCertificatePem()).ConfigureAwait(false);
+                await File.WriteAllTextAsync(lanPrivateKeyPath, rsa.ExportPkcs8PrivateKeyPem()).ConfigureAwait(false);
+            }
+
+            if (OperatingSystem.IsLinux())
+            {
+                File.SetUnixFileMode(lanCertificatePath, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+                File.SetUnixFileMode(lanPrivateKeyPath, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+                File.SetUnixFileMode(lanAccessLogPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.OtherRead | UnixFileMode.OtherWrite);
+            }
+
+            const string lanServer = """
+                import http.server, ssl
+                access=open('/tmp/lan-fixture-access.log','a',buffering=1)
+                def record(message): print(message, file=access, flush=True)
+                class Handler(http.server.BaseHTTPRequestHandler):
+                    def setup(self):
+                        http.server.BaseHTTPRequestHandler.setup(self)
+                        record('accepted TCP from '+str(self.client_address))
+                    def do_GET(self):
+                        record('GET '+self.path+' from '+str(self.client_address))
+                        body=b'NAC LAN fixture ok'
+                        self.send_response(200)
+                        self.send_header('Content-Length', str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    def log_message(self, fmt, *args): record(fmt % args)
+                server=http.server.ThreadingHTTPServer(('0.0.0.0',8443),Handler)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain('/tmp/lan-fixture.crt','/tmp/lan-fixture.key')
+                server.socket=context.wrap_socket(server.socket,server_side=True)
+                server.serve_forever()
+                """;
+            var (lanServerRc, lanServerOut, lanServerErr) = await ExecAsync(
+                "podman",
+                [
+                    "run", "-d", "--name", lanFixtureName,
+                    "--network", EgressTopologyManager.OutsideNetworkName,
+                    "--ip", "10.248.0.4",
+                    "--volume", $"{lanCertificatePath}:/tmp/lan-fixture.crt:ro",
+                    "--volume", $"{lanPrivateKeyPath}:/tmp/lan-fixture.key:ro",
+                    "--volume", $"{lanAccessLogPath}:/tmp/lan-fixture-access.log:rw",
+                    "--entrypoint", "python3", baseImage, "-u", "-c", lanServer,
+                ]).ConfigureAwait(false);
+            if (lanServerRc != 0 || string.IsNullOrWhiteSpace(lanServerOut))
+            {
+                throw new InvalidOperationException($"Could not start the controlled LAN fixture (rc={lanServerRc}; {lanServerErr}).");
+            }
+            int lanFixtureHealthRc = 1;
+            string lanFixtureHealthOut = string.Empty;
+            string lanFixtureHealthErr = string.Empty;
+            for (int attempt = 0; attempt < 10 && lanFixtureHealthRc != 0; attempt++)
+            {
+                (lanFixtureHealthRc, lanFixtureHealthOut, lanFixtureHealthErr) = await ExecAsync(
+                    "podman",
+                    ["exec", lanFixtureName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "2", "https://127.0.0.1:8443/"]).ConfigureAwait(false);
+                if (lanFixtureHealthRc != 0)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(200)).ConfigureAwait(false);
+                }
+            }
+            if (lanFixtureHealthRc != 0 || !lanFixtureHealthOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
+            {
+                var (_, lanFixtureLogs, _) = await ExecAsync("podman", ["logs", lanFixtureName]).ConfigureAwait(false);
+                var (_, lanFixtureState, _) = await ExecAsync("podman", ["inspect", lanFixtureName, "--format", "{{json .State}}"]).ConfigureAwait(false);
+                string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
+                throw new InvalidOperationException($"Controlled LAN fixture did not become healthy (rc={lanFixtureHealthRc}; {lanFixtureHealthErr}; state={lanFixtureState}; logs={lanFixtureLogs}; access={lanFixtureAccessLog}).");
+            }
+            var (lanNetworkProbeRc, lanNetworkProbeOut, lanNetworkProbeErr) = await ExecAsync(
+                "podman",
+                ["run", "--rm", "--network", EgressTopologyManager.OutsideNetworkName, "--entrypoint", "curl", baseImage, "--insecure", "--silent", "--show-error", "--max-time", "4", "https://10.248.0.4:8443/"]).ConfigureAwait(false);
+            if (lanNetworkProbeRc != 0 || !lanNetworkProbeOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal))
+            {
+                string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
+                throw new InvalidOperationException($"Controlled LAN fixture could not be reached from the outside network before the NAC flow (rc={lanNetworkProbeRc}; body={lanNetworkProbeOut}; error={lanNetworkProbeErr}; access={lanFixtureAccessLog}).");
+            }
+
+            string corefilePath = Path.Combine(stateDir, "nac", "Corefile");
+            string corefile = await File.ReadAllTextAsync(corefilePath).ConfigureAwait(false);
+            string workloadDnsBind = "    bind 10.247.0.2";
+            string envoyDnsBind = "    bind 127.0.0.1";
+            if (!corefile.Contains(workloadDnsBind, StringComparison.Ordinal)
+                || !corefile.Contains(envoyDnsBind, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The production CoreDNS configuration did not contain both expected DNS listeners.");
+            }
+
+            corefile = corefile.Replace(
+                workloadDnsBind,
+                workloadDnsBind + "\n    hosts {\n        93.184.216.34 rebind.nac.test\n        fallthrough\n    }",
+                StringComparison.Ordinal);
+            corefile = corefile.Replace(
+                envoyDnsBind,
+                envoyDnsBind + "\n    hosts {\n        10.248.0.5 rebind.nac.test\n        10.248.0.4 lan.nac.test\n        fallthrough\n    }",
+                StringComparison.Ordinal);
+            await File.WriteAllTextAsync(corefilePath, corefile).ConfigureAwait(false);
+            var (dnsRestartRc, _, dnsRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-dns"]).ConfigureAwait(false);
+            if (dnsRestartRc != 0)
+            {
+                throw new InvalidOperationException($"Could not restart production CoreDNS with the rebinding fixture (rc={dnsRestartRc}; {dnsRestartErr}).");
+            }
+
             string dnsUpstreamLine = boundaryText
                 .Split('\n')
                 .Select(static l => l.Trim())
                 .FirstOrDefault(static l => l.Contains("comment \"dns_upstream\"", StringComparison.Ordinal))
                 ?? string.Empty;
 
-            const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
             string wlWorkspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "a1");
             var wlContext = new ContainerContext(
                 "agent", "a1", "u1", wlWorkspace, "/workspace", baseImage, 1, "512m", 30, [], new Dictionary<string, string>());
+            string parserWorkspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "parser-internal");
+            string parserControlWorkspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "parser-control");
+            string rebindWorkspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "rebind");
+            string lanWorkspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "lan-grant");
+            Directory.CreateDirectory(wlWorkspace);
+            Directory.CreateDirectory(parserWorkspace);
+            Directory.CreateDirectory(parserControlWorkspace);
+            Directory.CreateDirectory(rebindWorkspace);
+            Directory.CreateDirectory(lanWorkspace);
+            var parserContext = wlContext with { ScopeId = "parser-internal", HostWorkspacePath = parserWorkspace };
+            var parserControlContext = wlContext with { ScopeId = "parser-control", HostWorkspacePath = parserControlWorkspace };
+            var rebindContext = wlContext with { ScopeId = "rebind", HostWorkspacePath = rebindWorkspace };
+            var lanContext = wlContext with { ScopeId = "lan-grant", HostWorkspacePath = lanWorkspace };
+            string parserBundlePath = Path.Combine(tempRoot, "nac-parser-fixture.mcpb");
+            using (var bundleStream = File.Create(parserBundlePath))
+            using (var bundleArchive = new ZipArchive(bundleStream, ZipArchiveMode.Create))
+            {
+                ZipArchiveEntry manifestEntry = bundleArchive.CreateEntry("manifest.json");
+                Stream manifestStream = await manifestEntry.OpenAsync().ConfigureAwait(false);
+                await using (manifestStream.ConfigureAwait(false))
+                {
+                    using var manifestWriter = new StreamWriter(manifestStream);
+                    await manifestWriter.WriteAsync("""
+                        {"manifest_version":"0.4","name":"nac-parser-fixture","display_name":"NAC parser fixture","version":"1.0.0","description":"Production acceptance fixture","author":{"name":"Kautuka"},"server":{"type":"binary","entry_point":"server.py","mcp_config":{"command":"python3","args":["server.py"]}}}
+                        """).ConfigureAwait(false);
+                }
+                ZipArchiveEntry serverEntry = bundleArchive.CreateEntry("server.py");
+                Stream serverStream = await serverEntry.OpenAsync().ConfigureAwait(false);
+                await using (serverStream.ConfigureAwait(false))
+                {
+                    using var serverWriter = new StreamWriter(serverStream);
+                    await serverWriter.WriteAsync("print('fixture entry point')").ConfigureAwait(false);
+                }
+            }
+            const string parserServer = "import json,subprocess,sys\nfor line in sys.stdin:\n r=json.loads(line); m=r.get('method'); i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'nac-parser-fixture','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[{'name':'network_probe','description':'Attempt a network request','inputSchema':{'type':'object','properties':{}}}]}}),flush=True)\n elif m=='tools/call':\n  p=subprocess.run(['curl','--insecure','--silent','--show-error','--max-time','6','https://example.com/'],capture_output=True,text=True)\n  print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'exit='+str(p.returncode)+';body='+p.stdout[:80]}],'isError':False}}),flush=True)\n";
+            var internalParserConnector = new WorkspaceMcpContainerConnectorDefinition(
+                "nac-internal-parser", baseImage, "python3", ["-u", "-c", parserServer],
+                Enabled: false, IsInternalSystemConnector: true, BundlePath: parserBundlePath, ServerType: "binary",
+                Environment: [], ReadinessTimeoutSeconds: 30, JitCooldownSeconds: 600)
+            {
+                CatalogScope = "system",
+            };
+            var parserControlConnector = internalParserConnector with
+            {
+                ConnectorId = "nac-parser-control",
+                Enabled = true,
+                IsInternalSystemConnector = false,
+                CatalogScope = "user",
+            };
             _ = desiredState.ApplyDesiredState(
                 1,
                 WorkspaceDesiredStateSyncReason.Bootstrap,
@@ -867,7 +1043,7 @@ public static class Program
                     new WorkspaceDefinition { BaseRoot = workspaceRoot },
                     new SandboxRuntimeDefinition { Image = baseImage, DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
-                [wlContext], [], []);
+                [wlContext, parserContext, parserControlContext, rebindContext, lanContext], [internalParserConnector, parserControlConnector], []);
             var containerTool = new PodmanContainerTool(
                 podman,
                 allocator,
@@ -887,6 +1063,201 @@ public static class Program
             }
             WorkloadVerificationResult verResult = await verifier.VerifyWorkloadAsync(wlName, wlIp, null, registry, cancellationToken: CancellationToken.None).ConfigureAwait(false);
 
+            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            AcceptanceObservation parserAcceptance;
+            var connectorService = new WorkspaceContainerConnectorExecutionService(
+                desiredState,
+                podman,
+                new McpbImageMaterializer(podman, loggerFactory.CreateLogger<McpbImageMaterializer>()),
+                containerTool,
+                loggerFactory.CreateLogger<WorkspaceContainerConnectorExecutionService>(),
+                addressAllocator: allocator,
+                workloadRegistry: registry,
+                postStartVerifier: verifier,
+                workloadLaunchGate: new WorkloadLaunchGate(topology, policyStore));
+            await using (connectorService.ConfigureAwait(false))
+            {
+                var internalParserCall = await connectorService.CallToolAsync(
+                    internalParserConnector.ConnectorId,
+                    null,
+                    "network_probe",
+                    "{}",
+                    30,
+                    allowInternalSystemConnector: true,
+                    parserContext,
+                    WorkspaceMcpExecutionContext.Isolated,
+                    CancellationToken.None).ConfigureAwait(false);
+                RegistryEntry internalParserEntry = registry.GetAll().Single(entry =>
+                    string.Equals(entry.ConnectorId, internalParserConnector.ConnectorId, StringComparison.Ordinal));
+                bool internalParserDenied = string.Equals(internalParserEntry.Egress, "deny-all", StringComparison.Ordinal)
+                    && string.Equals(internalParserEntry.Kind, "system", StringComparison.Ordinal)
+                    && string.Equals(internalParserEntry.Attribution, "none", StringComparison.Ordinal)
+                    && string.IsNullOrEmpty(internalParserEntry.AgentId)
+                    && string.Equals(internalParserEntry.UserId, "u1", StringComparison.Ordinal)
+                    && internalParserCall.Ok
+                    && !(internalParserCall.Result ?? string.Empty).Contains("Example Domain", StringComparison.OrdinalIgnoreCase)
+                    && !policyStore.ListRequests(admin).Requests.Any(view => view.Request.Status == "pending"
+                        && string.Equals(view.Request.ConnectorId, internalParserConnector.ConnectorId, StringComparison.Ordinal));
+
+                var parserControlCall = await connectorService.CallToolAsync(
+                    parserControlConnector.ConnectorId,
+                    null,
+                    "network_probe",
+                    "{}",
+                    30,
+                    allowInternalSystemConnector: false,
+                    parserControlContext,
+                    WorkspaceMcpExecutionContext.Isolated,
+                    CancellationToken.None).ConfigureAwait(false);
+                RegistryEntry parserControlEntry = registry.GetAll().Single(entry =>
+                    string.Equals(entry.ConnectorId, parserControlConnector.ConnectorId, StringComparison.Ordinal));
+                bool parserControlApprovalCreated = parserControlCall.Ok
+                    && string.Equals(parserControlEntry.Egress, "normal", StringComparison.Ordinal)
+                    && string.Equals(parserControlEntry.Kind, "connector", StringComparison.Ordinal)
+                    && string.Equals(parserControlEntry.Attribution, "user-agent", StringComparison.Ordinal)
+                    && policyStore.ListRequests(admin).Requests.Any(view => view.Request.Status == "pending"
+                        && string.Equals(view.Request.ConnectorId, parserControlConnector.ConnectorId, StringComparison.Ordinal)
+                        && string.Equals(view.Request.Destination, "example.com", StringComparison.OrdinalIgnoreCase));
+                NetworkAccessRequest? parserControlCard = policyStore.ListRequests(admin).Requests
+                    .Select(static view => view.Request)
+                    .FirstOrDefault(request => request.Status == "pending"
+                        && string.Equals(request.ConnectorId, parserControlConnector.ConnectorId, StringComparison.Ordinal));
+                if (parserControlCard is not null)
+                {
+                    _ = policyStore.DecideRequest(admin, parserControlCard.Id, allow: false, scope: "agent", expectedRevision: policyStore.Revision, allowLan: false);
+                }
+                string parserObservation = $"denyAll={internalParserDenied}:kindSystem={string.Equals(internalParserEntry.Kind, "system", StringComparison.Ordinal)}:noApproval={policyStore.ListRequests(admin).Requests.All(view => !string.Equals(view.Request.ConnectorId, internalParserConnector.ConnectorId, StringComparison.Ordinal))}";
+                string parserNcObservation = $"normal={string.Equals(parserControlEntry.Egress, "normal", StringComparison.Ordinal)}:kindConnector={string.Equals(parserControlEntry.Kind, "connector", StringComparison.Ordinal)}:approvalCreated={parserControlApprovalCreated}";
+                parserAcceptance = AcceptanceHarness.Record(
+                    "PROD_E_PARSER",
+                    parserObservation,
+                    "denyAll=True:kindSystem=True:noApproval=True",
+                    parserNcObservation,
+                    "normal=True:kindConnector=True:approvalCreated=True");
+            }
+
+            _ = policyStore.SetRule(
+                admin,
+                new RuleWriteSpec("agent", "u1", "rebind", null, "rebind.nac.test", "host", 8443, Allowed: true, AllowLan: false),
+                expectedRevision: policyStore.Revision);
+            OciSandboxSession rebindSession = await containerTool.SpawnSandboxAsync(rebindContext, CancellationToken.None).ConfigureAwait(false);
+            string rebindName = rebindSession.ContainerName;
+            RegistryEntry rebindEntry = registry.GetAll().Single(entry => string.Equals(entry.AgentId, "rebind", StringComparison.Ordinal));
+            string rebindCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long rebindRejectBefore = ExtractNftCommentCounterPackets(rebindCountersBefore, "private_reject");
+            var (rebindRc, _, rebindErr) = await ExecAsync(
+                "podman",
+                ["exec", rebindName, "curl", "--resolve", "rebind.nac.test:8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://rebind.nac.test:8443/"]).ConfigureAwait(false);
+            string rebindCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long rebindRejectDelta = ExtractNftCommentCounterPackets(rebindCountersAfter, "private_reject") - rebindRejectBefore;
+
+            string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy.yaml");
+            string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
+            const string removePrivatePublicFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 10\.0\.0\.0\r?\n\k<i>  prefix_len: 8\r?\n";
+            int privateRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivatePublicFilterRangePattern, RegexOptions.CultureInvariant);
+            if (privateRangeOccurrences != 2)
+            {
+                throw new InvalidOperationException($"The production Envoy config contained {privateRangeOccurrences} public-filter RFC1918 ranges; expected 2 for the negative control.");
+            }
+
+            string mutatedEnvoyConfig = Regex.Replace(
+                originalEnvoyConfig,
+                removePrivatePublicFilterRangePattern,
+                string.Empty,
+                RegexOptions.CultureInvariant);
+            await File.WriteAllTextAsync(envoyConfigPath, mutatedEnvoyConfig).ConfigureAwait(false);
+            AcceptanceObservation? rebindAcceptance = null;
+            try
+            {
+                var (envoyRestartRc, _, envoyRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                if (envoyRestartRc != 0)
+                {
+                    throw new InvalidOperationException($"Could not restart Envoy for the resolved-address-filter negative control (rc={envoyRestartRc}; {envoyRestartErr}).");
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                string rebindNcCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                long rebindNcRejectBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "private_reject");
+                var (rebindNcRc, _, _) = await ExecAsync(
+                    "podman",
+                    ["exec", rebindName, "curl", "--resolve", "rebind.nac.test:8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://rebind.nac.test:8443/"]).ConfigureAwait(false);
+                string rebindNcCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                long rebindNcRejectDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "private_reject") - rebindNcRejectBefore;
+                string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
+                string rebindNcObservation = $"filterRemovedRequestBlocked={rebindNcRc != 0}:kernelRejected={rebindNcRejectDelta > 0}";
+                rebindAcceptance = AcceptanceHarness.Record(
+                    "PROD_E_REBIND",
+                    rebindObservation,
+                    "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
+                    rebindNcObservation,
+                    "filterRemovedRequestBlocked=True:kernelRejected=True");
+                if (rebindErr.Length > 0 && rebindRc == 0)
+                {
+                    await Console.Error.WriteLineAsync($"E-rebind curl details: curlErr={rebindErr}").ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                await File.WriteAllTextAsync(envoyConfigPath, originalEnvoyConfig).ConfigureAwait(false);
+                _ = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            }
+
+            OciSandboxSession lanSession = await containerTool.SpawnSandboxAsync(lanContext, CancellationToken.None).ConfigureAwait(false);
+            string lanWorkloadName = lanSession.ContainerName;
+            _ = registry.GetAll().Single(entry => string.Equals(entry.AgentId, "lan-grant", StringComparison.Ordinal));
+            string lanCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
+            var (lanDeniedRc, _, _) = await ExecAsync(
+                "podman",
+                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+            await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
+            NetworkAccessRequest? lanCard = policyStore.ListRequests(admin).Requests
+                .Select(static view => view.Request)
+                .FirstOrDefault(request => request.Status == "pending"
+                    && string.Equals(request.UserId, "u1", StringComparison.Ordinal)
+                    && string.Equals(request.AgentId, "lan-grant", StringComparison.Ordinal)
+                    && string.Equals(request.Destination, "lan.nac.test", StringComparison.OrdinalIgnoreCase)
+                    && request.Port == 8443);
+            bool lanCardCreated = lanDeniedRc != 0 && lanCard is not null;
+            NetworkAccessRule? lanRule = null;
+            bool lanBodyReceived = false;
+            long lanApprovedDelta = 0;
+            if (lanCard is not null)
+            {
+                DecideRequestResult lanDecision = policyStore.DecideRequest(
+                    admin,
+                    lanCard.Id,
+                    allow: true,
+                    scope: "agent",
+                    allowLan: true,
+                    expectedRevision: policyStore.Revision);
+                lanRule = lanDecision.Rule;
+                var (lanAllowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
+                    "podman",
+                    ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+                lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
+                string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
+                if (lanAllowedRc != 0)
+                {
+                    var (_, lanFixtureLogs, _) = await ExecAsync("podman", ["logs", lanFixtureName]).ConfigureAwait(false);
+                    string envoyLogs = (await ExecAsync("podman", ["logs", "kautuka-egress-envoy"]).ConfigureAwait(false)).StdOut;
+                    string lanFixtureAccessLog = await File.ReadAllTextAsync(lanAccessLogPath).ConfigureAwait(false);
+                    string envoyRoutes = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "route"]).ConfigureAwait(false)).StdOut;
+                    string envoyAddresses = (await ExecAsync("podman", ["exec", "kautuka-egress-envoy", "ip", "-4", "address"]).ConfigureAwait(false)).StdOut;
+                    await Console.Error.WriteLineAsync($"LAN-grant diagnostics: server={lanFixtureLogs}; serverAccess={lanFixtureAccessLog}; envoy={envoyLogs}; envoyRoutes={envoyRoutes}; envoyAddresses={envoyAddresses}; lanApprovedDelta={lanApprovedDelta}").ConfigureAwait(false);
+                    await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
+                }
+            }
+            string lanObservation = $"beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:body={lanBodyReceived}";
+            string lanNcObservation = $"beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}";
+            AcceptanceObservation lanAcceptance = AcceptanceHarness.Record(
+                "PROD_LAN_GRANT",
+                lanObservation,
+                "beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:body=True",
+                lanNcObservation,
+                "beforeApprovalBlocked=True:cardCreated=True");
+
             // v7-28: ReconcileOnceAsync preserves running container (even if previously registered by name, now promoted to hex ID)
             await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
             bool stillRegisteredWhileRunning = registry.TryGetByIp(wlIp, out RegistryEntry? afterReconcileEntry);
@@ -902,10 +1273,11 @@ public static class Program
             string deniedOutput = denyRc == 0 ? $"ALLOWED:{denyOut.Trim()}" : "BLOCKED";
             await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
 
-            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
             NetworkAccessRequest? card = policyStore.ListRequests(admin).Requests
                 .Select(static v => v.Request)
-                .FirstOrDefault(r => r.Status == "pending" && string.Equals(r.Destination, "example.com", StringComparison.OrdinalIgnoreCase));
+                .FirstOrDefault(r => r.Status == "pending"
+                    && string.Equals(r.AgentId, "a1", StringComparison.Ordinal)
+                    && string.Equals(r.Destination, "example.com", StringComparison.OrdinalIgnoreCase));
             if (card is null)
             {
                 var (_, psOut, _) = await ExecAsync("podman", ["ps", "-a", "--format", "{{.Names}} {{.Status}}"]).ConfigureAwait(false);
@@ -1010,6 +1382,9 @@ public static class Program
 
             var observations = new List<AcceptanceObservation>
             {
+                parserAcceptance,
+                rebindAcceptance ?? throw new InvalidOperationException("The E-rebind production acceptance observation was not recorded."),
+                lanAcceptance,
                 AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
                 AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"{stillRegisteredWhileRunning}:{afterReconcileEntry?.ContainerId?.Length == 64}", "True:True", deregisteredAfterRm ? "DEREGISTERED_ON_RM" : "STILL_PRESENT", "DEREGISTERED_ON_RM"),
                 AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED"),
@@ -1034,6 +1409,7 @@ public static class Program
                 admin,
                 new RuleWriteSpec("agent", "u1", "a3", null, dnsNcHost, "host", 443, Allowed: true, AllowLan: false),
                 expectedRevision: policyStore.Revision);
+            bool startupGateOpenBeforeFinalNegativeControl = topology.IsStartupGateOpen;
 
             // v7-33 negative control runs last because deleting this live boundary rule must
             // close the startup gate; no later acceptance step may need to launch/reconcile.
@@ -1099,7 +1475,7 @@ public static class Program
                 envoyVer.Trim().Split('\n')[0].Trim(),
                 corednsVer.Trim().Replace('\n', ' '),
                 kernelVer.Trim(),
-                topology.IsStartupGateOpen,
+                startupGateOpenBeforeFinalNegativeControl,
                 verResult.Passed,
                 dnsUpstreamLine,
                 card.Id,
@@ -1121,6 +1497,11 @@ public static class Program
         }
         finally
         {
+            foreach (RegistryEntry entry in registry.GetAll())
+            {
+                _ = await ExecAsync("podman", ["rm", "-f", entry.ContainerId]).ConfigureAwait(false);
+            }
+            await ExecAsync("podman", ["rm", "-f", lanFixtureName]).ConfigureAwait(false);
             await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
                 "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
                 "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
