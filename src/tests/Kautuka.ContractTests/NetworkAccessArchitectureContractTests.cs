@@ -97,6 +97,7 @@ public sealed class NetworkAccessArchitectureContractTests
 
         Assert.Contains("InitializeProductionAsync", calls, StringComparer.Ordinal);
         Assert.DoesNotContain("InitializeAsync", calls, StringComparer.Ordinal);
+        Assert.Equal(5, calls.Count(call => string.Equals(call, "ResolveDesiredWorkspaceContext", StringComparison.Ordinal)));
     }
 
     [Fact]

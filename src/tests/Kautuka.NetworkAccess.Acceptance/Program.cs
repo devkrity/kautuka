@@ -1044,6 +1044,23 @@ public static class Program
                     new SandboxRuntimeDefinition { Image = baseImage, DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
                 [wlContext, parserContext, parserControlContext, rebindContext, lanContext], [internalParserConnector, parserControlConnector], []);
+            wlContext = ResolveDesiredWorkspaceContext(wlContext);
+            parserContext = ResolveDesiredWorkspaceContext(parserContext);
+            parserControlContext = ResolveDesiredWorkspaceContext(parserControlContext);
+            rebindContext = ResolveDesiredWorkspaceContext(rebindContext);
+            lanContext = ResolveDesiredWorkspaceContext(lanContext);
+
+            ContainerContext ResolveDesiredWorkspaceContext(ContainerContext requested)
+            {
+                if (!desiredState.TryResolveWorkspace(requested.ScopeType, requested.ScopeId, requested.UserId, out ContainerContext? resolved)
+                    || resolved is null)
+                {
+                    throw new InvalidOperationException($"v7-21 failed: production desired state did not resolve workspace '{requested.ScopeId}'.");
+                }
+
+                return resolved;
+            }
+
             var containerTool = new PodmanContainerTool(
                 podman,
                 allocator,
