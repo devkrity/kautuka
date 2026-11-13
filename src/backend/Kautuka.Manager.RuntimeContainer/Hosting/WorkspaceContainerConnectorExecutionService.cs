@@ -56,10 +56,23 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors)
     {
         ArgumentNullException.ThrowIfNull(connectors);
-        return [.. connectors
-            .Where(static connector => connector.Enabled && !connector.IsInternalSystemConnector)
-            .Select(static connector => BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null))
-            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        ContainerContext[] workspaces = [.. desiredStateStore.Snapshot.DesiredWorkspaces
+            .Where(static workspace => !string.IsNullOrWhiteSpace(workspace.UserId))
+            .DistinctBy(static workspace => (workspace.ScopeType, workspace.ScopeId, workspace.UserId))];
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (WorkspaceMcpContainerConnectorDefinition connector in connectors.Where(static item => item.Enabled && !item.IsInternalSystemConnector))
+        {
+            foreach (ContainerContext workspace in workspaces)
+            {
+                names.Add(BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, workspace));
+                if (string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, workspace));
+                }
+            }
+        }
+
+        return [.. names];
     }
 
     public async Task<IReadOnlyList<string>> ReconcileDesiredConnectorsAsync(
@@ -68,52 +81,104 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(connectors);
         var notes = new List<string>();
+        ContainerContext[] workspaces = [.. desiredStateStore.Snapshot.DesiredWorkspaces
+            .Where(static workspace => !string.IsNullOrWhiteSpace(workspace.UserId))
+            .DistinctBy(static workspace => (workspace.ScopeType, workspace.ScopeId, workspace.UserId))];
+        if (workspaces.Length == 0)
+        {
+            return notes;
+        }
+
         foreach (WorkspaceMcpContainerConnectorDefinition connector in connectors.Where(static item => item.Enabled && !item.IsInternalSystemConnector))
         {
-            string containerName = BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
-            string runtimeKey = BuildRuntimeKey(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, null);
-            ConnectorContainerInspection inspection;
-            try
+            foreach (ContainerContext workspace in workspaces)
             {
-                inspection = await InspectContainerStateAsync(containerName, connector, null, cancellationToken).ConfigureAwait(false);
-            }
-            catch (ContainerInspectionUnavailableException ex)
-            {
-                notes.Add("Connector " + connector.ConnectorId + " inspection is unavailable. Reconciliation is deferred.");
-                logger.LogWarning(ex, "[ContainerConnector] Reconcile deferred for connector '{ConnectorId}'.", connector.ConnectorId);
-                continue;
-            }
-            if (inspection.Exists && inspection.IsRunning && inspection.Matches(connector))
-            {
-                trackedConnectorContainers[runtimeKey] = containerName;
-                continue;
-            }
+                WorkspaceMcpExecutionContext[] executionContexts = string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+                    ? [WorkspaceMcpExecutionContext.Isolated, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles]
+                    : [WorkspaceMcpExecutionContext.Isolated];
+                foreach (WorkspaceMcpExecutionContext executionContext in executionContexts)
+                {
+                    string containerName = BuildContainerName(connector.ConnectorId, executionContext, workspace);
+                    string runtimeKey = BuildRuntimeKey(connector.ConnectorId, executionContext, workspace);
+                    try
+                    {
+                        if (await PodmanContainerInspector.ReadAsync(podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false) is null)
+                        {
+                            continue;
+                        }
+                    }
+                    catch (ContainerInspectionUnavailableException ex)
+                    {
+                        notes.Add("Connector " + connector.ConnectorId + " inspection is unavailable. Reconciliation is deferred.");
+                        logger.LogWarning(ex, "[ContainerConnector] Reconcile deferred for connector '{ConnectorId}'.", connector.ConnectorId);
+                        continue;
+                    }
 
-            if (!inspection.Exists || !inspection.IsRunning)
-            {
-                notes.Add(connector.ConnectorId + " is not running. It starts on the next tool call.");
-                continue;
-            }
+                    WorkspaceMcpContainerConnectorDefinition runtimeConnector;
+                    try
+                    {
+                        runtimeConnector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException)
+                    {
+                        notes.Add("Connector " + connector.ConnectorId + " could not be prepared for inspection.");
+                        logger.LogWarning(ex, "[ContainerConnector] Reconcile could not prepare connector '{ConnectorId}'.", connector.ConnectorId);
+                        continue;
+                    }
 
-            string reason = inspection.Exists
-                ? inspection.Drift ?? "its spec label changed"
-                : "it was not running after Manager started";
-            try
-            {
-                await EnsureConnectorContainerRunningAsync(
-                    connector,
-                    runtimeKey,
-                    containerName,
-                    WorkspaceMcpExecutionContext.Isolated,
-                    workspaceContext: null,
-                    cancellationToken).ConfigureAwait(false);
-                await ResetConnectorCooldownAsync(connector, runtimeKey, containerName).ConfigureAwait(false);
-                notes.Add("Connector " + connector.ConnectorId + " was replaced because " + reason + ".");
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or IOException)
-            {
-                notes.Add("Connector " + connector.ConnectorId + " could not be replaced.");
-                logger.LogWarning(ex, "[ContainerConnector] Reconcile did not replace connector '{ConnectorId}'.", connector.ConnectorId);
+                    ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(runtimeConnector, workspace, purpose: null);
+                    NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(runtimeConnector.Image);
+                    WorkspaceMcpContainerConnectorDefinition expectedConnector = runtimeConnector with
+                    {
+                        SpecFingerprint = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(
+                            runtimeConnector,
+                            identity,
+                            executionContext,
+                            compatProfile),
+                    };
+                    ContainerContext? mountedWorkspace = ResolveMountedWorkspace(executionContext, workspace);
+                    ConnectorContainerInspection inspection;
+                    try
+                    {
+                        inspection = await InspectContainerStateAsync(containerName, expectedConnector, mountedWorkspace, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (ContainerInspectionUnavailableException ex)
+                    {
+                        notes.Add("Connector " + connector.ConnectorId + " inspection is unavailable. Reconciliation is deferred.");
+                        logger.LogWarning(ex, "[ContainerConnector] Reconcile deferred for connector '{ConnectorId}'.", connector.ConnectorId);
+                        continue;
+                    }
+                    if (inspection.Exists && inspection.IsRunning && inspection.Matches(expectedConnector))
+                    {
+                        trackedConnectorContainers[runtimeKey] = containerName;
+                        continue;
+                    }
+
+                    if (!inspection.Exists || !inspection.IsRunning)
+                    {
+                        continue;
+                    }
+
+                    string reason = inspection.Drift ?? "its spec label changed";
+                    try
+                    {
+                        await EnsureConnectorContainerRunningAsync(
+                            expectedConnector,
+                            runtimeKey,
+                            containerName,
+                            executionContext,
+                            mountedWorkspace,
+                            cancellationToken,
+                            identityContext: workspace).ConfigureAwait(false);
+                        await ResetConnectorCooldownAsync(expectedConnector, runtimeKey, containerName).ConfigureAwait(false);
+                        notes.Add("Connector " + connector.ConnectorId + " was replaced because " + reason + ".");
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException)
+                    {
+                        notes.Add("Connector " + connector.ConnectorId + " could not be replaced.");
+                        logger.LogWarning(ex, "[ContainerConnector] Reconcile did not replace connector '{ConnectorId}'.", connector.ConnectorId);
+                    }
+                }
             }
         }
 

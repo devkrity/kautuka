@@ -947,6 +947,123 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
+    public async Task V7_39_ReconcileInspectsTheDesiredAgentFileContainer_WithNegativeControl()
+    {
+        const string workspaceRoot = "/tmp/nac-v7-reconcile-agent-files";
+        const string connectorId = "user-alpha::shared-reconcile";
+        var workspace = FingerprintContext("agent-alpha", Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-alpha"));
+        var sourceConnector = new WorkspaceMcpContainerConnectorDefinition(
+            connectorId,
+            "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
+            "custom-connector-command",
+            [],
+            true,
+            false,
+            null,
+            null,
+            [],
+            30,
+            600);
+        var desired = new WorkspaceDesiredStateStore();
+        _ = desired.ApplyDesiredState(
+            1,
+            WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(
+                new ManagerWorkspaceDefinition { BaseRoot = workspaceRoot },
+                new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
+                new WorkspaceTelemetryDefinition()),
+            [workspace],
+            [sourceConnector],
+            []);
+        WorkspaceMcpContainerConnectorDefinition connector = Assert.Single(desired.Snapshot.DesiredContainerConnectors);
+        string containerName = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, workspace);
+        string runtimeKey = string.Join('|', connectorId, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, workspace.ScopeType, workspace.ScopeId, workspace.UserId);
+        string allocatorDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-39-ip-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(allocatorDirectory);
+        var commands = new List<string[]>();
+        bool containerExists = false;
+        string? inspectJson = null;
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            if (args[0] == "inspect" && args.Count > 1 && args[1] == containerName && containerExists)
+            {
+                return Task.FromResult(Success(inspectJson!));
+            }
+
+            if (args[0] == "inspect")
+            {
+                return Task.FromResult(new PodmanCommandResult(125, string.Empty, "missing", ProcessTerminationReason.NonZeroExit));
+            }
+
+            if (args[0] == "container")
+            {
+                return Task.FromResult(new PodmanCommandResult(1, string.Empty, "missing", ProcessTerminationReason.NonZeroExit));
+            }
+
+            if (args[0] == "image")
+            {
+                return Task.FromResult(Success("sha256:current"));
+            }
+
+            if (args[0] == "run")
+            {
+                int labelIndex = args.ToList().IndexOf("--label") + 1;
+                string fingerprint = args.Skip(labelIndex)
+                    .First(static label => label.StartsWith("kautuka.spec-fingerprint=", StringComparison.Ordinal))
+                    ["kautuka.spec-fingerprint=".Length..];
+                inspectJson = ConnectorInspectJson(workspace.HostWorkspacePath, fingerprint, desiredVersion: 1);
+                containerExists = true;
+                return Task.FromResult(Success(containerName));
+            }
+
+            if (args[0] == "rm")
+            {
+                containerExists = false;
+                return Task.FromResult(Success(string.Empty));
+            }
+
+            throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
+        });
+        var registry = new WorkloadRegistry();
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            desired,
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(allocatorDirectory, "ip-cursor.json")),
+            workloadRegistry: registry);
+        Assert.Contains(containerName, service.DesiredIsolatedContainerNames([connector]), StringComparer.OrdinalIgnoreCase);
+
+        MethodInfo ensure = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("EnsureConnectorContainerRunningAsync method was not found.");
+        await ((Task)ensure.Invoke(service, [
+            connector,
+            runtimeKey,
+            containerName,
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles,
+            workspace,
+            CancellationToken.None,
+            false,
+            workspace,
+        ])!).ConfigureAwait(false);
+
+        Assert.Equal(1, commands.Count(static args => args[0] == "run"));
+        int inspectCountBeforeReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
+
+        _ = await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+
+        int inspectCountAfterReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
+        Assert.True(inspectCountAfterReconcile > inspectCountBeforeReconcile, "Reconciliation must inspect this user and agent's actual container name.");
+        Assert.Equal(1, commands.Count(static args => args[0] == "run"));
+        Assert.DoesNotContain(commands, static args => args[0] == "rm");
+        Assert.Equal(1, registry.Count);
+        Directory.Delete(allocatorDirectory, recursive: true);
+    }
+
+    [Fact]
     public async Task CompletingProbeClearsTemporaryGrantAndRequestWithoutContainerDeregistration()
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-probe-complete-" + Guid.NewGuid().ToString("N"));
