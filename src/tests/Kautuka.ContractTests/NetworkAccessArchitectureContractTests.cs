@@ -41,6 +41,19 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public void V7_13_OperationsGuideMatchesConnectorAndSocketEvidence()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string guide = File.ReadAllText(Path.Combine(repositoryRoot, "docs", "operations", "network-access.md"));
+
+        Assert.DoesNotContain("live connector launch still need their own production evidence", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("uses a dedicated service group", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CallToolAsync", guide, StringComparison.Ordinal);
+        Assert.Contains("keep-groups", guide, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
