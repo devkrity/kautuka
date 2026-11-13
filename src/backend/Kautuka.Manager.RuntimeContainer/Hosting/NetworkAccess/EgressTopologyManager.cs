@@ -156,11 +156,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         try
         {
-            await InitializeAsync(
+            await InitializeProductionAsync(
                 registry,
                 isWindowsHostNativeDev: !OperatingSystem.IsLinux(),
-                includeLanGrants: true,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -174,6 +173,21 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         IsStartupGateOpen = false;
         await DisposeAsync().ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Initializes the production egress topology, including the kernel path for approved LAN traffic.
+    /// The production Manager hosted service and the rootless acceptance harness share this entry point.
+    /// </summary>
+    public Task InitializeProductionAsync(
+        IWorkloadRegistry registry,
+        bool isWindowsHostNativeDev,
+        CancellationToken cancellationToken = default)
+        => InitializeAsync(
+            registry,
+            isWindowsHostNativeDev,
+            decisionEndpointIp: null,
+            includeLanGrants: true,
+            cancellationToken);
 
     /// <summary>
     /// Ensures networks and allowlist are provisioned, egress pod is live with boundary rules,

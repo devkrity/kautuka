@@ -813,7 +813,7 @@ public static class Program
             await authHost.StartAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
-                await topology.InitializeAsync(registry, isWindowsHostNativeDev: false, decisionEndpointIp: null, includeLanGrants: true, CancellationToken.None).ConfigureAwait(false);
+                await topology.InitializeProductionAsync(registry, isWindowsHostNativeDev: false, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {

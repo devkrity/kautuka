@@ -73,6 +73,33 @@ public sealed class NetworkAccessArchitectureContractTests
     }
 
     [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_21_ProductionRunUsesTheSameInitializerAsTheManagerHostedService()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        CompilationUnitSyntax source = CSharpSyntaxTree.ParseText(
+            await File.ReadAllTextAsync(acceptancePath, cancellationToken),
+            cancellationToken: cancellationToken).GetCompilationUnitRoot(cancellationToken);
+        MethodDeclarationSyntax productionRun = source.DescendantNodes()
+            .OfType<MethodDeclarationSyntax>()
+            .Single(method => method.Identifier.ValueText == "RunProductionTopologyProofAsync");
+        string[] calls = productionRun.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Select(invocation => invocation.Expression switch
+            {
+                MemberAccessExpressionSyntax memberAccess => memberAccess.Name.Identifier.ValueText,
+                IdentifierNameSyntax identifier => identifier.Identifier.ValueText,
+                _ => string.Empty,
+            })
+            .ToArray();
+
+        Assert.Contains("InitializeProductionAsync", calls, StringComparer.Ordinal);
+        Assert.DoesNotContain("InitializeAsync", calls, StringComparer.Ordinal);
+    }
+
+    [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
     public void G1_AllOutboundHttpAndWebSocketUsages_AreCheckedOrAllowlisted()
     {
