@@ -492,6 +492,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return false;
         }
 
+        string expectedRulesHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(canaryIp);
+
         foreach (string line in hookLog.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             try
@@ -501,7 +503,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 if (!record.TryGetProperty("action", out JsonElement action)
                     || !string.Equals(action.GetString(), "allow", StringComparison.Ordinal)
                     || !record.TryGetProperty("rules_sha256", out JsonElement rulesHash)
-                    || string.IsNullOrWhiteSpace(rulesHash.GetString())
+                    || !string.Equals(rulesHash.GetString(), expectedRulesHash, StringComparison.Ordinal)
                     || !record.TryGetProperty("ips", out JsonElement ips)
                     || ips.ValueKind != JsonValueKind.Array)
                 {
