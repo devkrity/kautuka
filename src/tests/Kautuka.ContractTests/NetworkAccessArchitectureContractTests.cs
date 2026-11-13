@@ -113,6 +113,7 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("WaitForExitAsync(timeoutCts.Token)", source, StringComparison.Ordinal);
         Assert.Contains("Process '{fileName}' exceeded the {timeoutSeconds}s acceptance-command timeout.", source, StringComparison.Ordinal);
         Assert.Contains("[PROD_STAGE] approved LAN traffic check completed", source, StringComparison.Ordinal);
+        Assert.Contains("[ACCEPTANCE] {observation.TestId} outcome=", source, StringComparison.Ordinal);
     }
 
     [Fact]

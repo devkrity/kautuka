@@ -1548,6 +1548,12 @@ public static class Program
                 observations,
                 $"{observations.Count - failedCount}/{observations.Count} PASS, {failedCount} FAIL");
 
+            foreach (AcceptanceObservation observation in observations)
+            {
+                Console.WriteLine(
+                    $"[ACCEPTANCE] {observation.TestId} outcome={observation.Outcome}; observed={observation.ObservedValue}; expected={observation.ExpectedValue}; ncObserved={observation.NcObservedValue}; ncExpected={observation.NcExpectedValue}; ncFlipped={observation.NcFlipped}");
+            }
+
             string targetReport = string.IsNullOrWhiteSpace(outputReportPath)
                 ? Path.Combine(tempRoot, "nac-prod-report.json")
                 : Path.GetFullPath(outputReportPath);
