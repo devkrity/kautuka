@@ -65,6 +65,23 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public void V7_20_ReconcileHonorsBrakeBeforeConnectorImageBuild()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string sourcePath = Path.Combine(repositoryRoot, "src", "backend", "Kautuka.Manager.RuntimeContainer", "Hosting", "WorkspaceContainerConnectorExecutionService.cs");
+        string source = File.ReadAllText(sourcePath);
+        int reconcileStart = source.IndexOf("public async Task<IReadOnlyList<string>> ReconcileDesiredConnectorsAsync", StringComparison.Ordinal);
+        int reconcileEnd = source.IndexOf("public async Task", reconcileStart + 1, StringComparison.Ordinal);
+        Assert.True(reconcileStart >= 0 && reconcileEnd > reconcileStart);
+        string reconcileSource = source[reconcileStart..reconcileEnd];
+        int brakeCheck = reconcileSource.IndexOf("workloadLaunchGate?.EnsureLaunchAllowed(workspace.UserId)", StringComparison.Ordinal);
+        int imagePreparation = reconcileSource.IndexOf("PrepareRuntimeConnectorAsync(connector", StringComparison.Ordinal);
+        Assert.True(brakeCheck >= 0 && imagePreparation > brakeCheck,
+            "Connector reconciliation must check the user's brake before any temporary image builder can run.");
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public async Task V7_21_LiveModeUsesTheProductionTopologyPath()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;

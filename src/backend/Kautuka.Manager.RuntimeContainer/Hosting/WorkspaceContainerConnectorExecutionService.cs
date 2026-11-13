@@ -117,6 +117,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     WorkspaceMcpContainerConnectorDefinition runtimeConnector;
                     try
                     {
+                        workloadLaunchGate?.EnsureLaunchAllowed(workspace.UserId);
                         runtimeConnector = await PrepareRuntimeConnectorAsync(connector, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception ex) when (ex is InvalidOperationException or IOException)
