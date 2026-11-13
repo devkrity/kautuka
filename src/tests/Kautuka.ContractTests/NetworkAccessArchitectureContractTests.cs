@@ -32,6 +32,10 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.DoesNotContain("### 3.4 Validating Static Templates `[Built]`", guide, StringComparison.Ordinal);
         Assert.DoesNotContain("### 2.1 Approval Cards `[Built]`", guide, StringComparison.Ordinal);
         Assert.Contains("nac-v7-production-rootless-run.json", guide, StringComparison.Ordinal);
+        Assert.Contains("seven scenarios passed", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("4/4 checks", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("E-rebind, E-parser, LAN grants, emergency-brake behavior", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("acceptance remain pending", guide, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("[Tested]", guide, StringComparison.OrdinalIgnoreCase);
     }
 
