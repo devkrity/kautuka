@@ -129,6 +129,18 @@ public sealed class NetworkAccessArchitectureContractTests
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_11_ProductionAcceptanceStagesRenderedWorkloadRulesetTemplate()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+
+        Assert.Contains("string hookTemplateSrc = Path.Combine(repoRoot, \"scripts\", \"nac\", \"kautuka_workload.nft.json.tmpl\")", source, StringComparison.Ordinal);
+        Assert.Contains("File.Copy(hookTemplateSrc, Path.Combine(hooksDir, \"kautuka_workload.nft.json.tmpl\"), overwrite: true)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;

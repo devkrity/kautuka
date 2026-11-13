@@ -201,10 +201,12 @@ public static class Program
         Directory.CreateDirectory(nacStateDir);
 
         string hookSrc = Path.Combine(repoRoot, "scripts", "nac", "kautuka_hook.py");
+        string hookTemplateSrc = Path.Combine(repoRoot, "scripts", "nac", "kautuka_workload.nft.json.tmpl");
         string hooksDir = Path.Combine(tempRoot, "hooks.d");
         Directory.CreateDirectory(hooksDir);
         string hookPath = Path.Combine(hooksDir, "kautuka_hook.py");
         File.Copy(hookSrc, hookPath, overwrite: true);
+        File.Copy(hookTemplateSrc, Path.Combine(hooksDir, "kautuka_workload.nft.json.tmpl"), overwrite: true);
         if (OperatingSystem.IsLinux())
         {
             File.SetUnixFileMode(hookPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
