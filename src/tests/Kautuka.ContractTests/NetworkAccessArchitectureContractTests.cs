@@ -134,10 +134,14 @@ public sealed class NetworkAccessArchitectureContractTests
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
         string source = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+        int productionStart = source.IndexOf("private static async Task<int> RunProductionTopologyProofAsync", StringComparison.Ordinal);
+        Assert.True(productionStart >= 0, "The production acceptance entry point must exist.");
+        string productionSource = source[productionStart..];
 
-        Assert.Contains("string hookTemplateSrc = Path.Combine(repoRoot, \"scripts\", \"nac\", \"kautuka_workload.nft.json.tmpl\")", source, StringComparison.Ordinal);
-        Assert.Contains("File.Copy(hookTemplateSrc, Path.Combine(hooksDir, \"kautuka_workload.nft.json.tmpl\"), overwrite: true)", source, StringComparison.Ordinal);
+        Assert.Contains("string hookTemplateSrc = Path.Combine(repoRoot, \"scripts\", \"nac\", \"kautuka_workload.nft.json.tmpl\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("File.Copy(hookTemplateSrc, Path.Combine(hooksDir, \"kautuka_workload.nft.json.tmpl\"), overwrite: true)", productionSource, StringComparison.Ordinal);
     }
+
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
