@@ -142,6 +142,21 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("File.Copy(hookTemplateSrc, Path.Combine(hooksDir, \"kautuka_workload.nft.json.tmpl\"), overwrite: true)", productionSource, StringComparison.Ordinal);
     }
 
+    [Fact]
+    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
+    public async Task V7_19_C6LiveVerifierScenarioRunsInLinuxAcceptanceCi()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string workflowPath = Path.Combine(repositoryRoot, ".github", "workflows", "nac-acceptance.yml");
+        string workflow = await File.ReadAllTextAsync(workflowPath, TestContext.Current.CancellationToken);
+        string acceptancePath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.NetworkAccess.Acceptance", "Program.cs");
+        string acceptance = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+
+        Assert.Contains("name: Run Production NAC and C6 Acceptance", workflow, StringComparison.Ordinal);
+        Assert.Contains("--prod-run", workflow, StringComparison.Ordinal);
+        Assert.Contains("AcceptanceHarness.Record(\"PROD_V7_29_VERIFIER\"", acceptance, StringComparison.Ordinal);
+    }
+
 
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]

@@ -1238,6 +1238,36 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_19_NonLinuxRulesetVerificationUsesPodmanMachine_WithNegativeControl()
+    {
+        const string ip = "10.247.1.12";
+        string expectedNftJson = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
+            .Replace("{{IP}}", ip, StringComparison.Ordinal);
+        IReadOnlyList<string>? capturedArgs = null;
+        bool returnMismatch = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            capturedArgs = args.ToArray();
+            string output = returnMismatch
+                ? "{\"nftables\":[{\"table\":{\"family\":\"inet\",\"name\":\"kautuka_workload\"}}]}"
+                : expectedNftJson;
+            return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var verifier = new WorkloadPostStartVerifier(podman);
+
+        await verifier.VerifyNetnsRulesetAsync(4242, ip, TestContext.Current.CancellationToken, usePodmanMachineOverride: true);
+
+        Assert.Equal(
+            ["machine", "ssh", "podman", "unshare", "nsenter", "-t", "4242", "-n", "nft", "-j", "list", "table", "inet", "kautuka_workload"],
+            capturedArgs);
+
+        // Negative control: a missing/partial ruleset returned by Podman Machine must fail verification.
+        returnMismatch = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => verifier.VerifyNetnsRulesetAsync(4242, ip, TestContext.Current.CancellationToken, usePodmanMachineOverride: true));
+    }
+
+    [Fact]
     public void V7_33_BoundaryNft_AllowsUpstreamDnsIpsBeforePrivateReject_WithNegativeControl()
     {
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(

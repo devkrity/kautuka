@@ -467,11 +467,13 @@ public sealed class WorkloadPostStartVerifier
     internal async Task VerifyNetnsRulesetAsync(
         int pid,
         string allocatedIp,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool? usePodmanMachineOverride = null)
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string stdOut;
-        if (!OperatingSystem.IsLinux())
+        bool usePodmanMachine = usePodmanMachineOverride ?? !OperatingSystem.IsLinux();
+        if (usePodmanMachine)
         {
             PodmanCommandResult nftResult = await podmanRunner
                 .RunAsync(

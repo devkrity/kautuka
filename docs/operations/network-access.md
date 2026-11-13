@@ -223,8 +223,10 @@ Validate the rendered boundary ruleset:
 nft -c -f /path/to/rendered/boundary.nft
 ```
 
-### 3.5 Live Container Acceptance `[Pending live Linux acceptance]`
-End-to-end container acceptance tests (`U5-U7`, `C6-C7`, `C10`) execute against rootless Podman on Linux environments with `nf_tables` and `crun` enabled.
+### 3.5 Live Container Acceptance `[Linux CI partial; LAN grant still failing]`
+The NAC acceptance workflow runs `--prod-run` against rootless Podman on Linux with `nf_tables` and `crun`; its production path includes the C6 post-start verifier and its tampering negative control. On commit `c1c9aca`, CI run [43472124594](https://github.com/devkrity/kautuka/actions/runs/43472124594) passed topology startup, the canary, and C6, but the overall run failed at `PROD_LAN_GRANT`: the approved request did not increment `lan_approved` and the fixture response was not received. End-to-end NAC acceptance is therefore not yet passing.
+
+The non-Linux Podman Machine verifier command is covered by an integration test that forces the machine path and rejects a partial ruleset; that path has not been exercised against a live Podman Machine in CI.
 
 ---
 
