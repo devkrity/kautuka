@@ -32,6 +32,61 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
     [Fact]
+    public async Task EnvoyCheck_PortBounds_DeniesOnlyValuesOutsideTcpRange()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            NacController controller = CreateController(Path.Combine(tempDir, "state"), out IWorkloadRegistry registry);
+            registry.Register(new RegistryEntry(
+                "10.247.0.10",
+                "u1",
+                "a1",
+                "c1",
+                "agent-sandbox",
+                null,
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            string socketPath = Path.Combine(tempDir, "networkaccess.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socketPath,
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+            });
+
+            await host.StartAsync(TestContext.Current.CancellationToken);
+            using GrpcChannel channel = CreateUdsChannel(socketPath);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+
+            foreach ((uint port, int expectedStatus, string expectedReason) in new[]
+            {
+                (0u, 7, "bad_destination"),
+                (1u, 7, "no_rule"),
+                (65535u, 7, "no_rule"),
+                (65536u, 7, "bad_destination"),
+            })
+            {
+                CheckResponse response = await client.CheckAsync(
+                    BuildCheckRequest("10.247.0.10", "93.184.216.34", port, "example.com"),
+                    cancellationToken: TestContext.Current.CancellationToken);
+
+                Assert.Equal(expectedStatus, response.Status.Code);
+                Assert.Equal(expectedReason, response.Status.Message);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task C2_SingleInstanceLock_PreventsUnlinkOfLiveSocket_AndReplacesStaleSocket_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
