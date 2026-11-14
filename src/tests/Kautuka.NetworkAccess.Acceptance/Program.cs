@@ -173,9 +173,19 @@ public static class Program
             return 1;
         }
 
-        int liveIdx = Array.FindIndex(args, a => string.Equals(a, "--live", StringComparison.OrdinalIgnoreCase));
-        string? liveOutPath = liveIdx + 1 < args.Length ? args[liveIdx + 1] : null;
-        return await RunProductionTopologyProofAsync(liveOutPath).ConfigureAwait(false);
+        int liveIdx = Array.FindIndex(args, static arg => string.Equals(arg, "--live", StringComparison.OrdinalIgnoreCase));
+        string? liveOutPath = liveIdx >= 0 && liveIdx + 1 < args.Length && !args[liveIdx + 1].StartsWith("--", StringComparison.Ordinal)
+            ? args[liveIdx + 1]
+            : null;
+        string? fedoraOutPath = liveOutPath is null
+            ? null
+            : Path.Combine(
+                Path.GetDirectoryName(Path.GetFullPath(liveOutPath))!,
+                $"{Path.GetFileNameWithoutExtension(liveOutPath)}.fedora{Path.GetExtension(liveOutPath)}");
+        int fedoraResult = await RunLiveFedoraAcceptanceAsync(
+            fedoraOutPath is null ? ["--live"] : ["--live", fedoraOutPath]).ConfigureAwait(false);
+        int productionResult = await RunProductionTopologyProofAsync(liveOutPath).ConfigureAwait(false);
+        return fedoraResult == 0 && productionResult == 0 ? 0 : 1;
     }
 
     private static async Task<int> RunLiveFedoraAcceptanceAsync(string[] args)
@@ -208,7 +218,10 @@ public static class Program
         string dnsUpName = $"nac-up-dns-{runSuffix}";
         string workloadName = $"nac-wl-{runSuffix}";
         string workload2Name = $"nac-wl2-{runSuffix}";
-        string reportPath = Path.Combine(tempRoot, "nac-live-report.json");
+        int liveIndex = Array.FindIndex(args, static arg => string.Equals(arg, "--live", StringComparison.OrdinalIgnoreCase));
+        string reportPath = liveIndex >= 0 && liveIndex + 1 < args.Length && !args[liveIndex + 1].StartsWith("--", StringComparison.Ordinal)
+            ? args[liveIndex + 1]
+            : Path.Combine(tempRoot, "nac-live-report.json");
 
         Environment.SetEnvironmentVariable("XDG_STATE_HOME", xdgState);
         string nacStateDir = Path.Combine(xdgState, "kautuka", "nac");
@@ -530,6 +543,7 @@ public static class Program
             liveResults.Add(AcceptanceHarness.Record("E_DNS_SINKHOLE", dnsReply.Trim(), "198.18.250.250", ncDnsReply.Trim(), "203.0.113.10"));
             Console.WriteLine($"[E_DNS_SINKHOLE] {liveResults[^1].Outcome} (workloadDns='{dnsReply.Trim()}', upstreamDnsNc='{ncDnsReply.Trim()}')");
 
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
             await File.WriteAllTextAsync(reportPath, JsonSerializer.Serialize(liveResults, AcceptanceJsonContext.Default.ListAcceptanceObservation)).ConfigureAwait(false);
             Console.WriteLine($"Live acceptance report written to {reportPath}");
 
@@ -1106,6 +1120,14 @@ public static class Program
             }
             string outsideNetworkDevice = outsideRouteTokens[outsideDeviceIndex + 1];
             string egressDefaultRoutes = string.Join('\n', outsideDefaultRoute, workloadDefaultRoute);
+            var (outsideSourceRc, outsideSourceOut, outsideSourceErr) = await ExecAsync(
+                "podman",
+                ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route", "get", "1.1.1.1"])
+                .ConfigureAwait(false);
+            if (outsideSourceRc != 0 || !Regex.IsMatch(outsideSourceOut, @"\bsrc 10\.248\.0\.2\b", RegexOptions.CultureInvariant))
+            {
+                throw new InvalidOperationException($"The egress default route did not select source 10.248.0.2 (rc={outsideSourceRc}; route={outsideSourceOut}; err={outsideSourceErr}).");
+            }
 
             string boundaryPath = Path.Combine(stateDir, "nac", "boundary", "boundary.nft");
             string boundaryText = await File.ReadAllTextAsync(boundaryPath).ConfigureAwait(false);
@@ -1355,6 +1377,16 @@ public static class Program
                 throw new InvalidOperationException("v7-21 failed: the acceptance workload was not registered through PodmanContainerTool's production builder.");
             }
             WorkloadVerificationResult verResult = await verifier.VerifyWorkloadAsync(wlName, wlIp, null, registry, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            int workloadPid = await InspectContainerPidAsync(wlName).ConfigureAwait(false);
+            var (workloadAddressRc, workloadAddresses, workloadAddressErr) = await ExecAsync(
+                "podman",
+                ["unshare", "nsenter", "-t", workloadPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-o", "-4", "address"])
+                .ConfigureAwait(false);
+            if (workloadAddressRc != 0
+                || Regex.IsMatch(workloadAddresses, @"\b10\.248\.0\.[23]/", RegexOptions.CultureInvariant))
+            {
+                throw new InvalidOperationException($"The workload NICs must not contain egress addresses 10.248.0.2 or 10.248.0.3 (rc={workloadAddressRc}; addresses={workloadAddresses}; err={workloadAddressErr}).");
+            }
 
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
             AcceptanceObservation parserAcceptance;
@@ -1499,10 +1531,33 @@ public static class Program
 
             OciSandboxSession lanSession = await containerTool.SpawnSandboxAsync(lanContext, CancellationToken.None).ConfigureAwait(false);
             string lanWorkloadName = lanSession.ContainerName;
+            int lanWorkloadPid = await InspectContainerPidAsync(lanWorkloadName).ConfigureAwait(false);
+            var (lanWorkloadAddressRc, lanWorkloadAddresses, lanWorkloadAddressErr) = await ExecAsync(
+                "podman",
+                ["unshare", "nsenter", "-t", lanWorkloadPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-o", "-4", "address"])
+                .ConfigureAwait(false);
+            if (lanWorkloadAddressRc != 0
+                || Regex.IsMatch(lanWorkloadAddresses, @"\b10\.248\.0\.[23]/", RegexOptions.CultureInvariant))
+            {
+                throw new InvalidOperationException($"The LAN acceptance workload NICs must not contain egress addresses 10.248.0.2 or 10.248.0.3 (rc={lanWorkloadAddressRc}; addresses={lanWorkloadAddresses}; err={lanWorkloadAddressErr}).");
+            }
             _ = registry.GetAll().Single(entry => string.Equals(entry.AgentId, "lan-grant", StringComparison.Ordinal));
             string lanCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
             long lanMasqueradeBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_source_masquerade");
+            int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
+            string noGrantWorkloadNftBefore = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
+            long noGrantPrivateRejectBefore = ExtractNftCommentCounterPackets(noGrantWorkloadNftBefore, "private_reject");
+            var (noGrantLanRc, _, _) = await ExecAsync(
+                "podman",
+                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
+            string noGrantWorkloadNftAfter = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
+            long noGrantPrivateRejectDelta = ExtractNftCommentCounterPackets(noGrantWorkloadNftAfter, "private_reject") - noGrantPrivateRejectBefore;
+            string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
+            int lanFixtureHitsAfterNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
+            int noGrantFixtureAccessDelta = lanFixtureHitsAfterNoGrant - lanFixtureHitsBeforeNoGrant;
+            string noGrantLanObservation = $"blocked={noGrantLanRc != 0}:privateRejectDeltaGt0={noGrantPrivateRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={noGrantMasqueradeDelta == 0}:fixtureHitsZero={noGrantFixtureAccessDelta == 0}";
             var (lanDeniedRc, _, _) = await ExecAsync(
                 "podman",
                 ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
@@ -1517,6 +1572,9 @@ public static class Program
             bool lanCardCreated = lanDeniedRc != 0 && lanCard is not null;
             NetworkAccessRule? lanRule = null;
             bool lanBodyReceived = false;
+            int lanAllowedRc = 1;
+            int lanFixtureHitsAfterApproval = 0;
+            long lanPrivateRejectDeltaAfterApproval = 0;
             long lanApprovedDelta = 0;
             long lanMasqueradeDelta = 0;
             if (lanCard is not null)
@@ -1529,10 +1587,14 @@ public static class Program
                     allowLan: true,
                     expectedRevision: policyStore.Revision);
                 lanRule = lanDecision.Rule;
-                var (lanAllowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
+                var (allowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
                     "podman",
                     ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+                lanAllowedRc = allowedRc;
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
+                lanFixtureHitsAfterApproval = (File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0) - lanFixtureHitsBeforeNoGrant;
+                string approvedWorkloadNft = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
+                lanPrivateRejectDeltaAfterApproval = ExtractNftCommentCounterPackets(approvedWorkloadNft, "private_reject") - noGrantPrivateRejectBefore - noGrantPrivateRejectDelta;
                 string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
                 lanMasqueradeDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -1557,6 +1619,13 @@ public static class Program
                 "beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
                 lanNcObservation,
                 "beforeApprovalBlocked=True:cardCreated=True");
+            AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(
+                "PROD_LAN_NO_GRANT",
+                noGrantLanObservation,
+                "blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
+                $"blocked={lanAllowedRc != 0}:privateRejectDeltaGt0={lanPrivateRejectDeltaAfterApproval > 0}:lanMasqueradeRulePacketDeltaZero={lanMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterApproval == 0}",
+                "blocked=False:privateRejectDeltaGt0=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False");
+            Console.WriteLine($"[PROD_LAN_NO_GRANT] {noGrantLanAcceptance.Outcome} ({noGrantLanAcceptance.ObservedValue}; nc={noGrantLanAcceptance.NcObservedValue})");
             Console.WriteLine("[PROD_STAGE] approved LAN traffic check completed");
 
             // v7-28: ReconcileOnceAsync preserves running container (even if previously registered by name, now promoted to hex ID)
@@ -1686,6 +1755,7 @@ public static class Program
                 parserAcceptance,
                 rebindAcceptance ?? throw new InvalidOperationException("The E-rebind production acceptance observation was not recorded."),
                 lanAcceptance,
+                noGrantLanAcceptance,
                 AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
                 AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"{stillRegisteredWhileRunning}:{afterReconcileEntry?.ContainerId?.Length == 64}", "True:True", deregisteredAfterRm ? "DEREGISTERED_ON_RM" : "STILL_PRESENT", "DEREGISTERED_ON_RM"),
                 AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED"),

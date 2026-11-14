@@ -128,9 +128,10 @@ public sealed class NetworkAccessArchitectureContractTests
             })
             .ToArray();
 
-        Assert.DoesNotContain("RunLiveFedoraAcceptanceAsync", calls, StringComparer.Ordinal);
-        Assert.True(calls.Count(call => string.Equals(call, "RunProductionTopologyProofAsync", StringComparison.Ordinal)) >= 2,
-            "Both --live and --prod-run must use the production topology acceptance path.");
+        Assert.Contains("RunLiveFedoraAcceptanceAsync", calls, StringComparer.Ordinal);
+        Assert.Contains("RunProductionTopologyProofAsync", calls, StringComparer.Ordinal);
+        string acceptanceSource = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+        Assert.Contains("Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!)", acceptanceSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -157,6 +158,18 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("Process.Start(lanServerStartInfo)", productionSource, StringComparison.Ordinal);
         Assert.Contains("LAN acceptance requires the production boundary", productionSource, StringComparison.Ordinal);
         Assert.Contains("https://lan.nac.test:8443/", productionSource, StringComparison.Ordinal);
+        Assert.Contains("PROD_LAN_NO_GRANT", productionSource, StringComparison.Ordinal);
+        Assert.Contains("private_reject", productionSource, StringComparison.Ordinal);
+        Assert.Contains("10.248.0.2", productionSource, StringComparison.Ordinal);
+        Assert.Contains("10.248.0.3", productionSource, StringComparison.Ordinal);
+        Assert.Contains("LAN acceptance workload NICs", productionSource, StringComparison.Ordinal);
+        Assert.Contains("lanWorkloadPid", productionSource, StringComparison.Ordinal);
+        Assert.Contains("lanMasqueradeRulePacketDeltaZero", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(outsideSourceOut, @\"\\bsrc 10\\.248\\.0\\.2\\b\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(workloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(lanWorkloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("RunNsenterNftListAsync(lanWorkloadPid)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(noGrantWorkloadNftAfter, \"private_reject\")", productionSource, StringComparison.Ordinal);
     }
 
     [Fact]
