@@ -161,7 +161,7 @@ Network isolation, OCI hook firewall rules, and approval card requirements remai
 ## 3. Operator Procedures & Diagnostics
 
 ### 3.1 Inspecting Hook State & Logs
-The OCI runtime hook logs execution events to `$XDG_STATE_HOME/kautuka/nac/hook.log` (default: `~/.local/state/kautuka/nac/hook.log`).
+The OCI runtime hook logs execution events to `$XDG_STATE_HOME/kautuka/nac/hook.log` (default: `~/.local/state/kautuka/nac/hook.log`). If appending the next record would take the active log over 5 MiB, it is rotated first; up to three previous logs are retained as `hook.log.1` through `hook.log.3`. A single record larger than 5 MiB can itself make the active log exceed that threshold. On Linux, the log and its rotation lock are created with mode `0600`.
 
 When an ephemeral connector's MCP transport closes unexpectedly, Gateway includes up to the last 100 Podman log lines in the failure details when its container ID is available. Returned log text is capped at 8,192 characters.
 

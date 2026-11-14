@@ -33,6 +33,9 @@ def get_xdg_state_home():
 
 STATE_DIR = get_xdg_state_home()
 HOOK_LOG_FILE = os.path.join(STATE_DIR, "hook.log")
+HOOK_LOG_MAX_BYTES = 5 * 1024 * 1024
+HOOK_LOG_BACKUP_COUNT = 3
+_HOOK_LOG_THREAD_LOCK = threading.Lock()
 ALLOWLIST_FILE = os.path.join(STATE_DIR, "infra-allowlist.json")
 OWNERS_FILE = os.path.join(STATE_DIR, "netns-owners.json")
 OWNERS_LOCK_FILE = os.path.join(STATE_DIR, "netns-owners.lock")
@@ -561,8 +564,52 @@ def log_hook(ts_ns, dur_ms, cid, pid, ips, inode, action, reason, rules_sha, ann
             "rules_sha256": rules_sha,
             "annotations": annotations or {},
         }
-        with open(HOOK_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec) + "\n")
+        line = (json.dumps(rec) + "\n").encode("utf-8")
+        os.makedirs(os.path.dirname(HOOK_LOG_FILE), exist_ok=True)
+        lock_fd = None
+        thread_locked = False
+        try:
+            if fcntl:
+                lock_fd = os.open(HOOK_LOG_FILE + ".lock", os.O_CREAT | os.O_WRONLY, 0o600)
+                os.chmod(HOOK_LOG_FILE + ".lock", 0o600)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            else:
+                _HOOK_LOG_THREAD_LOCK.acquire()
+                thread_locked = True
+
+            try:
+                current_size = os.path.getsize(HOOK_LOG_FILE)
+                if hasattr(os, "chmod") and hasattr(os, "getuid"):
+                    os.chmod(HOOK_LOG_FILE, 0o600)
+            except FileNotFoundError:
+                current_size = 0
+            if current_size and current_size + len(line) > HOOK_LOG_MAX_BYTES:
+                oldest = f"{HOOK_LOG_FILE}.{HOOK_LOG_BACKUP_COUNT}"
+                if os.path.exists(oldest):
+                    os.unlink(oldest)
+                for index in range(HOOK_LOG_BACKUP_COUNT - 1, 0, -1):
+                    source = f"{HOOK_LOG_FILE}.{index}"
+                    if os.path.exists(source):
+                        os.replace(source, f"{HOOK_LOG_FILE}.{index + 1}")
+                os.replace(HOOK_LOG_FILE, HOOK_LOG_FILE + ".1")
+
+            fd = os.open(HOOK_LOG_FILE, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            try:
+                if hasattr(os, "fchmod"):
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "ab") as f:
+                    f.write(line)
+            except Exception:
+                os.close(fd)
+                raise
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            if thread_locked:
+                _HOOK_LOG_THREAD_LOCK.release()
     except Exception:
         pass
 

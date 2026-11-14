@@ -13,6 +13,7 @@ Tests:
 """
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
@@ -37,7 +38,91 @@ from kautuka_hook import (
     get_pid_start_ticks,
     canonicalize_nft_json,
     main,
+    log_hook,
 )
+
+
+def _hook_log_process_writer(log_path, max_bytes, barrier, worker_id, disable_flock=False):
+    import kautuka_hook
+
+    kautuka_hook.HOOK_LOG_FILE = log_path
+    kautuka_hook.STATE_DIR = os.path.dirname(log_path)
+    kautuka_hook.HOOK_LOG_MAX_BYTES = max_bytes
+    if disable_flock:
+        kautuka_hook.fcntl = None
+    barrier.wait(timeout=10)
+    for index in range(5):
+        kautuka_hook.log_hook(index, 1, f"process-{worker_id}-{index}", index, [], None, "allow", "test", "", {})
+
+
+class TestHookLogRotation(unittest.TestCase):
+    def test_hook_log_rotates_and_is_private(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("x" * (5 * 1024 * 1024))
+            with unittest.mock.patch("kautuka_hook.STATE_DIR", temp_dir), \
+                 unittest.mock.patch("kautuka_hook.HOOK_LOG_FILE", log_path):
+                log_hook(29, 1, "container-29", 29, [], None, "allow", "test", "", {})
+
+            self.assertTrue(os.path.exists(log_path))
+            if hasattr(os, "getuid"):
+                self.assertEqual(stat.S_IMODE(os.stat(log_path).st_mode), 0o600)
+            backups = [f"{log_path}.{i}" for i in range(1, 4)]
+            self.assertTrue(os.path.exists(backups[0]), "oversized active log was not rotated")
+            self.assertTrue(all(os.path.getsize(path) <= 5 * 1024 * 1024 for path in [log_path, *backups] if os.path.exists(path)))
+            if hasattr(os, "getuid"):
+                self.assertEqual(stat.S_IMODE(os.stat(backups[0]).st_mode), 0o600)
+            with open(log_path, encoding="utf-8") as f:
+                current = f.read()
+            self.assertIn('"id": "container-29"', current)
+
+    def test_concurrent_hook_log_writes_remain_valid_json_lines(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            with unittest.mock.patch("kautuka_hook.STATE_DIR", temp_dir), \
+                 unittest.mock.patch("kautuka_hook.HOOK_LOG_FILE", log_path):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(log_hook, i, 1, f"c-{i}", i, [], None, "allow", "test", "", {}) for i in range(80)]
+                    for future in futures:
+                        future.result()
+            with open(log_path, encoding="utf-8") as f:
+                records = [json.loads(line) for line in f]
+            self.assertEqual(len(records), 80)
+
+    def test_multiprocess_hook_log_rotation_preserves_records(self):
+        if not hasattr(os, "getuid"):
+            self.skipTest("cross-process flock is available only on POSIX")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            max_bytes = 6000
+            # Seed a valid log close enough to the threshold that the first
+            # concurrent writes rotate it, while all new records fit afterward.
+            with open(log_path, "w", encoding="utf-8") as f:
+                for index in range(10):
+                    f.write(json.dumps({"id": f"seed-{index}", "padding": "x" * 500}) + "\n")
+            context = multiprocessing.get_context("spawn")
+            barrier = context.Barrier(2)
+            workers = [
+                context.Process(target=_hook_log_process_writer, args=(log_path, max_bytes, barrier, worker_id))
+                for worker_id in range(2)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(15)
+            self.assertTrue(all(not worker.is_alive() for worker in workers), "hook log writers did not finish")
+            self.assertTrue(all(worker.exitcode == 0 for worker in workers), f"writer exit codes: {[worker.exitcode for worker in workers]}")
+
+            records = []
+            for path in [log_path, *(f"{log_path}.{i}" for i in range(1, 4))]:
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        records.extend(json.loads(line) for line in f)
+            written_ids = {record.get("id") for record in records}
+            self.assertTrue(os.path.exists(f"{log_path}.1"), "concurrent writes did not rotate the seeded log")
+            expected_ids = {f"process-{worker_id}-{index}" for worker_id in range(2) for index in range(5)}
+            self.assertTrue(expected_ids.issubset(written_ids), f"missing process records: {sorted(expected_ids - written_ids)}")
 
 
 class TestKautukaHookDecideVectors(unittest.TestCase):
