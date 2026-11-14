@@ -1424,12 +1424,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         PodmanCommandResult podInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
         string? podState = podInspect.ExitCode == 0 ? GetPodState(podInspect.StdOut) : null;
-        if (podState is null || !IsPodStopped(podState) && !string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase))
+        if (podState is null)
         {
-            throw new InvalidOperationException("Cannot safely replace the egress boundary container because the egress pod state is unknown or degraded.");
+            throw new InvalidOperationException("Cannot safely replace the egress boundary container because egress pod inspection failed or returned no state.");
         }
 
-        if (string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase))
+        if (IsPodStopped(podState))
+        {
+            if (!HasOnlyInactiveEgressPodMembers(podInspect.StdOut))
+            {
+                throw new InvalidOperationException("Egress pod reports a stopped state but one or more pod members are active, missing, or unknown; refusing boundary replacement.");
+            }
+        }
+        else if (string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(podState, "Degraded", StringComparison.OrdinalIgnoreCase))
         {
             PodmanCommandResult stopped = await podmanRunner.RunAsync(["pod", "stop", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
             if (stopped.ExitCode != 0)
@@ -1438,10 +1446,16 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
 
             PodmanCommandResult stoppedInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
-            if (stoppedInspect.ExitCode != 0 || !IsPodStopped(GetPodState(stoppedInspect.StdOut)))
+            if (stoppedInspect.ExitCode != 0
+                || !IsPodStopped(GetPodState(stoppedInspect.StdOut))
+                || !HasOnlyInactiveEgressPodMembers(stoppedInspect.StdOut))
             {
-                throw new InvalidOperationException("Egress pod did not reach a known stopped state; refusing to replace its boundary container.");
+                throw new InvalidOperationException("Egress pod and every member must reach a known inactive state before replacing its boundary container.");
             }
+        }
+        else
+        {
+            throw new InvalidOperationException($"Cannot safely replace the egress boundary container because egress pod state '{podState}' is not a supported stoppable state.");
         }
 
         PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", containerName], 20, cancellationToken).ConfigureAwait(false);
@@ -1473,6 +1487,63 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private static bool IsPodStopped(string? state) =>
         string.Equals(state, "Exited", StringComparison.OrdinalIgnoreCase)
         || string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasOnlyInactiveEgressPodMembers(string? inspectJson)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson ?? string.Empty);
+            JsonElement pod = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            if (pod.ValueKind != JsonValueKind.Object
+                || !pod.TryGetProperty("Containers", out JsonElement containers)
+                || containers.ValueKind != JsonValueKind.Array
+                || containers.GetArrayLength() == 0)
+            {
+                return false;
+            }
+
+            string infraContainerId = GetStringProperty(pod, "InfraContainerID");
+            if (infraContainerId.Length == 0)
+            {
+                return false;
+            }
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool hasMatchingInfra = false;
+            foreach (JsonElement member in containers.EnumerateArray())
+            {
+                string name = GetStringProperty(member, "Name");
+                string id = GetStringProperty(member, "Id");
+                string state = GetStringProperty(member, "State");
+                if (name.Length == 0
+                    || id.Length == 0
+                    || state.Length == 0
+                    || !names.Add(name)
+                    || !ids.Add(id)
+                    || !(string.Equals(state, "exited", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(state, "stopped", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(state, "created", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return false;
+                }
+
+                hasMatchingInfra |= string.Equals(id, infraContainerId, StringComparison.OrdinalIgnoreCase)
+                    && name.EndsWith("-infra", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return hasMatchingInfra
+                && names.Contains("kautuka-egress-boundary")
+                && names.Contains("kautuka-egress-dns")
+                && names.Contains("kautuka-egress-envoy");
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     internal static List<string> BuildEgressPodCreateArgs(bool isWindowsHostNativeDev, string? decisionEndpointIp)
     {

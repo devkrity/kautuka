@@ -1135,24 +1135,38 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         const string staleInspect = """[{"CreateCommand":["podman","create","-v","/old/boundary.nft:/etc/nftables.conf:ro"]}]""";
         var calls = new List<IReadOnlyList<string>>();
         string podState = "Running";
+        string[] memberStates = ["running", "running", "running", "running"];
+        string[] memberIds = ["boundary-id", "dns-id", "envoy-id", "infra-id"];
+        string podInfraContainerId = "infra-id";
         string boundaryInspect = staleInspect;
         bool failPodInspect = false;
+        bool failStoppedPodInspect = false;
         bool failStop = false;
         bool failRemove = false;
+        bool leaveMemberRunningAfterStop = false;
         var podman = new PodmanCommandRunner((args, _) =>
         {
             calls.Add(args.ToArray());
             bool failed = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]) && failPodInspect
+                || args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]) && failStoppedPodInspect && string.Equals(podState, "Exited", StringComparison.Ordinal)
                 || args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]) && failStop
                 || args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]) && failRemove;
             string output = args.SequenceEqual(["inspect", "kautuka-egress-boundary"])
                 ? boundaryInspect
                 : args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])
-                    ? $"[{{\"State\":\"{podState}\"}}]"
+                    ? $"[{{\"State\":\"{podState}\",\"InfraContainerID\":\"{podInfraContainerId}\",\"Containers\":[{{\"Id\":\"{memberIds[0]}\",\"Name\":\"kautuka-egress-boundary\",\"State\":\"{memberStates[0]}\"}},{{\"Id\":\"{memberIds[1]}\",\"Name\":\"kautuka-egress-dns\",\"State\":\"{memberStates[1]}\"}},{{\"Id\":\"{memberIds[2]}\",\"Name\":\"kautuka-egress-envoy\",\"State\":\"{memberStates[2]}\"}},{{\"Id\":\"{memberIds[3]}\",\"Name\":\"pod-infra\",\"State\":\"{memberStates[3]}\"}}]}}]"
                     : string.Empty;
             if (args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]))
             {
                 podState = "Exited";
+                if (!leaveMemberRunningAfterStop)
+                {
+                    memberStates = ["exited", "created", "created", "exited"];
+                }
+                else
+                {
+                    memberStates = ["exited", "created", "created", "running"];
+                }
             }
             return Task.FromResult(new PodmanCommandResult(failed ? 1 : 0, output, failed ? "fixture failure" : string.Empty, ProcessTerminationReason.Completed));
         });
@@ -1169,6 +1183,43 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains(calls, args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
         Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
         Assert.Equal(2, calls.Count(args => args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])));
+
+        // A degraded pod must be stopped and verified member-by-member before replacing the boundary.
+        calls.Clear();
+        boundaryInspect = staleInspect;
+        podState = "Degraded";
+        memberStates = ["running", "running", "running", "running"];
+        await ((Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.Contains(calls, args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+        Assert.Equal(["exited", "created", "created", "exited"], memberStates);
+
+        calls.Clear();
+        podState = "Degraded";
+        memberStates = ["running", "running", "running", "running"];
+        leaveMemberRunningAfterStop = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+        leaveMemberRunningAfterStop = false;
+
+        calls.Clear();
+        podState = "Degraded";
+        memberStates = ["running", "created", "created", "running"];
+        failStoppedPodInspect = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+        failStoppedPodInspect = false;
+
+        calls.Clear();
+        podState = "Exited";
+        podInfraContainerId = "missing-infra-id";
+        memberStates = ["exited", "created", "created", "exited"];
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+        podInfraContainerId = "infra-id";
 
         calls.Clear();
         IReadOnlyList<string> expectedArgs = EgressTopologyManager.BuildBoundaryCreateArgs(Path.Combine(tempDir, "nac", "boundary"), false);
