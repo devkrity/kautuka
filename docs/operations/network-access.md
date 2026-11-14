@@ -236,6 +236,8 @@ The NAC acceptance workflow runs `--prod-run` against rootless Podman on Linux w
 
 The non-Linux Podman Machine verifier command is covered by an integration test that forces the machine path and rejects a partial ruleset; that path has not been exercised against a live Podman Machine in CI.
 
+The production acceptance runner stages Podman cleanup only after `podman info` confirms the private graphroot and runroot and reports rootless mode. Run `Kautuka.NetworkAccess.Acceptance -- --self-test-isolation-cleanup` to exercise the actual production proof with a fake Podman response; the test verifies that a failed isolation check causes no Podman cleanup calls.
+
 ---
 
 ## 4. Troubleshooting Hook Refusal Reasons `[Built]`

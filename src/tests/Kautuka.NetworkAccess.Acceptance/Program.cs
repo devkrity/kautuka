@@ -120,6 +120,7 @@ public static class AcceptanceHarness
 
 public static class Program
 {
+    private static Func<string, IReadOnlyList<string>, Task<(int ExitCode, string StdOut, string StdErr)>>? execOverride;
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -149,6 +150,12 @@ public static class Program
 
         if (!args.Contains("--live", StringComparer.OrdinalIgnoreCase))
         {
+            if (args.Contains("--self-test-isolation-cleanup", StringComparer.OrdinalIgnoreCase))
+            {
+                await VerifyProductionIsolationCleanupAsync().ConfigureAwait(false);
+                Console.WriteLine("Production cleanup self-test passed (mismatched Podman isolation suppressed all Podman mutations; verified cleanup control allowed).");
+                return 0;
+            }
             Console.WriteLine("Harness self-test verified G9 enforcement. Pass --live on Linux rootless Podman to execute live container & Envoy v1.40.2 proofs.");
             return 0;
         }
@@ -739,7 +746,7 @@ public static class Program
     {
         string repoRoot = FindRepoRoot();
         string baseTmp = Directory.Exists("/var/tmp") ? "/var/tmp" : Path.GetTempPath();
-        string tempRoot = Path.Combine(baseTmp, $"kautuka-nac-prod-{Guid.NewGuid():N}"[..24]);
+        (string tempRoot, string tempRootOwnerToken) = CreateOwnedTempRoot(baseTmp);
         string xdgState = Path.Combine(tempRoot, "xdg-state");
         string stateDir = Path.Combine(tempRoot, "manager-nac");
         string socketDir = Path.Combine(tempRoot, "sock");
@@ -821,6 +828,7 @@ public static class Program
         string? lanFixtureNamespaceName = null;
         string? lanFixtureHostDevice = null;
         string lanHostAddress = string.Empty;
+        var isolationCleanupGate = new PodmanIsolationCleanupGate();
         var podman = new PodmanCommandRunner();
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
@@ -865,6 +873,8 @@ public static class Program
             {
                 throw new InvalidOperationException($"Production proof requires rootless Podman with isolated storage. Observed: {storageInfo.StdOut} {storageInfo.StdErr}");
             }
+
+            isolationCleanupGate.MarkVerified();
 
             // Clean any leftover production-named pod/networks before initializing fresh topology
             await ExecAsync("podman", ["rm", "-f", wlName]).ConfigureAwait(false);
@@ -1619,10 +1629,23 @@ public static class Program
         finally
         {
             await topology.DisposeAsync().ConfigureAwait(false);
-            foreach (RegistryEntry entry in registry.GetAll())
+            if (isolationCleanupGate.IsVerified)
             {
-                _ = await ExecAsync("podman", ["rm", "-f", entry.ContainerId]).ConfigureAwait(false);
+                foreach (RegistryEntry entry in registry.GetAll())
+                {
+                    _ = await ExecAsync("podman", ["rm", "-f", entry.ContainerId]).ConfigureAwait(false);
+                }
+                await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
+                    "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
+                    "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+                    1, "512m", 30, [], new Dictionary<string, string>())), PodmanContainerTool.BuildContainerName(new ContainerContext(
+                    "agent", "a3", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a3"), "/workspace",
+                    "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+                    1, "512m", 30, [], new Dictionary<string, string>()))]).ConfigureAwait(false);
+                await ExecAsync("podman", ["pod", "rm", "-f", EgressTopologyManager.EgressPodName]).ConfigureAwait(false);
+                await ExecAsync("podman", ["network", "rm", "-f", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName]).ConfigureAwait(false);
             }
+
             if (lanFixtureProcess is not null)
             {
                 if (!lanFixtureProcess.HasExited)
@@ -1661,26 +1684,66 @@ public static class Program
                 }
                 _ = await ExecAsync("sudo", ["ip", "netns", "del", lanFixtureNamespaceName]).ConfigureAwait(false);
             }
-            await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
-                "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
-                "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
-                1, "512m", 30, [], new Dictionary<string, string>())), PodmanContainerTool.BuildContainerName(new ContainerContext(
-                "agent", "a3", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a3"), "/workspace",
-                "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
-                1, "512m", 30, [], new Dictionary<string, string>()))]).ConfigureAwait(false);
-            await ExecAsync("podman", ["pod", "rm", "-f", EgressTopologyManager.EgressPodName]).ConfigureAwait(false);
-            await ExecAsync("podman", ["network", "rm", "-f", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName]).ConfigureAwait(false);
             Environment.SetEnvironmentVariable("CONTAINERS_STORAGE_CONF", previousStorageConfig);
             Environment.SetEnvironmentVariable("CONTAINERS_CONF", previousContainersConfig);
             try
             {
-                Directory.Delete(tempRoot, recursive: true);
+                string ownerMarkerPath = Path.Combine(tempRoot, ".acceptance-owner");
+                if (File.Exists(ownerMarkerPath)
+                    && string.Equals(await File.ReadAllTextAsync(ownerMarkerPath).ConfigureAwait(false), tempRootOwnerToken, StringComparison.Ordinal))
+                {
+                    Directory.Delete(tempRoot, recursive: true);
+                }
             }
             catch
             {
                 // Best effort cleanup
             }
         }
+    }
+
+    private static (string Path, string OwnerToken) CreateOwnedTempRoot(string baseDirectory)
+    {
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            string ownerToken = Guid.NewGuid().ToString("N");
+            string path = Path.Combine(baseDirectory, $"kautuka-nac-prod-{ownerToken}");
+            string reservationPath = path + ".reserve";
+            try
+            {
+                using (new FileStream(reservationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                }
+            }
+            catch (IOException) when (File.Exists(reservationPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    continue;
+                }
+
+                Directory.CreateDirectory(path);
+                string markerPath = Path.Combine(path, ".acceptance-owner");
+                using (var marker = new FileStream(markerPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (var writer = new StreamWriter(marker))
+                {
+                    writer.Write(ownerToken);
+                }
+
+                return (path, ownerToken);
+            }
+            finally
+            {
+                File.Delete(reservationPath);
+            }
+        }
+
+        throw new IOException($"Could not reserve an unused acceptance directory beneath '{baseDirectory}'.");
     }
 
     private static async Task BestEffortCleanupAsync(string podName, string[] containers, string[] networks)
@@ -1696,11 +1759,77 @@ public static class Program
         }
     }
 
+    private static async Task VerifyProductionIsolationCleanupAsync()
+    {
+        List<string> podmanCommands = [];
+        execOverride = (fileName, arguments) =>
+        {
+            if (string.Equals(fileName, "podman", StringComparison.Ordinal))
+            {
+                podmanCommands.Add(string.Join(' ', arguments));
+                if (arguments.Count > 0 && string.Equals(arguments[0], "info", StringComparison.Ordinal))
+                {
+                    return Task.FromResult((0, "C:\\unsafe\\graph|C:\\unsafe\\run|false", string.Empty));
+                }
+            }
+
+            return Task.FromResult((1, string.Empty, "Unexpected command in fake Podman test."));
+        };
+        bool rejected = false;
+        try
+        {
+            _ = await RunProductionTopologyProofAsync(null).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("requires rootless Podman with isolated storage", StringComparison.Ordinal))
+        {
+            rejected = true;
+        }
+        finally
+        {
+            execOverride = null;
+        }
+
+        if (!rejected
+            || podmanCommands.Count != 1
+            || !podmanCommands[0].StartsWith("info ", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"The real production runner must reject mismatched isolation and run no Podman cleanup/mutation commands. Observed fake Podman calls: {string.Join("; ", podmanCommands)}");
+        }
+
+        int cleanupCalls = 0;
+        var gate = new PodmanIsolationCleanupGate();
+        await gate.RunIfVerifiedAsync(() =>
+        {
+            cleanupCalls++;
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        if (gate.IsVerified || cleanupCalls != 0)
+        {
+            throw new InvalidOperationException("Unverified Podman isolation must suppress every cleanup action.");
+        }
+
+        gate.MarkVerified();
+        await gate.RunIfVerifiedAsync(() =>
+        {
+            cleanupCalls++;
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        if (!gate.IsVerified || cleanupCalls != 1)
+        {
+            throw new InvalidOperationException("Verified Podman isolation must allow cleanup actions.");
+        }
+    }
+
     private static async Task<(int ExitCode, string StdOut, string StdErr)> ExecAsync(
         string fileName,
         IReadOnlyList<string> args,
         int timeoutSeconds = 60)
     {
+        if (execOverride is not null)
+        {
+            return await execOverride(fileName, args).ConfigureAwait(false);
+        }
+
         using var proc = new Process();
         proc.StartInfo = new ProcessStartInfo { FileName = fileName, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         foreach (string a in args)
