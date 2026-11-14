@@ -28,6 +28,10 @@ Gateway startup can restore the missing marker only for the exact current schema
 5. Before reopening traffic, run the relevant schema/contract suite and check that canonical root sequences, waits, invocation links, and ChannelHost delivery records are intact.
 6. Escalate any partial or unclassifiable migration result with the preserved evidence; it requires an engineering recovery decision.
 
+## Local update status cannot connect to port 20300
+
+The local development launcher does not start the optional release-feed server on port `20300`. Development Manager and UpdateService configurations therefore leave release and catalog feed URLs unset. Start `scripts/serve-release-smoke.mjs` only when intentionally testing a local release feed; otherwise the update service skips feed refresh.
+
 ## Browser failures
 
 - Verify `/api/auth/setup/status`, authenticated `/api/auth/me`, and `/api/narad/v1` discovery before debugging React state.

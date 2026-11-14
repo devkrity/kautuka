@@ -64,6 +64,27 @@ public sealed class NetworkAccessArchitectureContractTests
     }
 
     [Fact]
+    public void DevelopmentUpdateServiceDoesNotAssumeAnUnstartedLocalFeed()
+    {
+        string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
+        string updateServiceSettings = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "backend",
+            "Kautuka.UpdateService",
+            "appsettings.Development.json"));
+        string managerSettings = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "src",
+            "backend",
+            "Kautuka.Manager",
+            "appsettings.Development.json"));
+
+        Assert.DoesNotContain("127.0.0.1:20300", updateServiceSettings, StringComparison.Ordinal);
+        Assert.DoesNotContain("127.0.0.1:20300", managerSettings, StringComparison.Ordinal);
+    }
+
+    [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "NAC review item test naming")]
     public void V7_20_ReconcileHonorsBrakeBeforeConnectorImageBuild()
     {
