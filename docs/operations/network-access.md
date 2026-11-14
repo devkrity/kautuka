@@ -48,6 +48,8 @@ The U8 Envoy LAN address-filter test compares against a literal expected CIDR li
 
 Kautuka NAC v7 enforces a strict **default-deny outbound network posture** for untrusted containerized workloads (Agent Sandboxes, MCP connector containers, and build-time tools), while providing unified application-layer enforcement and caller attribution for first-party host services (`Gateway`, `ChannelHost`).
 
+The container controls described here apply only to workloads created and managed by Kautuka Manager; they do not govern unrelated containers running in the same Podman installation.
+
 ```mermaid
 flowchart LR
   subgraph HOST["Host Processes (Native .NET)"]
