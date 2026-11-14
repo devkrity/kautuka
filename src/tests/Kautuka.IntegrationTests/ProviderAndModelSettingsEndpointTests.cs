@@ -47,7 +47,7 @@ public sealed class ProviderSettingsEndpointTests
         Directory.CreateDirectory(stateDirectory);
         try
         {
-            var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            await using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var controller = new NetworkAccessController.NetworkAccessController(policyStore, new WorkloadRegistry());
             var providerTypeCatalog = new SeededProviderTypeCatalog();
             var checker = new ProviderTestNetworkAccessChecker(controller);
@@ -98,6 +98,7 @@ public sealed class ProviderSettingsEndpointTests
                 Assert.Null(pending.AgentId);
                 Assert.Equal("user", pending.Attribution);
                 Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
+                await policyStore.FlushPendingWritesAsync();
             }
         }
         finally
