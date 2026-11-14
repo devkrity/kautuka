@@ -16,6 +16,8 @@ using Kautuka.NetworkAccessController;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -465,6 +467,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     [Fact]
     public async Task C5_WindowsListenerBindAddress_NeverWildcard_WithNegativeControl()
     {
+        Assert.Null(typeof(EnvoyAuthorizationHostOptions).GetProperty(
+            "AllowWildcardBindForNegativeControl",
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic));
+
         string tempDir = CreateTempDir();
         try
         {
@@ -505,22 +514,18 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                 Assert.False(ContainsWildcardBindAddress(specificHost.BoundAddresses));
             }
 
-            // C5.NC: Test fixture forced to bind 0.0.0.0 via AllowWildcardBindForNegativeControl = true
-            // is caught by ContainsWildcardBindAddress.
-            await using (var ncWildcardHost = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
-            {
-                TransportMode = EnvoyListenerTransportMode.TcpMtls,
-                LockFilePath = Path.Combine(tempDir, "lock3"),
-                TcpBindAddress = IPAddress.Any,
-                TcpPort = 0,
-                ServerCertificate = serverCert,
-                CaCertificate = caCert,
-                AllowWildcardBindForNegativeControl = true,
-            }))
+            // C5.NC: Exercise the wildcard-address detector against a separate test-local Kestrel listener.
+            var wildcardBuilder = WebApplication.CreateBuilder();
+            wildcardBuilder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Any, 0));
+            await using (WebApplication ncWildcardHost = wildcardBuilder.Build())
             {
                 await ncWildcardHost.StartAsync(TestContext.Current.CancellationToken);
-                Assert.True(ncWildcardHost.IsListening);
-                Assert.True(ContainsWildcardBindAddress(ncWildcardHost.BoundAddresses));
+                IEnumerable<string> wildcardAddresses = ncWildcardHost.Services
+                    .GetRequiredService<IServer>()
+                    .Features
+                    .Get<IServerAddressesFeature>()!
+                    .Addresses;
+                Assert.True(ContainsWildcardBindAddress(wildcardAddresses));
             }
 
             caCert.Dispose();
