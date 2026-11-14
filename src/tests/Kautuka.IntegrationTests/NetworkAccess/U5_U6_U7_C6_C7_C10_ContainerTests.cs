@@ -1021,6 +1021,47 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_EgressTopologyManagerDisposalIsSafeWhenHostedServiceAndDiDisposeIt()
+    {
+        var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
+            0,
+            string.Empty,
+            string.Empty,
+            ProcessTerminationReason.Completed)));
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "ip-cursor.json"));
+        var manager = new EgressTopologyManager(
+            podman,
+            allocator,
+            new WorkloadPostStartVerifier(podman),
+            new WorkloadRegistry(),
+            tempDir);
+        var reconcileCts = new CancellationTokenSource();
+        var reconcileLoop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        typeof(EgressTopologyManager)
+            .GetField("reconcileCts", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, reconcileCts);
+        typeof(EgressTopologyManager)
+            .GetField("reconcileTask", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, reconcileLoop.Task);
+
+        // StopAsync disposes as part of the hosted-service lifecycle; the DI container
+        // then calls DisposeAsync for the same singleton. Exercise overlap as well as the
+        // normal repeated lifecycle call so the test catches a disposed CTS being reused.
+        // Hold the reconcile loop open to prove both callers await the same cleanup operation.
+        Task stopTask = manager.StopAsync(TestContext.Current.CancellationToken);
+        Task diDisposeTask = manager.DisposeAsync().AsTask();
+        Assert.False(stopTask.IsCompleted);
+        Assert.False(diDisposeTask.IsCompleted);
+
+        reconcileLoop.TrySetResult();
+        await Task.WhenAll(stopTask, diDisposeTask);
+        await manager.StopAsync(TestContext.Current.CancellationToken);
+        await manager.DisposeAsync();
+
+        Assert.True(reconcileCts.IsCancellationRequested);
+    }
+
+    [Fact]
     public void V7_20_UnprivilegedInfraImagesUseTheirPinnedNonRootUsers_WithNegativeControl()
     {
         IReadOnlyList<string> dnsArgs = EgressTopologyManager.BuildCoreDnsCreateArgs("/state/Corefile");

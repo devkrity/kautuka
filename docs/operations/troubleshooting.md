@@ -15,6 +15,10 @@
 - Manager reloads accepted desired state; inspect its accepted/reconciled version and safe failure rather than only container presence.
 - Cold MCP materialization can be long-running. Preserve cancellation/deadline diagnostics and inspect bounded stderr head/tail.
 
+## Egress topology shutdown
+
+Manager's hosted-service stop and dependency-injection container disposal both dispose the same `EgressTopologyManager` singleton. Disposal is idempotent: concurrent callers share one cleanup task, which cancels and awaits the reconcile loop before releasing its cancellation source. A shutdown `ObjectDisposedException` from that source indicates a regression; verify the focused `V7_20_EgressTopologyManagerDisposalIsSafeWhenHostedServiceAndDiDisposeIt` test.
+
 ## Failed schema migration
 
 Treat a failed migration as an integrity boundary, not a normal retry.

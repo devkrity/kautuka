@@ -78,6 +78,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
+    private readonly object disposeLock = new();
+    private Task? disposeTask;
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
 
     public EgressTopologyManager(
@@ -1808,23 +1810,66 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (reconcileCts is not null)
+        TaskCompletionSource<object?>? completion = null;
+        Task task;
+        lock (disposeLock)
         {
-            await reconcileCts.CancelAsync().ConfigureAwait(false);
-            if (reconcileTask is not null)
+            if (disposeTask is null)
+            {
+                completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                disposeTask = completion.Task;
+            }
+
+            task = disposeTask;
+        }
+
+        if (completion is not null)
+        {
+            _ = CompleteDisposalAsync(completion);
+        }
+
+        return new ValueTask(task);
+    }
+
+    private async Task CompleteDisposalAsync(TaskCompletionSource<object?> completion)
+    {
+        try
+        {
+            await DisposeCoreAsync().ConfigureAwait(false);
+            completion.TrySetResult(null);
+        }
+        catch (Exception ex)
+        {
+            completion.TrySetException(ex);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        // The hosted-service lifecycle and the DI container both dispose this singleton.
+        // Claim the cancellation source once so repeated or concurrent disposal is safe.
+        CancellationTokenSource? cts = reconcileCts;
+        reconcileCts = null;
+        if (cts is not null)
+        {
+            await cts.CancelAsync().ConfigureAwait(false);
+            Task? task = reconcileTask;
+            reconcileTask = null;
+            if (task is not null)
             {
                 try
                 {
-                    await reconcileTask.ConfigureAwait(false);
+                    await task.ConfigureAwait(false);
                 }
                 catch
                 {
                     // Ignore task cancellation
                 }
             }
-            reconcileCts.Dispose();
+
+            cts.Dispose();
         }
     }
 }
