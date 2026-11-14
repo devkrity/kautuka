@@ -45,6 +45,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         public StartupWorkloadContainmentException(string message) : base(message) { }
         public StartupWorkloadContainmentException(string message, Exception innerException) : base(message, innerException) { }
     }
+    private readonly record struct StartupGateStateChange(bool IsOpen, LaunchAdmissionGeneration? CancelAdmission);
     public const string WorkloadNetworkName = "kautuka-workload";
     public const string OutsideNetworkName = "kautuka-outside";
     public const string EgressPodName = "kautuka-egress";
@@ -179,40 +180,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
         private set
         {
-            LaunchAdmissionGeneration? cancelAdmission = null;
-            lock (gateLock)
-            {
-                if (value && launchAdmissionClosed && launchAdmissionGeneration.CancellationStarted)
-                {
-                    launchAdmissionGeneration = new LaunchAdmissionGeneration();
-                }
-
-                isStartupGateOpen = value;
-                launchAdmissionClosed = !value;
-                if (value)
-                {
-                    transientRecoveryPending = false;
-                }
-                if (!value && !launchAdmissionGeneration.CancellationStarted)
-                {
-                    launchAdmissionGeneration.CancellationStarted = true;
-                    cancelAdmission = launchAdmissionGeneration;
-                }
-                try
-                {
-                    File.WriteAllText(startupGateFilePath, value ? "open" : "closed");
-                }
-                catch
-                {
-                    // Ignore file write errors
-                }
-            }
-
-            if (cancelAdmission is not null)
-            {
-                LaunchAdmissionGeneration generation = cancelAdmission;
-                _ = Task.Run(() => CancelLaunchAdmissionCallbacksAsync(generation));
-            }
+            UpdateStartupGate(value, clearTransientRecovery: false);
         }
     }
 
@@ -247,10 +215,65 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public void CloseLaunchAdmission()
     {
+        StartupGateStateChange change;
         lock (gateLock)
         {
             transientRecoveryPending = false;
-            IsStartupGateOpen = false;
+            change = UpdateStartupGateStateUnderLock(isOpen: false);
+        }
+
+        CompleteStartupGateStateChange(change);
+    }
+
+    private void UpdateStartupGate(bool isOpen, bool clearTransientRecovery)
+    {
+        StartupGateStateChange change;
+        lock (gateLock)
+        {
+            if (isOpen || clearTransientRecovery)
+            {
+                transientRecoveryPending = false;
+            }
+            change = UpdateStartupGateStateUnderLock(isOpen);
+        }
+
+        CompleteStartupGateStateChange(change);
+    }
+
+    private StartupGateStateChange UpdateStartupGateStateUnderLock(bool isOpen)
+    {
+        if (isOpen && launchAdmissionClosed && launchAdmissionGeneration.CancellationStarted)
+        {
+            launchAdmissionGeneration = new LaunchAdmissionGeneration();
+        }
+
+        isStartupGateOpen = isOpen;
+        launchAdmissionClosed = !isOpen;
+        LaunchAdmissionGeneration? cancelAdmission = null;
+        if (!isOpen && !launchAdmissionGeneration.CancellationStarted)
+        {
+            launchAdmissionGeneration.CancellationStarted = true;
+            cancelAdmission = launchAdmissionGeneration;
+        }
+
+        return new StartupGateStateChange(isStartupGateOpen, cancelAdmission);
+    }
+
+    private void CompleteStartupGateStateChange(StartupGateStateChange change)
+    {
+        if (change.CancelAdmission is not null)
+        {
+            LaunchAdmissionGeneration generation = change.CancelAdmission;
+            _ = Task.Run(() => CancelLaunchAdmissionCallbacksAsync(generation));
+        }
+
+        try
+        {
+            File.WriteAllText(startupGateFilePath, change.IsOpen ? "open" : "closed");
+        }
+        catch
+        {
+            // Ignore file write errors
         }
     }
 
@@ -2655,6 +2678,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private async Task RecoverEgressTopologyAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
+        StartupGateStateChange? gateChange = null;
         lock (gateLock)
         {
             if (!IsStartupGateOpen && !transientRecoveryPending)
@@ -2662,11 +2686,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 return;
             }
 
-            if (IsStartupGateOpen)
+            if (isStartupGateOpen)
             {
-                IsStartupGateOpen = false;
                 transientRecoveryPending = true;
+                gateChange = UpdateStartupGateStateUnderLock(isOpen: false);
             }
+        }
+        if (gateChange is StartupGateStateChange change)
+        {
+            CompleteStartupGateStateChange(change);
         }
 
         try
@@ -2703,11 +2731,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             if (startupCanaryRetryPending)
             {
+                StartupGateStateChange retryGateChange;
                 lock (gateLock)
                 {
                     transientRecoveryPending = false;
-                    IsStartupGateOpen = false;
+                    retryGateChange = UpdateStartupGateStateUnderLock(isOpen: false);
                 }
+                CompleteStartupGateStateChange(retryGateChange);
                 logger.LogInformation("Egress topology was recovered while startup canary retry is pending; the launch gate remains closed for full startup revalidation.");
                 return;
             }
@@ -2727,10 +2757,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
         catch (Exception ex)
         {
+            StartupGateStateChange failedGateChange;
             lock (gateLock)
             {
-                IsStartupGateOpen = false;
+                failedGateChange = UpdateStartupGateStateUnderLock(isOpen: false);
             }
+            CompleteStartupGateStateChange(failedGateChange);
 
             logger.LogError(ex, "Egress pod recovery failed; startup gate remains closed and reconcile will retry.");
         }
@@ -2738,6 +2770,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private bool TryCompleteTransientRecovery()
     {
+        StartupGateStateChange gateChange;
         lock (gateLock)
         {
             if (!transientRecoveryPending
@@ -2746,9 +2779,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 return false;
             }
 
-            IsStartupGateOpen = true;
-            return true;
+            transientRecoveryPending = false;
+            gateChange = UpdateStartupGateStateUnderLock(isOpen: true);
         }
+
+        CompleteStartupGateStateChange(gateChange);
+        return true;
     }
 
     private async Task RemoveEgressPodIfPresentAsync(CancellationToken cancellationToken)

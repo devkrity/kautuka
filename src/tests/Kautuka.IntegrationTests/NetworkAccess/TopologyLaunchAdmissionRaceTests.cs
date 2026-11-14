@@ -368,7 +368,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
 
             reconcileTask = manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
 
-            // Incident closure cancels admission immediately and scans without waiting for MCP
+            // Incident closure schedules admission cancellation and scans without waiting for MCP
             // startup. The active lease keeps the scan incomplete until a later rescan.
             for (int attempt = 0; attempt < 100 && manager.IsStartupGateOpen; attempt++)
             {
@@ -378,8 +378,8 @@ public sealed class TopologyLaunchAdmissionRaceTests
             Assert.False(manager.IsStartupGateOpen);
             await reconcileTask.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.False(manager.TopologyContainmentCompleteForTests);
-            Assert.True(launchCancellationToken.IsCancellationRequested);
             Assert.True(cancellationCallbackStarted.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.True(launchCancellationToken.IsCancellationRequested);
             releaseCancellationCallback.Set();
 
             releaseLaunch.TrySetResult();
