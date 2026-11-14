@@ -416,6 +416,91 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       expect(within(systemwideCard).getByRole('button', { name: /Allow for everyone/i })).toBeVisible();
       expect(within(systemwideCard).getByRole('button', { name: /Allow for Alice only/i })).toBeVisible();
     });
+
+    it('administrator can decide another user request even when the owner is waiting for admin', async () => {
+      const user = userEvent.setup();
+      mockViewer.id = 'admin-bob';
+      mockViewer.displayName = 'Bob';
+      mockViewer.role = 'admin';
+
+      const requestsData = createDefaultRequests([
+        {
+          id: 'req-owner-needs-admin',
+          userId: 'user-alice',
+          userDisplayName: 'Alice',
+          agentId: 'agent-alice',
+          agentDisplayName: 'AliceAgent',
+          systemwide: false,
+          attribution: 'user-agent',
+          destination: 'alice-dest.example',
+          destKind: 'host',
+          port: 443,
+          actorKind: 'agent',
+          firstSeenUtc: '2026-11-11T10:00:00Z',
+          lastSeenUtc: '2026-11-11T10:00:01Z',
+          attempts: 1,
+          status: 'pending',
+          origin: 'container',
+          waitingForAdmin: true,
+          ownerCanApproveOwn: false,
+          ownerCanAllowAllAgents: true,
+        },
+      ]);
+      setupMockApis({ requests: requestsData });
+
+      renderComponent(<NetworkAccessPage />);
+
+      const card = await screen.findByTestId('request-card-req-owner-needs-admin');
+      expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(card).getByRole('button', { name: /Keep blocked/i })).toBeVisible();
+      expect(within(card).queryByRole('button', { name: /Allow for all of Alice's agents/i })).not.toBeInTheDocument();
+      expect(within(card).queryByText(/Waiting for an administrator to approve/i)).not.toBeInTheDocument();
+
+      await user.click(within(card).getByRole('button', { name: /^Allow$/ }));
+      await waitFor(() => {
+        expect(post).toHaveBeenCalledWith(
+          '/network-access/requests/req-owner-needs-admin/decision',
+          expect.objectContaining({ allow: true, scope: 'agent', expectedRevision: 1 })
+        );
+      });
+    });
+
+    it('non-admin still cannot decide another user request marked as waiting for admin', async () => {
+      mockViewer.id = 'user-ravi';
+      mockViewer.displayName = 'Ravi';
+      mockViewer.role = 'user';
+
+      const requestsData = createDefaultRequests([
+        {
+          id: 'req-owner-needs-admin',
+          userId: 'user-alice',
+          userDisplayName: 'Alice',
+          agentId: 'agent-alice',
+          agentDisplayName: 'AliceAgent',
+          systemwide: false,
+          attribution: 'user-agent',
+          destination: 'alice-dest.example',
+          destKind: 'host',
+          port: 443,
+          actorKind: 'agent',
+          firstSeenUtc: '2026-11-11T10:00:00Z',
+          lastSeenUtc: '2026-11-11T10:00:01Z',
+          attempts: 1,
+          status: 'pending',
+          origin: 'container',
+          waitingForAdmin: true,
+          ownerCanApproveOwn: false,
+        },
+      ]);
+      setupMockApis({ requests: requestsData });
+
+      renderComponent(<NetworkAccessPage />);
+
+      const card = await screen.findByTestId('request-card-req-owner-needs-admin');
+      expect(within(card).getByText(/Waiting for an administrator to approve/i)).toBeVisible();
+      expect(within(card).queryByRole('button', { name: /^Allow$/ })).not.toBeInTheDocument();
+      expect(within(card).queryByRole('button', { name: /Keep blocked/i })).not.toBeInTheDocument();
+    });
   });
 
   // ──────────────── UX4: Revision Conflict ────────────────
@@ -640,6 +725,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             attempts: 1,
             status: 'pending',
             origin: 'container',
+            ownerCanApproveOwn: true,
+            ownerCanAllowAllAgents: true,
           },
         ],
         { canApproveOwn: true, canAllowAllAgents: true }
@@ -691,6 +778,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             attempts: 1,
             status: 'pending',
             origin: 'container',
+            ownerCanApproveOwn: true,
+            ownerCanAllowAllAgents: true,
           },
         ],
         { canApproveOwn: true, canAllowAllAgents: true }
@@ -704,6 +793,74 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           name: "Allow for all of Sam's agents, including new ones",
         })
       ).toBeVisible();
+    });
+
+    it('admin does not infer another user all-agents privilege from the admin viewer privileges', async () => {
+      mockViewer.id = 'admin-user';
+      mockViewer.displayName = 'Admin';
+      mockViewer.role = 'admin';
+
+      const requestsData = createDefaultRequests([
+        {
+          id: 'req-owner-privileges-missing',
+          userId: 'user-sam',
+          userDisplayName: 'Sam',
+          agentId: 'agent-sam',
+          agentDisplayName: 'SamBot',
+          systemwide: false,
+          attribution: 'user-agent',
+          destination: 'api.sam.org',
+          destKind: 'host',
+          port: 443,
+          actorKind: 'agent',
+          firstSeenUtc: '2026-11-11T10:00:00Z',
+          lastSeenUtc: '2026-11-11T10:00:01Z',
+          attempts: 1,
+          status: 'pending',
+          origin: 'container',
+        },
+      ], { canApproveOwn: true, canAllowAllAgents: true });
+      setupMockApis({ requests: requestsData });
+
+      renderComponent(<NetworkAccessPage />);
+
+      const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
+      expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's agents/i })).not.toBeInTheDocument();
+    });
+
+    it('non-admin cannot infer another user all-agents privilege when owner flags are missing', async () => {
+      mockViewer.id = 'user-ravi';
+      mockViewer.displayName = 'Ravi';
+      mockViewer.role = 'user';
+
+      const requestsData = createDefaultRequests([
+        {
+          id: 'req-owner-privileges-missing',
+          userId: 'user-sam',
+          userDisplayName: 'Sam',
+          agentId: 'agent-sam',
+          agentDisplayName: 'SamBot',
+          systemwide: false,
+          attribution: 'user-agent',
+          destination: 'api.sam.org',
+          destKind: 'host',
+          port: 443,
+          actorKind: 'agent',
+          firstSeenUtc: '2026-11-11T10:00:00Z',
+          lastSeenUtc: '2026-11-11T10:00:01Z',
+          attempts: 1,
+          status: 'pending',
+          origin: 'container',
+        },
+      ], { canApproveOwn: true, canAllowAllAgents: true });
+      setupMockApis({ requests: requestsData });
+
+      renderComponent(<NetworkAccessPage />);
+
+      const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
+      expect(within(card).getByText(/No permission to decide this request/i)).toBeVisible();
+      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's agents/i })).not.toBeInTheDocument();
     });
 
     it('renders temporary probe card without permanent scope options (v7-14)', async () => {

@@ -34,11 +34,9 @@ export function PendingApprovalCard({
   // - canApproveOwn: If user holds canApproveOwn, or viewer is admin
   // - canAllowAllAgents: Based on request's owner privileges (v7-12)
   const canApproveOwn = isAdmin || (isOwner && Boolean(request.ownerCanApproveOwn ?? userPrivileges?.canApproveOwn));
-  const canAllowAllAgents = Boolean(
-    request.ownerCanAllowAllAgents !== undefined
-      ? request.ownerCanAllowAllAgents
-      : (userPrivileges?.canApproveOwn && userPrivileges?.canAllowAllAgents)
-  );
+  const ownerCanApproveOwn = request.ownerCanApproveOwn ?? (isOwner ? userPrivileges?.canApproveOwn : false);
+  const ownerCanAllowAllAgents = request.ownerCanAllowAllAgents ?? (isOwner ? userPrivileges?.canAllowAllAgents : false);
+  const canAllowAllAgents = Boolean(ownerCanApproveOwn && ownerCanAllowAllAgents);
 
   const [allowLan, setAllowLan] = React.useState(false);
   const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
@@ -277,7 +275,10 @@ export function PendingApprovalCard({
     : `${userLabel}'s ${agentLabel}${connectorInfo} wants to reach ${destFormatted}`;
 
   // If waiting for admin or lacking canApproveOwn:
-  const showWaitingNotice = (!canApproveOwn && isOwner) || request.waitingForAdmin;
+  // `waitingForAdmin` describes the request owner's permissions. Admins can
+  // still decide the request, so that owner-specific flag must not hide their
+  // controls.
+  const showWaitingNotice = !isAdmin && ((!canApproveOwn && isOwner) || request.waitingForAdmin);
 
   return (
     <article
