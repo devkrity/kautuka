@@ -103,7 +103,8 @@ builder.Services.AddSingleton(sp =>
         windowsPodmanMachineName: windowsPodmanDevEgress?.PodmanMachineName,
         windowsPodmanHookStateDirectory: windowsPodmanDevEgress?.RemoteHookStateDirectory,
         desiredStateStore: sp.GetRequiredService<WorkspaceDesiredStateStore>(),
-        imageCompatibilityStore: sp.GetRequiredService<ImageCompatibilityStore>()));
+        imageCompatibilityStore: sp.GetRequiredService<ImageCompatibilityStore>(),
+        policyStore: sp.GetRequiredService<NetworkAccessPolicyStore>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());

@@ -1,5 +1,7 @@
 using Kautuka.Manager.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -27,6 +29,31 @@ public sealed class DevelopmentNacStartupGuardTests
         var guard = CreateGuard(isOpen: true, Environments.Development);
 
         await guard.StartAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task DevelopmentWithPendingBrakeRetryStartsManagerWithoutOpeningLaunchGateAsync()
+    {
+        string tempDirectory = Path.Combine(Path.GetTempPath(), $"nac-dev-retry-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+        var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
+            0, string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman,
+            new WorkloadAddressAllocator(Path.Combine(tempDirectory, "cursor.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDirectory);
+        typeof(EgressTopologyManager).GetMethod("QueueStartupCanaryRetry", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(manager, [registry]);
+        var guard = new DevelopmentNacStartupGuard(
+            manager, new TestHostEnvironment(Environments.Development), NullLogger<DevelopmentNacStartupGuard>.Instance);
+
+        await guard.StartAsync(CancellationToken.None);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.True(manager.IsStartupRetryPending);
+        await manager.DisposeAsync();
+        Directory.Delete(tempDirectory, recursive: true);
     }
 
     [Fact]

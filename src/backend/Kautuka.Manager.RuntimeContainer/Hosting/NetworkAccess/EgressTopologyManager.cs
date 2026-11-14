@@ -68,6 +68,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly WorkloadPostStartVerifier postStartVerifier;
     private readonly WorkspaceDesiredStateStore? desiredStateStore;
     private readonly ImageCompatibilityStore? imageCompatibilityStore;
+    private readonly NetworkAccessPolicyStore? policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly string stateDirectory;
     private readonly string envoySocketHostDir;
@@ -88,6 +89,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private volatile bool topologyIncidentLatched;
     private volatile bool topologyContainmentComplete;
     private volatile bool transientRecoveryPending;
+    private volatile bool startupCanaryRetryPending;
+    private volatile bool startupCanaryBrakeObserved;
+    private bool startupIsWindowsHostNativeDev;
+    private string? startupDecisionEndpointIp;
+    private bool startupIncludeLanGrants;
     private string? expectedBoundaryRulesetHash;
     private string? expectedBoundaryNftSourceHash;
     private long unlabelledWorkloadCount;
@@ -111,7 +117,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string? windowsPodmanMachineName = null,
         string? windowsPodmanHookStateDirectory = null,
         WorkspaceDesiredStateStore? desiredStateStore = null,
-        ImageCompatibilityStore? imageCompatibilityStore = null)
+        ImageCompatibilityStore? imageCompatibilityStore = null,
+        NetworkAccessPolicyStore? policyStore = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -124,6 +131,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.postStartVerifier = postStartVerifier;
         this.desiredStateStore = desiredStateStore;
         this.imageCompatibilityStore = imageCompatibilityStore;
+        this.policyStore = policyStore;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -207,6 +215,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
     }
+
+    public bool IsStartupRetryPending => startupCanaryRetryPending;
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
@@ -380,6 +390,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(registry);
+        startupIsWindowsHostNativeDev = isWindowsHostNativeDev;
+        startupDecisionEndpointIp = decisionEndpointIp ?? windowsDecisionEndpointIp;
+        startupIncludeLanGrants = includeLanGrants;
 
         if (topologyIncidentLatched)
         {
@@ -408,7 +421,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         // 2. Ensure egress pod and containers exist, and write infra allowlist before start
         await EnsureEgressPodAsync(
             isWindowsHostNativeDev,
-            decisionEndpointIp ?? windowsDecisionEndpointIp,
+            startupDecisionEndpointIp,
             includeLanGrants,
             windowsEnvoyCertificateDirectory,
             cancellationToken).ConfigureAwait(false);
@@ -425,19 +438,37 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         await RebuildRegistryFromLiveContainersAsync(registry, cancellationToken).ConfigureAwait(false);
 
         // 4. Run startup self-test canary (Section 4.3.4 item 5)
-        bool canaryPassed = await RunStartupSelfTestAsync(cancellationToken).ConfigureAwait(false);
+        bool canaryPassed = await RunStartupCanaryOrDeferAsync(registry, cancellationToken).ConfigureAwait(false);
         if (!canaryPassed)
         {
             IsStartupGateOpen = false;
+            if (startupCanaryRetryPending)
+            {
+                return;
+            }
+
             logger.LogError("Startup canary self-test failed; startup gate closed.");
             throw new InvalidOperationException("Network access control self-test failed.");
         }
 
+        startupCanaryRetryPending = false;
         IsStartupGateOpen = true;
         logger.LogInformation("Startup canary self-test passed; startup gate open.");
 
         // 5. Start 30s reconcile loop
         StartReconcileLoop(registry);
+    }
+
+    private async Task<bool> RunStartupCanaryOrDeferAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    {
+        bool canaryPassed = await RunStartupSelfTestAsync(cancellationToken).ConfigureAwait(false);
+        if (!canaryPassed && (startupCanaryBrakeObserved || IsCanaryIdentityBraked()))
+        {
+            IsStartupGateOpen = false;
+            QueueStartupCanaryRetry(registry);
+        }
+
+        return canaryPassed;
     }
 
     /// <summary>
@@ -741,6 +772,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public async Task<bool> RunStartupSelfTestAsync(CancellationToken cancellationToken = default)
     {
+        startupCanaryBrakeObserved = IsCanaryIdentityBraked();
         string canaryName = $"kautuka-canary-{Guid.NewGuid():N}"[..24];
         string canaryIp = addressAllocator.AllocateNextIp(registry);
 
@@ -756,7 +788,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 Egress = "deny-all",
                 Persistent = true,
                 StartupGateOpen = true,
-                IsBraked = false,
+                IsBraked = startupCanaryBrakeObserved,
             };
 
             IReadOnlyList<string> runArgs = spec.Render();
@@ -829,6 +861,19 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 // Ignore cleanup error
             }
         }
+    }
+
+    private bool IsCanaryIdentityBraked()
+    {
+        BrakeState? brake = policyStore?.GetBrakeSnapshot();
+        return brake is not null && (brake.System || brake.IsUserBraked("system"));
+    }
+
+    private void QueueStartupCanaryRetry(IWorkloadRegistry registry)
+    {
+        startupCanaryRetryPending = true;
+        logger.LogWarning("Startup canary is paused by the persisted brake; the startup gate remains closed and reconcile will retry after brake release.");
+        StartReconcileLoop(registry);
     }
 
     internal static bool HasSuccessfulCanaryHookRecord(string? hookLog, string canaryIp, string canaryId)
@@ -1098,7 +1143,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string envoyPath = Path.Combine(envoyConfigDir, "envoy.yaml");
         string corefilePath = Path.Combine(dnsConfigDir, "Corefile");
 
-        expectedBoundaryNftSourceHash = ComputeBoundaryNftSourceHash(boundaryNft);
+        expectedBoundaryNftSourceHash = ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+        await EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundaryNft, envoyConfig, corefile, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
+
         await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
@@ -1337,6 +1385,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         ArgumentNullException.ThrowIfNull(renderedBoundaryNft);
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(renderedBoundaryNft)));
+    }
+
+    internal static string ComputeReconcileConfigurationHash(string boundaryNft, string envoyConfig, string corefile)
+    {
+        ArgumentNullException.ThrowIfNull(boundaryNft);
+        ArgumentNullException.ThrowIfNull(envoyConfig);
+        ArgumentNullException.ThrowIfNull(corefile);
+        return ComputeBoundaryNftSourceHash($"boundary.nft\0{boundaryNft}\0envoy.yaml\0{envoyConfig}\0Corefile\0{corefile}");
     }
 
     internal static void RequireMatchingBoundaryRulesetHash(string renderedNativeHash, string liveHash)
@@ -2179,6 +2235,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private void StartReconcileLoop(IWorkloadRegistry registry)
     {
+        if (reconcileTask is { IsCompleted: false })
+        {
+            return;
+        }
+
         reconcileCts = new CancellationTokenSource();
         CancellationToken token = reconcileCts.Token;
 
@@ -2213,6 +2274,72 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
+        if (startupCanaryRetryPending)
+        {
+            if (IsCanaryIdentityBraked())
+            {
+                return;
+            }
+
+            string currentStartupConfigurationHash;
+            try
+            {
+                currentStartupConfigurationHash = await ReadRenderedReconcileConfigurationHashAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(ex, "Rendered egress configuration could not be read before startup retry; recovering with the launch gate closed.");
+                lock (gateLock)
+                {
+                    transientRecoveryPending = true;
+                }
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash)
+                || string.IsNullOrWhiteSpace(currentStartupConfigurationHash))
+            {
+                logger.LogWarning("Rendered egress configuration hash is unavailable before startup retry; recovering with the launch gate closed.");
+                lock (gateLock)
+                {
+                    transientRecoveryPending = true;
+                }
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!string.Equals(currentStartupConfigurationHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal))
+            {
+                await LatchTopologyIncidentAndContainAsync(registry, "rendered egress configuration drift during startup retry", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            try
+            {
+                await InitializeAsync(
+                    registry,
+                    startupIsWindowsHostNativeDev,
+                    startupDecisionEndpointIp,
+                    startupIncludeLanGrants,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                CloseLaunchAdmission();
+                logger.LogWarning(ex, "Startup revalidation after persisted brake release did not complete; the startup gate remains closed.");
+            }
+            return;
+        }
+
         if (!IsStartupGateOpen && transientRecoveryPending)
         {
             await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
@@ -2230,7 +2357,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             string currentSourceHash;
             try
             {
-                currentSourceHash = await ReadRenderedBoundaryNftSourceHashAsync(cancellationToken).ConfigureAwait(false);
+                currentSourceHash = await ReadRenderedReconcileConfigurationHashAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -2238,22 +2365,22 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                logger.LogWarning(ex, "Rendered boundary nft source could not be read during reconcile; recreating the egress pod with the startup gate closed.");
+                logger.LogWarning(ex, "Rendered egress configuration could not be read during reconcile; recreating the egress pod with the startup gate closed.");
                 await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash) || string.IsNullOrWhiteSpace(currentSourceHash))
             {
-                logger.LogWarning("Rendered boundary nft source hash is unavailable; recreating the egress pod with the startup gate closed.");
+                logger.LogWarning("Rendered egress configuration hash is unavailable; recreating the egress pod with the startup gate closed.");
                 await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
             if (!string.Equals(currentSourceHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal))
             {
-                logger.LogError("Rendered boundary nft source changed during reconcile; closing the NAC startup gate.");
-                await LatchTopologyIncidentAndContainAsync(registry, "rendered boundary source drift", cancellationToken).ConfigureAwait(false);
+                logger.LogError("Rendered egress configuration changed during reconcile; closing the NAC startup gate.");
+                await LatchTopologyIncidentAndContainAsync(registry, "rendered egress configuration drift", cancellationToken).ConfigureAwait(false);
                 return;
             }
         }
@@ -2572,6 +2699,17 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 }
 
                 expectedBoundaryRulesetHash = renderedHash;
+            }
+
+            if (startupCanaryRetryPending)
+            {
+                lock (gateLock)
+                {
+                    transientRecoveryPending = false;
+                    IsStartupGateOpen = false;
+                }
+                logger.LogInformation("Egress topology was recovered while startup canary retry is pending; the launch gate remains closed for full startup revalidation.");
+                return;
             }
 
             if (TryCompleteTransientRecovery())
@@ -3093,11 +3231,58 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return string.Empty;
     }
 
-    private async Task<string> ReadRenderedBoundaryNftSourceHashAsync(CancellationToken cancellationToken)
+    private async Task<string> ReadRenderedReconcileConfigurationHashAsync(CancellationToken cancellationToken)
     {
         string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
-        string currentSource = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
-        return ComputeBoundaryNftSourceHash(currentSource);
+        string envoyPath = Path.Combine(stateDirectory, "nac", "envoy", "envoy.yaml");
+        string corefilePath = Path.Combine(stateDirectory, "nac", "dns", "Corefile");
+        string boundaryNft = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
+        string envoyConfig = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
+        string corefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
+        return ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+    }
+
+    private async Task<bool> ExistingReconcileConfigurationMatchesAsync(
+        string boundaryNft,
+        string envoyConfig,
+        string corefile,
+        CancellationToken cancellationToken)
+    {
+        string nacDirectory = Path.Combine(stateDirectory, "nac");
+        string boundaryPath = Path.Combine(nacDirectory, "boundary", "boundary.nft");
+        string envoyPath = Path.Combine(nacDirectory, "envoy", "envoy.yaml");
+        string corefilePath = Path.Combine(nacDirectory, "dns", "Corefile");
+        if (!File.Exists(boundaryPath) || !File.Exists(envoyPath) || !File.Exists(corefilePath))
+        {
+            return false;
+        }
+
+        string existingBoundary = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
+        string existingEnvoy = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
+        string existingCorefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
+        return string.Equals(
+            ComputeReconcileConfigurationHash(existingBoundary, existingEnvoy, existingCorefile),
+            ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile),
+            StringComparison.Ordinal);
+    }
+
+    private async Task EnsureExistingEgressPodUsesRenderedConfigAsync(
+        string boundaryNft,
+        string envoyConfig,
+        string corefile,
+        bool isWindowsHostNativeDev,
+        CancellationToken cancellationToken)
+    {
+        if (isWindowsHostNativeDev
+            || await ExistingReconcileConfigurationMatchesAsync(boundaryNft, envoyConfig, corefile, cancellationToken).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        // Existing Envoy/CoreDNS processes keep their loaded configuration in memory.
+        // Recreate the pod before replacing the bind-mounted files so startup loads the
+        // same bytes represented by the expected reconcile hash.
+        await RemoveEgressPodIfPresentAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public ValueTask DisposeAsync()

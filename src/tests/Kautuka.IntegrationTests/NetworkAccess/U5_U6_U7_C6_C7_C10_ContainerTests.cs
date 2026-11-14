@@ -1677,6 +1677,31 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-existing-pod-callsite-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        System.Reflection.MethodInfo discoverDns = typeof(EgressTopologyManager).GetMethod(
+            "DiscoverUpstreamDnsIpsAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("DiscoverUpstreamDnsIpsAsync method was not found.");
+        IReadOnlyList<string> upstreamDnsIps = await ((Task<IReadOnlyList<string>>)discoverDns.Invoke(
+            manager, [TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        string nacDirectory = Path.Combine(tempDir, "nac");
+        string boundaryDirectory = Path.Combine(nacDirectory, "boundary");
+        string envoyDirectory = Path.Combine(nacDirectory, "envoy");
+        string dnsDirectory = Path.Combine(nacDirectory, "dns");
+        Directory.CreateDirectory(boundaryDirectory);
+        Directory.CreateDirectory(envoyDirectory);
+        Directory.CreateDirectory(dnsDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(boundaryDirectory, "boundary.nft"),
+            BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, upstreamDnsIps: upstreamDnsIps),
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(envoyDirectory, "envoy.yaml"),
+            BoundaryRulesetRenderer.RenderEnvoyConfig("/run/kautuka-admin/admin.sock", isWindowsMtls: false),
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            Path.Combine(dnsDirectory, "Corefile"),
+            BoundaryRulesetRenderer.RenderCorefile(EgressTopologyManager.EgressPodIp),
+            TestContext.Current.CancellationToken);
         System.Reflection.MethodInfo ensurePod = typeof(EgressTopologyManager).GetMethod(
             "EnsureEgressPodAsync",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
@@ -1788,14 +1813,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         const string infraInspect = "[{\"State\":{\"Pid\":4242}}]";
         const string ipv4Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
         const string ipv6Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip6\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip6\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
-        string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
-        string nacDirectory = Path.Combine(tempDir, "nac", "boundary");
-        Directory.CreateDirectory(nacDirectory);
-        await File.WriteAllTextAsync(
-            Path.Combine(nacDirectory, "boundary.nft"),
-            rendered + "# changed",
-            TestContext.Current.CancellationToken);
-
         var podman = new PodmanCommandRunner((args, _) =>
         {
             string output = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"])
@@ -1815,17 +1832,17 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-source-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman, new WorkspaceDesiredStateStore());
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        await File.AppendAllTextAsync(
+            Path.Combine(tempDir, "nac", "boundary", "boundary.nft"),
+            "# changed",
+            TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, true);
         typeof(EgressTopologyManager)
             .GetField("expectedBoundaryRulesetHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4Rules, ipv6Rules));
-        var renderedHashField = typeof(EgressTopologyManager)
-            .GetField("expectedBoundaryNftSourceHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
-        Assert.NotNull(renderedHashField);
-        renderedHashField!.SetValue(manager, EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
-
         await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
 
         Assert.False(manager.IsStartupGateOpen);
@@ -2272,6 +2289,272 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task V7_20_StartupCanaryUsesPersistedSystemBrakeState()
+    {
+        string policyPath = Path.Combine(tempDir, "v720-canary-policy.json");
+        using var policyStore = new NetworkAccessPolicyStore(policyPath);
+        policyStore.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "system", null, on: true);
+        var calls = new List<IReadOnlyList<string>>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, "unexpected", ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-canary-ip.json"));
+        await using var manager = new EgressTopologyManager(
+            podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir, policyStore: policyStore);
+
+        bool passed = await manager.RunStartupSelfTestAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(passed);
+        Assert.DoesNotContain(calls, args => args.Count > 0 && args[0] == "run");
+        Assert.Contains(calls, args => args.Count == 3 && args[0] == "rm" && args[1] == "-f" && args[2].StartsWith("kautuka-canary-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task V7_20_StartupCanaryBrakeReleaseDuringFailureStillQueuesRetry()
+    {
+        using var policyStore = new NetworkAccessPolicyStore(Path.Combine(tempDir, "v720-canary-race-policy.json"));
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        policyStore.SetBrake(admin, "system", null, on: true);
+        var registry = new WorkloadRegistry();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.Count == 3 && args[0] == "rm" && args[1] == "-f")
+            {
+                policyStore.SetBrake(admin, "system", null, on: false);
+            }
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, "braked", ProcessTerminationReason.Completed));
+        });
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-canary-race-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir, policyStore: policyStore);
+        System.Reflection.MethodInfo runCanary = typeof(EgressTopologyManager).GetMethod(
+            "RunStartupCanaryOrDeferAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("RunStartupCanaryOrDeferAsync method was not found.");
+
+        bool passed = await ((Task<bool>)runCanary.Invoke(manager, [registry, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+
+        Assert.False(passed);
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.True(manager.IsStartupRetryPending);
+    }
+
+    [Fact]
+    public async Task V7_20_DeferredStartupReinitializesAndStaysClosedWhenPodDriftsAfterBrakeRelease()
+    {
+        string policyPath = Path.Combine(tempDir, "v720-canary-retry-policy.json");
+        using var policyStore = new NetworkAccessPolicyStore(policyPath);
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        policyStore.SetBrake(admin, "system", null, on: true);
+        var calls = new List<IReadOnlyList<string>>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-canary-retry-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir, policyStore: policyStore);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        typeof(EgressTopologyManager).GetMethod("QueueStartupCanaryRetry", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(manager, [registry]);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.DoesNotContain(calls, args => args.Count > 0 && args[0] == "run");
+
+        policyStore.SetBrake(admin, "system", null, on: false);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.Contains(calls, args => args.SequenceEqual(["info", "--format", "{{.Host.Distribution.Distribution}}"]));
+        Assert.DoesNotContain(calls, args => args.Count > 0 && args[0] == "run");
+    }
+
+    [Fact]
+    public async Task V7_20_StartupRetryLatchesConfigTamperingDuringBrakeWait_WithNegativeControl()
+    {
+        string policyPath = Path.Combine(tempDir, "v720-config-tamper-policy.json");
+        using var policyStore = new NetworkAccessPolicyStore(policyPath);
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        policyStore.SetBrake(admin, "system", null, on: true);
+        var calls = new List<IReadOnlyList<string>>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-tamper-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir, policyStore: policyStore);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        typeof(EgressTopologyManager).GetMethod("QueueStartupCanaryRetry", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(manager, [registry]);
+
+        await File.AppendAllTextAsync(
+            Path.Combine(tempDir, "nac", "envoy", "envoy.yaml"), "# modified while braked\n", TestContext.Current.CancellationToken);
+        policyStore.SetBrake(admin, "system", null, on: false);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.True((bool)typeof(EgressTopologyManager)
+            .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(manager)!);
+        Assert.DoesNotContain(calls, args => args.Count > 0 && args[0] == "info");
+    }
+
+    [Fact]
+    public async Task V7_20_StartupRetryConfigReadFailureRecoversWithoutLatching()
+    {
+        var calls = new List<IReadOnlyList<string>>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-retry-read-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        typeof(EgressTopologyManager).GetMethod("QueueStartupCanaryRetry", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(manager, [registry]);
+        File.Delete(Path.Combine(tempDir, "nac", "dns", "Corefile"));
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.False((bool)typeof(EgressTopologyManager)
+            .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(manager)!);
+        Assert.DoesNotContain(calls, args => args.Count > 0 && args[0] == "info");
+    }
+
+    [Fact]
+    public async Task V7_20_StartupRecreatesEgressPodWhenRenderedConfigBytesChanged()
+    {
+        string boundary = "boundary desired";
+        string envoy = "envoy desired";
+        string corefile = "dns desired";
+        string nac = Path.Combine(tempDir, "nac");
+        Directory.CreateDirectory(Path.Combine(nac, "boundary"));
+        Directory.CreateDirectory(Path.Combine(nac, "envoy"));
+        Directory.CreateDirectory(Path.Combine(nac, "dns"));
+        await File.WriteAllTextAsync(Path.Combine(nac, "boundary", "boundary.nft"), boundary, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(nac, "envoy", "envoy.yaml"), envoy, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), "old loaded config", TestContext.Current.CancellationToken);
+        var calls = new List<IReadOnlyList<string>>();
+        bool failRemoval = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            int exitCode = failRemoval && args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]) ? 1 : 0;
+            return Task.FromResult(new PodmanCommandResult(exitCode, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-recreate-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir);
+        System.Reflection.MethodInfo ensureConfig = typeof(EgressTopologyManager).GetMethod(
+            "EnsureExistingEgressPodUsesRenderedConfigAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("EnsureExistingEgressPodUsesRenderedConfigAsync method was not found.");
+
+        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.Contains(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
+
+        calls.Clear();
+        await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), corefile, TestContext.Current.CancellationToken);
+        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
+
+        await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), "old loaded config again", TestContext.Current.CancellationToken);
+        failRemoval = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!);
+        Assert.False(manager.IsStartupGateOpen);
+    }
+
+    [Fact]
+    public async Task V7_20_ReconcileConfigReadFailureRemainsTransientAndDoesNotLatch()
+    {
+        var calls = new List<IReadOnlyList<string>>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            int exitCode = args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]) ? 1 : 0;
+            return Task.FromResult(new PodmanCommandResult(exitCode, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-read-failure-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir);
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        typeof(EgressTopologyManager).GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+        File.Delete(Path.Combine(tempDir, "nac", "envoy", "envoy.yaml"));
+
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.False((bool)typeof(EgressTopologyManager)
+            .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(manager)!);
+    }
+
+    [Fact]
+    public async Task V7_20_ReconcileLatchesOnEnvoyOrCoreDnsConfigurationDrift_WithNegativeControl()
+    {
+        const string healthyPod = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra\",\"Containers\":["
+            + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
+            + "{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},"
+            + "{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+        const string ipv4 = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
+        const string ipv6 = "{\"nftables\":[{\"table\":{\"family\":\"ip6\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip6\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
+
+        foreach (string relativePath in new[] { "envoy/envoy.yaml", "dns/Corefile" })
+        {
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                string output = args[0] switch
+                {
+                    "pod" => healthyPod,
+                    "inspect" when args.Count > 1 && args[1] == "kautuka-egress-boundary" => "[{\"State\":{\"Status\":\"exited\",\"ExitCode\":0}}]",
+                    "inspect" => "[{\"State\":{\"Pid\":123}}]",
+                    "machine" when args.Count > 3 && args[3].Contains("table ip6", StringComparison.Ordinal) => ipv6,
+                    "machine" => ipv4,
+                    "ps" => "[]",
+                    _ => "[]"
+                };
+                return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+            });
+            var registry = new WorkloadRegistry();
+            var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, $"v720-{Path.GetFileName(relativePath)}-ip.json"));
+            await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir,
+                windowsPodmanMachineName: "dev", windowsPodmanHookStateDirectory: "/tmp/kautuka-nac-test");
+            await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+            typeof(EgressTopologyManager).GetField("expectedBoundaryRulesetHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(manager, EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4, ipv6));
+            typeof(EgressTopologyManager).GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(manager, true);
+
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.True(manager.IsStartupGateOpen);
+
+            string configPath = Path.Combine(tempDir, "nac", relativePath);
+            await File.AppendAllTextAsync(configPath, "# drift\n", TestContext.Current.CancellationToken);
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.False(manager.IsStartupGateOpen);
+            Assert.True((bool)typeof(EgressTopologyManager)
+                .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(manager)!);
+        }
+    }
+
+    [Fact]
     public async Task V7_20_ReconcileClosesGateWhenBoundaryInitFailed_WithNegativeControl()
     {
         const string healthyPod = "[{\"State\":\"Running\",\"Containers\":["
@@ -2498,8 +2781,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         string nacDirectory = Path.Combine(tempDir, "nac", "boundary");
         Directory.CreateDirectory(nacDirectory);
         await File.WriteAllTextAsync(Path.Combine(nacDirectory, "boundary.nft"), rendered, cancellationToken);
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig("/run/kautuka-admin/admin.sock", isWindowsMtls: false);
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressTopologyManager.EgressPodIp);
+        string envoyDirectory = Path.Combine(tempDir, "nac", "envoy");
+        string dnsDirectory = Path.Combine(tempDir, "nac", "dns");
+        Directory.CreateDirectory(envoyDirectory);
+        Directory.CreateDirectory(dnsDirectory);
+        await File.WriteAllTextAsync(Path.Combine(envoyDirectory, "envoy.yaml"), envoy, cancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(dnsDirectory, "Corefile"), corefile, cancellationToken);
         typeof(EgressTopologyManager)
             .GetField("expectedBoundaryNftSourceHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .SetValue(manager, EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
+            .SetValue(manager, EgressTopologyManager.ComputeReconcileConfigurationHash(rendered, envoy, corefile));
     }
 }
