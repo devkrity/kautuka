@@ -90,8 +90,11 @@ public sealed record WindowsPodmanDevEgressOptions(
             stagedHookConfig, $"{remoteHookDirectory}/kautuka_hook.json", cancellationToken).ConfigureAwait(false);
 
         string remoteConfigFragment = Path.Combine(resolvedCertificateDirectory, "99-kautuka-nac.conf");
+        // containers/common otherwise replaces hooks_dir and hides user hooks. Append mode
+        // persists for subsequently loaded fragments, so the NAC drop-in is named late and
+        // later hooks_dir assignments will append instead of replacing the accumulated list.
         await File.WriteAllTextAsync(remoteConfigFragment,
-            $"[engine]{Environment.NewLine}hooks_dir = [\"/usr/share/containers/oci/hooks.d\", \"/etc/containers/oci/hooks.d\", \"{remoteHookDirectory}\"]{Environment.NewLine}",
+            RenderHookDirectoryConfig(remoteHookDirectory),
             cancellationToken).ConfigureAwait(false);
         await CopyToMachineAsync(podmanRunner, machineName,
             remoteConfigFragment, $"{remoteConfigDirectory}/99-kautuka-nac.conf", cancellationToken).ConfigureAwait(false);
@@ -227,6 +230,17 @@ public sealed record WindowsPodmanDevEgressOptions(
         }
 
         throw new InvalidOperationException("Podman Machine did not report a usable IPv4 default gateway.");
+    }
+
+    internal static string RenderHookDirectoryConfig(string remoteHookDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(remoteHookDirectory);
+        string escapedDirectory = remoteHookDirectory
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal);
+        return $"[engine]{Environment.NewLine}hooks_dir = [\"{escapedDirectory}\", {{append = true}}]{Environment.NewLine}";
     }
 
     public static async Task WriteClientBundleAsync(
