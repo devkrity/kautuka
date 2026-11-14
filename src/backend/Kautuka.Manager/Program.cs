@@ -106,11 +106,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyMana
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
-builder.Services.AddSingleton(sp =>
-    new Kautuka.NetworkAccessController.NetworkAccessController(
-        sp.GetRequiredService<NetworkAccessPolicyStore>(),
-        sp.GetRequiredService<IWorkloadRegistry>(),
-        sp.GetRequiredService<NetworkAccessAuditRing>()));
+builder.Services.AddManagerNetworkAccessController();
 
 if (OperatingSystem.IsLinux())
 {

@@ -16,6 +16,7 @@ public sealed class NetworkAccessController
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
+    private readonly Func<bool>? isContainerAuthorizationGateOpen;
 
     private long checks;
     private long allowed;
@@ -27,13 +28,15 @@ public sealed class NetworkAccessController
     public NetworkAccessController(
         NetworkAccessPolicyStore policyStore,
         IWorkloadRegistry registry,
-        NetworkAccessAuditRing? auditRing = null)
+        NetworkAccessAuditRing? auditRing = null,
+        Func<bool>? isContainerAuthorizationGateOpen = null)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
         this.policyStore = policyStore;
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
+        this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -103,6 +106,33 @@ public sealed class NetworkAccessController
     {
         Interlocked.Increment(ref checks);
         DateTimeOffset now = DateTimeOffset.UtcNow;
+
+        // The topology gate revokes new container authorization decisions during boundary
+        // incidents. It does not revoke established connections; workload containment handles those.
+        if (isContainerAuthorizationGateOpen is not null)
+        {
+            bool gateOpen;
+            try
+            {
+                gateOpen = isContainerAuthorizationGateOpen();
+            }
+            catch
+            {
+                gateOpen = false;
+            }
+
+            if (!gateOpen)
+            {
+                bool foundEntry = registry.TryGetByIp(sourceIp, out RegistryEntry? gateEntry);
+                return RecordDeny(
+                    now,
+                    sourceIp,
+                    foundEntry ? gateEntry : null,
+                    sni ?? destinationIp ?? string.Empty,
+                    destinationPort,
+                    "topology_closed");
+            }
+        }
 
         // 0. Emergency Brake check FIRST (Section 4.1.4 / C21)
         NetworkAccessPolicyState state = policyStore.GetRawStateSnapshot();
