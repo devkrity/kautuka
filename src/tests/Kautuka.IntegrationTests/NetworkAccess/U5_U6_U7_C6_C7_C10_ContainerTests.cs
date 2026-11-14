@@ -405,6 +405,65 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Equal("address replace 10.248.0.3/24 dev enp0s8", File.ReadAllText(capturePath).Trim());
     }
 
+    [Theory]
+    [InlineData("image")]
+    [InlineData("same-tag-image-id")]
+    [InlineData("partial-pod")]
+    [InlineData("partial-pod-created")]
+    [InlineData("partial-pod-configured")]
+    [InlineData("args")]
+    [InlineData("current")]
+    public async Task V7_53_ExistingInfraContainerIsRecreatedWhenImageOrArgsDrift(string drift)
+    {
+        string image = EgressTopologyManager.EnvoyPinnedImage;
+        string[] args = ["create", "--name", "kautuka-egress-envoy", "--network", "kautuka-egress", image, "--config-path", "/etc/kautuka-envoy/envoy.yaml"];
+        string[] actual = drift == "image"
+            ? ["podman", "create", "--name", "kautuka-egress-envoy", "--network", "kautuka-egress", "docker.io/envoyproxy/envoy:old", "--config-path", "/etc/kautuka-envoy/envoy.yaml"]
+            : drift == "args"
+                ? ["podman", "create", "--name", "kautuka-egress-envoy", "--network", "kautuka-egress", image, "--config-path", "/old/envoy.yaml"]
+                : new[] { "podman" }.Concat(args).ToArray();
+        bool imageIdDrift = drift is "same-tag-image-id" or "partial-pod" or "partial-pod-created" or "partial-pod-configured";
+        string staleInspect = JsonSerializer.Serialize(new[] { new { Id = "old-envoy", Image = imageIdDrift ? "sha256:old" : "sha256:current", Config = new { CreateCommand = actual } } });
+        var calls = new List<IReadOnlyList<string>>();
+        bool removed = false;
+        string podState = drift is "partial-pod-created" or "partial-pod-configured" ? "Created" : "Running";
+        var podman = new PodmanCommandRunner((call, _) =>
+        {
+            calls.Add(call.ToArray());
+            string output = call.SequenceEqual(["inspect", "kautuka-egress-envoy"])
+                ? (removed ? JsonSerializer.Serialize(new[] { new { Id = "new-envoy", Image = "sha256:current", Config = new { CreateCommand = new[] { "podman" }.Concat(args).ToArray() } } }) : staleInspect)
+                : call.SequenceEqual(["image", "inspect", image]) ? "[{\"Id\":\"sha256:current\"}]"
+                : call.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])
+                    ? drift.StartsWith("partial-pod", StringComparison.Ordinal)
+                        ? $"[{{\"State\":\"{podState}\",\"InfraContainerID\":\"infra\",\"Containers\":[{{\"Id\":\"envoy\",\"Name\":\"kautuka-egress-envoy\",\"State\":\"{(podState == "Running" ? "running" : drift == "partial-pod-configured" ? "configured" : "created")}\"}},{{\"Id\":\"infra\",\"Name\":\"kautuka-egress-pod-infra\",\"State\":\"{(podState == "Running" ? "running" : drift == "partial-pod-configured" ? "configured" : podState == "Created" ? "created" : "exited")}\"}}]}}]"
+                        : $"[{{\"State\":\"{podState}\",\"InfraContainerID\":\"infra\",\"Containers\":[{{\"Id\":\"boundary\",\"Name\":\"kautuka-egress-boundary\",\"State\":\"{(podState == "Running" ? "running" : "exited")}\"}},{{\"Id\":\"dns\",\"Name\":\"kautuka-egress-dns\",\"State\":\"{(podState == "Running" ? "running" : "created")}\"}},{{\"Id\":\"envoy\",\"Name\":\"kautuka-egress-envoy\",\"State\":\"{(podState == "Running" ? "running" : "created")}\"}},{{\"Id\":\"infra\",\"Name\":\"kautuka-egress-pod-infra\",\"State\":\"{(podState == "Running" ? "running" : "exited")}\"}}]}}]"
+                    : string.Empty;
+            if (call.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName])) podState = "Exited";
+            if (call.SequenceEqual(["rm", "-f", "kautuka-egress-envoy"])) removed = true;
+            return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v753.json")), new WorkloadPostStartVerifier(podman), registry, tempDir);
+        var ensure = typeof(EgressTopologyManager).GetMethod("EnsureInfraContainerCreatedAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        await ((Task)ensure.Invoke(manager, ["kautuka-egress-envoy", "egress-envoy", image, args, new List<InfraAllowlistEntry>(), TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        if (drift == "current")
+        {
+            Assert.DoesNotContain(calls, c => c.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+            Assert.DoesNotContain(calls, c => c.SequenceEqual(["rm", "-f", "kautuka-egress-envoy"]));
+            Assert.DoesNotContain(calls, c => c.SequenceEqual(args));
+        }
+        else
+        {
+            if (drift is "partial-pod-created" or "partial-pod-configured")
+                Assert.DoesNotContain(calls, c => c.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+            else
+                Assert.Contains(calls, c => c.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+            Assert.Contains(calls, c => c.SequenceEqual(["rm", "-f", "kautuka-egress-envoy"]));
+            Assert.Contains(calls, c => c.SequenceEqual(args));
+        }
+        Assert.Contains(calls, c => c.SequenceEqual(["inspect", "kautuka-egress-envoy"]));
+    }
+
     [Fact]
     public async Task V7_51_ProductionHostedStartupEnablesLanGrants_WithNegativeControl()
     {
@@ -1936,10 +1995,33 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var secondRecoveryPodStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseSecondRecoveryPodStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var containerInspectCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        string certificateDirectory = Path.Combine(tempDir, "v754-certs");
+        Directory.CreateDirectory(certificateDirectory);
+        string boundaryDirectory = Path.Combine(tempDir, "nac", "boundary");
+        string dnsDirectory = Path.Combine(tempDir, "nac", "dns");
+        string envoyDirectory = Path.Combine(tempDir, "nac", "envoy");
+        string socketsDirectory = Path.Combine(tempDir, "sockets");
+        string adminDirectory = Path.Combine(tempDir, "admin-socket");
+        bool isWindowsHostNativeDev = OperatingSystem.IsWindows();
+        var createdContainerCommands = new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["kautuka-egress-boundary"] = ["podman", .. EgressTopologyManager.BuildBoundaryCreateArgs(boundaryDirectory, isWindowsHostNativeDev)],
+            ["kautuka-egress-dns"] = ["podman", .. EgressTopologyManager.BuildCoreDnsCreateArgs(Path.Combine(dnsDirectory, "Corefile"), isWindowsHostNativeDev)],
+            ["kautuka-egress-envoy"] = ["podman", .. EgressTopologyManager.BuildEnvoyCreateArgs(Path.Combine(envoyDirectory, "envoy.yaml"), socketsDirectory, adminDirectory, isWindowsHostNativeDev, "192.168.1.10", certificateDirectory)]
+        };
         var podman = new PodmanCommandRunner((args, _) =>
         {
             string call = string.Join(" ", args);
             calls.Add(call);
+            if (args.Count > 0 && args[0] == "create")
+            {
+                int nameIndex = args.ToList().IndexOf("--name");
+                if (nameIndex >= 0 && nameIndex + 1 < args.Count)
+                    createdContainerCommands[args[nameIndex + 1]] = ["podman", .. args];
+            }
+
+            if (args.Count == 3 && args[0] == "image" && args[1] == "inspect")
+                return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"sha256:v754-image\"}]", string.Empty, ProcessTerminationReason.Completed));
             if (args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"]))
             {
                 formattedPodInspects++;
@@ -2008,7 +2090,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
                 containerInspectCounts[name] = count;
                 return Task.FromResult(count == 1
                     ? new PodmanCommandResult(125, string.Empty, "missing", ProcessTerminationReason.NonZeroExit)
-                    : new PodmanCommandResult(0, containerId, string.Empty, ProcessTerminationReason.Completed));
+                    : new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { new { Id = JsonDocument.Parse(containerId).RootElement.GetProperty("Id").GetString(), Image = "sha256:v754-image", Config = new { CreateCommand = createdContainerCommands.TryGetValue(name, out string[]? command) ? command : [] } } }), string.Empty, ProcessTerminationReason.Completed));
             }
 
             if (args.Count >= 4 && args[0] == "machine" && args[1] == "ssh")
@@ -2038,8 +2120,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
             return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
         });
-        string certificateDirectory = Path.Combine(tempDir, "v754-certs");
-        Directory.CreateDirectory(certificateDirectory);
         var registry = new WorkloadRegistry();
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v754-recovery-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);

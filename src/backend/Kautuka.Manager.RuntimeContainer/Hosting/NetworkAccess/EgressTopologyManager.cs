@@ -1555,9 +1555,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
                 ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
                 : doc.RootElement;
-            if (container.ValueKind != JsonValueKind.Object
-                || !container.TryGetProperty("CreateCommand", out JsonElement command)
-                || command.ValueKind != JsonValueKind.Array)
+            if (!TryGetCreateCommand(container, out JsonElement command))
             {
                 return false;
             }
@@ -1590,9 +1588,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
                 ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
                 : doc.RootElement;
-            if (container.ValueKind != JsonValueKind.Object
-                || !container.TryGetProperty("CreateCommand", out JsonElement command)
-                || command.ValueKind != JsonValueKind.Array)
+            if (!TryGetCreateCommand(container, out JsonElement command))
             {
                 return false;
             }
@@ -1612,6 +1608,35 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return false;
         }
     }
+
+    internal static bool HasRequiredInfraContainerImageAndArgs(string? inspectJson, string expectedImage, IReadOnlyList<string> expectedCreateArgs)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson) || string.IsNullOrWhiteSpace(expectedImage)) return false;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default) : doc.RootElement;
+            if (!TryGetCreateCommand(container, out JsonElement command)) return false;
+            string[] actual = command.EnumerateArray().Where(t => t.ValueKind == JsonValueKind.String).Select(t => t.GetString()!).ToArray();
+            string[] expected = expectedCreateArgs.ToArray();
+            if (actual.Length > 0 && string.Equals(Path.GetFileName(actual[0]), "podman", StringComparison.OrdinalIgnoreCase)) actual = actual.Skip(1).ToArray();
+            if (actual.Length > 0 && string.Equals(Path.GetFileName(actual[0]), "create", StringComparison.OrdinalIgnoreCase)) actual = actual.Skip(1).ToArray();
+            if (expected.Length > 0 && string.Equals(Path.GetFileName(expected[0]), "create", StringComparison.OrdinalIgnoreCase)) expected = expected.Skip(1).ToArray();
+            return actual.SequenceEqual(expected, StringComparer.Ordinal) && actual.Any(arg => string.Equals(arg, expectedImage, StringComparison.Ordinal));
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool TryGetCreateCommand(JsonElement container, out JsonElement command)
+    {
+        command = default;
+        if (container.ValueKind != JsonValueKind.Object) return false;
+        if (container.TryGetProperty("Config", out JsonElement config) && config.ValueKind == JsonValueKind.Object
+            && config.TryGetProperty("CreateCommand", out command) && command.ValueKind == JsonValueKind.Array) return true;
+        return container.TryGetProperty("CreateCommand", out command) && command.ValueKind == JsonValueKind.Array;
+    }
+
 
     private async Task EnsureConfigContainerMountCurrentAsync(string containerName, string configDirectory, string containerConfigDirectory, bool isWindowsHostNativeDev, CancellationToken cancellationToken)
     {
@@ -1753,7 +1778,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private static bool IsPodStopped(string? state) =>
         string.Equals(state, "Exited", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(state, "Created", StringComparison.OrdinalIgnoreCase);
 
     private static bool HasOnlyInactiveEgressPodMembers(string? inspectJson)
     {
@@ -1792,7 +1818,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     || !ids.Add(id)
                     || !(string.Equals(state, "exited", StringComparison.OrdinalIgnoreCase)
                         || string.Equals(state, "stopped", StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(state, "created", StringComparison.OrdinalIgnoreCase)))
+                        || string.Equals(state, "created", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(state, "configured", StringComparison.OrdinalIgnoreCase)))
                 {
                     return false;
                 }
@@ -1802,9 +1829,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
 
             return hasMatchingInfra
-                && names.Contains("kautuka-egress-boundary")
-                && names.Contains("kautuka-egress-dns")
-                && names.Contains("kautuka-egress-envoy");
+                && (names.Contains("kautuka-egress-boundary") || names.Contains("kautuka-egress-dns") || names.Contains("kautuka-egress-envoy"));
         }
         catch (JsonException)
         {
@@ -1859,6 +1884,16 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 .RunAsync(["inspect", containerName], 10, cancellationToken)
                 .ConfigureAwait(false);
         }
+        else if (createArgs.Count > 0 && !await IsInfraContainerCurrentAsync(inspect.StdOut, imageDigest, createArgs, cancellationToken).ConfigureAwait(false))
+        {
+            await ReplaceStaleInfraContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
+            PodmanCommandResult createRes = await podmanRunner.RunAsync(createArgs, 30, cancellationToken).ConfigureAwait(false);
+            if (createRes.ExitCode != 0)
+                throw new InvalidOperationException($"Failed to recreate infrastructure container '{containerName}': {createRes.StdErr}");
+            inspect = await podmanRunner.RunAsync(["inspect", containerName], 10, cancellationToken).ConfigureAwait(false);
+            if (inspect.ExitCode != 0 || (createArgs.Count > 0 && !await IsInfraContainerCurrentAsync(inspect.StdOut, imageDigest, createArgs, cancellationToken).ConfigureAwait(false)))
+                throw new InvalidOperationException($"Recreated infrastructure container '{containerName}' does not match its requested image and create arguments.");
+        }
 
         string? containerId = null;
         if (inspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(inspect.StdOut))
@@ -1892,6 +1927,45 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
             WriteInfraAllowlist(allowlistEntries);
         }
+    }
+
+    private async Task<bool> IsInfraContainerCurrentAsync(string? containerInspectJson, string imageReference, IReadOnlyList<string> createArgs, CancellationToken cancellationToken)
+    {
+        if (!HasRequiredInfraContainerImageAndArgs(containerInspectJson, imageReference, createArgs)) return false;
+        try
+        {
+            using JsonDocument containerDoc = JsonDocument.Parse(containerInspectJson!);
+            JsonElement container = containerDoc.RootElement.ValueKind == JsonValueKind.Array ? containerDoc.RootElement[0] : containerDoc.RootElement;
+            string actualId = GetStringProperty(container, "Image");
+            if (actualId.Length == 0) return false;
+            PodmanCommandResult imageInspect = await podmanRunner.RunAsync(["image", "inspect", imageReference], 10, cancellationToken).ConfigureAwait(false);
+            if (imageInspect.ExitCode != 0 || string.IsNullOrWhiteSpace(imageInspect.StdOut)) return false;
+            using JsonDocument imageDoc = JsonDocument.Parse(imageInspect.StdOut);
+            JsonElement image = imageDoc.RootElement.ValueKind == JsonValueKind.Array ? imageDoc.RootElement[0] : imageDoc.RootElement;
+            return string.Equals(actualId, GetStringProperty(image, "Id"), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private async Task ReplaceStaleInfraContainerAsync(string containerName, CancellationToken cancellationToken)
+    {
+        PodmanCommandResult podInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+        string? state = podInspect.ExitCode == 0 ? GetPodState(podInspect.StdOut) : null;
+        if (state is null) throw new InvalidOperationException($"Cannot safely replace stale infrastructure container '{containerName}' because egress pod inspection failed.");
+        if (!IsPodStopped(state))
+        {
+            if (!string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase) && !string.Equals(state, "Degraded", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Cannot safely replace '{containerName}' because egress pod state '{state}' is unsupported.");
+            PodmanCommandResult stopped = await podmanRunner.RunAsync(["pod", "stop", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+            if (stopped.ExitCode != 0) throw new InvalidOperationException($"Failed to stop egress pod before replacing '{containerName}': {stopped.StdErr}");
+            podInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+            if (podInspect.ExitCode != 0 || !IsPodStopped(GetPodState(podInspect.StdOut)) || !HasOnlyInactiveEgressPodMembers(podInspect.StdOut))
+                throw new InvalidOperationException($"Egress pod members must be confirmed inactive before replacing '{containerName}'.");
+        }
+        else if (!HasOnlyInactiveEgressPodMembers(podInspect.StdOut))
+            throw new InvalidOperationException($"Egress pod members must be confirmed inactive before replacing '{containerName}'.");
+        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", containerName], 20, cancellationToken).ConfigureAwait(false);
+        if (removed.ExitCode != 0) throw new InvalidOperationException($"Failed to remove stale infrastructure container '{containerName}': {removed.StdErr}");
     }
 
     internal static string[] GetExpectedInfraIpv4(string role) =>
