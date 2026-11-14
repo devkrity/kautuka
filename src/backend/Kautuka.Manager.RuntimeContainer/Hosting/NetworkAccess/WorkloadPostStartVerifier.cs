@@ -11,13 +11,16 @@ public sealed record WorkloadVerificationResult(
     string AllocatedIp,
     bool Passed,
     long ExposureWindowMs,
-    string? FailureReason = null);
+    string? FailureReason = null,
+    string? CanonicalContainerId = null);
 
 /// <summary>
 /// Verifies live workload container compliance immediately after start (MF6, Section 4.3.4 item 4).
 /// Inspects security attributes via Podman inspect and verifies the in-netns nftables ruleset
 /// via nsenter and canonical hash comparison.
-/// Immediately kills and removes any container failing verification.
+/// Cleanup targets only a canonical immutable ID returned by inspect. If no such ID is available,
+/// verification fails closed and retains the denied registry identity because safe cleanup cannot
+/// be confirmed without risking a different container that later reuses the name.
 /// </summary>
 public sealed class WorkloadPostStartVerifier
 {
@@ -32,8 +35,9 @@ public sealed class WorkloadPostStartVerifier
     }
 
     /// <summary>
-    /// Executes the full post-start verification check. If any check fails, the container is killed
-    /// and force-removed immediately before throwing an <see cref="InvalidOperationException"/>.
+    /// Executes the full post-start verification check. A missing or malformed immutable container
+    /// ID fails verification. On failure, cleanup is attempted only with a canonical ID; otherwise
+    /// the registry identity remains denied and cleanup is left unconfirmed.
     /// </summary>
     public async Task<WorkloadVerificationResult> VerifyWorkloadAsync(
         string containerId,
@@ -47,6 +51,7 @@ public sealed class WorkloadPostStartVerifier
 
         var stopwatch = Stopwatch.StartNew();
         string registeredId = containerId;
+        string? canonicalContainerId = null;
         try
         {
             // 1. Inspect container
@@ -67,11 +72,19 @@ public sealed class WorkloadPostStartVerifier
             if (container.TryGetProperty("Id", out JsonElement inspectedIdElem))
             {
                 string? inspectedId = inspectedIdElem.GetString();
-                if (!string.IsNullOrWhiteSpace(inspectedId)
-                    && registry?.UpdateContainerId(allocatedIp, containerId, inspectedId) == true)
+                if (IsCanonicalContainerId(inspectedId))
                 {
-                    registeredId = inspectedId;
+                    canonicalContainerId = inspectedId;
+                    if (registry?.UpdateContainerId(allocatedIp, containerId, inspectedId!) == true)
+                    {
+                        registeredId = inspectedId!;
+                    }
                 }
+            }
+
+            if (canonicalContainerId is null)
+            {
+                throw new InvalidOperationException("Security check failed: podman inspect did not return a canonical immutable container ID.");
             }
 
             JsonElement hostConfig = container.GetProperty("HostConfig");
@@ -275,7 +288,7 @@ public sealed class WorkloadPostStartVerifier
             }
 
             stopwatch.Stop();
-            return new WorkloadVerificationResult(registeredId, allocatedIp, true, stopwatch.ElapsedMilliseconds);
+            return new WorkloadVerificationResult(registeredId, allocatedIp, true, stopwatch.ElapsedMilliseconds, CanonicalContainerId: canonicalContainerId);
         }
         catch (Exception ex)
         {
@@ -297,34 +310,33 @@ public sealed class WorkloadPostStartVerifier
                 quarantineFailure = quarantineException.Message;
             }
 
-            // Kill and force remove immediately on verification failure:
+            // Never act on a reusable name after inspect. If inspect yielded an immutable ID,
+            // use that exact identity even when a later compliance check failed.
             bool removed = false;
-            try
+            if (canonicalContainerId is not null)
             {
-                PodmanCommandResult killResult = await podmanRunner
-                    .RunAsync(["kill", containerId], 5, CancellationToken.None)
-                    .ConfigureAwait(false);
-                if (killResult.ExitCode != 0)
+                try
                 {
-                    // A failed kill is not proof that the process stopped. Continue to the
-                    // force-remove attempt; only confirmed removal permits deregistration.
+                    _ = await podmanRunner
+                        .RunAsync(["kill", canonicalContainerId], 5, CancellationToken.None)
+                        .ConfigureAwait(false);
                 }
-            }
-            catch
-            {
-                // A failed kill is not proof that the process stopped. Continue to force-remove.
-            }
+                catch
+                {
+                    // A failed kill is not proof that the process stopped. Continue to force-remove.
+                }
 
-            try
-            {
-                PodmanCommandResult removeResult = await podmanRunner
-                    .RunAsync(["rm", "-f", containerId], 5, CancellationToken.None)
-                    .ConfigureAwait(false);
-                removed = removeResult.ExitCode == 0;
-            }
-            catch
-            {
-                // Removal is unconfirmed; keep the container identity quarantined below.
+                try
+                {
+                    PodmanCommandResult removeResult = await podmanRunner
+                        .RunAsync(["rm", "-f", canonicalContainerId], 5, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    removed = removeResult.ExitCode == 0;
+                }
+                catch
+                {
+                    // Removal is unconfirmed; keep the container identity quarantined below.
+                }
             }
 
             string? registryFinalizationFailure = null;
@@ -334,7 +346,8 @@ public sealed class WorkloadPostStartVerifier
                 {
                     RegistryEntry? currentEntry = registry?.FindByIp(allocatedIp);
                     if (currentEntry is not null
-                        && (string.Equals(currentEntry.ContainerId, registeredId, StringComparison.Ordinal)
+                        && (string.Equals(currentEntry.ContainerId, canonicalContainerId, StringComparison.Ordinal)
+                            || string.Equals(currentEntry.ContainerId, registeredId, StringComparison.Ordinal)
                             || string.Equals(currentEntry.ContainerId, containerId, StringComparison.Ordinal)))
                     {
                         registry!.Deregister(allocatedIp, currentEntry.ContainerId);
@@ -386,6 +399,9 @@ public sealed class WorkloadPostStartVerifier
         string suffix = fullPath[3..].Replace('\\', '/').TrimEnd('/');
         return $"/mnt/{char.ToLowerInvariant(fullPath[0])}/{suffix}";
     }
+
+    private static bool IsCanonicalContainerId(string? value) =>
+        value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
     private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
     {

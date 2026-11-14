@@ -14,6 +14,7 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class WorkloadPostStartVerifierCleanupTests
 {
     private const string ContainerId = "surviving-workload";
+    private const string CanonicalContainerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string AllocatedIp = "10.247.1.81";
 
     [Fact]
@@ -33,6 +34,38 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         Assert.Equal("none", registry.FindByIp(AllocatedIp)?.Attribution);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("malformed")]
+    public async Task MissingOrMalformedInspectedIdFailsVerificationAndRetainsQuarantine(string idCase)
+    {
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry(
+            AllocatedIp, "user-1", "agent-1", ContainerId, "connector", "connector-1",
+            "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        var calls = new List<string[]>();
+        string inspect = idCase == "missing"
+            ? "[{\"HostConfig\":{}}]"
+            : "[{\"Id\":\"not-an-immutable-container-id\",\"HostConfig\":{}}]";
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add([.. args]);
+            return Task.FromResult(args[0] == "inspect"
+                ? new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed)
+                : throw new InvalidOperationException("Name-based destructive cleanup must not be attempted."));
+        });
+
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(() => new WorkloadPostStartVerifier(runner)
+            .VerifyWorkloadAsync(ContainerId, AllocatedIp, registry: registry, cancellationToken: CancellationToken.None));
+
+        Assert.Contains("canonical immutable container ID", failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Single(calls, static args => args[0] == "inspect");
+        RegistryEntry quarantined = Assert.Single(registry.GetAll());
+        Assert.Equal(ContainerId, quarantined.ContainerId);
+        Assert.Equal("deny-all", quarantined.Egress);
+        Assert.Equal("none", quarantined.Attribution);
+    }
+
     [Fact]
     public async Task ThrowingQuarantineSubscriberDoesNotSkipContainerCleanup()
     {
@@ -48,7 +81,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
             calls.Add([.. args]);
             if (args[0] == "inspect")
             {
-                return Task.FromResult(new PodmanCommandResult(0, "[{\"HostConfig\":{\"SecurityOpt\":[]}}]", string.Empty, ProcessTerminationReason.Completed));
+                return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + CanonicalContainerId + "\",\"HostConfig\":{\"SecurityOpt\":[]}}]", string.Empty, ProcessTerminationReason.Completed));
             }
 
             return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
@@ -61,6 +94,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         Assert.Contains("registry finalization failed", failure.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(calls, static args => args[0] == "kill");
         Assert.Contains(calls, static args => args[0] == "rm");
+        Assert.All(calls.Where(static args => args[0] is "kill" or "rm"), args => Assert.Equal(CanonicalContainerId, args[^1]));
         Assert.False(registry.TryGetByIp(AllocatedIp, out _));
     }
 
@@ -96,10 +130,10 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                 args: [ContainerId, AllocatedIp, null],
                 culture: null)!;
             MethodInfo complete = typeof(WorkspaceContainerConnectorExecutionService)
-                .GetMethod("CompleteEphemeralWorkload", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?? throw new InvalidOperationException("CompleteEphemeralWorkload was not found.");
+                .GetMethod("CompleteEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("CompleteEphemeralWorkloadAsync was not found.");
 
-            Assert.True((bool)complete.Invoke(service, [workload])!);
+            Assert.True(await ((Task<bool>)complete.Invoke(service, [workload])!).ConfigureAwait(false));
             RegistryEntry quarantined = Assert.Single(registry.GetAll());
             Assert.Equal(ContainerId, quarantined.ContainerId);
             Assert.Equal("deny-all", quarantined.Egress);
@@ -148,7 +182,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                 // Fail before namespace checks; cleanup behavior is the subject of this test.
                 return Task.FromResult(new PodmanCommandResult(
                     0,
-                    "[{\"HostConfig\":{\"SecurityOpt\":[]}}]",
+                    "[{\"Id\":\"" + CanonicalContainerId + "\",\"HostConfig\":{\"SecurityOpt\":[]}}]",
                     string.Empty,
                     ProcessTerminationReason.Completed));
             }
@@ -185,6 +219,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
 
         Assert.Contains(calls, static args => args[0] == "kill");
         Assert.Contains(calls, static args => args[0] == "rm");
+        Assert.All(calls.Where(static args => args[0] is "kill" or "rm"), args => Assert.Equal(CanonicalContainerId, args[^1]));
         Assert.True(quarantinedAtKill, "The normal grant must be removed before the kill request is awaited.");
         Assert.True(quarantinedAtRemove, "The normal grant must remain removed while force removal is awaited.");
         if (removeSucceeds)
@@ -195,7 +230,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         {
             Assert.True(registry.TryGetByIp(AllocatedIp, out RegistryEntry? quarantined));
             Assert.NotNull(quarantined);
-            Assert.Equal(ContainerId, quarantined.ContainerId);
+            Assert.Equal(CanonicalContainerId, quarantined.ContainerId);
             Assert.Equal("deny-all", quarantined.Egress);
             Assert.Equal("none", quarantined.Attribution);
         }
@@ -218,7 +253,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                 return Task.FromResult(args[0] switch
                 {
                     "inspect" when !started => new PodmanCommandResult(125, string.Empty, "not found", ProcessTerminationReason.NonZeroExit),
-                    "inspect" => new PodmanCommandResult(0, "[{\"Id\":\"runtime-connector\",\"HostConfig\":{\"SecurityOpt\":[]}}]", string.Empty, ProcessTerminationReason.Completed),
+                    "inspect" => new PodmanCommandResult(0, "[{\"Id\":\"" + CanonicalContainerId + "\",\"HostConfig\":{\"SecurityOpt\":[]}}]", string.Empty, ProcessTerminationReason.Completed),
                     "container" => new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit),
                     "image" => new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed),
                     "run" => StartContainer(),
@@ -270,7 +305,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
             Assert.True(commands.Any(static args => args[0] == "rm"), "No rm call; exception: " + failureDetail + Environment.NewLine + string.Join(Environment.NewLine, commands.Select(static args => string.Join(' ', args))));
             Assert.Single(commands, static args => args[0] == "rm");
             RegistryEntry quarantined = Assert.Single(registry.GetAll());
-            Assert.Equal("runtime-connector", quarantined.ContainerId);
+            Assert.Equal(CanonicalContainerId, quarantined.ContainerId);
             Assert.Equal("deny-all", quarantined.Egress);
             Assert.Equal("none", quarantined.Attribution);
         }

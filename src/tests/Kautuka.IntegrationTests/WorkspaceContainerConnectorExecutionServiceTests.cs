@@ -466,7 +466,15 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         const string connectorId = "unverified-ephemeral-test";
         string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-unverified-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workspaceRoot);
-        var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+        var runner = new PodmanCommandRunner((args, _) => Task.FromResult(args[0] switch
+        {
+            // This test uses a host Python process as the fake MCP transport, so no verified
+            // container identity exists. Name lookup cannot prove that a container was not
+            // renamed or replaced, so the production registry must retain its deny-all entry.
+            "inspect" => new PodmanCommandResult(125, string.Empty, "not found", ProcessTerminationReason.NonZeroExit),
+            "container" => new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit),
+            _ => new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed),
+        }));
         var registry = new WorkloadRegistry();
         var desired = new WorkspaceDesiredStateStore();
         string ownerWorkspace = Path.Combine(workspaceRoot, "users", "u", "agents", "a");
@@ -492,7 +500,9 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var result = await service.CallToolAsync(connectorId, null, "echo", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated, CancellationToken.None);
             Assert.False(result.Ok);
             Assert.Contains("post-start verifier is unavailable", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
-            Assert.Empty(registry.GetAll());
+            RegistryEntry retained = Assert.Single(registry.GetAll());
+            Assert.Equal("deny-all", retained.Egress);
+            Assert.Equal("none", retained.Attribution);
         }
         finally
         {
@@ -524,7 +534,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             if (args[0] == "inspect")
             {
                 RegistryEntry entry = Assert.Single(registry.GetAll());
-                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                const string canonicalId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                string inspect = "[{\"Id\":\"" + canonicalId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                 return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
             }
 
@@ -559,6 +570,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.False(result.Ok);
             Assert.Contains("WorkloadPostStartVerifier failed", result.FailureMessage, StringComparison.Ordinal);
             Assert.Contains(commands, static args => args[0] == "inspect");
+            Assert.Contains(commands, static args => args[0] == "rm" && args[^1] == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
             Assert.Empty(registry.GetAll());
         }
         finally

@@ -365,7 +365,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             CompleteProbeAuthorization(connectorId, probeContext, ephemeralWorkload?.ContainerName);
             if (containerPrepared)
             {
-                if (!CompleteEphemeralWorkload(ephemeralWorkload))
+                if (!await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false))
                 {
                     await ResetConnectorCooldownAsync(
                         connector,
@@ -456,7 +456,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (containerPrepared && connector is not null)
             {
-                if (!CompleteEphemeralWorkload(ephemeralWorkload))
+                if (!await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false))
                 {
                     await ResetConnectorCooldownAsync(
                         connector,
@@ -547,7 +547,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (containerPrepared && connector is not null)
             {
-                if (!CompleteEphemeralWorkload(ephemeralWorkload))
+                if (!await CompleteEphemeralWorkloadAsync(ephemeralWorkload).ConfigureAwait(false))
                 {
                     await ResetConnectorCooldownAsync(
                         connector,
@@ -1722,48 +1722,92 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             ?? throw new InvalidOperationException("The workload post-start verifier is unavailable; refusing to use an ephemeral connector.");
         NetworkAccess.WorkloadVerificationResult result = await verifier.VerifyWorkloadAsync(workload.ContainerName, workload.AllocatedIp, workload.CompatProfile, workloadRegistry, cancellationToken)
             .ConfigureAwait(false);
-        workload.VerifiedContainerId = result.ContainerId;
+        workload.VerifiedContainerId = result.CanonicalContainerId;
     }
 
-    private bool CompleteEphemeralWorkload(EphemeralWorkload? workload)
+    private async Task<bool> CompleteEphemeralWorkloadAsync(EphemeralWorkload? workload)
     {
         if (workload is null)
         {
             return false;
         }
 
-        // Failed verification leaves the registry identity in quarantine. Do not erase it in
-        // the outer finally path; the verifier already attempted force-removal and only confirmed
-        // removal is allowed to deregister. This also covers failures before inspect ID promotion.
-        if (workload.VerifiedContainerId is null)
+        string expectedContainerId = workload.VerifiedContainerId ?? workload.ContainerName;
+        try
+        {
+            if (workloadRegistry?.TryQuarantine(workload.AllocatedIp, expectedContainerId, workload.ContainerName) == false)
+            {
+                Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry.FindByIp(workload.AllocatedIp);
+                if (current is not null
+                    && (!string.Equals(current.Egress, "deny-all", StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(current.Attribution, "none", StringComparison.OrdinalIgnoreCase)))
+                {
+                    logger.LogError(
+                        "Could not quarantine ephemeral workload '{ContainerName}' at {Ip}; registry now identifies '{CurrentContainerId}' with an active egress policy.",
+                        workload.ContainerName,
+                        workload.AllocatedIp,
+                        current.ContainerId);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // This finally path must not replace the original MCP operation/verification error.
+            logger.LogError(ex, "Could not quarantine ephemeral workload '{ContainerName}' at {Ip}.", workload.ContainerName, workload.AllocatedIp);
+        }
+
+        string? cleanupTarget = IsCanonicalContainerId(workload.VerifiedContainerId)
+            ? workload.VerifiedContainerId
+            : null;
+        bool removed = false;
+        if (cleanupTarget is not null)
         {
             try
             {
-                if (workloadRegistry?.TryQuarantine(workload.AllocatedIp, workload.ContainerName) == false)
+                PodmanCommandResult removeResult = await podmanCommandRunner
+                    .RunAsync(["rm", "-f", cleanupTarget], 15, CancellationToken.None)
+                    .ConfigureAwait(false);
+                removed = removeResult.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not force-remove ephemeral workload '{ContainerId}' at {Ip}.", cleanupTarget, workload.AllocatedIp);
+            }
+        }
+
+        if (!removed && cleanupTarget is not null)
+        {
+            try
+            {
+                // Without an inspected canonical ID, querying/removing by the reusable name could
+                // act on a replacement container or mistake a renamed original for absence.
+                removed = await PodmanContainerInspector.ReadAsync(podmanCommandRunner, cleanupTarget, CancellationToken.None)
+                    .ConfigureAwait(false) is null;
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Ephemeral workload '{ContainerId}' at {Ip} remains unconfirmed after cleanup.", cleanupTarget, workload.AllocatedIp);
+            }
+        }
+
+        if (removed)
+        {
+            try
+            {
+                Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry?.FindByIp(workload.AllocatedIp);
+                if (current is not null
+                    && (string.Equals(current.ContainerId, expectedContainerId, StringComparison.Ordinal)
+                        || string.Equals(current.ContainerId, cleanupTarget, StringComparison.Ordinal)))
                 {
-                    Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry.FindByIp(workload.AllocatedIp);
-                    if (current is not null
-                        && (!string.Equals(current.Egress, "deny-all", StringComparison.OrdinalIgnoreCase)
-                            || !string.Equals(current.Attribution, "none", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        logger.LogError(
-                            "Could not quarantine unverified ephemeral workload '{ContainerName}' at {Ip}; registry now identifies '{CurrentContainerId}' with an active egress policy.",
-                            workload.ContainerName,
-                            workload.AllocatedIp,
-                            current.ContainerId);
-                    }
+                    workloadRegistry!.Deregister(workload.AllocatedIp, current.ContainerId);
                 }
             }
             catch (Exception ex)
             {
-                // This finally path must not replace the original MCP operation/verification error.
-                logger.LogError(ex, "Could not quarantine unverified ephemeral workload '{ContainerName}' at {Ip}.", workload.ContainerName, workload.AllocatedIp);
+                logger.LogError(ex, "Could not deregister removed ephemeral workload '{ContainerName}' at {Ip}.", workload.ContainerName, workload.AllocatedIp);
             }
-
-            return true;
         }
 
-        workloadRegistry?.Deregister(workload.AllocatedIp, workload.VerifiedContainerId);
         return true;
     }
 
@@ -1773,6 +1817,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         int baseLength = Math.Min(baseName.Length, 63 - suffix.Length);
         return baseName[..baseLength] + suffix;
     }
+
+    private static bool IsCanonicalContainerId(string? value) =>
+        value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
     private sealed record TransportLaunch(StdioClientTransport Transport, EphemeralWorkload? EphemeralWorkload);
 
