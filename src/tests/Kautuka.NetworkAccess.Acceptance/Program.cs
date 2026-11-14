@@ -150,6 +150,13 @@ public static class Program
 
         if (!args.Contains("--live", StringComparer.OrdinalIgnoreCase))
         {
+            if (args.Contains("--self-test-routed-lan-fixture-cleanup", StringComparer.OrdinalIgnoreCase))
+            {
+                await VerifyRoutedLanFixtureCleanupAsync().ConfigureAwait(false);
+                Console.WriteLine("Routed LAN fixture cleanup self-test passed (pre-existing interface preserved; owned resources cleaned after later setup failure; namespace cleanup continued after veth cleanup failure and retained the original error).");
+                return 0;
+            }
+
             if (args.Contains("--self-test-isolation-cleanup", StringComparer.OrdinalIgnoreCase))
             {
                 await VerifyProductionIsolationCleanupAsync().ConfigureAwait(false);
@@ -550,10 +557,14 @@ public static class Program
             }
         }
 
-        await RunIpAsync("netns", "add", namespaceName).ConfigureAwait(false);
+        bool namespaceCreated = false;
+        bool vethCreated = false;
         try
         {
+            await RunIpAsync("netns", "add", namespaceName).ConfigureAwait(false);
+            namespaceCreated = true;
             await RunIpAsync("link", "add", hostDevice, "type", "veth", "peer", "name", lanDevice).ConfigureAwait(false);
+            vethCreated = true;
             await RunIpAsync("link", "set", lanDevice, "netns", namespaceName).ConfigureAwait(false);
             await RunIpAsync("addr", "add", hostAddress, "dev", hostDevice).ConfigureAwait(false);
             await RunIpAsync("link", "set", hostDevice, "up").ConfigureAwait(false);
@@ -565,9 +576,170 @@ public static class Program
         }
         catch
         {
-            _ = await ExecAsync("sudo", ["ip", "link", "del", hostDevice]).ConfigureAwait(false);
-            _ = await ExecAsync("sudo", ["ip", "netns", "del", namespaceName]).ConfigureAwait(false);
+            if (vethCreated)
+            {
+                try
+                {
+                    _ = await ExecAsync("sudo", ["ip", "link", "del", hostDevice]).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Continue cleanup and preserve the setup failure that caused this path.
+                }
+            }
+            if (namespaceCreated)
+            {
+                try
+                {
+                    _ = await ExecAsync("sudo", ["ip", "netns", "del", namespaceName]).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Cleanup is best effort; preserve the original setup failure.
+                }
+            }
             throw;
+        }
+    }
+
+    private static async Task VerifyRoutedLanFixtureCleanupAsync()
+    {
+        List<string> commands = [];
+        execOverride = (fileName, arguments) =>
+        {
+            if (!string.Equals(fileName, "sudo", StringComparison.Ordinal)
+                || arguments.Count < 2
+                || !string.Equals(arguments[0], "ip", StringComparison.Ordinal))
+            {
+                return Task.FromResult((1, string.Empty, "Unexpected command in routed LAN fixture fake runner."));
+            }
+
+            string command = string.Join(' ', arguments);
+            commands.Add(command);
+            if (arguments.Count >= 4
+                && string.Equals(arguments[1], "link", StringComparison.Ordinal)
+                && string.Equals(arguments[2], "add", StringComparison.Ordinal))
+            {
+                return Task.FromResult((2, string.Empty, "File exists"));
+            }
+
+            return Task.FromResult((0, string.Empty, string.Empty));
+        };
+
+        try
+        {
+            bool failedAtVethAdd = false;
+            try
+            {
+                _ = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("link add", StringComparison.Ordinal))
+            {
+                failedAtVethAdd = true;
+            }
+
+            string addCommand = commands.Single(c => c.Contains("link add", StringComparison.Ordinal));
+            string attemptedHostDevice = addCommand.Split(' ', StringSplitOptions.RemoveEmptyEntries)[3];
+            bool interfaceDeleteIssued = commands.Any(c => c == $"ip link del {attemptedHostDevice}");
+            bool namespaceAddIssued = commands.Any(c => c.StartsWith("ip netns add ", StringComparison.Ordinal));
+            bool namespaceDeleteIssued = commands.Any(c => c.StartsWith("ip netns del ", StringComparison.Ordinal));
+
+            if (!failedAtVethAdd || !namespaceAddIssued || !namespaceDeleteIssued || interfaceDeleteIssued)
+            {
+                throw new InvalidOperationException($"Routed LAN fixture cleanup ownership self-test failed (failedAtVethAdd={failedAtVethAdd}; namespaceAdd={namespaceAddIssued}; namespaceDelete={namespaceDeleteIssued}; interfaceDelete={interfaceDeleteIssued}; commands={string.Join("; ", commands)}).");
+            }
+
+            commands.Clear();
+            execOverride = (fileName, arguments) =>
+            {
+                if (!string.Equals(fileName, "sudo", StringComparison.Ordinal)
+                    || arguments.Count < 2
+                    || !string.Equals(arguments[0], "ip", StringComparison.Ordinal))
+                {
+                    return Task.FromResult((1, string.Empty, "Unexpected command in routed LAN cleanup-success fake runner."));
+                }
+
+                string command = string.Join(' ', arguments);
+                commands.Add(command);
+                if (arguments.Count >= 5
+                    && string.Equals(arguments[1], "link", StringComparison.Ordinal)
+                    && string.Equals(arguments[2], "set", StringComparison.Ordinal)
+                    && string.Equals(arguments[4], "netns", StringComparison.Ordinal))
+                {
+                    return Task.FromResult((5, string.Empty, "Injected failure after veth creation."));
+                }
+
+                return Task.FromResult((0, string.Empty, string.Empty));
+            };
+
+            string? laterFailure = null;
+            try
+            {
+                _ = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("link set", StringComparison.Ordinal))
+            {
+                laterFailure = ex.Message;
+            }
+
+            string createdNamespace = commands.Single(c => c.StartsWith("ip netns add ", StringComparison.Ordinal))["ip netns add ".Length..];
+            string createdVeth = commands.Single(c => c.Contains("link add", StringComparison.Ordinal)).Split(' ', StringSplitOptions.RemoveEmptyEntries)[3];
+            bool createdVethRemoved = commands.Count(c => c == $"ip link del {createdVeth}") == 1;
+            bool createdNamespaceRemoved = commands.Count(c => c == $"ip netns del {createdNamespace}") == 1;
+            if (laterFailure is null || !createdVethRemoved || !createdNamespaceRemoved)
+            {
+                throw new InvalidOperationException($"Routed LAN fixture owned-resource cleanup self-test failed (setupFailureObserved={laterFailure is not null}; vethRemoved={createdVethRemoved}; namespaceRemoved={createdNamespaceRemoved}; commands={string.Join("; ", commands)}).");
+            }
+
+            commands.Clear();
+            execOverride = (fileName, arguments) =>
+            {
+                if (!string.Equals(fileName, "sudo", StringComparison.Ordinal)
+                    || arguments.Count < 2
+                    || !string.Equals(arguments[0], "ip", StringComparison.Ordinal))
+                {
+                    return Task.FromResult((1, string.Empty, "Unexpected command in routed LAN cleanup-failure fake runner."));
+                }
+
+                string command = string.Join(' ', arguments);
+                commands.Add(command);
+                if (arguments.Count >= 5
+                    && string.Equals(arguments[1], "link", StringComparison.Ordinal)
+                    && string.Equals(arguments[2], "set", StringComparison.Ordinal)
+                    && string.Equals(arguments[4], "netns", StringComparison.Ordinal))
+                {
+                    throw new IOException("Injected original fixture setup failure.");
+                }
+                if (arguments.Count >= 4
+                    && string.Equals(arguments[1], "link", StringComparison.Ordinal)
+                    && string.Equals(arguments[2], "del", StringComparison.Ordinal))
+                {
+                    throw new IOException("Injected veth cleanup failure.");
+                }
+
+                return Task.FromResult((0, string.Empty, string.Empty));
+            };
+
+            string? preservedFailure = null;
+            try
+            {
+                _ = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
+            }
+            catch (IOException ex) when (ex.Message == "Injected original fixture setup failure.")
+            {
+                preservedFailure = ex.Message;
+            }
+
+            string failingNamespace = commands.Single(c => c.StartsWith("ip netns add ", StringComparison.Ordinal))["ip netns add ".Length..];
+            bool namespaceCleanupAttempted = commands.Count(c => c == $"ip netns del {failingNamespace}") == 1;
+            if (preservedFailure is null || !namespaceCleanupAttempted)
+            {
+                throw new InvalidOperationException($"Routed LAN fixture cleanup-failure self-test failed (originalFailurePreserved={preservedFailure is not null}; namespaceCleanupAttempted={namespaceCleanupAttempted}; commands={string.Join("; ", commands)}).");
+            }
+        }
+        finally
+        {
+            execOverride = null;
         }
     }
 
