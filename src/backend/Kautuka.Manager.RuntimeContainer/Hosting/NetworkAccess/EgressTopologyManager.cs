@@ -16,7 +16,8 @@ public sealed record InfraAllowlistEntry(
     [property: JsonPropertyName("id")] string Id,
     [property: JsonPropertyName("role")] string Role,
     [property: JsonPropertyName("expected_ipv4")] IReadOnlyList<string> ExpectedIpv4,
-    [property: JsonPropertyName("image_digest")] string ImageDigest);
+    [property: JsonPropertyName("image_digest")] string ImageDigest,
+    [property: JsonPropertyName("expected_ipv4_alternates"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<IReadOnlyList<string>>? ExpectedIpv4Alternates = null);
 
 public sealed record InfraAllowlistDocument(
     [property: JsonPropertyName("version")] int Version,
@@ -1433,7 +1434,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             knownInfraContainerIds.Add(containerId);
             string[] expectedIps = GetExpectedInfraIpv4(role);
             int existingEntryIndex = allowlistEntries.FindIndex(e => string.Equals(e.Id, containerId, StringComparison.OrdinalIgnoreCase));
-            var entry = new InfraAllowlistEntry(containerId, role, expectedIps, imageDigest);
+            IReadOnlyList<IReadOnlyList<string>>? expectedIpv4Alternates = string.Equals(role, "egress-boundary", StringComparison.Ordinal)
+                ? [[EgressPodIp, OutsidePodIp, OutsideLanSourceIp]]
+                : null;
+            var entry = new InfraAllowlistEntry(containerId, role, expectedIps, imageDigest, expectedIpv4Alternates);
             if (existingEntryIndex < 0)
             {
                 allowlistEntries.Add(entry);

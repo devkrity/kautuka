@@ -6,6 +6,7 @@ Implements Sections 4.3.2 and 4.3.3 of Kautuka NAC v7 specification.
 """
 import hashlib
 import json
+import ipaddress
 import os
 import stat
 import subprocess
@@ -332,8 +333,35 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
                     normalized_allowlist[entry["id"]] = entry
 
     if cid in normalized_allowlist:
-        expected = normalized_allowlist[cid].get("expected_ipv4", [])
-        if set(ips) == set(expected):
+        entry = normalized_allowlist[cid]
+        expected = entry.get("expected_ipv4", [])
+        if (not isinstance(expected, list) or not expected
+                or not all(_is_ipv4(ip) for ip in expected)
+                or len(set(expected)) != len(expected)):
+            return ("refuse", "infra_ip_mismatch")
+        if not all(_is_ipv4(ip) for ip in ips) or len(set(ips)) != len(ips):
+            return ("refuse", "infra_ip_mismatch")
+        accepted_sets = [expected]
+        if "expected_ipv4_alternates" in entry:
+            alternates = entry["expected_ipv4_alternates"]
+            # Only the boundary init container may have the known restart-time
+            # address added by its own init command. Keep every accepted state
+            # explicit and exact; malformed alternate data fails closed.
+            if (entry.get("role") != "egress-boundary"
+                    or not isinstance(alternates, list)
+                    or len(alternates) != 1
+                    or set(expected) != {"10.247.0.2", "10.248.0.2"}
+                    or len(expected) != 2):
+                return ("refuse", "infra_ip_mismatch")
+            for alternate in alternates:
+                if (not isinstance(alternate, list) or not alternate
+                        or not all(_is_ipv4(ip) for ip in alternate)
+                        or len(set(alternate)) != len(alternate)
+                        or set(alternate) != set(expected) | {"10.248.0.3"}
+                        or len(alternate) != len(expected) + 1):
+                    return ("refuse", "infra_ip_mismatch")
+                accepted_sets.append(alternate)
+        if any(set(ips) == set(candidate) and len(ips) == len(candidate) for candidate in accepted_sets):
             return ("allow", "infra_allowlisted")
         else:
             return ("refuse", "infra_ip_mismatch")
@@ -393,6 +421,15 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
                 return ("refuse", "shared_netns")
 
     return ("allow", "workload_rules")
+
+
+def _is_ipv4(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        return isinstance(ipaddress.ip_address(value), ipaddress.IPv4Address)
+    except ValueError:
+        return False
 
 
 def canonicalize_nft_json(nft_json_data, required_comments=None, required_workload_ip=None):

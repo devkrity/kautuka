@@ -305,6 +305,37 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task BoundaryInfraAllowlistEmitsOnlyTheKnownRestartAlternate()
+    {
+        var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
+            0,
+            args.SequenceEqual(["inspect", "kautuka-egress-boundary"])
+                ? "[{\"Id\":\"boundary-container-id\"}]"
+                : string.Empty,
+            string.Empty,
+            ProcessTerminationReason.Completed)));
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "boundary-alternate-ip.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        List<InfraAllowlistEntry> entries = [];
+        System.Reflection.MethodInfo createInfra = typeof(EgressTopologyManager).GetMethod(
+            "EnsureInfraContainerCreatedAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("EnsureInfraContainerCreatedAsync method was not found.");
+
+        await ((Task)createInfra.Invoke(manager,
+            ["kautuka-egress-boundary", "egress-boundary", EgressTopologyManager.BoundaryInitImage,
+                Array.Empty<string>(), entries, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+
+        JsonArray allowlist = JsonNode.Parse(await File.ReadAllTextAsync(
+            Path.Combine(tempDir, "nac", "infra-allowlist.json"), TestContext.Current.CancellationToken))!["entries"]!.AsArray();
+        JsonNode boundary = Assert.Single(allowlist, entry => entry!["id"]!.GetValue<string>() == "boundary-container-id")!;
+        Assert.Equal(["10.247.0.2", "10.248.0.2"], boundary["expected_ipv4"]!.AsArray().Select(ip => ip!.GetValue<string>()));
+        Assert.Equal(["10.247.0.2", "10.248.0.2", "10.248.0.3"], boundary["expected_ipv4_alternates"]![0]!.AsArray().Select(ip => ip!.GetValue<string>()));
+    }
+
+    [Fact]
     public void V7_21_ApprovedLanSourceIsTranslatedToPodmanAssignedOutsideAddress()
     {
         string boundary = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
