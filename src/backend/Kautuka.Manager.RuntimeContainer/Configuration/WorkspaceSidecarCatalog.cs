@@ -154,21 +154,19 @@ public static class WorkspaceSidecarCatalogLoader
             return resolved;
         }
 
-        if (!OperatingSystem.IsWindows())
-        {
-            return Path.GetFullPath(resolved);
-        }
-
         string normalizedResolved = Path.GetFullPath(resolved);
         string normalizedProdRoot = Path.GetFullPath(prodSharedStateRoot);
         string normalizedSharedRoot = Path.GetFullPath(runtimePaths.SharedDataRoot);
-        if (string.Equals(normalizedSharedRoot, normalizedProdRoot, StringComparison.OrdinalIgnoreCase))
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(normalizedSharedRoot, normalizedProdRoot, pathComparison))
         {
             return normalizedResolved;
         }
 
         string prodPrefix = normalizedProdRoot + Path.DirectorySeparatorChar;
-        if (normalizedResolved.StartsWith(prodPrefix, StringComparison.OrdinalIgnoreCase))
+        if (normalizedResolved.StartsWith(prodPrefix, pathComparison))
         {
             string relativeSuffix = normalizedResolved[prodPrefix.Length..];
             string mappedPath = Path.GetFullPath(Path.Combine(normalizedSharedRoot, relativeSuffix));
@@ -176,7 +174,7 @@ public static class WorkspaceSidecarCatalogLoader
             return mappedPath;
         }
 
-        if (string.Equals(normalizedResolved, normalizedProdRoot, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(normalizedResolved, normalizedProdRoot, pathComparison))
         {
             Directory.CreateDirectory(normalizedSharedRoot);
             return normalizedSharedRoot;

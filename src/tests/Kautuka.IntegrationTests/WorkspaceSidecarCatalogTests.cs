@@ -1,6 +1,11 @@
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceSidecarCatalogTests
@@ -224,6 +229,70 @@ public sealed class WorkspaceSidecarCatalogTests
     }
 
     [Fact]
+    public void LoadMapsProductionSharedStateVolumeToConfiguredLinuxSharedRoot()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string tempRoot = CreateTempDirectory();
+
+        try
+        {
+            string sharedRoot = Path.Combine(tempRoot, "shared-data");
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Kautuka:ContainerStateRoot"] = sharedRoot,
+                    ["Kautuka:Mode"] = "dev",
+                })
+                .Build();
+            var runtimePaths = new WorkspaceRuntimePaths(
+                configuration,
+                new TestHostEnvironment(),
+                NullLogger<WorkspaceRuntimePaths>.Instance);
+
+            string path = Path.Combine(tempRoot, "sidecars.json");
+            File.WriteAllText(path, """
+                {
+                  "sidecars": [
+                    {
+                      "name": "stateful-sidecar",
+                      "image": "docker.io/example/stateful:latest",
+                      "ports": [],
+                      "volumes": [
+                        { "hostPath": "/var/lib/kautuka/sidecars/stateful", "containerPath": "/data" },
+                        { "hostPath": "/var/lib/kautuka-escape/stateful", "containerPath": "/outside" }
+                      ],
+                      "environment": {},
+                      "command": [],
+                      "buildContext": null,
+                      "dockerfile": null,
+                      "healthCheck": null
+                    }
+                  ]
+                }
+                """);
+
+            WorkspaceSidecarCatalog catalog = WorkspaceSidecarCatalogLoader.Load(path, runtimePaths);
+
+            WorkspaceSidecarDefinition sidecar = Assert.Single(catalog.Sidecars);
+            Assert.Equal(
+                Path.GetFullPath(Path.Combine(sharedRoot, "sidecars", "stateful")),
+                sidecar.Volumes![0].HostPath);
+            Assert.True(Directory.Exists(sidecar.Volumes[0].HostPath));
+            Assert.Equal(
+                Path.GetFullPath("/var/lib/kautuka-escape/stateful"),
+                sidecar.Volumes[1].HostPath);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void CommittedCatalogSealsUnpublishedPkgsProxy()
     {
         string path = Path.Combine(FindRepoRoot(), "src", "backend", "Kautuka.Manager", "sidecars.json");
@@ -263,5 +332,16 @@ public sealed class WorkspaceSidecarCatalogTests
         }
 
         throw new InvalidOperationException("Repository root was not found.");
+    }
+
+    private sealed class TestHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+
+        public string ApplicationName { get; set; } = "Kautuka.IntegrationTests";
+
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 }
