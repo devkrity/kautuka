@@ -40,26 +40,46 @@ public sealed class GatewaySchemaUpgradeTests
         database.EnsureReady();
     }
 
-    [Fact]
-    public void UnmarkedKnownTelegramSchemaIsRecognizedAndMigrated()
+    [Theory]
+    [InlineData("")]
+    [InlineData("ALTER TABLE runtime_users ADD COLUMN private_extension TEXT; UPDATE runtime_users SET private_extension='preserve';")]
+    [InlineData("CREATE TABLE unsupported_extension(value TEXT); INSERT INTO unsupported_extension VALUES ('preserve');")]
+    [InlineData("UPDATE runtime_users SET telegramuser_idsJson='[123]';")]
+    public void UnmarkedUnsupportedOrUnmigratableSchemaLeavesDatabaseUntouched(string change)
     {
+        ArgumentNullException.ThrowIfNull(change);
         using var temp = new TemporaryGatewayStateDirectory();
         string fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFileName));
-        using (var connection = new SqliteConnection($"Data Source={temp.SqlitePath}"))
-        {
-            connection.Open();
-            connection.ExecuteScript(fixture);
-            connection.ExecuteScript("DROP TABLE gateway_schema;");
-        }
+        using var connection = new SqliteConnection($"Data Source={temp.SqlitePath}");
+        connection.Open();
+        connection.ExecuteScript(fixture);
+        connection.ExecuteScript("DROP TABLE gateway_schema; INSERT INTO runtime_users(username, user_id, created_at, updated_at, telegramuser_idsJson, telegram_bot_ids_json) VALUES ('test', 'user', 'created', 'updated', '[]', '[]');");
+        connection.ExecuteScript(change);
+        string schemaBefore = connection.ExecuteScalar<string>("SELECT group_concat(type || ':' || name || ':' || sql, char(10)) FROM (SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type, name)");
+        string dataBefore = connection.ExecuteScalar<string>("SELECT json_object('user', username, 'telegram', telegramuser_idsJson) FROM runtime_users WHERE username='test'");
 
-        KautukaDatabase database = CreateDatabase(temp.SqlitePath);
-        database.EnsureReady();
+        Assert.Throws<InvalidOperationException>(() => SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection));
 
-        using SqliteConnection migrated = new(database.ConnectionString);
-        migrated.Open();
-        Assert.Equal(SqliteGatewaySchemaBootstrapper.SchemaId,
-            migrated.ExecuteScalar<string>("SELECT schema_id FROM gateway_schema"));
-        SqliteGatewaySchemaBootstrapper.ValidateExisting(migrated);
+        Assert.Equal(schemaBefore, connection.ExecuteScalar<string>("SELECT group_concat(type || ':' || name || ':' || sql, char(10)) FROM (SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type, name)"));
+        Assert.Equal(dataBefore, connection.ExecuteScalar<string>("SELECT json_object('user', username, 'telegram', telegramuser_idsJson) FROM runtime_users WHERE username='test'"));
+        Assert.Equal(0L, connection.ExecuteScalar<long>("SELECT COUNT(*) FROM sqlite_schema WHERE name='gateway_schema'"));
+        if (change.StartsWith("ALTER TABLE", StringComparison.Ordinal))
+            Assert.Equal("preserve", connection.ExecuteScalar<string>("SELECT private_extension FROM runtime_users"));
+        if (change.StartsWith("CREATE TABLE", StringComparison.Ordinal))
+            Assert.Equal("preserve", connection.ExecuteScalar<string>("SELECT value FROM unsupported_extension"));
+    }
+
+    [Fact]
+    public void UnmarkedSingleLegacyColumnIsNotRecognized()
+    {
+        using var connection = new SqliteConnection("Data Source=:memory:");
+        connection.Open();
+        connection.ExecuteScript("CREATE TABLE autopilot_schedules(notify_telegram INTEGER, payload TEXT); INSERT INTO autopilot_schedules VALUES(1, 'preserve');");
+
+        Assert.Throws<InvalidOperationException>(() => SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection));
+
+        Assert.Equal("preserve", connection.ExecuteScalar<string>("SELECT payload FROM autopilot_schedules"));
+        Assert.Equal(1L, connection.ExecuteScalar<long>("SELECT COUNT(*) FROM sqlite_schema WHERE type='table'"));
     }
 
     [Theory]

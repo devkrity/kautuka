@@ -19,7 +19,7 @@
 
 Treat a failed migration as an integrity boundary, not a normal retry.
 
-Gateway startup can restore the missing marker only for the exact current schema or the recognized pre-marker Telegram-era schema, and only the latter then runs through the registered migration chain. An unrecognized or partially modified schema still fails closed; do not add the marker manually.
+Gateway startup can restore a missing marker when the database exactly matches the current schema. Unmarked legacy databases and unrecognized or partially modified schemas fail closed; preserve the database for recovery and do not add a marker manually.
 
 1. Stop only the service whose startup reports the migration failure; do not delete or edit its database, journal, or migration marker.
 2. Preserve the release version, schema version, sanitized error code, database checksum/size, and the exact migration identifier. Do not copy rows containing credentials, prompts, or provider payloads.

@@ -38,15 +38,6 @@ internal static class SqliteGatewaySchemaBootstrapper
                 CreateSchemaMarker(connection, SchemaId);
                 schemaId = SchemaId;
             }
-            else if (schemaId is null && HasLegacyTelegramSchema(connection))
-            {
-                // These pre-marker Gateway databases have a known Telegram-era signature and
-                // registered table migrations. Give the normal migration path its earliest
-                // supported marker; validation still rejects any unrecognized schema drift.
-                const string inferredLegacySchemaId = "gateway-2026-10-10.1";
-                CreateSchemaMarker(connection, inferredLegacySchemaId);
-                schemaId = inferredLegacySchemaId;
-            }
             if (schemaId is null
                 || (!string.Equals(schemaId, SchemaId, StringComparison.Ordinal)
                     && !priorSupportedSchemaIds.Contains(schemaId)
