@@ -956,8 +956,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string nacDir = Path.Combine(stateDirectory, "nac");
         string boundaryConfigDir = Path.Combine(nacDir, "boundary");
         string boundaryPath = Path.Combine(boundaryConfigDir, "boundary.nft");
-        string envoyPath = Path.Combine(nacDir, "envoy.yaml");
-        string corefilePath = Path.Combine(nacDir, "Corefile");
+        string envoyConfigDir = Path.Combine(nacDir, "envoy");
+        string dnsConfigDir = Path.Combine(nacDir, "dns");
+        string envoyPath = Path.Combine(envoyConfigDir, "envoy.yaml");
+        string corefilePath = Path.Combine(dnsConfigDir, "Corefile");
 
         expectedBoundaryNftSourceHash = ComputeBoundaryNftSourceHash(boundaryNft);
         await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
@@ -1040,11 +1042,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             cancellationToken).ConfigureAwait(false);
 
         // 2. CoreDNS container
+        await EnsureConfigContainerMountCurrentAsync(
+            "kautuka-egress-dns", Path.GetDirectoryName(corefilePath)!, "/etc/coredns", isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-dns",
             "egress-dns",
             CoreDnsPinnedImage,
-            BuildCoreDnsCreateArgs(corefilePath),
+            BuildCoreDnsCreateArgs(corefilePath, isWindowsHostNativeDev),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -1074,6 +1078,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         }
 
+        await EnsureConfigContainerMountCurrentAsync(
+            "kautuka-egress-envoy", Path.GetDirectoryName(envoyPath)!, "/etc/kautuka-envoy", isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-envoy",
             "egress-envoy",
@@ -1454,13 +1460,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    internal static IReadOnlyList<string> BuildCoreDnsCreateArgs(string corefilePath) =>
+    internal static IReadOnlyList<string> BuildCoreDnsCreateArgs(string corefilePath, bool isWindowsHostNativeDev = false) =>
     [
         "create",
         "--pod", EgressPodName,
         "--name", "kautuka-egress-dns",
         "--cap-add", "NET_BIND_SERVICE",
-        "-v", $"{corefilePath}:/etc/coredns/Corefile:ro",
+        "-v", $"{Path.GetFullPath(Path.GetDirectoryName(corefilePath)!)}:/etc/coredns:{GetConfigMountOptions(isWindowsHostNativeDev)}",
         CoreDnsPinnedImage,
         "-conf", "/etc/coredns/Corefile"
     ];
@@ -1478,7 +1484,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             "create",
             "--pod", EgressPodName,
             "--name", "kautuka-egress-envoy",
-            "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro"
+            "-v", $"{Path.GetFullPath(Path.GetDirectoryName(envoyPath)!)}:/etc/kautuka-envoy:{GetConfigMountOptions(isWindowsHostNativeDev)}"
         ];
 
         if (!isWindowsHostNativeDev)
@@ -1498,10 +1504,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
 
         args.Add(EnvoyPinnedImage);
-        args.AddRange(["-c", "/etc/envoy/envoy.yaml"]);
+        args.AddRange(["-c", "/etc/kautuka-envoy/envoy.yaml"]);
 
         return args;
     }
+
+    private static string GetConfigMountOptions(bool isWindowsHostNativeDev) => isWindowsHostNativeDev ? "ro" : "ro,z";
 
     internal static IReadOnlyList<string> BuildBoundaryCreateArgs(string boundaryConfigDirectory, bool isWindowsHostNativeDev)
     {
@@ -1554,6 +1562,109 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         catch (ArgumentException)
         {
             return false;
+        }
+    }
+
+    internal static bool HasRequiredConfigContainerMount(string? inspectJson, string configDirectory, string containerConfigDirectory, bool isWindowsHostNativeDev)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson) || string.IsNullOrWhiteSpace(configDirectory))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            if (container.ValueKind != JsonValueKind.Object
+                || !container.TryGetProperty("CreateCommand", out JsonElement command)
+                || command.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            string options = isWindowsHostNativeDev ? "ro" : "ro,z";
+            string expected = $"{Path.GetFullPath(configDirectory)}:{containerConfigDirectory}:{options}";
+            StringComparison pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return command.EnumerateArray().Any(token => token.ValueKind == JsonValueKind.String
+                && string.Equals(token.GetString(), expected, pathComparison));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private async Task EnsureConfigContainerMountCurrentAsync(string containerName, string configDirectory, string containerConfigDirectory, bool isWindowsHostNativeDev, CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspect = await podmanRunner.RunAsync(["inspect", containerName], 10, cancellationToken).ConfigureAwait(false);
+        if (inspect.ExitCode != 0)
+        {
+            PodmanCommandResult exists = await podmanRunner.RunAsync(["container", "exists", containerName], 10, cancellationToken).ConfigureAwait(false);
+            if (exists.ExitCode == 1)
+            {
+                return;
+            }
+
+            if (exists.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Cannot determine whether infrastructure container '{containerName}' exists after inspection failed: {exists.StdErr}");
+            }
+
+            throw new InvalidOperationException($"Failed to inspect existing infrastructure container '{containerName}'; refusing to assume its config mount is current: {inspect.StdErr}");
+        }
+
+        if (HasRequiredConfigContainerMount(inspect.StdOut, configDirectory, containerConfigDirectory, isWindowsHostNativeDev))
+        {
+            return;
+        }
+
+        PodmanCommandResult podInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+        string? podState = podInspect.ExitCode == 0 ? GetPodState(podInspect.StdOut) : null;
+        if (podState is null)
+        {
+            throw new InvalidOperationException($"Cannot safely replace infrastructure container '{containerName}' because egress pod inspection failed or returned no state.");
+        }
+
+        if (IsPodStopped(podState))
+        {
+            if (!HasOnlyInactiveEgressPodMembers(podInspect.StdOut))
+            {
+                throw new InvalidOperationException($"Egress pod reports stopped but one or more members are active, missing, or unknown; refusing to replace '{containerName}'.");
+            }
+        }
+        else if (string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(podState, "Degraded", StringComparison.OrdinalIgnoreCase))
+        {
+            PodmanCommandResult stopped = await podmanRunner.RunAsync(["pod", "stop", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+            if (stopped.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to stop egress pod before replacing stale config mount for '{containerName}': {stopped.StdErr}");
+            }
+
+            PodmanCommandResult stoppedInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+            if (stoppedInspect.ExitCode != 0
+                || !IsPodStopped(GetPodState(stoppedInspect.StdOut))
+                || !HasOnlyInactiveEgressPodMembers(stoppedInspect.StdOut))
+            {
+                throw new InvalidOperationException($"Egress pod and every member must reach a known inactive state before replacing '{containerName}'.");
+            }
+        }
+        else
+        {
+            throw new InvalidOperationException($"Cannot safely replace '{containerName}' because egress pod state '{podState}' is not a supported stoppable state.");
+        }
+
+        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", containerName], 20, cancellationToken).ConfigureAwait(false);
+        if (removed.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Failed to remove infrastructure container '{containerName}' with a stale config mount: {removed.StdErr}");
         }
     }
 

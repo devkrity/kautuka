@@ -394,8 +394,12 @@ public static class Program
             """;
 
             string boundaryPath = Path.Combine(tempRoot, "boundary.nft");
-            string envoyPath = Path.Combine(tempRoot, "envoy.yaml");
-            string corefilePath = Path.Combine(tempRoot, "Corefile");
+            string envoyConfigDir = Path.Combine(tempRoot, "envoy");
+            string dnsConfigDir = Path.Combine(tempRoot, "dns");
+            Directory.CreateDirectory(envoyConfigDir);
+            Directory.CreateDirectory(dnsConfigDir);
+            string envoyPath = Path.Combine(envoyConfigDir, "envoy.yaml");
+            string corefilePath = Path.Combine(dnsConfigDir, "Corefile");
             await File.WriteAllTextAsync(boundaryPath, renderedBoundary).ConfigureAwait(false);
             await File.WriteAllTextAsync(envoyPath, renderedEnvoy).ConfigureAwait(false);
             await File.WriteAllTextAsync(corefilePath, renderedCorefile).ConfigureAwait(false);
@@ -421,11 +425,11 @@ public static class Program
             await CreateAndAllowlistAsync($"{podName}-bnd", "egress-boundary", EgressTopologyManager.BoundaryInitImage,
                 ["create", "--pod", podName, "--name", $"{podName}-bnd", "--init-ctr=always", "--cap-add", "NET_ADMIN", "--user", "0:0", "--entrypoint", "/bin/sh", "-v", $"{boundaryPath}:/etc/nftables.conf:ro", EgressTopologyManager.BoundaryInitImage, "-c", "ip route replace local 192.0.0.8 dev lo 2>/dev/null || true; exec /usr/sbin/nft -f /etc/nftables.conf"]).ConfigureAwait(false);
             await CreateAndAllowlistAsync($"{podName}-dns", "egress-dns", EgressTopologyManager.CoreDnsPinnedImage,
-                ["create", "--pod", podName, "--name", $"{podName}-dns", "--cap-add", "NET_BIND_SERVICE", "--user", "0:0", "-v", $"{corefilePath}:/etc/coredns/Corefile:ro", EgressTopologyManager.CoreDnsPinnedImage, "-conf", "/etc/coredns/Corefile"]).ConfigureAwait(false);
+                ["create", "--pod", podName, "--name", $"{podName}-dns", "--cap-add", "NET_BIND_SERVICE", "--user", "0:0", "-v", $"{dnsConfigDir}:/etc/coredns:ro,z", EgressTopologyManager.CoreDnsPinnedImage, "-conf", "/etc/coredns/Corefile"]).ConfigureAwait(false);
             string adminSockDir = Path.Combine(tempRoot, "admin-sock");
             Directory.CreateDirectory(adminSockDir);
             await CreateAndAllowlistAsync($"{podName}-env", "egress-envoy", EgressTopologyManager.EnvoyPinnedImage,
-                ["create", "--pod", podName, "--name", $"{podName}-env", "--user", "0:0", "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro", "-v", $"{socketDir}:/run/kautuka-nac:z", "-v", $"{adminSockDir}:/run/kautuka-admin:z", EgressTopologyManager.EnvoyPinnedImage, "-c", "/etc/envoy/envoy.yaml"]).ConfigureAwait(false);
+                ["create", "--pod", podName, "--name", $"{podName}-env", "--user", "0:0", "-v", $"{envoyConfigDir}:/etc/kautuka-envoy:ro,z", "-v", $"{socketDir}:/run/kautuka-nac:z", "-v", $"{adminSockDir}:/run/kautuka-admin:z", EgressTopologyManager.EnvoyPinnedImage, "-c", "/etc/kautuka-envoy/envoy.yaml"]).ConfigureAwait(false);
 
             await ExecPodmanAsync(["--hooks-dir", hooksDir, "pod", "start", podName]).ConfigureAwait(false);
 
@@ -1225,7 +1229,7 @@ public static class Program
                 throw new InvalidOperationException($"Routed LAN fixture could not be reached from the outside network before the NAC flow (rc={lanNetworkProbeRc}; body={lanNetworkProbeOut}; error={lanNetworkProbeErr}; access={lanFixtureAccessLog}).");
             }
 
-            string corefilePath = Path.Combine(stateDir, "nac", "Corefile");
+            string corefilePath = Path.Combine(stateDir, "nac", "dns", "Corefile");
             string corefile = await File.ReadAllTextAsync(corefilePath).ConfigureAwait(false);
             string workloadDnsBind = "    bind 10.247.0.2";
             string envoyDnsBind = "    bind 127.0.0.1";
@@ -1441,7 +1445,7 @@ public static class Program
             string rebindCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long rebindRejectDelta = ExtractNftCommentCounterPackets(rebindCountersAfter, "private_reject") - rebindRejectBefore;
 
-            string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy.yaml");
+            string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy", "envoy.yaml");
             string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
             const string removePrivatePublicFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 10\.0\.0\.0\r?\n\k<i>  prefix_len: 8\r?\n";
             int privateRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivatePublicFilterRangePattern, RegexOptions.CultureInvariant);

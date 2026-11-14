@@ -1130,6 +1130,140 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void DnsAndEnvoyConfigsUseDedicatedReadOnlyRelabeledDirectoryMounts_WithNegativeControl()
+    {
+        string dnsDir = Path.Combine(tempDir, "nac", "dns");
+        string envoyDir = Path.Combine(tempDir, "nac", "envoy");
+        IReadOnlyList<string> dns = EgressTopologyManager.BuildCoreDnsCreateArgs(Path.Combine(dnsDir, "Corefile"));
+        IReadOnlyList<string> envoy = EgressTopologyManager.BuildEnvoyCreateArgs(
+            Path.Combine(envoyDir, "envoy.yaml"), Path.Combine(tempDir, "sockets"), Path.Combine(tempDir, "admin"));
+
+        Assert.Contains($"{Path.GetFullPath(dnsDir)}:/etc/coredns:ro,z", dns);
+        Assert.Contains("/etc/coredns/Corefile", dns);
+        Assert.Contains($"{Path.GetFullPath(envoyDir)}:/etc/kautuka-envoy:ro,z", envoy);
+        Assert.Contains("/etc/kautuka-envoy/envoy.yaml", envoy);
+
+        string oldDnsFileMount = """[{"CreateCommand":["podman","create","-v","/state/nac/Corefile:/etc/coredns/Corefile:ro"]}]""";
+        string oldEnvoyFileMount = """[{"CreateCommand":["podman","create","-v","/state/nac/envoy.yaml:/etc/envoy/envoy.yaml:ro"]}]""";
+        Assert.False(EgressTopologyManager.HasRequiredConfigContainerMount(oldDnsFileMount, dnsDir, "/etc/coredns", false));
+        Assert.False(EgressTopologyManager.HasRequiredConfigContainerMount(oldEnvoyFileMount, envoyDir, "/etc/kautuka-envoy", false));
+
+        string currentDns = JsonSerializer.Serialize(new[] { new { CreateCommand = new[] { "podman", "create", "-v", $"{Path.GetFullPath(dnsDir)}:/etc/coredns:ro,z" } } });
+        string currentEnvoy = JsonSerializer.Serialize(new[] { new { CreateCommand = new[] { "podman", "create", "-v", $"{Path.GetFullPath(envoyDir)}:/etc/kautuka-envoy:ro,z" } } });
+        Assert.True(EgressTopologyManager.HasRequiredConfigContainerMount(currentDns, dnsDir, "/etc/coredns", false));
+        Assert.True(EgressTopologyManager.HasRequiredConfigContainerMount(currentEnvoy, envoyDir, "/etc/kautuka-envoy", false));
+        IReadOnlyList<string> windowsDns = EgressTopologyManager.BuildCoreDnsCreateArgs(Path.Combine(dnsDir, "Corefile"), isWindowsHostNativeDev: true);
+        IReadOnlyList<string> windowsEnvoy = EgressTopologyManager.BuildEnvoyCreateArgs(Path.Combine(envoyDir, "envoy.yaml"), "sockets", "admin", isWindowsHostNativeDev: true, decisionEndpointIp: "172.20.144.1", envoyCertificateDirectory: "C:\\certs");
+        Assert.Contains($"{Path.GetFullPath(dnsDir)}:/etc/coredns:ro", windowsDns);
+        Assert.Contains($"{Path.GetFullPath(envoyDir)}:/etc/kautuka-envoy:ro", windowsEnvoy);
+        Assert.Contains("/etc/kautuka-envoy/envoy.yaml", windowsEnvoy);
+        Assert.Contains("C:\\certs:/etc/envoy/certs:ro", windowsEnvoy);
+    }
+
+    [Theory]
+    [InlineData("kautuka-egress-dns", "/etc/coredns")]
+    [InlineData("kautuka-egress-envoy", "/etc/kautuka-envoy")]
+    public async Task ConfigMountMigrationStopsPodOnceAndRemovesOnlyTheStaleInfraContainer(string containerName, string containerConfigDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(containerName);
+        ArgumentNullException.ThrowIfNull(containerConfigDirectory);
+        const string staleInspect = """[{"CreateCommand":["podman","create","-v","/state/old-config:/etc/old-config:ro"]}]""";
+        var calls = new List<IReadOnlyList<string>>();
+        string podState = "Running";
+        string[] states = ["running", "running", "running", "running"];
+        bool removed = false;
+        bool failStop = false;
+        bool failRemove = false;
+        bool failInspect = false;
+        bool failExistsCheck = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            string output = args.SequenceEqual(["inspect", containerName]) ? staleInspect
+                : args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])
+                    ? $"[{{\"State\":\"{podState}\",\"InfraContainerID\":\"infra-id\",\"Containers\":[{{\"Id\":\"boundary-id\",\"Name\":\"kautuka-egress-boundary\",\"State\":\"{states[0]}\"}},{{\"Id\":\"dns-id\",\"Name\":\"kautuka-egress-dns\",\"State\":\"{states[1]}\"}},{{\"Id\":\"envoy-id\",\"Name\":\"kautuka-egress-envoy\",\"State\":\"{states[2]}\"}},{{\"Id\":\"infra-id\",\"Name\":\"kautuka-egress-pod-infra\",\"State\":\"{states[3]}\"}}]}}]"
+                    : string.Empty;
+            bool failed = args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]) && failStop
+                || args.SequenceEqual(["rm", "-f", containerName]) && failRemove
+                || args.SequenceEqual(["inspect", containerName]) && failInspect
+                || args.SequenceEqual(["container", "exists", containerName]) && failExistsCheck;
+            if (args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]) && !failed)
+            {
+                podState = "Exited";
+                states = ["exited", "created", "created", "exited"];
+            }
+            if (args.SequenceEqual(["rm", "-f", containerName]) && !failed) removed = true;
+            int exitCode = failed
+                ? (args.SequenceEqual(["container", "exists", containerName]) ? 125 : 1)
+                : 0;
+            return Task.FromResult(new PodmanCommandResult(exitCode, output, failed ? "fixture failure" : string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "dns-migration.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir);
+        var migrate = typeof(EgressTopologyManager).GetMethod("EnsureConfigContainerMountCurrentAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Config mount migration method was not found.");
+
+        string configDirectory = Path.Combine(tempDir, "nac", containerName.EndsWith("dns", StringComparison.Ordinal) ? "dns" : "envoy");
+        await ((Task)migrate.Invoke(manager, [containerName, configDirectory, containerConfigDirectory, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+
+        Assert.True(removed);
+        Assert.Equal(1, calls.Count(args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName])));
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", containerName]));
+        string unrelatedConfigContainer = containerName == "kautuka-egress-envoy" ? "kautuka-egress-dns" : "kautuka-egress-envoy";
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", unrelatedConfigContainer]));
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+
+        // The second stale config container reuses the already stopped pod; it does not stop the pod again.
+        string otherConfigDirectory = Path.Combine(tempDir, "nac", containerName == "kautuka-egress-dns" ? "envoy" : "dns");
+        string otherContainerConfigDirectory = containerName == "kautuka-egress-dns" ? "/etc/kautuka-envoy" : "/etc/coredns";
+        await ((Task)migrate.Invoke(manager, [unrelatedConfigContainer, otherConfigDirectory, otherContainerConfigDirectory, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.Equal(1, calls.Count(args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName])));
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-dns"]));
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-envoy"]));
+
+        // Negative controls: ignoring a failed stop or failed targeted removal would allow migration to proceed unsafely.
+        calls.Clear();
+        removed = false;
+        podState = "Running";
+        states = ["running", "running", "running", "running"];
+        failStop = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [containerName, configDirectory, containerConfigDirectory, false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", containerName]));
+
+        calls.Clear();
+        podState = "Exited";
+        states = ["exited", "created", "created", "exited"];
+        failStop = false;
+        failRemove = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [containerName, configDirectory, containerConfigDirectory, false, TestContext.Current.CancellationToken])!);
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", containerName]));
+        Assert.False(removed);
+
+        // If inspect transiently fails while the container still exists, never infer that it is absent/current.
+        calls.Clear();
+        failRemove = false;
+        failInspect = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [containerName, configDirectory, containerConfigDirectory, false, TestContext.Current.CancellationToken])!);
+        Assert.Contains(calls, args => args.SequenceEqual(["container", "exists", containerName]));
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", containerName]));
+
+        // An existence-check error is also ambiguous and must fail closed.
+        calls.Clear();
+        failExistsCheck = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [containerName, configDirectory, containerConfigDirectory, false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", containerName]));
+    }
+
+    [Fact]
     public async Task BoundaryMountMigrationStopsOnlyForDriftAndFailsClosedOnUnknownPodState()
     {
         const string staleInspect = """[{"CreateCommand":["podman","create","-v","/old/boundary.nft:/etc/nftables.conf:ro"]}]""";
