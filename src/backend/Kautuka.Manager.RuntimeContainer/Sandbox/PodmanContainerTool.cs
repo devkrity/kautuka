@@ -226,19 +226,7 @@ public sealed class PodmanContainerTool(
 
         if (workloadRegistry is not null)
         {
-            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
-                allocatedIp,
-                context.UserId,
-                IsAgentScope(context) ? context.ScopeId : null,
-                containerName,
-                "agent-sandbox",
-                null,
-                "agent-sandbox",
-                false,
-                "normal",
-                "user-agent",
-                null,
-                DateTimeOffset.UtcNow));
+            workloadRegistry.Register(BuildSandboxRegistryEntry(context, allocatedIp, containerName));
         }
 
         ContainerExecutionResult createResult = await RunPodmanAsync(
@@ -599,6 +587,9 @@ public sealed class PodmanContainerTool(
         }
 
         string image = QualifyLocalImage(context.Image);
+        bool hasUserAgentIdentity = !string.IsNullOrWhiteSpace(context.UserId)
+            && IsAgentScope(context)
+            && !string.IsNullOrWhiteSpace(context.ScopeId);
 
         var spec = new Hosting.NetworkAccess.WorkloadContainerSpec(containerName, image, ip)
         {
@@ -607,7 +598,7 @@ public sealed class PodmanContainerTool(
             ExecContext = "agent-sandbox",
             Kind = "agent-sandbox",
             Systemwide = false,
-            Egress = "normal",
+            Egress = hasUserAgentIdentity ? "normal" : "deny-all",
             Persistent = true,
             WorkingDirectory = context.ContainerWorkspacePath,
             Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath)],
@@ -640,6 +631,30 @@ public sealed class PodmanContainerTool(
 
     private static bool IsAgentScope(ContainerContext context)
         => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase);
+
+    internal static Kautuka.NetworkAccessController.RegistryEntry BuildSandboxRegistryEntry(
+        ContainerContext context,
+        string allocatedIp,
+        string containerName)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        bool hasUserIdentity = !string.IsNullOrWhiteSpace(context.UserId);
+        bool hasAgentIdentity = hasUserIdentity && IsAgentScope(context) && !string.IsNullOrWhiteSpace(context.ScopeId);
+        bool hasAgentScope = IsAgentScope(context) && !string.IsNullOrWhiteSpace(context.ScopeId);
+        return new Kautuka.NetworkAccessController.RegistryEntry(
+            allocatedIp,
+            hasUserIdentity ? context.UserId : null,
+            hasAgentScope ? context.ScopeId : null,
+            containerName,
+            "agent-sandbox",
+            null,
+            "agent-sandbox",
+            false,
+            hasAgentIdentity ? "normal" : "deny-all",
+            hasAgentIdentity ? "user-agent" : "none",
+            null,
+            DateTimeOffset.UtcNow);
+    }
 
     private static string NormalizeContainerSegment(string? value)
     {

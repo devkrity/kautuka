@@ -233,6 +233,28 @@ public sealed class WorkloadPostStartVerifierTests
     }
 
     [Fact]
+    public async Task UserlessSandboxMountMatchesOnlyItsOwnDesiredWorkspace()
+    {
+        static WorkloadRegistry UserlessRegistry()
+        {
+            var registry = new WorkloadRegistry();
+            registry.Register(new RegistryEntry(AllocatedIp, null, "agent-alpha", ContainerId, "agent-sandbox", null,
+                "agent-sandbox", false, "deny-all", "none", null, DateTimeOffset.UtcNow));
+            return registry;
+        }
+
+        var calls = new List<string[]>();
+        await VerifyAsync(Inspect(mountType: "bind", mountSource: "{{USERLESS_WORKSPACE}}"), calls, UserlessRegistry());
+        Assert.DoesNotContain(calls, static call => call[0] is "kill" or "rm");
+
+        calls.Clear();
+        WorkloadRegistry registry = UserlessRegistry();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => VerifyAsync(
+            Inspect(mountType: "bind", mountSource: "{{OWNER_WORKSPACE}}"), calls, registry));
+        AssertCleanup(calls, registry);
+    }
+
+    [Fact]
     public async Task VolumeMountOutsideConfiguredRootFailsAndCleansUp()
     {
         var calls = new List<string[]>();
@@ -280,6 +302,7 @@ public sealed class WorkloadPostStartVerifierTests
             string siblingAgentWorkspacePath = Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-beta");
             inspectJson = inspectJson
                 .Replace("{{OWNER_WORKSPACE}}", JsonSerializer.Serialize(ownerWorkspacePath)[1..^1], StringComparison.Ordinal)
+                .Replace("{{USERLESS_WORKSPACE}}", JsonSerializer.Serialize(Path.Combine(workspaceRoot, "shared", "agent-alpha"))[1..^1], StringComparison.Ordinal)
                 .Replace(
                     "{{OTHER_USER_WORKSPACE}}",
                     JsonSerializer.Serialize(Path.Combine(workspaceRoot, "users", "user-beta", "agents", "agent-alpha"))[1..^1],
@@ -329,6 +352,8 @@ public sealed class WorkloadPostStartVerifierTests
                     new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
                 [
+                    new ContainerContext(
+                        "agent", "agent-alpha", null, Path.Combine(workspaceRoot, "shared", "agent-alpha"), "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
                     new ContainerContext(
                         "agent", "agent-alpha", "user-alpha", ownerWorkspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>()),
                     new ContainerContext(

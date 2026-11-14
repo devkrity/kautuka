@@ -12,7 +12,6 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class PodmanContainerToolTests
 {
-
     [Fact]
     public async Task HardenedSandboxUserCanCreateAndRemoveConnectorInstallDirectoryOnTmpfsHome()
     {
@@ -68,6 +67,33 @@ public sealed class PodmanContainerToolTests
                 + $"ExitCode={writableHome.ExitCode}; stderr={writableHome.StdErr}");
     }
 
+    [Fact]
+    public void UserlessAgentSandboxRegistersDenyAllIdentity_WhileUserAgentKeepsNormalEgress()
+    {
+        var registry = new WorkloadRegistry();
+        ContainerContext userless = CreateLaunchContext("placeholder", "shared-agent", Path.Combine(Path.GetTempPath(), "shared-agent"))
+            with
+        { UserId = null };
+        RegistryEntry systemEntry = PodmanContainerTool.BuildSandboxRegistryEntry(userless, "10.247.1.200", "sandbox-system");
+
+        registry.Register(systemEntry);
+        RegistryEntry registeredSystemEntry = Assert.Single(registry.GetAll());
+        Assert.Equal("deny-all", registeredSystemEntry.Egress);
+        Assert.Equal("none", registeredSystemEntry.Attribution);
+        Assert.Null(registeredSystemEntry.UserId);
+        Assert.Equal("shared-agent", registeredSystemEntry.AgentId);
+        List<string> systemArguments = InvokeBuildRunArguments(userless, "sandbox-system");
+        Assert.Contains("io.kautuka.egress=deny-all", systemArguments);
+        Assert.Contains("io.kautuka.user=", systemArguments);
+        Assert.Contains("io.kautuka.agent=shared-agent", systemArguments);
+
+        ContainerContext userAgent = CreateLaunchContext("user-a", "agent-a", Path.Combine(Path.GetTempPath(), "agent-a"));
+        RegistryEntry userEntry = PodmanContainerTool.BuildSandboxRegistryEntry(userAgent, "10.247.1.201", "sandbox-user");
+        registry.Register(userEntry);
+        Assert.Equal("normal", registry.FindByIp("10.247.1.201")?.Egress);
+        Assert.Equal("user-agent", registry.FindByIp("10.247.1.201")?.Attribution);
+        Assert.Contains("io.kautuka.egress=normal", InvokeBuildRunArguments(userAgent, "sandbox-user"));
+    }
 
     [Fact]
     public async Task V7_45_BrakedSandboxIsRejectedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
@@ -235,7 +261,7 @@ public sealed class PodmanContainerToolTests
     }
 
     [Fact]
-    public void BuildRunArgumentsRejectsUserScopeWithoutAnAgentIdentity()
+    public void BuildRunArgumentsDeniesEgressForUserScopeWithoutAnAgentIdentity()
     {
         ContainerContext context = new(
             ScopeType: "user",
@@ -248,12 +274,21 @@ public sealed class PodmanContainerToolTests
             DefaultMemoryLimit: "512m",
             DefaultTimeoutSeconds: 30,
             BaseCapabilities: [],
-            ContainerEnvironment: new Dictionary<string, string>());
+            ContainerEnvironment: new Dictionary<string, string>())
+        {
+            WorkspaceBaseRoot = "/tmp/kautuka",
+        };
 
-        ArgumentException exception = Assert.Throws<ArgumentException>(
-            () => PodmanContainerTool.BuildRunArguments(context, "kautuka-user-user-alpha", "10.247.1.10", isBraked: false));
+        IReadOnlyList<string> arguments = PodmanContainerTool.BuildRunArguments(
+            context,
+            "kautuka-user-user-alpha",
+            "10.247.1.10",
+            isBraked: false);
 
-        Assert.Contains("agentId", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("io.kautuka.egress=deny-all", arguments, StringComparer.Ordinal);
+        Assert.Contains("io.kautuka.user=user-alpha", arguments, StringComparer.Ordinal);
+        Assert.Equal("user-alpha", PodmanContainerTool.BuildSandboxRegistryEntry(context, "10.247.1.10", "kautuka-user-user-alpha").UserId);
+        Assert.DoesNotContain(arguments, static argument => argument.StartsWith("io.kautuka.agent=", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -232,7 +232,10 @@ public sealed class WorkloadPostStartVerifier
                 if (!mountType.Equals("tmpfs", StringComparison.OrdinalIgnoreCase)
                     && (string.IsNullOrWhiteSpace(source) || !IsWithinAllowedRoot(source, allowedMountRoots)))
                 {
-                    throw new InvalidOperationException($"Mount check failed: {mountType} source '{source}' is outside the configured workspace roots.");
+                    throw new InvalidOperationException(
+                        $"Mount check failed: {mountType} source '{source}' is outside the configured workspace roots " +
+                        $"for agent '{workloadIdentity?.AgentId ?? "<none>"}' and user '{workloadIdentity?.UserId ?? "<none>"}' " +
+                        $"(resolved roots: {string.Join(", ", allowedMountRoots)}).");
                 }
 
                 if (source.Contains("docker.sock", StringComparison.OrdinalIgnoreCase)
@@ -313,7 +316,6 @@ public sealed class WorkloadPostStartVerifier
     private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity)
     {
         if (workloadIdentity is null
-            || string.IsNullOrWhiteSpace(workloadIdentity.UserId)
             || string.IsNullOrWhiteSpace(workloadIdentity.AgentId)
             || desiredStateStore is null)
         {

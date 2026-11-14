@@ -914,6 +914,62 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.NotNull(entry);
         Assert.Equal(validCid, entry.ContainerId);
     }
+
+    [Fact]
+    public async Task RebuildRegistryRetainsUserlessDenyAllSandboxButRejectsNormalEgress()
+    {
+        const string image = "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        var spec = new WorkloadContainerSpec("sandbox", image, "10.247.1.10")
+        {
+            UserId = string.Empty,
+            AgentId = string.Empty,
+            Kind = "agent-sandbox",
+            ExecContext = "agent-sandbox",
+            Egress = "deny-all",
+            Systemwide = false,
+            StartupGateOpen = true,
+            IsBraked = false
+        };
+        IReadOnlyList<string> args = spec.Render();
+        var labels = new Dictionary<string, string>();
+        for (int i = 0; i < args.Count - 1; i++)
+        {
+            if (args[i] == "--label")
+            {
+                string[] pair = args[++i].Split('=', 2);
+                labels[pair[0]] = pair[1];
+            }
+        }
+        var normalLabels = new Dictionary<string, string>(labels) { ["io.kautuka.egress"] = "normal" };
+        var removed = new List<string>();
+        var podman = new PodmanCommandRunner((command, _) =>
+        {
+            if (command[0] == "ps")
+                return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"restricted\"},{\"Id\":\"normal\"}]", ""));
+            if (command[0] == "inspect")
+            {
+                bool restricted = command[1] == "restricted";
+                string ip = restricted ? "10.247.1.10" : "10.247.1.11";
+                string labelJson = System.Text.Json.JsonSerializer.Serialize(restricted ? labels : normalLabels);
+                return Task.FromResult(new PodmanCommandResult(0, $"[{{\"Config\":{{\"Labels\":{labelJson}}},\"NetworkSettings\":{{\"Networks\":{{\"kautuka-workload\":{{\"IPAddress\":\"{ip}\"}}}}}}}}]", ""));
+            }
+            if (command[0] == "rm") removed.Add(command[2]);
+            return Task.FromResult(new PodmanCommandResult(0, "", ""));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "rebuild-ip.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir);
+
+        await manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+
+        Assert.True(registry.TryGetByIp("10.247.1.10", out RegistryEntry? entry));
+        Assert.NotNull(entry);
+        Assert.Equal("deny-all", entry.Egress);
+        Assert.Equal("none", entry.Attribution);
+        Assert.False(registry.TryGetByIp("10.247.1.11", out _));
+        Assert.Equal(new[] { "normal" }, removed);
+    }
+
     [Fact]
     public void V7_20_CanaryRequiresSuccessfulHookRecordForItsOwnIp_WithNegativeControl()
     {

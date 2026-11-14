@@ -368,7 +368,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
                             if (isValid && kind is "connector" or "agent-sandbox")
                             {
-                                if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user))
+                                if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user)
+                                    && egress is not ("deny-all" or "proxy-only"))
                                 {
                                     isValid = false;
                                 }
