@@ -74,6 +74,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
+    private volatile bool topologyIncidentLatched;
+    private volatile bool topologyContainmentComplete;
     private string? expectedBoundaryRulesetHash;
     private string? expectedBoundaryNftSourceHash;
     private long unlabelledWorkloadCount;
@@ -170,6 +172,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
+    internal bool TopologyContainmentCompleteForTests => topologyContainmentComplete;
+
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         try
@@ -219,6 +223,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(registry);
+
+        if (topologyIncidentLatched)
+        {
+            IsStartupGateOpen = false;
+            await ContainWorkloadNetworkMembersAsync(registry, "previous topology incident", cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException("A topology incident is latched. This Manager process cannot reopen the NAC startup gate.");
+        }
 
         logger.LogInformation("Initializing Kautuka egress topology...");
 
@@ -1740,17 +1751,23 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     internal async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
+        if (topologyIncidentLatched)
+        {
+            await ContainWorkloadNetworkMembersAsync(registry, "previous topology incident", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (IsStartupGateOpen && !await IsRenderedBoundaryNftUnchangedAsync(cancellationToken).ConfigureAwait(false))
         {
             logger.LogError("Rendered boundary nft source changed during reconcile; closing the NAC startup gate.");
-            IsStartupGateOpen = false;
+            await LatchTopologyIncidentAndContainAsync(registry, "rendered boundary source drift", cancellationToken).ConfigureAwait(false);
             return;
         }
 
         if (IsStartupGateOpen && !await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
         {
             logger.LogError("Egress pod health check failed during reconcile; closing the NAC startup gate.");
-            IsStartupGateOpen = false;
+            await LatchTopologyIncidentAndContainAsync(registry, "egress pod health failure", cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -1766,14 +1783,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         "Boundary nft ruleset hash changed during reconcile (expected {ExpectedHash}, observed {ObservedHash}); closing the NAC startup gate.",
                         expectedBoundaryRulesetHash,
                         liveBoundaryHash);
-                    IsStartupGateOpen = false;
+                    await LatchTopologyIncidentAndContainAsync(registry, "live boundary ruleset drift", cancellationToken).ConfigureAwait(false);
                     return;
                 }
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Boundary nft ruleset verification failed during reconcile; closing the NAC startup gate.");
-                IsStartupGateOpen = false;
+                await LatchTopologyIncidentAndContainAsync(registry, "live boundary verification failure", cancellationToken).ConfigureAwait(false);
                 return;
             }
         }
@@ -1856,6 +1873,338 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
     }
+
+    private async Task LatchTopologyIncidentAndContainAsync(
+        IWorkloadRegistry registry,
+        string incident,
+        CancellationToken cancellationToken)
+    {
+        // Deny new launches and Envoy authorization before the first Podman await.
+        IsStartupGateOpen = false;
+        topologyIncidentLatched = true;
+        topologyContainmentComplete = false;
+        logger.LogCritical("Topology incident '{Incident}' latched; stopping workloads on {Network}.", incident, WorkloadNetworkName);
+        await ContainWorkloadNetworkMembersAsync(registry, incident, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ContainWorkloadNetworkMembersAsync(
+        IWorkloadRegistry registry,
+        string incident,
+        CancellationToken cancellationToken)
+    {
+        HashSet<string> candidateIds = new(StringComparer.OrdinalIgnoreCase);
+        PodmanCommandResult initialList = await ListWorkloadNetworkContainersAsync(cancellationToken).ConfigureAwait(false);
+        bool initialListComplete = TryReadWorkloadNetworkContainers(initialList, out List<WorkloadNetworkContainer> initialContainers);
+        HashSet<string> enumeratedIdentities = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (WorkloadNetworkContainer container in initialContainers)
+        {
+            enumeratedIdentities.Add(container.Id);
+            foreach (string name in container.Names)
+            {
+                enumeratedIdentities.Add(name);
+            }
+
+            if (!knownInfraContainerIds.Contains(container.Id) && !IsKnownStoppedContainerState(container.State))
+            {
+                candidateIds.Add(container.Id);
+            }
+        }
+
+        // Registry IDs and the network scan are independent evidence sources. Union them so a
+        // valid-but-empty filtered Podman response cannot hide a registered running workload.
+        foreach (RegistryEntry entry in registry.GetAll())
+        {
+            if (knownInfraContainerIds.Contains(entry.ContainerId))
+            {
+                continue;
+            }
+
+            if (!enumeratedIdentities.Contains(entry.ContainerId)
+                || !initialListComplete && !IsKnownStoppedContainerState(
+                    initialContainers.FirstOrDefault(container =>
+                        string.Equals(container.Id, entry.ContainerId, StringComparison.OrdinalIgnoreCase)
+                        || container.Names.Contains(entry.ContainerId, StringComparer.OrdinalIgnoreCase))?.State ?? string.Empty))
+            {
+                candidateIds.Add(entry.ContainerId);
+            }
+        }
+
+        if (!initialListComplete)
+        {
+            logger.LogError(
+                "Workload network enumeration failed or was malformed while containing topology incident '{Incident}'; all known registered workloads will be included and the incident will be retried.",
+                incident);
+        }
+
+        HashSet<string> confirmedInactive = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string containerId in candidateIds)
+        {
+            if (await StopKillOrInspectForTopologyIncidentAsync(containerId, incident, cancellationToken).ConfigureAwait(false))
+            {
+                confirmedInactive.Add(containerId);
+            }
+        }
+
+        PodmanCommandResult finalList = await ListWorkloadNetworkContainersAsync(cancellationToken).ConfigureAwait(false);
+        bool finalListComplete = TryReadWorkloadNetworkContainers(finalList, out List<WorkloadNetworkContainer> finalContainers);
+        string[] remaining = finalContainers
+            .Where(container => !knownInfraContainerIds.Contains(container.Id) && !IsKnownStoppedContainerState(container.State))
+            .Select(static container => container.Id)
+            .ToArray();
+        foreach (string containerId in candidateIds)
+        {
+            if (finalContainers.Any(container =>
+                (string.Equals(container.Id, containerId, StringComparison.OrdinalIgnoreCase)
+                    || container.Names.Contains(containerId, StringComparer.OrdinalIgnoreCase))
+                && IsKnownStoppedContainerState(container.State)))
+            {
+                confirmedInactive.Add(containerId);
+            }
+        }
+
+        string[] unconfirmedCandidates = candidateIds
+            .Where(containerId => !confirmedInactive.Contains(containerId))
+            .ToArray();
+
+        if (!initialListComplete || !finalListComplete || remaining.Length > 0 || unconfirmedCandidates.Length > 0)
+        {
+            topologyContainmentComplete = false;
+            logger.LogCritical(
+                "Topology incident '{Incident}' remains unresolved; enumeration complete={EnumerationComplete}, remaining workload containers={Remaining}, unconfirmed candidates={Unconfirmed}. The launch/auth gate remains closed and reconcile will retry.",
+                incident,
+                initialListComplete && finalListComplete,
+                remaining.Length == 0 ? "none observed" : string.Join(",", remaining),
+                unconfirmedCandidates.Length == 0 ? "none" : string.Join(",", unconfirmedCandidates));
+            return;
+        }
+
+        topologyContainmentComplete = true;
+        logger.LogCritical(
+            "Topology incident '{Incident}' remains latched. A complete workload-network scan found no running workload containers and every candidate was confirmed inactive; the gate remains closed and future reconcile ticks will rescan.",
+            incident);
+    }
+
+    private async Task<bool> StopKillOrInspectForTopologyIncidentAsync(
+        string containerId,
+        string incident,
+        CancellationToken cancellationToken)
+    {
+        bool stopped = false;
+        try
+        {
+            PodmanCommandResult stop = await podmanRunner
+                .RunAsync(["stop", "-t", "2", containerId], 10, cancellationToken)
+                .ConfigureAwait(false);
+            stopped = stop.ExitCode == 0;
+            if (!stopped)
+            {
+                logger.LogWarning(
+                    "Topology incident '{Incident}': stop failed for workload '{ContainerId}' (rc {ExitCode}); trying kill.",
+                    incident,
+                    containerId,
+                    stop.ExitCode);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Topology incident '{Incident}': stop failed for workload '{ContainerId}'; trying kill.", incident, containerId);
+        }
+
+        if (stopped)
+        {
+            return true;
+        }
+
+        try
+        {
+            PodmanCommandResult kill = await podmanRunner
+                .RunAsync(["kill", containerId], 10, cancellationToken)
+                .ConfigureAwait(false);
+            if (kill.ExitCode == 0)
+            {
+                return true;
+            }
+
+            logger.LogCritical(
+                "Topology incident '{Incident}': stop and kill failed for workload '{ContainerId}' (kill rc {ExitCode}); registry identity is retained and reconcile will retry.",
+                incident,
+                containerId,
+                kill.ExitCode);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogCritical(ex,
+                "Topology incident '{Incident}': stop and kill failed for workload '{ContainerId}'; registry identity is retained and reconcile will retry.",
+                incident,
+                containerId);
+        }
+
+        PodmanCommandResult inspect;
+        try
+        {
+            inspect = await podmanRunner
+                .RunAsync(["inspect", containerId, "--format", "json"], 10, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogCritical(ex,
+                "Topology incident '{Incident}': cannot inspect workload '{ContainerId}' after stop and kill failures; inactive state is unconfirmed.",
+                incident,
+                containerId);
+            return false;
+        }
+
+        if (TryReadConfirmedInactiveInspect(inspect))
+        {
+            logger.LogWarning(
+                "Topology incident '{Incident}': workload '{ContainerId}' did not stop on command, but Podman inspect confirms it is inactive.",
+                incident,
+                containerId);
+            return true;
+        }
+
+        logger.LogCritical(
+            "Topology incident '{Incident}': workload '{ContainerId}' remains unconfirmed after stop, kill, and inspect; reconcile will retry.",
+            incident,
+            containerId);
+        return false;
+    }
+
+    private static bool TryReadConfirmedInactiveInspect(PodmanCommandResult result)
+    {
+        if (result.ExitCode != 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(result.StdOut);
+            JsonElement inspected = document.RootElement.ValueKind == JsonValueKind.Array
+                ? document.RootElement.GetArrayLength() == 1 ? document.RootElement[0] : default
+                : document.RootElement;
+            if (inspected.ValueKind != JsonValueKind.Object
+                || !inspected.TryGetProperty("State", out JsonElement state)
+                || state.ValueKind != JsonValueKind.Object
+                || !state.TryGetProperty("Status", out JsonElement status)
+                || status.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            return IsKnownStoppedContainerState(status.GetString() ?? string.Empty);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private bool TryReadWorkloadNetworkContainers(PodmanCommandResult result, out List<WorkloadNetworkContainer> containers)
+    {
+        containers = [];
+        if (result.ExitCode != 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(result.StdOut);
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            bool complete = true;
+            foreach (JsonElement item in document.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    complete = false;
+                    continue;
+                }
+
+                string id = item.TryGetProperty("Id", out JsonElement idElement) && idElement.ValueKind == JsonValueKind.String
+                    ? idElement.GetString() ?? string.Empty
+                    : string.Empty;
+                string state = item.TryGetProperty("State", out JsonElement stateElement) && stateElement.ValueKind == JsonValueKind.String
+                    ? stateElement.GetString() ?? string.Empty
+                    : string.Empty;
+                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(state))
+                {
+                    complete = false;
+                }
+
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    List<string> names = [];
+                    if (item.TryGetProperty("Names", out JsonElement namesElement))
+                    {
+                        if (namesElement.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (JsonElement nameElement in namesElement.EnumerateArray())
+                            {
+                                if (nameElement.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(nameElement.GetString()))
+                                {
+                                    complete = false;
+                                    continue;
+                                }
+
+                                names.Add(nameElement.GetString()!.TrimStart('/'));
+                            }
+                        }
+                        else if (namesElement.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(namesElement.GetString()))
+                        {
+                            names.Add(namesElement.GetString()!.TrimStart('/'));
+                        }
+                        else
+                        {
+                            complete = false;
+                        }
+                    }
+
+                    containers.Add(new WorkloadNetworkContainer(id, state, names));
+                }
+            }
+
+            return complete;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<PodmanCommandResult> ListWorkloadNetworkContainersAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await podmanRunner
+                .RunAsync(["ps", "-a", "--filter", $"network={WorkloadNetworkName}", "--format", "json"], 30, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to enumerate Podman containers on workload network '{Network}'.", WorkloadNetworkName);
+            return new PodmanCommandResult(1, string.Empty, ex.Message, ProcessTerminationReason.NonZeroExit);
+        }
+    }
+
+    private static bool IsKnownStoppedContainerState(string state)
+        => state.Equals("exited", StringComparison.OrdinalIgnoreCase)
+            || state.Equals("stopped", StringComparison.OrdinalIgnoreCase)
+            || state.Equals("created", StringComparison.OrdinalIgnoreCase)
+            || state.Equals("configured", StringComparison.OrdinalIgnoreCase)
+            || state.Equals("initialized", StringComparison.OrdinalIgnoreCase);
+
+    private sealed record WorkloadNetworkContainer(string Id, string State, IReadOnlyList<string> Names);
 
     private async Task<IReadOnlyList<string>> DiscoverUpstreamDnsIpsAsync(CancellationToken cancellationToken)
     {
