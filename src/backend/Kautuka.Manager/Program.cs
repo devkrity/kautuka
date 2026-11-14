@@ -103,6 +103,7 @@ builder.Services.AddSingleton(sp =>
         windowsPodmanMachineName: windowsPodmanDevEgress?.PodmanMachineName,
         windowsPodmanHookStateDirectory: windowsPodmanDevEgress?.RemoteHookStateDirectory));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
 builder.Services.AddSingleton(sp =>

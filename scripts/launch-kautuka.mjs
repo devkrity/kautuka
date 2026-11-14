@@ -14,6 +14,7 @@ import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isUnixSocketAcceptingConnections } from "./launcher-readiness.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -211,10 +212,26 @@ function waitForPort(service, timeoutMs = 120_000, useWindowsTcp = process.platf
       }
 
       if (service.readySocket && !(useWindowsTcp && service.windowsPort)) {
-        // Kestrel creates the socket file as it binds. Node cannot dial an AF_UNIX
-        // socket on Windows, where a path is treated as a named pipe, so the file
-        // appearing is the portable readiness signal.
         const socketPath = socketPathFor(service);
+        if (process.platform === "linux") {
+          void isUnixSocketAcceptingConnections(socketPath).then((isReady) => {
+            if (isReady) {
+              resolve(undefined);
+              return;
+            }
+
+            if (Date.now() >= deadline) {
+              reject(new Error(`${service.name} did not accept a connection on ${socketPath} within ${timeoutMs}ms`));
+              return;
+            }
+
+            setTimeout(probe, 200);
+          });
+          return;
+        }
+
+        // Node cannot reliably inspect live Unix socket entries on Windows. The
+        // Windows native stack uses TCP above; other platforms keep the file check.
         if (socketFileExists(socketPath)) {
           resolve(undefined);
           return;
