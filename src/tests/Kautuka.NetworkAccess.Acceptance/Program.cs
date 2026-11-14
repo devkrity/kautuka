@@ -1139,6 +1139,8 @@ public static class Program
             const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
             (lanFixtureNamespaceName, lanFixtureHostDevice, lanHostAddress) = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
             Console.WriteLine($"[PROD_STAGE] routed LAN fixture address={lanHostAddress}; namespace={lanFixtureNamespaceName}");
+            string rebindHostName = $"rebind.{lanHostAddress}.nip.io";
+            string lanHostName = $"lan.{lanHostAddress}.nip.io";
             int envoyLanRoutePid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (lanRouteGetRc, lanRouteGetOut, lanRouteGetErr) = await ExecAsync(
                 "podman",
@@ -1261,21 +1263,18 @@ public static class Program
                 throw new InvalidOperationException("The production CoreDNS configuration did not contain both expected DNS listeners.");
             }
 
-            corefile = corefile.Replace(
-                workloadDnsBind,
-                workloadDnsBind + "\n    hosts {\n        93.184.216.34 rebind.nac.test\n        fallthrough\n    }",
-                StringComparison.Ordinal);
-            corefile = corefile.Replace(
-                envoyDnsBind,
-                envoyDnsBind + $"\n    hosts {{\n        {lanHostAddress} rebind.nac.test\n        {lanHostAddress} lan.nac.test\n        fallthrough\n    }}",
-                StringComparison.Ordinal);
-            await File.WriteAllTextAsync(corefilePath, corefile).ConfigureAwait(false);
-            var (dnsRestartRc, _, dnsRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-dns"]).ConfigureAwait(false);
-            if (dnsRestartRc != 0)
+            foreach (string resolverFixtureHost in new[] { rebindHostName, lanHostName })
             {
-                throw new InvalidOperationException($"Could not restart production CoreDNS with the rebinding fixture (rc={dnsRestartRc}; {dnsRestartErr}).");
+                var (resolveRc, resolveOut, resolveErr) = await ExecAsync("getent", ["ahostsv4", resolverFixtureHost]).ConfigureAwait(false);
+                bool resolvesToLanFixture = resolveRc == 0 && resolveOut
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Any(line => string.Equals(line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault(), lanHostAddress, StringComparison.Ordinal));
+                if (!resolvesToLanFixture)
+                {
+                    throw new InvalidOperationException($"Wildcard DNS fixture {resolverFixtureHost} did not resolve to the routed LAN fixture {lanHostAddress} using the acceptance runner's configured resolver (rc={resolveRc}; out={resolveOut}; err={resolveErr}). The live NAC proof requires external nip.io DNS resolution.");
+                }
+                Console.WriteLine($"[PROD_STAGE] wildcard DNS fixture resolved: {resolverFixtureHost} -> {lanHostAddress}");
             }
-
             string dnsUpstreamLine = boundaryText
                 .Split('\n')
                 .Select(static l => l.Trim())
@@ -1464,7 +1463,7 @@ public static class Program
 
             _ = policyStore.SetRule(
                 admin,
-                new RuleWriteSpec("agent", "u1", "rebind", null, "rebind.nac.test", "host", 8443, Allowed: true, AllowLan: false),
+                new RuleWriteSpec("agent", "u1", "rebind", null, rebindHostName, "host", 8443, Allowed: true, AllowLan: false),
                 expectedRevision: policyStore.Revision);
             OciSandboxSession rebindSession = await containerTool.SpawnSandboxAsync(rebindContext, CancellationToken.None).ConfigureAwait(false);
             string rebindName = rebindSession.ContainerName;
@@ -1473,70 +1472,15 @@ public static class Program
             long rebindRejectBefore = ExtractNftCommentCounterPackets(rebindCountersBefore, "private_reject");
             var (rebindRc, _, rebindErr) = await ExecAsync(
                 "podman",
-                ["exec", rebindName, "curl", "--resolve", "rebind.nac.test:8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://rebind.nac.test:8443/"]).ConfigureAwait(false);
+                ["exec", rebindName, "curl", "--resolve", rebindHostName + ":8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + rebindHostName + ":8443/"]).ConfigureAwait(false);
             string rebindCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long rebindRejectDelta = ExtractNftCommentCounterPackets(rebindCountersAfter, "private_reject") - rebindRejectBefore;
 
-            string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy", "envoy.yaml");
-            string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
-            const string removePrivateLanFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 192\.168\.0\.0\r?\n\k<i>  prefix_len: 16\r?\n";
-            int privateLanRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivateLanFilterRangePattern, RegexOptions.CultureInvariant);
-            if (privateLanRangeOccurrences != 2)
-            {
-                throw new InvalidOperationException($"The production Envoy config contained {privateLanRangeOccurrences} 192.168.0.0/16 private-address filter ranges; expected 2 for the negative control.");
-            }
-
-            string mutatedEnvoyConfig = Regex.Replace(
-                originalEnvoyConfig,
-                removePrivateLanFilterRangePattern,
-                string.Empty,
-                RegexOptions.CultureInvariant);
-            await File.WriteAllTextAsync(envoyConfigPath, mutatedEnvoyConfig).ConfigureAwait(false);
             AcceptanceObservation? rebindAcceptance = null;
-            try
+            if (rebindErr.Length > 0 && rebindRc == 0)
             {
-                var (envoyRestartRc, _, envoyRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
-                if (envoyRestartRc != 0)
-                {
-                    throw new InvalidOperationException($"Could not restart Envoy for the resolved-address-filter negative control (rc={envoyRestartRc}; {envoyRestartErr}).");
-                }
-                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-                string rebindNcCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-                long rebindNcRejectBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "private_reject");
-                long rebindNcMasqueradeBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "lan_source_masquerade");
-                int rebindNcFixtureHitsBefore = File.Exists(lanAccessLogPath)
-                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
-                    : 0;
-                var (rebindNcRc, _, _) = await ExecAsync(
-                    "podman",
-                    ["exec", rebindName, "curl", "--resolve", "rebind.nac.test:8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://rebind.nac.test:8443/"]).ConfigureAwait(false);
-                string rebindNcCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-                long rebindNcRejectDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "private_reject") - rebindNcRejectBefore;
-                long rebindNcMasqueradeDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "lan_source_masquerade") - rebindNcMasqueradeBefore;
-                int rebindNcFixtureHitsAfter = File.Exists(lanAccessLogPath)
-                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
-                    : 0;
-                string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
-                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}";
-                rebindAcceptance = AcceptanceHarness.Record(
-                    "PROD_E_REBIND",
-                    rebindObservation,
-                    "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
-                    rebindNcObservation,
-                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True");
-                if (rebindErr.Length > 0 && rebindRc == 0)
-                {
-                    await Console.Error.WriteLineAsync($"E-rebind curl details: curlErr={rebindErr}").ConfigureAwait(false);
-                }
+                await Console.Error.WriteLineAsync($"E-rebind curl details: curlErr={rebindErr}").ConfigureAwait(false);
             }
-            finally
-            {
-                await File.WriteAllTextAsync(envoyConfigPath, originalEnvoyConfig).ConfigureAwait(false);
-                _ = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
-                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
-            }
-            Console.WriteLine("[PROD_STAGE] resolved-address rebinding check completed");
-
             OciSandboxSession lanSession = await containerTool.SpawnSandboxAsync(lanContext, CancellationToken.None).ConfigureAwait(false);
             string lanWorkloadName = lanSession.ContainerName;
             int lanWorkloadPid = await InspectContainerPidAsync(lanWorkloadName).ConfigureAwait(false);
@@ -1556,7 +1500,7 @@ public static class Program
             int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
             var (lanDeniedRc, _, _) = await ExecAsync(
                 "podman",
-                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
             string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
             int lanFixtureHitsAfterNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
@@ -1567,7 +1511,7 @@ public static class Program
                 .FirstOrDefault(request => request.Status == "pending"
                     && string.Equals(request.UserId, "u1", StringComparison.Ordinal)
                     && string.Equals(request.AgentId, "lan-grant", StringComparison.Ordinal)
-                    && string.Equals(request.Destination, "lan.nac.test", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(request.Destination, lanHostName, StringComparison.OrdinalIgnoreCase)
                     && request.Port == 8443);
             bool lanCardCreated = lanDeniedRc != 0 && lanCard is not null;
             NetworkAccessRule? lanRule = null;
@@ -1588,7 +1532,7 @@ public static class Program
                 lanRule = lanDecision.Rule;
                 var (allowedRc, lanAllowedOut, lanAllowedErr) = await ExecAsync(
                     "podman",
-                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+                    ["exec", lanWorkloadName, "curl", "--verbose", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
                 lanAllowedRc = allowedRc;
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
                 lanFixtureHitsAfterApproval = (File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0) - lanFixtureHitsBeforeNoGrant;
@@ -1750,7 +1694,6 @@ public static class Program
             var observations = new List<AcceptanceObservation>
             {
                 parserAcceptance,
-                rebindAcceptance ?? throw new InvalidOperationException("The E-rebind production acceptance observation was not recorded."),
                 lanAcceptance,
                 noGrantLanAcceptance,
                 AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
@@ -1779,14 +1722,90 @@ public static class Program
                 expectedRevision: policyStore.Revision);
             bool startupGateOpenBeforeFinalNegativeControl = topology.IsStartupGateOpen;
 
-            // v7-33 negative control runs last because deleting this live boundary rule must
-            // close the startup gate; no later acceptance step may need to launch/reconcile.
-            long dnsUpstreamHandle = ExtractNftCommentRuleHandle(dnsCountersAfter, "dns_upstream");
+            string currentCorefile = await File.ReadAllTextAsync(corefilePath).ConfigureAwait(false);
+            if (!string.Equals(currentCorefile, corefile, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("The acceptance harness changed the production CoreDNS configuration after topology startup.");
+            }
+
+            if (!await IsContainerRunningAsync(rebindName).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException("The existing rebind workload exited before the isolated Envoy filter negative control.");
+            }
+
+            if (!startupGateOpenBeforeFinalNegativeControl)
+            {
+                throw new InvalidOperationException("The NAC startup gate closed before the isolated Envoy filter negative control.");
+            }
+
+            // The Envoy filter negative control deliberately edits the rendered file. Stop
+            // the Manager reconcile lifecycle only after all launches and checks have
+            // completed. The standalone acceptance auth host keeps the policy store and
+            // controller active, but it has no production startup-gate callback; this final
+            // control therefore proves the Envoy packet path only. Gate-denial behavior is
+            // covered separately by NetworkAccessTopologyGateTests.
+            await topology.DisposeAsync().ConfigureAwait(false);
+            string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy", "envoy.yaml");
+            string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
+            const string removePrivateLanFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 192\.168\.0\.0\r?\n\k<i>  prefix_len: 16\r?\n";
+            int privateLanRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivateLanFilterRangePattern, RegexOptions.CultureInvariant);
+            if (privateLanRangeOccurrences != 2)
+            {
+                throw new InvalidOperationException($"The production Envoy config contained {privateLanRangeOccurrences} 192.168.0.0/16 private-address filter ranges; expected 2 for the negative control.");
+            }
+
+            string mutatedEnvoyConfig = Regex.Replace(originalEnvoyConfig, removePrivateLanFilterRangePattern, string.Empty, RegexOptions.CultureInvariant);
+            await File.WriteAllTextAsync(envoyConfigPath, mutatedEnvoyConfig).ConfigureAwait(false);
+            try
+            {
+                var (envoyRestartRc, _, envoyRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                if (envoyRestartRc != 0)
+                {
+                    throw new InvalidOperationException($"Could not restart Envoy for the resolved-address-filter negative control (rc={envoyRestartRc}; {envoyRestartErr}).");
+                }
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                string rebindNcCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                long rebindNcRejectBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "private_reject");
+                long rebindNcMasqueradeBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "lan_source_masquerade");
+                int rebindNcFixtureHitsBefore = File.Exists(lanAccessLogPath)
+                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    : 0;
+                var (rebindNcRc, _, _) = await ExecAsync(
+                    "podman",
+                    ["exec", rebindName, "curl", "--resolve", rebindHostName + ":8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + rebindHostName + ":8443/"]).ConfigureAwait(false);
+                string rebindNcCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                long rebindNcRejectDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "private_reject") - rebindNcRejectBefore;
+                long rebindNcMasqueradeDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "lan_source_masquerade") - rebindNcMasqueradeBefore;
+                int rebindNcFixtureHitsAfter = File.Exists(lanAccessLogPath)
+                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    : 0;
+                string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
+                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}:authorizationGate=notAttached:packetPathOnly=True";
+                rebindAcceptance = AcceptanceHarness.Record(
+                    "PROD_E_REBIND",
+                    rebindObservation,
+                    "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
+                    rebindNcObservation,
+                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGate=notAttached:packetPathOnly=True");
+            }
+            finally
+            {
+                await File.WriteAllTextAsync(envoyConfigPath, originalEnvoyConfig).ConfigureAwait(false);
+                _ = await ExecAsync("podman", ["restart", "kautuka-egress-envoy"]).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+            }
+            observations.Add(rebindAcceptance ?? throw new InvalidOperationException("The E-rebind production acceptance observation was not recorded."));
+            Console.WriteLine("[PROD_STAGE] resolved-address rebinding check completed");
+
+            // v7-33 negative control runs after the packet-path control above, so refresh
+            // both its rule handle and counter baseline from the live ruleset now.
+            string dnsNcCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long dnsUpstreamHandle = ExtractNftCommentRuleHandle(dnsNcCountersBefore, "dns_upstream");
             if (dnsUpstreamHandle == 0)
             {
                 throw new InvalidOperationException("The live egress namespace has no dns_upstream rule handle to remove for the negative control.");
             }
-            long privateRejectBefore = ExtractNftCommentCounterPackets(dnsCountersAfter, "private_reject");
+            long privateRejectBefore = ExtractNftCommentCounterPackets(dnsNcCountersBefore, "private_reject");
             int envoyPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             await RunBashAsync(
                 $"podman unshare nsenter -t {envoyPid} -n nft delete rule ip kautuka_egress output handle {dnsUpstreamHandle.ToString(CultureInfo.InvariantCulture)}")

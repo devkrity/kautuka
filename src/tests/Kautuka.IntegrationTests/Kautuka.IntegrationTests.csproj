@@ -24,6 +24,7 @@
     <None Update="Fixtures\gateway-2026-10-10.1.sql" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Fixtures\workflow-transition-parity.json" Link="Fixtures\workflow-transition-parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Fixtures\workflow-save-request-shapes.json" Link="Fixtures\workflow-save-request-shapes.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Kautuka.NetworkAccess.Acceptance\Program.cs" Link="Fixtures\NetworkAccessAcceptanceProgram.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\..\scripts\nac\golden\kautuka-workload.nft" Link="Fixtures\kautuka-workload.nft" CopyToOutputDirectory="PreserveNewest" />
     <None Include="NetworkAccess\Fixtures\kautuka-egress-boundary.nft" Link="Fixtures\kautuka-egress-boundary.nft" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

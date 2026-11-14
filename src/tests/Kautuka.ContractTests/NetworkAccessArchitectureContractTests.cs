@@ -157,7 +157,12 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", productionSource, StringComparison.Ordinal);
         Assert.Contains("Process.Start(lanServerStartInfo)", productionSource, StringComparison.Ordinal);
         Assert.Contains("LAN acceptance requires the production boundary", productionSource, StringComparison.Ordinal);
-        Assert.Contains("https://lan.nac.test:8443/", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string rebindHostName = $\"rebind.{lanHostAddress}.nip.io\";", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string lanHostName = $\"lan.{lanHostAddress}.nip.io\";", productionSource, StringComparison.Ordinal);
+        Assert.Contains("getent", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string.Equals(currentCorefile, corefile, StringComparison.Ordinal)", productionSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionSource, StringComparison.Ordinal);
+        Assert.Contains("\"https://\" + lanHostName + \":8443/\"", productionSource, StringComparison.Ordinal);
         Assert.Contains("PROD_LAN_NO_GRANT", productionSource, StringComparison.Ordinal);
         Assert.Contains("private_reject", productionSource, StringComparison.Ordinal);
         Assert.Contains("10.248.0.2", productionSource, StringComparison.Ordinal);
@@ -174,7 +179,10 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("rebindNcRejectDelta > 0", productionSource, StringComparison.Ordinal);
         Assert.Contains("rebindNcMasqueradeDelta == 0", productionSource, StringComparison.Ordinal);
         Assert.Contains("rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore", productionSource, StringComparison.Ordinal);
-        Assert.Contains("{lanHostAddress} rebind.nac.test", productionSource, StringComparison.Ordinal);
+        Assert.Contains("authorizationGate=notAttached:packetPathOnly=True", productionSource, StringComparison.Ordinal);
+        Assert.Contains("NetworkAccessTopologyGateTests", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string dnsNcCountersBefore = await RunPodNftListEgressAsync", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(dnsNcCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);
         Assert.Contains("address_prefix: 192\\.168\\.0\\.0\\r?\\n\\k<i>  prefix_len: 16", productionSource, StringComparison.Ordinal);
         Assert.Contains("blocked={lanDeniedRc != 0}:lanMasqueradeRulePacketDeltaZero=", productionSource, StringComparison.Ordinal);
         Assert.Contains("fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}", productionSource, StringComparison.Ordinal);
