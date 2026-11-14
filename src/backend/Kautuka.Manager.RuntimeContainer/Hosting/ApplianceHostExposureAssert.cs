@@ -12,6 +12,8 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting;
 /// </summary>
 public static class ApplianceHostExposureAssert
 {
+    private static readonly TimeSpan developmentSocketStartupGracePeriod = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan developmentSocketCheckRetryPeriod = TimeSpan.FromSeconds(10);
     private static readonly int[] forbiddenTcpPorts =
     [
         20000, 20001, 20002, 20003, 20004, // former gRPC TCP plane (now Unix sockets)
@@ -20,16 +22,43 @@ public static class ApplianceHostExposureAssert
         20102, // former proxpi host publish
     ];
 
-    private static readonly string[] expectedSocketPaths =
-    [
-        "/run/kautuka/gateway/gateway.sock",
-        "/run/kautuka/manager/manager.sock",
-        "/run/kautuka/credentialshost/credentialshost.sock",
-        "/run/kautuka/channelhost/channelhost.sock",
-        "/run/kautuka/updateservice/updateservice.sock",
-    ];
+    private static readonly string[] serviceSocketNames =
+    ["gateway/gateway.sock", "manager/manager.sock", "credentialshost/credentialshost.sock", "channelhost/channelhost.sock", "updateservice/updateservice.sock"];
 
-    public static void LogFindings(ILogger logger)
+    public static IReadOnlyList<string> GetExpectedSocketPaths(string socketRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(socketRoot);
+        return serviceSocketNames
+            .Select(path => Path.Combine(socketRoot, path.Replace('/', Path.DirectorySeparatorChar)))
+            .ToArray();
+    }
+
+    public static bool ShouldWarnForMissingSockets(bool requireSidecars, TimeSpan elapsedSinceManagerStart)
+        => requireSidecars || elapsedSinceManagerStart >= developmentSocketStartupGracePeriod;
+
+    public static TimeSpan BoundNextReconcileDelay(
+        bool requireSidecars,
+        bool developmentSocketCheckCompleted,
+        TimeSpan elapsedSinceManagerStart,
+        TimeSpan normalDelay)
+    {
+        if (requireSidecars || developmentSocketCheckCompleted)
+        {
+            return normalDelay;
+        }
+
+        if (elapsedSinceManagerStart >= developmentSocketStartupGracePeriod)
+        {
+            return developmentSocketCheckRetryPeriod < normalDelay
+                ? developmentSocketCheckRetryPeriod
+                : normalDelay;
+        }
+
+        TimeSpan untilSocketCheck = developmentSocketStartupGracePeriod - elapsedSinceManagerStart;
+        return untilSocketCheck < normalDelay ? untilSocketCheck : normalDelay;
+    }
+
+    public static void LogFindings(ILogger logger, string socketRoot, bool warnForMissingSockets = true)
     {
         ArgumentNullException.ThrowIfNull(logger);
         if (!OperatingSystem.IsLinux())
@@ -37,7 +66,7 @@ public static class ApplianceHostExposureAssert
             return;
         }
 
-        foreach (string socketPath in expectedSocketPaths)
+        foreach (string socketPath in warnForMissingSockets ? GetExpectedSocketPaths(socketRoot) : [])
         {
             if (!File.Exists(socketPath))
             {

@@ -27,6 +27,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     WorkspaceExecTracker execTracker,
     IOptions<ManagerContainerStartupOptions> startupOptions,
     ILogger<WorkspaceContainerSupervisorWorker> logger,
+    string socketRoot,
     Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : BackgroundService
 {
     /// <summary>
@@ -35,6 +36,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     /// </summary>
     private static readonly TimeSpan driftAuditInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan recoveryRetryInterval = TimeSpan.FromSeconds(10);
+    private readonly long managerStartedTimestamp = Stopwatch.GetTimestamp();
+    private bool developmentSocketCheckCompleted;
 
     // Tracks every container spawned during reconcile so StopAsync can shut them all down.
     private readonly ConcurrentDictionary<string, byte> trackedContainers = new(StringComparer.OrdinalIgnoreCase);
@@ -87,7 +90,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     {
         using var triggerCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        TimeSpan nextDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        TimeSpan normalDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        TimeSpan nextDelay = GetNextReconcileDelay(normalDelay);
         if (!readinessGate.IsReady)
         {
             LogRecoveryRetryScheduled(logger, (int)nextDelay.TotalSeconds);
@@ -107,6 +111,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
         return trigger;
     }
+
+    internal TimeSpan GetNextReconcileDelay(TimeSpan normalDelay)
+        => ApplianceHostExposureAssert.BoundNextReconcileDelay(
+            runtimePaths.RequireSidecars,
+            developmentSocketCheckCompleted,
+            Stopwatch.GetElapsedTime(managerStartedTimestamp),
+            normalDelay);
 
     private static WorkspaceReconcileTriggerKind ResolveReconcileTrigger(
         Task completed,
@@ -211,7 +222,16 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        ApplianceHostExposureAssert.LogFindings(logger);
+        // The launcher starts Manager before UpdateService and Gateway. Keep the
+        // production checks immediate, but give Development's later services one minute.
+        bool warnForMissingSockets = ApplianceHostExposureAssert.ShouldWarnForMissingSockets(
+            runtimePaths.RequireSidecars,
+            Stopwatch.GetElapsedTime(managerStartedTimestamp));
+        ApplianceHostExposureAssert.LogFindings(logger, socketRoot, warnForMissingSockets);
+        if (!runtimePaths.RequireSidecars && warnForMissingSockets)
+        {
+            developmentSocketCheckCompleted = true;
+        }
 
         if (!hasLiveDesiredState)
         {

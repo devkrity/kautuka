@@ -168,6 +168,7 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
     sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>(),
+    socketRoot,
     sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>()));
 
 builder.Services.AddGrpc(options =>

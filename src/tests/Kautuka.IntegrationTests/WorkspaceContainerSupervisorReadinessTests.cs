@@ -107,6 +107,33 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
         }
     }
 
+    [Fact]
+    public void DevelopmentSchedulesSocketRecheckAtStartupGraceDeadline()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-readiness-" + Guid.NewGuid().ToString("N"));
+        WorkspaceContainerSupervisorWorker worker = CreateWorker(
+            new WorkspaceDesiredStateStore(),
+            new WorkspaceReadinessGate(),
+            new UnavailableRuntimeAdapter(),
+            root);
+
+        try
+        {
+            TimeSpan nextDelay = worker.GetNextReconcileDelay(TimeSpan.FromMinutes(30));
+
+            Assert.True(nextDelay > TimeSpan.Zero);
+            Assert.True(nextDelay <= TimeSpan.FromMinutes(1));
+        }
+        finally
+        {
+            worker.Dispose();
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static WorkspaceContainerSupervisorWorker CreateWorker(
         WorkspaceDesiredStateStore store,
         WorkspaceReadinessGate gate,
@@ -147,7 +174,8 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
             gate,
             new WorkspaceExecTracker(),
             startup,
-            NullLogger<WorkspaceContainerSupervisorWorker>.Instance);
+            NullLogger<WorkspaceContainerSupervisorWorker>.Instance,
+            Path.Combine(root, "runtime-sockets"));
     }
 
     private static ManagerRuntimeSettings CreateRuntimeSettings(string root, int defaultTimeout = 120)
