@@ -21,6 +21,30 @@ public sealed class V7_20_AcceptanceHarnessContractTests
         Assert.Contains("NetworkAccessTopologyGateTests", productionProof, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionProof, StringComparison.Ordinal);
 
+        int dnsProbeHost = productionProof.IndexOf("string dnsProbeHostName = $\"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io\"", StringComparison.Ordinal);
+        int dnsProbeRule = productionProof.IndexOf("dnsProbeHostName, \"host\", 8443, Allowed: true, AllowLan: true", StringComparison.Ordinal);
+        int upstreamConntrackClear = productionProof.IndexOf("foreach (string upstreamAddress in dnsProbeUpstreamAddresses)", StringComparison.Ordinal);
+        int liveCounterBefore = productionProof.IndexOf("string dnsProbeCountersBefore = await RunPodNftListEgressAsync", StringComparison.Ordinal);
+        int uniqueApprovedLookup = productionProof.IndexOf("[\"exec\", wlName, \"curl\", \"--insecure\", \"--silent\", \"--show-error\", \"--max-time\", \"8\", \"https://\" + dnsProbeHostName", StringComparison.Ordinal);
+        int liveCounterAfter = productionProof.IndexOf("string dnsProbeCountersAfter = await RunPodNftListEgressAsync", StringComparison.Ordinal);
+        int dnsPositiveDelta = productionProof.IndexOf("long dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore", StringComparison.Ordinal);
+        Assert.True(dnsProbeHost >= 0 && dnsProbeRule > dnsProbeHost && upstreamConntrackClear > dnsProbeRule,
+            "A unique per-run host must have an approved LAN rule and its resolver conntrack flows must be cleared first.");
+        Assert.True(liveCounterBefore > upstreamConntrackClear && uniqueApprovedLookup > liveCounterBefore
+            && liveCounterAfter > uniqueApprovedLookup && dnsPositiveDelta > liveCounterAfter,
+            "The probe must sample the live rule, issue the approved workload lookup, then verify a counted packet delta.");
+        Assert.Contains("Zero is valid: it means no established conntrack flow existed", productionProof, StringComparison.Ordinal);
+        Assert.Contains("TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr", productionProof, StringComparison.Ordinal);
+        Assert.Contains("--self-test-conntrack-delete-result", source, StringComparison.Ordinal);
+        Assert.Contains("exitCode != 0 && removedFlowCount == 0", source, StringComparison.Ordinal);
+        Assert.Contains("Operation failed: Permission denied", source, StringComparison.Ordinal);
+        Assert.Contains("command not found", source, StringComparison.Ordinal);
+        Assert.Contains("if (!dnsProbeBodyReceived || dnsProbeDelta <= 0)", productionProof, StringComparison.Ordinal);
+        Assert.Contains("dnsProbeBodyReceived = dnsProbeRc == 0 && dnsProbeBody.Contains(\"NAC LAN fixture ok\"", productionProof, StringComparison.Ordinal);
+        Assert.Contains("policyStore.DeleteRule(admin, dnsProbeRule.Id", productionProof, StringComparison.Ordinal);
+        Assert.Contains("delta_gt0={dnsProbeDelta > 0}:body={hasExampleDomain}", productionProof, StringComparison.Ordinal);
+        Assert.Contains("body={hasExampleDomain}", productionProof, StringComparison.Ordinal);
+
         int lastWorkloadLaunch = productionProof.LastIndexOf("SpawnSandboxAsync(", StringComparison.Ordinal);
         int managerDispose = productionProof.IndexOf("await topology.DisposeAsync()", StringComparison.Ordinal);
         int envoyMutation = productionProof.IndexOf("await File.WriteAllTextAsync(envoyConfigPath, mutatedEnvoyConfig)", StringComparison.Ordinal);

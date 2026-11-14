@@ -150,6 +150,13 @@ public static class Program
 
         if (!args.Contains("--live", StringComparer.OrdinalIgnoreCase))
         {
+            if (args.Contains("--self-test-conntrack-delete-result", StringComparer.OrdinalIgnoreCase))
+            {
+                VerifyConntrackDeleteResultParsing();
+                Console.WriteLine("Conntrack delete result self-test passed (recognized zero-match and successful deletion accepted; command and permission errors rejected).");
+                return 0;
+            }
+
             if (args.Contains("--self-test-routed-lan-fixture-cleanup", StringComparer.OrdinalIgnoreCase))
             {
                 await VerifyRoutedLanFixtureCleanupAsync().ConfigureAwait(false);
@@ -186,6 +193,42 @@ public static class Program
             fedoraOutPath is null ? ["--live"] : ["--live", fedoraOutPath]).ConfigureAwait(false);
         int productionResult = await RunProductionTopologyProofAsync(liveOutPath).ConfigureAwait(false);
         return fedoraResult == 0 && productionResult == 0 ? 0 : 1;
+    }
+
+    private static bool TryParseConntrackDeleteResult(int exitCode, string stdout, string stderr, out long removedFlowCount)
+    {
+        removedFlowCount = 0;
+        string[] lines = (stdout + "\n" + stderr)
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length != 1)
+        {
+            return false;
+        }
+
+        Match match = Regex.Match(
+            lines[0],
+            @"^(?:conntrack v[0-9.]+ \(conntrack-tools\):\s*)?(?<count>[0-9]+)\s+flow\s+(?:entries\s+have|entry\s+has)\s+been deleted\.?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success || !long.TryParse(match.Groups["count"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out removedFlowCount))
+        {
+            return false;
+        }
+
+        // conntrack returns nonzero for its documented no-match result on some versions.
+        // Accept only that exact output; any stderr error or extra output is rejected above.
+        return exitCode == 0 || (exitCode != 0 && removedFlowCount == 0);
+    }
+
+    private static void VerifyConntrackDeleteResultParsing()
+    {
+        if (!TryParseConntrackDeleteResult(1, "0 flow entries have been deleted.\n", string.Empty, out long zeroCount) || zeroCount != 0
+            || !TryParseConntrackDeleteResult(0, "2 flow entries have been deleted.\n", string.Empty, out long positiveCount) || positiveCount != 2
+            || TryParseConntrackDeleteResult(1, "0 flow entries have been deleted.\n", "conntrack: Operation failed: Permission denied\n", out _)
+            || TryParseConntrackDeleteResult(127, string.Empty, "conntrack: command not found\n", out _)
+            || TryParseConntrackDeleteResult(1, "1 flow entry has been deleted.\n", string.Empty, out _))
+        {
+            throw new InvalidOperationException("Conntrack delete result parser accepted an invalid result or rejected a recognized result.");
+        }
     }
 
     private static async Task<int> RunLiveFedoraAcceptanceAsync(string[] args)
@@ -1388,6 +1431,61 @@ public static class Program
             }
 
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            string dnsProbeHostName = $"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io";
+            NetworkAccessRule dnsProbeRule = policyStore.SetRule(
+                admin,
+                new RuleWriteSpec("agent", "u1", "a1", null, dnsProbeHostName, "host", 8443, Allowed: true, AllowLan: true),
+                expectedRevision: policyStore.Revision).Rule.Rule
+                ?? throw new InvalidOperationException("The unique DNS probe policy rule was not created.");
+
+            string[] dnsProbeUpstreamAddresses = corefile
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(static line => line.StartsWith("forward . ", StringComparison.Ordinal))
+                .SelectMany(static line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Skip(2))
+                .Where(static token => System.Net.IPAddress.TryParse(token, out System.Net.IPAddress? address)
+                    && address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (dnsProbeUpstreamAddresses.Length == 0)
+            {
+                throw new InvalidOperationException("The production CoreDNS forwarder had no IPv4 upstream addresses for the unique DNS probe.");
+            }
+
+            var conntrackDnsClearResults = new List<string>(dnsProbeUpstreamAddresses.Length);
+            foreach (string upstreamAddress in dnsProbeUpstreamAddresses)
+            {
+                var (conntrackClearRc, conntrackClearOut, conntrackClearErr) = await ExecAsync(
+                    "podman",
+                    ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "conntrack", "-D", "-p", "udp", "--dst", upstreamAddress, "--dport", "53"])
+                    .ConfigureAwait(false);
+                if (!TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr, out long removedFlowCount))
+                {
+                    throw new InvalidOperationException($"Could not clear DNS conntrack state for configured upstream {upstreamAddress} (rc={conntrackClearRc}; out={conntrackClearOut}; err={conntrackClearErr}).");
+                }
+
+                // Zero is valid: it means no established conntrack flow existed for this
+                // resolver. The unique-name lookup below must still hit the nft rule.
+                conntrackDnsClearResults.Add($"{upstreamAddress}:removed={removedFlowCount}");
+            }
+
+            string conntrackDnsClearSummary = string.Join(",", conntrackDnsClearResults);
+            string dnsProbeCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long dnsProbePacketsBefore = ExtractNftCommentCounterPackets(dnsProbeCountersBefore, "dns_upstream");
+            var (dnsProbeRc, dnsProbeBody, dnsProbeErr) = await ExecAsync(
+                "podman",
+                ["exec", wlName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + dnsProbeHostName + ":8443/"])
+                .ConfigureAwait(false);
+            string dnsProbeCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long dnsProbePacketsAfter = ExtractNftCommentCounterPackets(dnsProbeCountersAfter, "dns_upstream");
+            long dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore;
+            bool dnsProbeBodyReceived = dnsProbeRc == 0 && dnsProbeBody.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
+            if (!dnsProbeBodyReceived || dnsProbeDelta <= 0)
+            {
+                throw new InvalidOperationException($"The unique approved DNS probe did not exercise a counted upstream lookup (host={dnsProbeHostName}; upstreams={string.Join(",", dnsProbeUpstreamAddresses)}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}; countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}).");
+            }
+            Console.WriteLine($"[PROD_STAGE] unique approved DNS lookup reached LAN fixture; host={dnsProbeHostName}; delta={dnsProbeDelta}; conntrack={conntrackDnsClearSummary}");
+            _ = policyStore.DeleteRule(admin, dnsProbeRule.Id, expectedRevision: policyStore.Revision);
+
             AcceptanceObservation parserAcceptance;
             var connectorService = new WorkspaceContainerConnectorExecutionService(
                 desiredState,
@@ -1600,7 +1698,6 @@ public static class Program
             }
 
             // Production flow Step B: Decide card -> rule created -> retry through Envoy + CoreDNS upstream succeeds!
-            string dnsCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             DecideRequestResult decision = policyStore.DecideRequest(admin, card.Id, allow: true, scope: "agent", allowLan: false, expectedRevision: policyStore.Revision);
             NetworkAccessRule allowedRule = decision.Rule
                 ?? throw new InvalidOperationException("Allow decision did not return the created network rule.");
@@ -1645,14 +1742,10 @@ public static class Program
                     ["unshare", "nsenter", "-t", failedEnvoyPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "route"])
                     .ConfigureAwait(false);
                 string nftAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-                throw new InvalidOperationException($"Retry after Allow failed after {allowAttempts} requests (rc {allowRc}): {allowErr}\ndns counters before:\n{dnsCountersBefore}\nadmin stats rc={adminStatsRc}: {adminStats}{adminStatsErr}\negress pod route rc={routeRc}: {routeOut}{routeErr}\npod state: {podInspect}{podInspectErr}\nenvoy state/mounts: {envoyInspect}{envoyInspectErr}\nenvoyLogs:\n{envLogs}{envLogErr}\ndnsLogs:\n{dnsLogs}{dnsLogErr}\nnft:\n{nftAfter}");
+                throw new InvalidOperationException($"Retry after Allow failed after {allowAttempts} requests (rc {allowRc}): {allowErr}\nunique DNS probe {dnsProbeHostName} conntrack={conntrackDnsClearSummary} countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}\nadmin stats rc={adminStatsRc}: {adminStats}{adminStatsErr}\negress pod route rc={routeRc}: {routeOut}{routeErr}\npod state: {podInspect}{podInspectErr}\nenvoy state/mounts: {envoyInspect}{envoyInspectErr}\nenvoyLogs:\n{envLogs}{envLogErr}\ndnsLogs:\n{dnsLogs}{dnsLogErr}\nnft:\n{nftAfter}");
             }
             string allowedBody = allowOut;
-            string dnsCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
             bool hasExampleDomain = allowedBody.Contains("Example Domain", StringComparison.OrdinalIgnoreCase);
-            long dnsPacketsBefore = ExtractNftCommentCounterPackets(dnsCountersBefore, "dns_upstream");
-            long dnsPacketsAfter = ExtractNftCommentCounterPackets(dnsCountersAfter, "dns_upstream");
-            long dnsDelta = dnsPacketsAfter - dnsPacketsBefore;
 
             string allowedObs = $"ALLOWED:card={card.Destination}:{card.Port}:rule={allowedRule.Destination}:body={hasExampleDomain}";
 
@@ -1836,8 +1929,8 @@ public static class Program
             string dnsNcObservation = $"ruleRemoved={dnsRuleRemoved}:conntrackCleared={conntrackEntryRemoved}:lookupBlocked={dnsNcBlocked}:privateRejectDelta_gt0={privateRejectDelta > 0}";
             observations.Add(AcceptanceHarness.Record(
                 "PROD_V7_33_DNS_UPSTREAM",
-                $"rule={!string.IsNullOrEmpty(dnsUpstreamLine)}:delta_gt0={dnsDelta > 0}:body={hasExampleDomain}",
-                "rule=True:delta_gt0=True:body=True",
+                $"rule={!string.IsNullOrEmpty(dnsUpstreamLine)}:uniqueLookup=True:delta_gt0={dnsProbeDelta > 0}:body={hasExampleDomain}",
+                "rule=True:uniqueLookup=True:delta_gt0=True:body=True",
                 dnsNcObservation,
                 "ruleRemoved=True:conntrackCleared=True:lookupBlocked=True:privateRejectDelta_gt0=True"));
 
