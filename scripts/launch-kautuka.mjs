@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isUnixSocketAcceptingConnections } from "./launcher-readiness.mjs";
+import { webToolsMcpbCommand } from "./launcher-web-tools.mjs";
 import { canRemoveLinuxDevelopmentNacHook, removeLinuxDevelopmentNacHook, stageLinuxDevelopmentNacHook } from "./launcher-nac-hook.mjs";
 import { killProcessTree } from "./launcher-process-tree.mjs";
 
@@ -352,6 +353,13 @@ async function main() {
   await runCommand("stage m365 mail", "node", ["scripts/stage-m365-mail-mcpb.mjs"]);
   process.stdout.write("[launch-kautuka] staging Google mail connector...\n");
   await runCommand("stage google mail", "node", ["scripts/stage-google-mail-mcpb.mjs"]);
+  process.stdout.write("[launch-kautuka] staging built-in web-tools MCP bundle...\n");
+  try {
+    const webToolsCommand = webToolsMcpbCommand(process.platform, repoRoot);
+    await runCommand("stage built-in web-tools MCP bundle", webToolsCommand.command, webToolsCommand.args);
+  } catch (error) {
+    process.stderr.write(`[launch-kautuka] warning: web-tools MCP bundle staging failed; continuing with any previously staged bundle: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
 
   process.stdout.write("[launch-kautuka] starting services...\n");
   if (process.platform === "linux") {

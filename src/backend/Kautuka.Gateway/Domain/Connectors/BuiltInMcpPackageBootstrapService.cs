@@ -9,7 +9,8 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
     IMcpConnectorTestService mcpConnectorTestService,
     ILogger<BuiltInMcpPackageBootstrapService> logger,
     Func<bool>? maintenanceActive = null,
-    TimeSpan? retryDelay = null) : BackgroundService
+    TimeSpan? retryDelay = null,
+    string? applicationBaseDirectory = null) : BackgroundService
 {
     private const string builtInBundleDirectoryName = "built-in-mcpb";
     private const string solutionRelativePath = "src/Kautuka.slnx";
@@ -145,7 +146,17 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
 
     private string ResolveBundlePath(string fileName, string connectorId)
     {
-        string outputPath = Path.Combine(AppContext.BaseDirectory, builtInBundleDirectoryName, fileName);
+        // Development runs from the repository source tree. Prefer the freshly staged
+        // web-tools artifact over stale built-in bundles copied beside the app.
+        string? developmentBundlePath = environment.IsDevelopment() && connectorId == "kautuka-web-tools"
+            ? TryResolveRepositoryBundlePath(environment.ContentRootPath, connectorId)
+            : null;
+        if (developmentBundlePath is not null)
+        {
+            return developmentBundlePath;
+        }
+
+        string outputPath = Path.Combine(applicationBaseDirectory ?? AppContext.BaseDirectory, builtInBundleDirectoryName, fileName);
         if (File.Exists(outputPath))
         {
             return outputPath;
@@ -157,9 +168,7 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             return contentRootPath;
         }
 
-        string? repositoryBundlePath = TryResolveRepositoryBundlePath(environment.ContentRootPath, connectorId);
-
-        return repositoryBundlePath ?? contentRootPath;
+        return TryResolveRepositoryBundlePath(environment.ContentRootPath, connectorId) ?? contentRootPath;
     }
 
     private static string? TryResolveRepositoryBundlePath(string startPath, string connectorId)

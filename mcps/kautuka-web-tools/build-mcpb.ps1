@@ -36,23 +36,27 @@ $outputFile = Join-Path $outputDir "kautuka-web-tools-$version.mcpb"
 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
-if (Test-Path -LiteralPath $outputFile) {
-    Remove-Item -LiteralPath $outputFile -Force
-}
+$tempFile = "$outputFile.$([guid]::NewGuid().ToString('N')).tmp.mcpb"
+$backupFile = "$outputFile.$([guid]::NewGuid().ToString('N')).bak"
+try {
+    & npx -y @anthropic-ai/mcpb validate $scriptDir
+    if ($LASTEXITCODE -ne 0) { throw "MCPB validation failed (exit $LASTEXITCODE)" }
 
-& npx -y @anthropic-ai/mcpb validate $scriptDir
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
+    & npx -y @anthropic-ai/mcpb pack $scriptDir $tempFile
+    if ($LASTEXITCODE -ne 0) { throw "MCPB pack failed (exit $LASTEXITCODE)" }
+    if (-not (Test-Path -LiteralPath $tempFile) -or (Get-Item -LiteralPath $tempFile).Length -lt 4) { throw "Failed to create MCPB archive at $tempFile" }
+    & node (Join-Path $repoRoot 'scripts/validate-mcpb-archive.mjs') $tempFile
+    if ($LASTEXITCODE -ne 0) { throw "MCPB ZIP integrity validation failed (exit $LASTEXITCODE)" }
 
-& npx -y @anthropic-ai/mcpb pack $scriptDir $outputFile
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-if (-not (Test-Path -LiteralPath $outputFile)) {
-    Write-Error "Failed to create MCPB archive at $outputFile"
-    exit 1
+    if (Test-Path -LiteralPath $outputFile) {
+        [System.IO.File]::Replace($tempFile, $outputFile, $backupFile)
+        if (Test-Path -LiteralPath $backupFile) { Remove-Item -LiteralPath $backupFile -Force }
+    } else {
+        [System.IO.File]::Move($tempFile, $outputFile)
+    }
+} finally {
+    if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force }
+    if (Test-Path -LiteralPath $backupFile) { Remove-Item -LiteralPath $backupFile -Force }
 }
 
 Write-Output $outputFile

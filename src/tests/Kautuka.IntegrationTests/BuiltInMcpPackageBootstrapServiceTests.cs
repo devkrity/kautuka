@@ -13,6 +13,77 @@ namespace Kautuka.IntegrationTests;
 public sealed class BuiltInMcpPackageBootstrapServiceTests
 {
     [Fact]
+    public async Task DevelopmentBootstrapImportsFreshRepositoryBundleAheadOfStaleBuildOutput()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            await File.WriteAllTextAsync(Path.Combine(root, "src", "Kautuka.slnx"), "", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string artifacts = Path.Combine(root, "artifacts", "mcpb");
+            Directory.CreateDirectory(artifacts);
+            byte[] freshBundle = "fresh-development-bundle"u8.ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(artifacts, "kautuka-web-tools-9.9.9.mcpb"), freshBundle, TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string staleContentRoot = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(staleContentRoot);
+            await File.WriteAllTextAsync(Path.Combine(staleContentRoot, "kautuka-web-tools.mcpb"), "stale-content-root-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string staleOutput = Path.Combine(root, "app-output", "built-in-mcpb");
+            Directory.CreateDirectory(staleOutput);
+            await File.WriteAllTextAsync(Path.Combine(staleOutput, "kautuka-web-tools.mcpb"), "stale-output-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            var packages = new FakeMcpbPackageService
+            {
+                Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Fresh", Transport = "container" }, "0.4", "node", "kautuka-web-tools")
+            };
+            var service = new BuiltInMcpPackageBootstrapService(
+                new FakeWebHostEnvironment(root), new FakeCatalogStore(), packages,
+                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                applicationBaseDirectory: Path.Combine(root, "app-output"));
+
+            await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.Equal(freshBundle, packages.InspectedBundleBytes);
+            Assert.Equal(1, packages.InspectCallCount);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ProductionBootstrapKeepsContentRootBundlePrecedence()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            await File.WriteAllTextAsync(Path.Combine(root, "src", "Kautuka.slnx"), "", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string artifacts = Path.Combine(root, "artifacts", "mcpb");
+            Directory.CreateDirectory(artifacts);
+            await File.WriteAllTextAsync(Path.Combine(artifacts, "kautuka-web-tools-9.9.9.mcpb"), "repository-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string contentBundle = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(contentBundle);
+            await File.WriteAllTextAsync(Path.Combine(contentBundle, "kautuka-web-tools.mcpb"), "production-content-root-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string productionOutput = Path.Combine(root, "app-output", "built-in-mcpb");
+            Directory.CreateDirectory(productionOutput);
+            byte[] productionBundle = "production-output-bundle"u8.ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(productionOutput, "kautuka-web-tools.mcpb"), productionBundle, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            var environment = new FakeWebHostEnvironment(root) { EnvironmentName = "Production" };
+            var packages = new FakeMcpbPackageService
+            {
+                Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Production", Transport = "container" }, "0.4", "node", "kautuka-web-tools")
+            };
+            var service = new BuiltInMcpPackageBootstrapService(environment, new FakeCatalogStore(), packages,
+                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                applicationBaseDirectory: Path.Combine(root, "app-output"));
+
+            await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.Equal(productionBundle, packages.InspectedBundleBytes);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task BootstrapStopsAfterCancellationDuringRejectedActivation()
     {
         string root = CreateTempDirectory();
@@ -543,20 +614,25 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
     {
         public int InspectCallCount { get; private set; }
 
+        public byte[]? InspectedBundleBytes { get; private set; }
+
         public McpbConnectorInspection? Inspection { get; init; }
 
         public Exception? Exception { get; init; }
 
-        public Task<McpbConnectorInspection> InspectAsync(Stream archiveStream, string fileName, CancellationToken cancellationToken)
+        public async Task<McpbConnectorInspection> InspectAsync(Stream archiveStream, string fileName, CancellationToken cancellationToken)
         {
             InspectCallCount++;
+            using var contents = new MemoryStream();
+            await archiveStream.CopyToAsync(contents, cancellationToken).ConfigureAwait(false);
+            InspectedBundleBytes = contents.ToArray();
 
             if (Exception is not null)
             {
                 throw Exception;
             }
 
-            return Task.FromResult(Inspection!);
+            return Inspection!;
         }
     }
 

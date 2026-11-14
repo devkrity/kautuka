@@ -20,13 +20,17 @@ output_file="$output_dir/kautuka-web-tools-$version.mcpb"
 
 mkdir -p "$output_dir"
 
-rm -f "$output_file"
+temp_file="$output_dir/.kautuka-web-tools-${version}.$(node -p "require('node:crypto').randomBytes(12).toString('hex')").tmp.mcpb"
+trap 'rm -f "$temp_file"' EXIT
 npx -y @anthropic-ai/mcpb validate "$script_dir"
-npx -y @anthropic-ai/mcpb pack "$script_dir" "$output_file"
+npx -y @anthropic-ai/mcpb pack "$script_dir" "$temp_file"
 
-if [[ ! -f "$output_file" ]]; then
-    echo "Failed to create MCPB archive at $output_file" >&2
+if [[ ! -s "$temp_file" ]]; then
+    echo "Failed to create MCPB archive at $temp_file" >&2
     exit 1
 fi
+node "$repo_root/scripts/validate-mcpb-archive.mjs" "$temp_file"
+
+mv -f -- "$temp_file" "$output_file"
 
 echo "$output_file"
