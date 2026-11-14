@@ -12,6 +12,63 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class PodmanContainerToolTests
 {
+
+    [Fact]
+    public async Task HardenedSandboxUserCanCreateAndRemoveConnectorInstallDirectoryOnTmpfsHome()
+    {
+        const string image = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+        var podman = new PodmanCommandRunner();
+        PodmanCommandResult imageExists;
+        try
+        {
+            imageExists = await podman.RunAsync(
+                ["image", "exists", image],
+                10,
+                TestContext.Current.CancellationToken);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            Assert.Skip("Podman is not installed; the sandbox home accessibility check requires Podman.");
+            return;
+        }
+
+        if (imageExists.ExitCode != 0)
+        {
+            Assert.Skip($"Sandbox image '{image}' is not available locally.");
+            return;
+        }
+
+        const string installDirectory = "/home/node/.kautuka/connectors";
+        const string command = "mkdir -p /home/node/.kautuka/connectors && rmdir /home/node/.kautuka/connectors";
+
+        // Negative control: the former nested tmpfs leaves /home/node owned by UID 1000,
+        // so hardened UID 65532 cannot traverse it to use the connector install path.
+        PodmanCommandResult oldNestedHome = await podman.RunAsync(
+            [
+                "run", "--pull=never", "--rm", "--read-only", "--user", "65532:65532",
+                "--tmpfs", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777",
+                "--entrypoint", "/bin/sh", image, "-c", command,
+            ],
+            30,
+            TestContext.Current.CancellationToken);
+        Assert.NotEqual(0, oldNestedHome.ExitCode);
+
+        PodmanCommandResult writableHome = await podman.RunAsync(
+            [
+                "run", "--pull=never", "--rm", "--read-only", "--user", "65532:65532",
+                "--tmpfs", "/home/node:rw,nodev,nosuid,mode=1777",
+                "--entrypoint", "/bin/sh", image, "-c", command,
+            ],
+            30,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(
+            writableHome.ExitCode == 0,
+            $"UID 65532 could not create and remove {installDirectory} with a writable home tmpfs. "
+                + $"ExitCode={writableHome.ExitCode}; stderr={writableHome.StdErr}");
+    }
+
+
     [Fact]
     public async Task V7_45_BrakedSandboxIsRejectedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
     {
@@ -140,7 +197,7 @@ public sealed class PodmanContainerToolTests
     }
 
     [Fact]
-    public void BuildRunArgumentsIncludesReplaceForStableSandboxNameReuse()
+    public void BuildRunArgumentsUsesWritableTmpfsHomeWithoutChangingHardenedUser()
     {
         ContainerContext context = new(
             ScopeType: "agent",
@@ -171,7 +228,7 @@ public sealed class PodmanContainerToolTests
         AssertOption(
             arguments,
             "--tmpfs",
-            "/home/node/.kautuka:rw,nodev,nosuid,mode=1777");
+            "/home/node:rw,nodev,nosuid,mode=1777");
         Assert.DoesNotContain(arguments, static argument => argument.Contains("size=", StringComparison.Ordinal));
         Assert.Contains("kautuka.desired-version=7", arguments, StringComparer.Ordinal);
         Assert.Contains("kautuka.spec-fingerprint=abc123", arguments, StringComparer.Ordinal);

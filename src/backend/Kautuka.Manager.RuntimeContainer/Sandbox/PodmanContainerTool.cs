@@ -612,7 +612,10 @@ public sealed class PodmanContainerTool(
             WorkingDirectory = context.ContainerWorkspacePath,
             Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath)],
             AllowedMountRoots = context.WorkspaceBaseRoot is null ? [] : [context.WorkspaceBaseRoot],
-            TmpfsMounts = ["/tmp:rw,noexec,nosuid", "/home/node/.kautuka:rw,nodev,nosuid,mode=1777"],
+            // The hardened default user is 65532, while /home/node in the base image
+            // belongs to UID 1000. Mount the home path itself so the sandbox user can
+            // reach its connector install directory without changing its UID or caps.
+            TmpfsMounts = ["/tmp:rw,noexec,nosuid", "/home/node:rw,nodev,nosuid,mode=1777"],
             DesiredStateVersion = context.DesiredStateVersion,
             SpecFingerprint = context.SpecFingerprint,
             ManagerRole = "agent",
