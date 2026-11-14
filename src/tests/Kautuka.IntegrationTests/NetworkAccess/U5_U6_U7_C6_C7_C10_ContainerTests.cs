@@ -971,21 +971,32 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void CanaryRejectsStaleHookRecordForReusedIp()
+    {
+        const string canaryIp = "10.247.1.24";
+        string hash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(canaryIp);
+        string stale = $$"""{"id":"{{new string('a', 64)}}","action":"allow","rules_sha256":"{{hash}}","ips":["{{canaryIp}}"]}""";
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(stale, canaryIp, new string('b', 64)));
+    }
+
+    [Fact]
     public void V7_20_CanaryRequiresSuccessfulHookRecordForItsOwnIp_WithNegativeControl()
     {
         const string canaryIp = "10.247.1.24";
+        string canaryId = new('b', 64);
         string expectedRulesHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(canaryIp);
-        string successfulHook = $$"""{"action":"allow","reason":"workload_rules","rules_sha256":"{{expectedRulesHash}}","ips":["{{canaryIp}}"]}""";
+        string successfulHook = $$"""{"id":"{{canaryId}}","action":"allow","reason":"workload_rules","rules_sha256":"{{expectedRulesHash}}","ips":["{{canaryIp}}"]}""";
 
-        Assert.True(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook, canaryIp));
+        Assert.True(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook, canaryIp, canaryId));
 
         // Negative controls: a warning-only/missing record, a refusal, a stale record for another IP,
         // a success with a mismatched applied-rules hash, or a missing hash must all keep the startup gate closed.
-        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(null, canaryIp));
-        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"refuse\",\"ips\":[\"" + canaryIp + "\"]}", canaryIp));
-        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"allow\",\"rules_sha256\":\"abc123\",\"ips\":[\"10.247.1.25\"]}", canaryIp));
-        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook.Replace(expectedRulesHash, "abc123", StringComparison.Ordinal), canaryIp));
-        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord("{\"action\":\"allow\",\"rules_sha256\":\"\",\"ips\":[\"" + canaryIp + "\"]}", canaryIp));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(null, canaryIp, canaryId));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook.Replace("allow", "refuse", StringComparison.Ordinal), canaryIp, canaryId));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook.Replace(canaryIp, "10.247.1.25", StringComparison.Ordinal), canaryIp, canaryId));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook.Replace(expectedRulesHash, "abc123", StringComparison.Ordinal), canaryIp, canaryId));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook.Replace(canaryId, "", StringComparison.Ordinal), canaryIp, canaryId));
+        Assert.False(EgressTopologyManager.HasSuccessfulCanaryHookRecord(successfulHook, canaryIp, "short-id"));
     }
 
     [Fact]

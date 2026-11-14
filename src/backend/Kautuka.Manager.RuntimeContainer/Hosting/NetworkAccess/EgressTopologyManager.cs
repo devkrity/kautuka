@@ -486,6 +486,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 return false;
             }
 
+            string canaryId = runResult.StdOut.Trim();
+            if (canaryId.Length != 64 || !canaryId.All(char.IsAsciiHexDigit))
+            {
+                logger.LogError("Canary start did not return a full container ID.");
+                return false;
+            }
+
             // Verify live ruleset via verifier
             WorkloadVerificationResult verification = await postStartVerifier
                 .VerifyWorkloadAsync(canaryName, canaryIp, cancellationToken: cancellationToken)
@@ -514,7 +521,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     ? await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false)
                     : string.Empty;
             }
-            if (!HasSuccessfulCanaryHookRecord(logContent, canaryIp))
+            if (!HasSuccessfulCanaryHookRecord(logContent, canaryIp, canaryId))
             {
                 logger.LogError("Canary hook did not record an applied workload ruleset for {CanaryIp}.", canaryIp);
                 return false;
@@ -540,9 +547,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    internal static bool HasSuccessfulCanaryHookRecord(string? hookLog, string canaryIp)
+    internal static bool HasSuccessfulCanaryHookRecord(string? hookLog, string canaryIp, string canaryId)
     {
-        if (string.IsNullOrWhiteSpace(hookLog) || string.IsNullOrWhiteSpace(canaryIp))
+        if (string.IsNullOrWhiteSpace(hookLog) || string.IsNullOrWhiteSpace(canaryIp)
+            || canaryId is null || canaryId.Length != 64 || !canaryId.All(char.IsAsciiHexDigit))
         {
             return false;
         }
@@ -555,7 +563,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             {
                 using JsonDocument doc = JsonDocument.Parse(line);
                 JsonElement record = doc.RootElement;
-                if (!record.TryGetProperty("action", out JsonElement action)
+                if (!record.TryGetProperty("id", out JsonElement id)
+                    || id.ValueKind != JsonValueKind.String
+                    || !string.Equals(id.GetString(), canaryId, StringComparison.Ordinal)
+                    || !record.TryGetProperty("action", out JsonElement action)
                     || !string.Equals(action.GetString(), "allow", StringComparison.Ordinal)
                     || !record.TryGetProperty("rules_sha256", out JsonElement rulesHash)
                     || !string.Equals(rulesHash.GetString(), expectedRulesHash, StringComparison.Ordinal)
