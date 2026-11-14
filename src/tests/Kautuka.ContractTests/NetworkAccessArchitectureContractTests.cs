@@ -168,8 +168,17 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("Regex.IsMatch(outsideSourceOut, @\"\\bsrc 10\\.248\\.0\\.2\\b\"", productionSource, StringComparison.Ordinal);
         Assert.Contains("Regex.IsMatch(workloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
         Assert.Contains("Regex.IsMatch(lanWorkloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
-        Assert.Contains("RunNsenterNftListAsync(lanWorkloadPid)", productionSource, StringComparison.Ordinal);
-        Assert.Contains("ExtractNftCommentCounterPackets(noGrantWorkloadNftAfter, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("envoyPrivateFilterRemoved=True:allowLanGrant=False", productionSource, StringComparison.Ordinal);
+        Assert.Contains("RunPodNftListEgressAsync(\"kautuka-egress-envoy\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(rebindNcCountersAfter, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcRejectDelta > 0", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcMasqueradeDelta == 0", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore", productionSource, StringComparison.Ordinal);
+        Assert.Contains("{lanHostAddress} rebind.nac.test", productionSource, StringComparison.Ordinal);
+        Assert.Contains("address_prefix: 192\\.168\\.0\\.0\\r?\\n\\k<i>  prefix_len: 16", productionSource, StringComparison.Ordinal);
+        Assert.Contains("blocked={lanDeniedRc != 0}:lanMasqueradeRulePacketDeltaZero=", productionSource, StringComparison.Ordinal);
+        Assert.Contains("fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}", productionSource, StringComparison.Ordinal);
+        Assert.Contains("noGrantLanObservation", productionSource, StringComparison.Ordinal);
     }
 
     [Fact]

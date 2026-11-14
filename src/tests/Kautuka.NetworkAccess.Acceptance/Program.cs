@@ -1267,7 +1267,7 @@ public static class Program
                 StringComparison.Ordinal);
             corefile = corefile.Replace(
                 envoyDnsBind,
-                envoyDnsBind + $"\n    hosts {{\n        10.248.0.5 rebind.nac.test\n        {lanHostAddress} lan.nac.test\n        fallthrough\n    }}",
+                envoyDnsBind + $"\n    hosts {{\n        {lanHostAddress} rebind.nac.test\n        {lanHostAddress} lan.nac.test\n        fallthrough\n    }}",
                 StringComparison.Ordinal);
             await File.WriteAllTextAsync(corefilePath, corefile).ConfigureAwait(false);
             var (dnsRestartRc, _, dnsRestartErr) = await ExecAsync("podman", ["restart", "kautuka-egress-dns"]).ConfigureAwait(false);
@@ -1479,16 +1479,16 @@ public static class Program
 
             string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy", "envoy.yaml");
             string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
-            const string removePrivatePublicFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 10\.0\.0\.0\r?\n\k<i>  prefix_len: 8\r?\n";
-            int privateRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivatePublicFilterRangePattern, RegexOptions.CultureInvariant);
-            if (privateRangeOccurrences != 2)
+            const string removePrivateLanFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 192\.168\.0\.0\r?\n\k<i>  prefix_len: 16\r?\n";
+            int privateLanRangeOccurrences = Regex.Count(originalEnvoyConfig, removePrivateLanFilterRangePattern, RegexOptions.CultureInvariant);
+            if (privateLanRangeOccurrences != 2)
             {
-                throw new InvalidOperationException($"The production Envoy config contained {privateRangeOccurrences} public-filter RFC1918 ranges; expected 2 for the negative control.");
+                throw new InvalidOperationException($"The production Envoy config contained {privateLanRangeOccurrences} 192.168.0.0/16 private-address filter ranges; expected 2 for the negative control.");
             }
 
             string mutatedEnvoyConfig = Regex.Replace(
                 originalEnvoyConfig,
-                removePrivatePublicFilterRangePattern,
+                removePrivateLanFilterRangePattern,
                 string.Empty,
                 RegexOptions.CultureInvariant);
             await File.WriteAllTextAsync(envoyConfigPath, mutatedEnvoyConfig).ConfigureAwait(false);
@@ -1503,19 +1503,27 @@ public static class Program
                 await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
                 string rebindNcCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 long rebindNcRejectBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "private_reject");
+                long rebindNcMasqueradeBefore = ExtractNftCommentCounterPackets(rebindNcCountersBefore, "lan_source_masquerade");
+                int rebindNcFixtureHitsBefore = File.Exists(lanAccessLogPath)
+                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    : 0;
                 var (rebindNcRc, _, _) = await ExecAsync(
                     "podman",
                     ["exec", rebindName, "curl", "--resolve", "rebind.nac.test:8443:93.184.216.34", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://rebind.nac.test:8443/"]).ConfigureAwait(false);
                 string rebindNcCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 long rebindNcRejectDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "private_reject") - rebindNcRejectBefore;
+                long rebindNcMasqueradeDelta = ExtractNftCommentCounterPackets(rebindNcCountersAfter, "lan_source_masquerade") - rebindNcMasqueradeBefore;
+                int rebindNcFixtureHitsAfter = File.Exists(lanAccessLogPath)
+                    ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
+                    : 0;
                 string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
-                string rebindNcObservation = $"filterRemovedRequestBlocked={rebindNcRc != 0}:kernelRejected={rebindNcRejectDelta > 0}";
+                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}";
                 rebindAcceptance = AcceptanceHarness.Record(
                     "PROD_E_REBIND",
                     rebindObservation,
                     "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
                     rebindNcObservation,
-                    "filterRemovedRequestBlocked=True:kernelRejected=True");
+                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True");
                 if (rebindErr.Length > 0 && rebindRc == 0)
                 {
                     await Console.Error.WriteLineAsync($"E-rebind curl details: curlErr={rebindErr}").ConfigureAwait(false);
@@ -1546,21 +1554,13 @@ public static class Program
             long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
             long lanMasqueradeBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_source_masquerade");
             int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
-            string noGrantWorkloadNftBefore = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
-            long noGrantPrivateRejectBefore = ExtractNftCommentCounterPackets(noGrantWorkloadNftBefore, "private_reject");
-            var (noGrantLanRc, _, _) = await ExecAsync(
-                "podman",
-                ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "4", $"https://{lanHostAddress}:8443/"]).ConfigureAwait(false);
-            string noGrantWorkloadNftAfter = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
-            long noGrantPrivateRejectDelta = ExtractNftCommentCounterPackets(noGrantWorkloadNftAfter, "private_reject") - noGrantPrivateRejectBefore;
-            string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
-            int lanFixtureHitsAfterNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
-            int noGrantFixtureAccessDelta = lanFixtureHitsAfterNoGrant - lanFixtureHitsBeforeNoGrant;
-            string noGrantLanObservation = $"blocked={noGrantLanRc != 0}:privateRejectDeltaGt0={noGrantPrivateRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={noGrantMasqueradeDelta == 0}:fixtureHitsZero={noGrantFixtureAccessDelta == 0}";
             var (lanDeniedRc, _, _) = await ExecAsync(
                 "podman",
                 ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://lan.nac.test:8443/"]).ConfigureAwait(false);
+            string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
+            int lanFixtureHitsAfterNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
+            string noGrantLanObservation = $"blocked={lanDeniedRc != 0}:lanMasqueradeRulePacketDeltaZero={noGrantMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}";
             await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
             NetworkAccessRequest? lanCard = policyStore.ListRequests(admin).Requests
                 .Select(static view => view.Request)
@@ -1574,7 +1574,6 @@ public static class Program
             bool lanBodyReceived = false;
             int lanAllowedRc = 1;
             int lanFixtureHitsAfterApproval = 0;
-            long lanPrivateRejectDeltaAfterApproval = 0;
             long lanApprovedDelta = 0;
             long lanMasqueradeDelta = 0;
             if (lanCard is not null)
@@ -1593,8 +1592,6 @@ public static class Program
                 lanAllowedRc = allowedRc;
                 lanBodyReceived = lanAllowedRc == 0 && lanAllowedOut.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
                 lanFixtureHitsAfterApproval = (File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0) - lanFixtureHitsBeforeNoGrant;
-                string approvedWorkloadNft = await RunNsenterNftListAsync(lanWorkloadPid).ConfigureAwait(false);
-                lanPrivateRejectDeltaAfterApproval = ExtractNftCommentCounterPackets(approvedWorkloadNft, "private_reject") - noGrantPrivateRejectBefore - noGrantPrivateRejectDelta;
                 string lanCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 lanApprovedDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_approved") - lanApprovedBefore;
                 lanMasqueradeDelta = ExtractNftCommentCounterPackets(lanCountersAfter, "lan_source_masquerade") - lanMasqueradeBefore;
@@ -1622,9 +1619,9 @@ public static class Program
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_NO_GRANT",
                 noGrantLanObservation,
-                "blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
-                $"blocked={lanAllowedRc != 0}:privateRejectDeltaGt0={lanPrivateRejectDeltaAfterApproval > 0}:lanMasqueradeRulePacketDeltaZero={lanMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterApproval == 0}",
-                "blocked=False:privateRejectDeltaGt0=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False");
+                "blocked=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
+                $"blocked={lanAllowedRc != 0}:lanMasqueradeRulePacketDeltaZero={lanMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterApproval == 0}",
+                "blocked=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False");
             Console.WriteLine($"[PROD_LAN_NO_GRANT] {noGrantLanAcceptance.Outcome} ({noGrantLanAcceptance.ObservedValue}; nc={noGrantLanAcceptance.NcObservedValue})");
             Console.WriteLine("[PROD_STAGE] approved LAN traffic check completed");
 
