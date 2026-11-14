@@ -182,7 +182,14 @@ public sealed class PodmanContainerTool(
 
     private async Task<OciSandboxSession> EnsureContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
-        workloadLaunchGate?.EnsureLaunchAllowed(context.UserId);
+        Hosting.NetworkAccess.IWorkloadLaunchLease acquiredLaunchLease = workloadLaunchGate is null
+            ? NoopLaunchLease.Instance
+            : await workloadLaunchGate.AcquireLaunchLeaseAsync(context.UserId, cancellationToken).ConfigureAwait(false);
+        await using var launchLease = acquiredLaunchLease.ConfigureAwait(false);
+        using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            acquiredLaunchLease.CancellationToken);
+        cancellationToken = launchCancellation.Token;
         string containerName = BuildContainerName(context);
         await using var containerLease = (await containerLocks
             .AcquireAsync(containerName, cancellationToken)
@@ -735,5 +742,14 @@ public sealed class PodmanContainerTool(
                 && DesiredStateVersion == context.DesiredStateVersion
                 && !string.IsNullOrWhiteSpace(context.SpecFingerprint)
                 && string.Equals(SpecFingerprint, context.SpecFingerprint, StringComparison.Ordinal);
+    }
+
+    private sealed class NoopLaunchLease : Hosting.NetworkAccess.IWorkloadLaunchLease
+    {
+        public static NoopLaunchLease Instance { get; } = new();
+
+        public CancellationToken CancellationToken => CancellationToken.None;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

@@ -37,7 +37,7 @@ internal sealed partial class InfraAllowlistJsonContext : JsonSerializerContext;
 /// 7. Startup canary self-test gating workload creation.
 /// 8. 30s background reconcile loop and emergency brake container stops.
 /// </summary>
-public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IWorkloadStartupState
+public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IWorkloadStartupState, IWorkloadLaunchAdmission
 {
     public const string WorkloadNetworkName = "kautuka-workload";
     public const string OutsideNetworkName = "kautuka-outside";
@@ -74,6 +74,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
+    private bool launchAdmissionClosed = true;
+    private int activeLaunchLeases;
+    private LaunchAdmissionGeneration launchAdmissionGeneration = new();
     private volatile bool topologyIncidentLatched;
     private volatile bool topologyContainmentComplete;
     private string? expectedBoundaryRulesetHash;
@@ -155,9 +158,21 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
         private set
         {
+            LaunchAdmissionGeneration? cancelAdmission = null;
             lock (gateLock)
             {
+                if (value && launchAdmissionClosed && launchAdmissionGeneration.CancellationStarted)
+                {
+                    launchAdmissionGeneration = new LaunchAdmissionGeneration();
+                }
+
                 isStartupGateOpen = value;
+                launchAdmissionClosed = !value;
+                if (!value && !launchAdmissionGeneration.CancellationStarted)
+                {
+                    launchAdmissionGeneration.CancellationStarted = true;
+                    cancelAdmission = launchAdmissionGeneration;
+                }
                 try
                 {
                     File.WriteAllText(startupGateFilePath, value ? "open" : "closed");
@@ -167,12 +182,130 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     // Ignore file write errors
                 }
             }
+
+            if (cancelAdmission is not null)
+            {
+                LaunchAdmissionGeneration generation = cancelAdmission;
+                _ = Task.Run(() => CancelLaunchAdmissionCallbacksAsync(generation));
+            }
         }
     }
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
     internal bool TopologyContainmentCompleteForTests => topologyContainmentComplete;
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage(
+        "Reliability",
+        "CA2000:Dispose objects before losing scope",
+        Justification = "The returned lease transfers ownership to the caller, which disposes it after launch verification and registration.")]
+    public ValueTask<IWorkloadLaunchLease> AcquireLaunchLeaseAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gateLock)
+        {
+            if (launchAdmissionClosed || !isStartupGateOpen)
+            {
+                throw new InvalidOperationException("Workload launch rejected: NAC launch admission is closed.");
+            }
+
+            LaunchAdmissionGeneration generation = launchAdmissionGeneration;
+            activeLaunchLeases++;
+            generation.ActiveLeases++;
+            return ValueTask.FromResult<IWorkloadLaunchLease>(new WorkloadLaunchLease(
+                () => ReleaseLaunchLease(generation),
+                generation.Cancellation.Token));
+        }
+    }
+
+    public void CloseLaunchAdmission() => IsStartupGateOpen = false;
+
+    private int ActiveLaunchLeaseCount
+    {
+        get
+        {
+            lock (gateLock)
+            {
+                return activeLaunchLeases;
+            }
+        }
+    }
+
+    private async Task CancelLaunchAdmissionCallbacksAsync(LaunchAdmissionGeneration generation)
+    {
+        try
+        {
+            await generation.Cancellation.CancelAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "A workload launch cancellation callback failed; topology containment continues with admission closed.");
+        }
+        finally
+        {
+            CancellationTokenSource? dispose = null;
+            lock (gateLock)
+            {
+                generation.CancellationFinished = true;
+                if (generation.ActiveLeases == 0 && !generation.Disposed)
+                {
+                    generation.Disposed = true;
+                    dispose = generation.Cancellation;
+                }
+            }
+
+            dispose?.Dispose();
+        }
+    }
+
+    private void ReleaseLaunchLease(LaunchAdmissionGeneration generation)
+    {
+        CancellationTokenSource? dispose = null;
+        lock (gateLock)
+        {
+            if (activeLaunchLeases <= 0 || generation.ActiveLeases <= 0)
+            {
+                logger.LogError("Ignored an unbalanced NAC launch lease release.");
+                return;
+            }
+
+            activeLaunchLeases--;
+            generation.ActiveLeases--;
+            if (generation.CancellationFinished && generation.ActiveLeases == 0 && !generation.Disposed)
+            {
+                generation.Disposed = true;
+                dispose = generation.Cancellation;
+            }
+        }
+
+        dispose?.Dispose();
+    }
+
+    private sealed class LaunchAdmissionGeneration
+    {
+        public CancellationTokenSource Cancellation { get; } = new();
+
+        public int ActiveLeases { get; set; }
+
+        public bool CancellationStarted { get; set; }
+
+        public bool CancellationFinished { get; set; }
+
+        public bool Disposed { get; set; }
+    }
+
+    private sealed class WorkloadLaunchLease(Action release, CancellationToken cancellationToken) : IWorkloadLaunchLease
+    {
+        private Action? release = release;
+
+        public CancellationToken CancellationToken { get; } = cancellationToken;
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref release, null)?.Invoke();
+            return ValueTask.CompletedTask;
+        }
+    }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -192,7 +325,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        IsStartupGateOpen = false;
+        CloseLaunchAdmission();
         await DisposeAsync().ConfigureAwait(false);
     }
 
@@ -226,7 +359,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (topologyIncidentLatched)
         {
-            IsStartupGateOpen = false;
+            CloseLaunchAdmission();
             await ContainWorkloadNetworkMembersAsync(registry, "previous topology incident", cancellationToken).ConfigureAwait(false);
             throw new InvalidOperationException("A topology incident is latched. This Manager process cannot reopen the NAC startup gate.");
         }
@@ -1753,6 +1886,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         if (topologyIncidentLatched)
         {
+            CloseLaunchAdmission();
             await ContainWorkloadNetworkMembersAsync(registry, "previous topology incident", cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -1880,8 +2014,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken)
     {
         // Deny new launches and Envoy authorization before the first Podman await.
-        IsStartupGateOpen = false;
         topologyIncidentLatched = true;
+        CloseLaunchAdmission();
         topologyContainmentComplete = false;
         logger.LogCritical("Topology incident '{Incident}' latched; stopping workloads on {Network}.", incident, WorkloadNetworkName);
         await ContainWorkloadNetworkMembersAsync(registry, incident, cancellationToken).ConfigureAwait(false);
@@ -1892,6 +2026,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string incident,
         CancellationToken cancellationToken)
     {
+        int activeLaunchesAtScanStart = ActiveLaunchLeaseCount;
         HashSet<string> candidateIds = new(StringComparer.OrdinalIgnoreCase);
         PodmanCommandResult initialList = await ListWorkloadNetworkContainersAsync(cancellationToken).ConfigureAwait(false);
         bool initialListComplete = TryReadWorkloadNetworkContainers(initialList, out List<WorkloadNetworkContainer> initialContainers);
@@ -1967,15 +2102,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             .Where(containerId => !confirmedInactive.Contains(containerId))
             .ToArray();
 
-        if (!initialListComplete || !finalListComplete || remaining.Length > 0 || unconfirmedCandidates.Length > 0)
+        int activeLaunches = ActiveLaunchLeaseCount;
+        if (!initialListComplete || !finalListComplete || remaining.Length > 0 || unconfirmedCandidates.Length > 0 || activeLaunchesAtScanStart > 0 || activeLaunches > 0)
         {
             topologyContainmentComplete = false;
             logger.LogCritical(
-                "Topology incident '{Incident}' remains unresolved; enumeration complete={EnumerationComplete}, remaining workload containers={Remaining}, unconfirmed candidates={Unconfirmed}. The launch/auth gate remains closed and reconcile will retry.",
+                "Topology incident '{Incident}' remains unresolved; enumeration complete={EnumerationComplete}, remaining workload containers={Remaining}, unconfirmed candidates={Unconfirmed}, active launch leases at scan start={ActiveLaunchLeasesAtScanStart}, active launch leases at scan end={ActiveLaunchLeasesAtScanEnd}. The launch/auth gate remains closed and reconcile will retry.",
                 incident,
                 initialListComplete && finalListComplete,
                 remaining.Length == 0 ? "none observed" : string.Join(",", remaining),
-                unconfirmedCandidates.Length == 0 ? "none" : string.Join(",", unconfirmedCandidates));
+                unconfirmedCandidates.Length == 0 ? "none" : string.Join(",", unconfirmedCandidates),
+                activeLaunchesAtScanStart,
+                activeLaunches);
             return;
         }
 
@@ -2378,6 +2516,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private async Task DisposeCoreAsync()
     {
+        CloseLaunchAdmission();
+
         // The hosted-service lifecycle and the DI container both dispose this singleton.
         // Claim the cancellation source once so repeated or concurrent disposal is safe.
         CancellationTokenSource? cts = reconcileCts;
