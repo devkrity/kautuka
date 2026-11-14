@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Channels;
 
@@ -14,6 +15,7 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
     private const int maxEntriesPerBucket = 500;
     private const long defaultMaxFileBytes = 10 * 1024 * 1024;
     private const int maxRotatedFiles = 5;
+    private static readonly TimeSpan defaultEnqueueWaitTimeout = TimeSpan.FromMilliseconds(5);
 
     private readonly object gate = new();
     private readonly LinkedList<NetworkAccessActivityEntry> globalEntries = new();
@@ -22,31 +24,54 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
     private readonly long maxFileBytes;
     private readonly Channel<NetworkAccessActivityEntry>? asyncWriterChannel;
     private readonly Task? asyncWriterTask;
-    private readonly CancellationTokenSource cts = new();
+    private readonly Action<NetworkAccessActivityEntry>? writeEntry;
+    private long pendingAuditLossCount;
+    private DateTimeOffset? pendingAuditLossFrom;
+    private DateTimeOffset? pendingAuditLossTo;
+    private bool writerCompleting;
+    private bool isDisposed;
+    private int pendingEnqueueAttempts;
+    private TaskCompletionSource producersDrained = CompletedSignal();
 
     public NetworkAccessAuditRing(string? logFilePath = null, long maxFileBytes = defaultMaxFileBytes)
+        : this(logFilePath, maxFileBytes, 10000, null)
+    {
+    }
+
+    internal NetworkAccessAuditRing(
+        string? logFilePath,
+        long maxFileBytes,
+        int queueCapacity,
+        Action<NetworkAccessActivityEntry>? writeEntry)
     {
         this.logFilePath = string.IsNullOrWhiteSpace(logFilePath) ? null : Path.GetFullPath(logFilePath);
         this.maxFileBytes = maxFileBytes > 0 ? maxFileBytes : defaultMaxFileBytes;
+        this.writeEntry = writeEntry;
 
         if (this.logFilePath is not null)
         {
-            var options = new BoundedChannelOptions(10000)
+            var options = new BoundedChannelOptions(queueCapacity)
             {
-                FullMode = BoundedChannelFullMode.DropOldest,
+                FullMode = BoundedChannelFullMode.Wait,
                 SingleReader = true,
                 SingleWriter = false,
             };
             asyncWriterChannel = Channel.CreateBounded<NetworkAccessActivityEntry>(options);
-            asyncWriterTask = Task.Run(() => ProcessAsyncWrites(asyncWriterChannel.Reader, cts.Token));
+            asyncWriterTask = Task.Run(() => ProcessAsyncWrites(asyncWriterChannel.Reader));
         }
     }
 
     public void Record(NetworkAccessActivityEntry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
+        bool waitForCapacity = false;
         lock (gate)
         {
+            if (isDisposed)
+            {
+                return;
+            }
+
             AppendBounded(globalEntries, entry);
             if (!string.IsNullOrWhiteSpace(entry.UserId))
             {
@@ -58,10 +83,91 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
 
                 AppendBounded(userList, entry);
             }
+
+            if (asyncWriterChannel is not null && !writerCompleting)
+            {
+                if (pendingAuditLossCount > 0)
+                {
+                    NetworkAccessActivityEntry loss = CreateAuditLossEntry();
+                    if (!asyncWriterChannel.Writer.TryWrite(loss))
+                    {
+                        RegisterPendingEnqueueAttempt();
+                        waitForCapacity = true;
+                    }
+                    else
+                    {
+                        ClearPendingAuditLoss();
+                    }
+                }
+
+                if (!waitForCapacity && !asyncWriterChannel.Writer.TryWrite(entry))
+                {
+                    RegisterPendingEnqueueAttempt();
+                    waitForCapacity = true;
+                }
+            }
         }
 
-        // Asynchronous non-blocking file append
-        asyncWriterChannel?.Writer.TryWrite(entry);
+        if (waitForCapacity)
+        {
+            long started = Stopwatch.GetTimestamp();
+            try
+            {
+                while (true)
+                {
+                    bool canWrite = WaitForCapacityWithShortTimeout(started);
+                    if (!canWrite)
+                    {
+                        lock (gate)
+                        {
+                            NoteAuditLoss(entry.TimestampUtc);
+                        }
+
+                        break;
+                    }
+
+                    bool retry = false;
+                    lock (gate)
+                    {
+                        if (writerCompleting)
+                        {
+                            NoteAuditLoss(entry.TimestampUtc);
+                            break;
+                        }
+
+                        if (pendingAuditLossCount > 0)
+                        {
+                            NetworkAccessActivityEntry loss = CreateAuditLossEntry();
+                            if (asyncWriterChannel!.Writer.TryWrite(loss))
+                            {
+                                ClearPendingAuditLoss();
+                            }
+                            else
+                            {
+                                retry = true;
+                            }
+                        }
+
+                        if (!retry && !asyncWriterChannel!.Writer.TryWrite(entry))
+                        {
+                            retry = true;
+                        }
+                    }
+
+                    if (!retry)
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                lock (gate)
+                {
+                    CompletePendingEnqueueAttempt();
+                }
+            }
+        }
     }
 
     public void RecordPrivilegeChange(string actorUserId, string targetUserId, bool canApproveOwn, bool canAllowAllAgents)
@@ -146,7 +252,17 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
     {
         if (asyncWriterChannel is not null)
         {
-            asyncWriterChannel.Writer.TryComplete();
+            lock (gate)
+            {
+                isDisposed = true;
+            }
+
+            await WaitForPendingEnqueueAttemptsAsync().ConfigureAwait(false);
+            lock (gate)
+            {
+                writerCompleting = true;
+                asyncWriterChannel.Writer.TryComplete();
+            }
             try
             {
                 if (asyncWriterTask is not null)
@@ -159,16 +275,31 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
                 // Suppress background writer termination errors
             }
         }
+        else
+        {
+            lock (gate)
+            {
+                isDisposed = true;
+            }
+        }
 
-        await cts.CancelAsync().ConfigureAwait(false);
-        cts.Dispose();
     }
 
     public void Dispose()
     {
         if (asyncWriterChannel is not null)
         {
-            asyncWriterChannel.Writer.TryComplete();
+            lock (gate)
+            {
+                isDisposed = true;
+            }
+
+            WaitForPendingEnqueueAttempts();
+            lock (gate)
+            {
+                writerCompleting = true;
+                asyncWriterChannel.Writer.TryComplete();
+            }
             try
             {
                 asyncWriterTask?.Wait(TimeSpan.FromSeconds(1));
@@ -177,9 +308,14 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
             {
             }
         }
+        else
+        {
+            lock (gate)
+            {
+                isDisposed = true;
+            }
+        }
 
-        cts.Cancel();
-        cts.Dispose();
     }
 
     private static void AppendBounded(LinkedList<NetworkAccessActivityEntry> list, NetworkAccessActivityEntry entry)
@@ -191,30 +327,186 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
         }
     }
 
-    private async Task ProcessAsyncWrites(ChannelReader<NetworkAccessActivityEntry> reader, CancellationToken token)
+    private bool WaitForCapacityWithShortTimeout(long started)
     {
+        ChannelWriter<NetworkAccessActivityEntry> writer = asyncWriterChannel!.Writer;
         try
         {
-            while (await reader.WaitToReadAsync(token).ConfigureAwait(false))
+            TimeSpan remaining = defaultEnqueueWaitTimeout - Stopwatch.GetElapsedTime(started);
+            if (remaining <= TimeSpan.Zero)
             {
-                while (reader.TryRead(out NetworkAccessActivityEntry? entry))
-                {
-                    if (entry is not null)
-                    {
-                        TryWriteJsonLine(entry);
-                    }
-                }
+                return false;
             }
+
+            using var timeout = new CancellationTokenSource(remaining);
+            return writer.WaitToWriteAsync(timeout.Token).AsTask().GetAwaiter().GetResult();
         }
         catch (OperationCanceledException)
         {
-            // Drain remaining
+            return false;
+        }
+        catch (ChannelClosedException)
+        {
+            return false;
+        }
+    }
+
+    private void RegisterPendingEnqueueAttempt()
+    {
+        if (pendingEnqueueAttempts++ == 0)
+        {
+            producersDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    private void CompletePendingEnqueueAttempt()
+    {
+        if (--pendingEnqueueAttempts == 0)
+        {
+            producersDrained.TrySetResult();
+        }
+    }
+
+    private void WaitForPendingEnqueueAttempts()
+    {
+        while (true)
+        {
+            Task waitForProducers;
+            lock (gate)
+            {
+                if (pendingEnqueueAttempts == 0)
+                {
+                    return;
+                }
+
+                waitForProducers = producersDrained.Task;
+            }
+
+            waitForProducers.GetAwaiter().GetResult();
+        }
+    }
+
+    private async Task WaitForPendingEnqueueAttemptsAsync()
+    {
+        while (true)
+        {
+            Task waitForProducers;
+            lock (gate)
+            {
+                if (pendingEnqueueAttempts == 0)
+                {
+                    return;
+                }
+
+                waitForProducers = producersDrained.Task;
+            }
+
+            await waitForProducers.ConfigureAwait(false);
+        }
+    }
+
+    private static TaskCompletionSource CompletedSignal()
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        signal.SetResult();
+        return signal;
+    }
+
+    private void NoteAuditLoss(DateTimeOffset timestamp)
+    {
+        pendingAuditLossCount++;
+        pendingAuditLossFrom = pendingAuditLossFrom is null || timestamp < pendingAuditLossFrom
+            ? timestamp
+            : pendingAuditLossFrom;
+        pendingAuditLossTo = pendingAuditLossTo is null || timestamp > pendingAuditLossTo
+            ? timestamp
+            : pendingAuditLossTo;
+
+        if (!writerCompleting && asyncWriterChannel is not null)
+        {
+            NetworkAccessActivityEntry loss = CreateAuditLossEntry();
+            if (asyncWriterChannel.Writer.TryWrite(loss))
+            {
+                ClearPendingAuditLoss();
+            }
+        }
+    }
+
+    private NetworkAccessActivityEntry CreateAuditLossEntry()
+        => new(
+            TimestampUtc: DateTimeOffset.UtcNow,
+            SourceIp: null,
+            UserId: "system",
+            AgentId: null,
+            ConnectorId: null,
+            Destination: "network-access-audit",
+            Port: 0,
+            Decision: "audit_loss",
+            Reason: $"count={pendingAuditLossCount};from={pendingAuditLossFrom:O};to={pendingAuditLossTo:O}",
+            Cluster: null,
+            OpenInternetBadge: false,
+            CompatibilityMode: false);
+
+    private void ClearPendingAuditLoss()
+    {
+        pendingAuditLossCount = 0;
+        pendingAuditLossFrom = null;
+        pendingAuditLossTo = null;
+    }
+
+    private async Task ProcessAsyncWrites(ChannelReader<NetworkAccessActivityEntry> reader)
+    {
+        while (await reader.WaitToReadAsync().ConfigureAwait(false))
+        {
             while (reader.TryRead(out NetworkAccessActivityEntry? entry))
             {
                 if (entry is not null)
                 {
-                    TryWriteJsonLine(entry);
+                    WriteEntry(entry);
+                    TryEnqueuePendingLossFromConsumer();
                 }
+            }
+        }
+
+        NetworkAccessActivityEntry? pendingLoss = null;
+        lock (gate)
+        {
+            if (pendingAuditLossCount > 0)
+            {
+                pendingLoss = CreateAuditLossEntry();
+                ClearPendingAuditLoss();
+            }
+        }
+
+        if (pendingLoss is not null)
+        {
+            WriteEntry(pendingLoss);
+        }
+    }
+
+    private void WriteEntry(NetworkAccessActivityEntry entry)
+    {
+        if (writeEntry is not null)
+        {
+            writeEntry(entry);
+        }
+
+        TryWriteJsonLine(entry);
+    }
+
+    private void TryEnqueuePendingLossFromConsumer()
+    {
+        lock (gate)
+        {
+            if (writerCompleting || pendingAuditLossCount == 0)
+            {
+                return;
+            }
+
+            NetworkAccessActivityEntry loss = CreateAuditLossEntry();
+            if (asyncWriterChannel!.Writer.TryWrite(loss))
+            {
+                ClearPendingAuditLoss();
             }
         }
     }
