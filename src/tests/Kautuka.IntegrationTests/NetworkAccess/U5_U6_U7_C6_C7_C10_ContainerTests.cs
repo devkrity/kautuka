@@ -457,9 +457,35 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         const string ipv4 = "{\"nftables\":[{\"rule\":{\"comment\":\"private_reject\",\"expr\":[]}},{\"rule\":{\"comment\":\"wl_net_reject\",\"expr\":[]}}]}";
         const string ipv6 = "{\"nftables\":[{\"rule\":{\"comment\":\"ipv6_drop_pod\",\"expr\":[]}}]}";
         IReadOnlyList<string>? observedArgs = null;
+        bool catFails = false;
         var podman = new PodmanCommandRunner((args, _) =>
         {
             observedArgs = args.ToArray();
+            // Fedora's confined boundary file must be read by the shell before nft
+            // consumes stdin. A plain pipeline can hide cat's failure status.
+            bool readsRulesetFromShellStdin = args.Count > 5
+                && args[5].Contains("rules=$(cat \"$1\") &&", StringComparison.Ordinal)
+                && args[5].Contains("| nft -f -", StringComparison.Ordinal);
+            bool unsafePlainPipeline = args.Count > 5
+                && args[5].Contains("cat \"$1\" | nft -f -", StringComparison.Ordinal);
+            readsRulesetFromShellStdin |= unsafePlainPipeline;
+            if (catFails && unsafePlainPipeline)
+            {
+                // Negative control: a failing cat can leave a valid prefix on
+                // stdin while the pipeline reports nft's successful exit code.
+                return Task.FromResult(new PodmanCommandResult(
+                    0, $"{ipv4}\n__KUTUKA_IPV6_BOUNDARY__\n{ipv6}", string.Empty, ProcessTerminationReason.Completed));
+            }
+            if (catFails && readsRulesetFromShellStdin)
+            {
+                return Task.FromResult(new PodmanCommandResult(
+                    1, ipv4, "cat: boundary.nft: No such file", ProcessTerminationReason.Completed));
+            }
+            if (!readsRulesetFromShellStdin)
+            {
+                return Task.FromResult(new PodmanCommandResult(
+                    1, string.Empty, "nft cannot open confined boundary file", ProcessTerminationReason.Completed));
+            }
             return Task.FromResult(new PodmanCommandResult(
                 0,
                 $"{ipv4}\n__KUTUKA_IPV6_BOUNDARY__\n{ipv6}",
@@ -477,8 +503,14 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.NotNull(observedArgs);
         Assert.Equal("unshare", observedArgs![0]);
         Assert.Equal("-n", observedArgs[2]);
-        Assert.Contains("nft -f", observedArgs[5], StringComparison.Ordinal);
         Assert.DoesNotContain("run", observedArgs, StringComparer.Ordinal);
+
+        // Model cat failing after producing a valid-looking prefix. The explicit
+        // && must make the script fail rather than hash the truncated ruleset.
+        catFails = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => manager.ReadRenderedBoundaryRulesetHashAsync(TestContext.Current.CancellationToken));
+        Assert.Contains("rules=$(cat \"$1\") && printf '%s\\n' \"$rules\" | nft -f -", observedArgs[5], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -512,6 +544,9 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         string live = await manager.ReadBoundaryRulesetHashAsync(TestContext.Current.CancellationToken);
         EgressTopologyManager.RequireMatchingBoundaryRulesetHash(rendered, live);
         Assert.Contains(calls, args => args.Count > 1 && args[0] == "machine" && args[1] == "cp");
+        Assert.Contains(calls, args => args.Count > 3 && args[0] == "machine" && args[1] == "ssh"
+            && args[3].Contains("rules=$(cat \"$1\") &&", StringComparison.Ordinal)
+            && args[3].Contains("| nft -f -", StringComparison.Ordinal));
         Assert.Contains(calls, args => args.Count > 3 && args[2] == "dev" && args[3].Contains("nsenter -t 123 -n nft -j list table ip6", StringComparison.Ordinal));
         drift = true;
         await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ReadBoundaryRulesetHashAsync(TestContext.Current.CancellationToken));

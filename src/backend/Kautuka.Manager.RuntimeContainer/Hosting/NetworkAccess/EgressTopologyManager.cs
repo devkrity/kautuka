@@ -1218,7 +1218,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
         const string ipv6Marker = "__KUTUKA_IPV6_BOUNDARY__";
         string script =
-            $"nft -f \"$1\" && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress";
+            $"rules=$(cat \"$1\") && printf '%s\\n' \"$rules\" | nft -f - && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress";
         PodmanCommandResult rendered;
         if (!string.IsNullOrWhiteSpace(windowsPodmanMachineName) && !string.IsNullOrWhiteSpace(windowsPodmanHookStateDirectory))
         {
