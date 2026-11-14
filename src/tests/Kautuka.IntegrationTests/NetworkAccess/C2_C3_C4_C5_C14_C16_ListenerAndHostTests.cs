@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Runtime.InteropServices;
+using System.Reflection;
 
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -20,6 +21,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using EnvoyAuth = Kautuka.NetworkAccess.Protos.Envoy.Service.Auth.V3.Authorization;
@@ -33,6 +35,33 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
+    [Fact]
+    public async Task EnvoyAuthorizationHost_ActualLoggerFactoryUsesInformationMinimum()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            NacController controller = CreateController(Path.Combine(tempDir, "state"), out _);
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+                SocketPath = Path.Combine(tempDir, "networkaccess.sock"),
+            });
+            await host.StartAsync(TestContext.Current.CancellationToken);
+
+            var serverField = typeof(EnvoyAuthorizationHost).GetField("server", BindingFlags.Instance | BindingFlags.NonPublic);
+            var server = Assert.IsType<WebApplication>(serverField?.GetValue(host));
+            ILogger logger = server.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EnvoyAuthorizationHost.Test");
+            Assert.False(logger.IsEnabled(LogLevel.Trace));
+            Assert.False(logger.IsEnabled(LogLevel.Debug));
+            Assert.True(logger.IsEnabled(LogLevel.Information));
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
     [Fact]
     public async Task EnvoyCheck_PortBounds_DeniesOnlyValuesOutsideTcpRange()
     {
