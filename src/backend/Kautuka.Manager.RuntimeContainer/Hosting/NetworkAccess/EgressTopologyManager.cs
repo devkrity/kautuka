@@ -79,6 +79,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private LaunchAdmissionGeneration launchAdmissionGeneration = new();
     private volatile bool topologyIncidentLatched;
     private volatile bool topologyContainmentComplete;
+    private volatile bool transientRecoveryPending;
     private string? expectedBoundaryRulesetHash;
     private string? expectedBoundaryNftSourceHash;
     private long unlabelledWorkloadCount;
@@ -168,6 +169,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
                 isStartupGateOpen = value;
                 launchAdmissionClosed = !value;
+                if (value)
+                {
+                    transientRecoveryPending = false;
+                }
                 if (!value && !launchAdmissionGeneration.CancellationStarted)
                 {
                     launchAdmissionGeneration.CancellationStarted = true;
@@ -218,7 +223,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    public void CloseLaunchAdmission() => IsStartupGateOpen = false;
+    public void CloseLaunchAdmission()
+    {
+        lock (gateLock)
+        {
+            transientRecoveryPending = false;
+            IsStartupGateOpen = false;
+        }
+    }
 
     private int ActiveLaunchLeaseCount
     {
@@ -972,7 +984,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         // development certificates stay in sync on every Manager start.
         if (isWindowsHostNativeDev)
         {
-            _ = await podmanRunner.RunAsync(["pod", "rm", "-f", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+            await RemoveEgressPodIfPresentAsync(cancellationToken).ConfigureAwait(false);
         }
 
         // Check if pod exists:
@@ -2002,27 +2014,87 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
-        if (IsStartupGateOpen && !await IsRenderedBoundaryNftUnchangedAsync(cancellationToken).ConfigureAwait(false))
+        if (!IsStartupGateOpen && transientRecoveryPending)
         {
-            logger.LogError("Rendered boundary nft source changed during reconcile; closing the NAC startup gate.");
-            await LatchTopologyIncidentAndContainAsync(registry, "rendered boundary source drift", cancellationToken).ConfigureAwait(false);
+            await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        if (IsStartupGateOpen && !await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+        if (!IsStartupGateOpen)
         {
-            logger.LogError("Egress pod health check failed during reconcile; closing the NAC startup gate.");
-            await LatchTopologyIncidentAndContainAsync(registry, "egress pod health failure", cancellationToken).ConfigureAwait(false);
+            await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        if (IsStartupGateOpen && (OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(windowsPodmanMachineName)))
+        if (IsStartupGateOpen)
+        {
+            string currentSourceHash;
+            try
+            {
+                currentSourceHash = await ReadRenderedBoundaryNftSourceHashAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogWarning(ex, "Rendered boundary nft source could not be read during reconcile; recreating the egress pod with the startup gate closed.");
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash) || string.IsNullOrWhiteSpace(currentSourceHash))
+            {
+                logger.LogWarning("Rendered boundary nft source hash is unavailable; recreating the egress pod with the startup gate closed.");
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!string.Equals(currentSourceHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal))
+            {
+                logger.LogError("Rendered boundary nft source changed during reconcile; closing the NAC startup gate.");
+                await LatchTopologyIncidentAndContainAsync(registry, "rendered boundary source drift", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        bool egressPodHealthy;
+        try
+        {
+            egressPodHealthy = await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Egress pod health check failed during reconcile; recreating the egress pod with the startup gate closed.");
+            await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!egressPodHealthy)
+        {
+            logger.LogWarning("Egress pod health check failed during reconcile; recreating the egress pod with the startup gate closed.");
+            await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(windowsPodmanMachineName))
         {
             try
             {
                 string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash)
-                    || !string.Equals(liveBoundaryHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
+                if (string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash) || string.IsNullOrWhiteSpace(liveBoundaryHash))
+                {
+                    logger.LogWarning("Boundary nft ruleset verification returned an empty hash; recreating the egress pod with the startup gate closed.");
+                    await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (!string.Equals(liveBoundaryHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
                 {
                     logger.LogError(
                         "Boundary nft ruleset hash changed during reconcile (expected {ExpectedHash}, observed {ObservedHash}); closing the NAC startup gate.",
@@ -2032,15 +2104,24 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     return;
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Boundary nft ruleset verification failed during reconcile; closing the NAC startup gate.");
-                await LatchTopologyIncidentAndContainAsync(registry, "live boundary verification failure", cancellationToken).ConfigureAwait(false);
+                logger.LogWarning(ex, "Boundary nft ruleset could not be verified during reconcile; recreating the egress pod with the startup gate closed.");
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
                 return;
             }
         }
 
-        // 1. Compare running containers to registry
+        await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ReconcileWorkloadRegistryAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    {
+        // Compare running containers to registry.
         PodmanCommandResult psResult = await podmanRunner
             .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
             .ConfigureAwait(false);
@@ -2117,6 +2198,127 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
+    }
+
+    private async Task RecoverEgressTopologyAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    {
+        lock (gateLock)
+        {
+            if (!IsStartupGateOpen && !transientRecoveryPending)
+            {
+                return;
+            }
+
+            if (IsStartupGateOpen)
+            {
+                IsStartupGateOpen = false;
+                transientRecoveryPending = true;
+            }
+        }
+
+        try
+        {
+            await RemoveEgressPodIfPresentAsync(cancellationToken).ConfigureAwait(false);
+
+            bool isWindowsHostNativeDev = OperatingSystem.IsWindows();
+            await EnsureEgressPodAsync(
+                isWindowsHostNativeDev,
+                decisionEndpointIp: windowsDecisionEndpointIp,
+                includeLanGrants: true,
+                envoyCertificateDirectory: windowsEnvoyCertificateDirectory,
+                cancellationToken).ConfigureAwait(false);
+
+            if (OperatingSystem.IsLinux() || isWindowsHostNativeDev || !string.IsNullOrWhiteSpace(windowsPodmanMachineName))
+            {
+                string renderedHash = await ReadRenderedBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                string liveHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(renderedHash)
+                    && !string.IsNullOrWhiteSpace(liveHash)
+                    && !string.Equals(renderedHash, liveHash, StringComparison.Ordinal))
+                {
+                    await LatchTopologyIncidentAndContainAsync(registry, "live boundary ruleset drift during recovery", cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(renderedHash) || string.IsNullOrWhiteSpace(liveHash))
+                {
+                    throw new InvalidOperationException("Boundary nft ruleset verification returned an empty hash during recovery.");
+                }
+
+                expectedBoundaryRulesetHash = renderedHash;
+            }
+
+            if (TryCompleteTransientRecovery())
+            {
+                logger.LogInformation("Egress pod recovery completed; startup gate reopened.");
+            }
+            else
+            {
+                logger.LogInformation("Egress pod recovery completed, but launch admission was explicitly closed while recovery was in progress; the gate remains closed.");
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            lock (gateLock)
+            {
+                IsStartupGateOpen = false;
+            }
+
+            logger.LogError(ex, "Egress pod recovery failed; startup gate remains closed and reconcile will retry.");
+        }
+    }
+
+    private bool TryCompleteTransientRecovery()
+    {
+        lock (gateLock)
+        {
+            if (!transientRecoveryPending
+                || topologyIncidentLatched)
+            {
+                return false;
+            }
+
+            IsStartupGateOpen = true;
+            return true;
+        }
+    }
+
+    private async Task RemoveEgressPodIfPresentAsync(CancellationToken cancellationToken)
+    {
+        PodmanCommandResult exists = await podmanRunner
+            .RunAsync(["pod", "exists", EgressPodName], 10, cancellationToken)
+            .ConfigureAwait(false);
+        if (exists.ExitCode == 1)
+        {
+            return;
+        }
+
+        if (exists.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Could not determine whether egress pod '{EgressPodName}' exists: {exists.StdErr}");
+        }
+
+        PodmanCommandResult removed = await podmanRunner
+            .RunAsync(["pod", "rm", "-f", EgressPodName], 30, cancellationToken)
+            .ConfigureAwait(false);
+        if (removed.ExitCode == 0)
+        {
+            return;
+        }
+
+        PodmanCommandResult existsAfterRemoval = await podmanRunner
+            .RunAsync(["pod", "exists", EgressPodName], 10, cancellationToken)
+            .ConfigureAwait(false);
+        if (existsAfterRemoval.ExitCode == 1)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"Failed to remove egress pod '{EgressPodName}' before recovery (rc {removed.ExitCode}): {removed.StdErr}");
     }
 
     private async Task LatchTopologyIncidentAndContainAsync(
@@ -2565,28 +2767,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return string.Empty;
     }
 
-    private async Task<bool> IsRenderedBoundaryNftUnchangedAsync(CancellationToken cancellationToken)
+    private async Task<string> ReadRenderedBoundaryNftSourceHashAsync(CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash))
-        {
-            return false;
-        }
-
         string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
-        try
-        {
-            string currentSource = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
-            string currentHash = ComputeBoundaryNftSourceHash(currentSource);
-            return string.Equals(currentHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal);
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
+        string currentSource = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
+        return ComputeBoundaryNftSourceHash(currentSource);
     }
 
     public ValueTask DisposeAsync()
