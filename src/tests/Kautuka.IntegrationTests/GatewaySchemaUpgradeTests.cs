@@ -40,6 +40,28 @@ public sealed class GatewaySchemaUpgradeTests
         database.EnsureReady();
     }
 
+    [Fact]
+    public void UnmarkedKnownTelegramSchemaIsRecognizedAndMigrated()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        string fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFileName));
+        using (var connection = new SqliteConnection($"Data Source={temp.SqlitePath}"))
+        {
+            connection.Open();
+            connection.ExecuteScript(fixture);
+            connection.ExecuteScript("DROP TABLE gateway_schema;");
+        }
+
+        KautukaDatabase database = CreateDatabase(temp.SqlitePath);
+        database.EnsureReady();
+
+        using SqliteConnection migrated = new(database.ConnectionString);
+        migrated.Open();
+        Assert.Equal(SqliteGatewaySchemaBootstrapper.SchemaId,
+            migrated.ExecuteScalar<string>("SELECT schema_id FROM gateway_schema"));
+        SqliteGatewaySchemaBootstrapper.ValidateExisting(migrated);
+    }
+
     [Theory]
     [InlineData("gateway-2026-10-10.1")]
     [InlineData("gateway-2026-10-19.1")]

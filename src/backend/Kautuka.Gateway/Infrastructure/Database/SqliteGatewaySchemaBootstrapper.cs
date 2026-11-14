@@ -33,6 +33,20 @@ internal static class SqliteGatewaySchemaBootstrapper
         if (ReadSchema(connection).Count != 0)
         {
             string? schemaId = ReadGatewaySchemaId(connection);
+            if (schemaId is null && HasExactCurrentSchemaWithoutMarker(connection))
+            {
+                CreateSchemaMarker(connection, SchemaId);
+                schemaId = SchemaId;
+            }
+            else if (schemaId is null && HasLegacyTelegramSchema(connection))
+            {
+                // These pre-marker Gateway databases have a known Telegram-era signature and
+                // registered table migrations. Give the normal migration path its earliest
+                // supported marker; validation still rejects any unrecognized schema drift.
+                const string inferredLegacySchemaId = "gateway-2026-10-10.1";
+                CreateSchemaMarker(connection, inferredLegacySchemaId);
+                schemaId = inferredLegacySchemaId;
+            }
             if (schemaId is null
                 || (!string.Equals(schemaId, SchemaId, StringComparison.Ordinal)
                     && !priorSupportedSchemaIds.Contains(schemaId)
@@ -69,6 +83,54 @@ internal static class SqliteGatewaySchemaBootstrapper
 
         EnsureRemoteMcpNamespaces(connection);
         ValidateExisting(connection);
+    }
+
+    private static bool HasExactCurrentSchemaWithoutMarker(SqliteConnection connection)
+    {
+        IReadOnlyDictionary<SchemaObjectKey, string> expected = CreateExpectedSchema();
+        IReadOnlyDictionary<SchemaObjectKey, string> actual = ReadSchema(connection);
+        var markerKey = new SchemaObjectKey("table", "gateway_schema");
+        if (!expected.ContainsKey(markerKey) || actual.Count != expected.Count - 1)
+        {
+            return false;
+        }
+
+        foreach ((SchemaObjectKey key, string expectedSql) in expected)
+        {
+            if (key == markerKey)
+            {
+                continue;
+            }
+
+            if (!actual.TryGetValue(key, out string? actualSql)
+                || !string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void CreateSchemaMarker(SqliteConnection connection, string schemaId)
+    {
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        try
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                "CREATE TABLE gateway_schema (schema_id TEXT PRIMARY KEY, created_at TEXT NOT NULL); " +
+                "INSERT INTO gateway_schema(schema_id, created_at) VALUES ($schemaId, CURRENT_TIMESTAMP)";
+            command.Parameters.AddWithValue("$schemaId", schemaId);
+            command.ExecuteNonQuery();
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
     }
 
     public static void ValidateExisting(SqliteConnection connection)

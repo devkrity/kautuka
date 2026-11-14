@@ -253,6 +253,33 @@ public sealed class SqliteGatewaySchemaBootstrapperTests
     }
 
     [Fact]
+    public void UnmarkedDatabaseWithExactCurrentSchemaGetsCurrentMarker()
+    {
+        using SqliteConnection connection = OpenMemoryDatabase();
+        SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection);
+        using (SqliteCommand removeMarker = connection.CreateCommand())
+        {
+            removeMarker.CommandText = "DROP TABLE gateway_schema";
+            removeMarker.ExecuteNonQuery();
+        }
+
+        SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection);
+
+        Assert.Equal(SqliteGatewaySchemaBootstrapper.SchemaId, QueryString(
+            connection,
+            "SELECT schema_id FROM gateway_schema"));
+        SqliteGatewaySchemaBootstrapper.ValidateExisting(connection);
+
+        using (SqliteCommand makeUnknown = connection.CreateCommand())
+        {
+            makeUnknown.CommandText =
+                "DROP TABLE gateway_schema; CREATE TABLE unrecognized_extra(id TEXT PRIMARY KEY);";
+            makeUnknown.ExecuteNonQuery();
+        }
+        Assert.Throws<InvalidOperationException>(() => SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection));
+    }
+
+    [Fact]
     public void IncompatibleExistingDatabaseFailsWithoutRepairOrDataLoss()
     {
         using SqliteConnection connection = OpenMemoryDatabase();
