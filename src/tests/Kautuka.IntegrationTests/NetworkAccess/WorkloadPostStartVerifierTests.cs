@@ -17,6 +17,7 @@ public sealed class WorkloadPostStartVerifierTests
 {
     private const string ContainerId = "nac-verifier-test";
     private const string AllocatedIp = "10.247.1.80";
+    private const string CanonicalContainerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     [Fact]
     public void PodmanMachineMountPathsMatchOnlyTheirWindowsWorkspaceRoot()
@@ -383,6 +384,7 @@ public sealed class WorkloadPostStartVerifierTests
     {
         var inspect = new JsonObject
         {
+            ["Id"] = CanonicalContainerId,
             ["HostConfig"] = new JsonObject
             {
                 ["SecurityOpt"] = noNewPrivileges ? JsonNode.Parse("[\"no-new-privileges\"]") : JsonNode.Parse("[]"),

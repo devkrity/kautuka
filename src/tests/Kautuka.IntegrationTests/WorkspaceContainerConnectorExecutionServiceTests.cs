@@ -57,7 +57,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     RegistryEntry entry = Assert.Single(registry.GetAll());
                     const int pid = 4242;
                     pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
-                    string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                    const string canonicalId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                    string inspect = "[{\"Id\":\"" + canonicalId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                     return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
                 }
 
@@ -289,7 +290,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 RegistryEntry entry = Assert.Single(registry.GetAll(), item => item.ContainerId == args[1]);
                 int pid = Interlocked.Increment(ref nextPid);
                 pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
-                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                string canonicalId = new string('0', 56) + Convert.ToHexString(IPAddress.Parse(entry.Ip).GetAddressBytes());
+                string inspect = "[{\"Id\":\"" + canonicalId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                 return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
             }
 
@@ -619,7 +621,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 RegistryEntry entry = Assert.Single(registry.GetAll());
                 int pid = Interlocked.Increment(ref nextPid);
                 pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
-                string inspect = "[{\"Id\":\"runtime-" + entry.ContainerId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                string canonicalId = new string('0', 56) + Convert.ToHexString(IPAddress.Parse(entry.Ip).GetAddressBytes());
+                string inspect = "[{\"Id\":\"" + canonicalId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":" + pid + "},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                 return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
             }
 
@@ -688,7 +691,16 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var result = await listing;
             Assert.False(result.Ok);
             Assert.Contains(commands, static args => args[0] == "inspect");
-            Assert.Empty(registry.GetAll());
+            if (cancelWhileListing)
+            {
+                Assert.Empty(registry.GetAll());
+            }
+            else
+            {
+                RegistryEntry quarantined = Assert.Single(registry.GetAll());
+                Assert.Equal("deny-all", quarantined.Egress);
+                Assert.Equal("none", quarantined.Attribution);
+            }
             string[] methods = File.Exists(requestLogPath)
                 ? await File.ReadAllLinesAsync(requestLogPath, TestContext.Current.CancellationToken)
                 : [];
