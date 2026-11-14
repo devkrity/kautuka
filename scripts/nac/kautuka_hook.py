@@ -112,34 +112,35 @@ def is_owner_live(entry):
 
 def read_owners_file(owners_path=OWNERS_FILE):
     """
-    Reads and validates netns-owners.json.
+    Reads and validates netns-owners.json from one opened file descriptor.
     Returns (owners_dict, owners_valid, owners_reason).
     owners_dict maps str(inode) -> entry dict.
-    If the file exists and has a JSON parse error, unreadable permissions,
-    or wrong mode (st_mode & 0o077 != 0 or st_uid != os.geteuid()),
-    returns ({}, False, "owners_unreadable").
+    On POSIX, the opened file must have owner-only permissions and be owned by
+    the effective user; O_NOFOLLOW prevents accepting a symlink at open time.
     """
-    if not os.path.exists(owners_path):
-        return {}, True, None
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
 
     try:
-        st = os.stat(owners_path)
-        if hasattr(os, "getuid"):
-            if (st.st_mode & 0o077) != 0:
-                return {}, False, "owners_unreadable"
-            if st.st_uid != os.geteuid():
-                return {}, False, "owners_unreadable"
-
-        raw = None
+        fd = None
         for attempt in range(5):
             try:
-                with open(owners_path, "r", encoding="utf-8") as f:
-                    raw = f.read()
+                fd = os.open(owners_path, flags)
                 break
+            except FileNotFoundError:
+                return {}, True, None
             except PermissionError:
                 if attempt == 4:
                     raise
                 time.sleep(0.01)
+
+        with os.fdopen(fd, "r", encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            if hasattr(os, "getuid"):
+                if (st.st_mode & 0o077) != 0 or st.st_uid != os.geteuid():
+                    return {}, False, "owners_unreadable"
+            raw = f.read()
 
         if not raw or not raw.strip():
             return {}, True, None

@@ -400,6 +400,135 @@ class TestKautukaHookOwnersIntegrity(unittest.TestCase):
         self.assertFalse(valid, "Corrupt owners file must not be considered valid")
         self.assertEqual(reason, "owners_unreadable")
 
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_symlink_owners_file_fails_closed(self):
+        target = os.path.join(self.temp_dir.name, "target.json")
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(target, 0o600)
+        os.symlink(target, self.owners_path)
+
+        data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid, "A symlink owners file must not be accepted")
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_symlink_negative_control_without_nofollow(self):
+        target = os.path.join(self.temp_dir.name, "target.json")
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(target, 0o600)
+        os.symlink(target, self.owners_path)
+        real_open = os.open
+
+        def open_following_symlinks(path, flags, *args, **kwargs):
+            return real_open(path, flags & ~os.O_NOFOLLOW, *args, **kwargs)
+
+        # Control: with the relevant protection removed, the attack fixture is accepted.
+        with unittest.mock.patch("kautuka_hook.os.open", side_effect=open_following_symlinks):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertTrue(valid)
+        self.assertIsNone(reason)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX owner and mode checks")
+    def test_wrong_mode_rejected_from_opened_file(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o644)
+
+        data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_mode_change_after_path_check_is_rejected_by_fstat(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o600)
+        real_open = os.open
+        changed = False
+
+        def open_then_relax_mode(path, flags, *args, **kwargs):
+            nonlocal changed
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == self.owners_path and not changed:
+                os.chmod(path, 0o644)
+                changed = True
+            return fd
+
+        with unittest.mock.patch("kautuka_hook.os.open", side_effect=open_then_relax_mode):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid, "Mode changes on the opened inode must be caught by fstat")
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX owner checks")
+    def test_wrong_owner_rejected_from_opened_file(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o600)
+        real_fstat = os.fstat
+
+        def foreign_owner(fd):
+            st = real_fstat(fd)
+            return unittest.mock.Mock(st_mode=st.st_mode, st_uid=os.geteuid() + 1)
+
+        with unittest.mock.patch("kautuka_hook.os.fstat", side_effect=foreign_owner):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_path_replaced_after_open_reads_validated_descriptor(self):
+        replacement = os.path.join(self.temp_dir.name, "replacement.json")
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({"11": {"inode": 11, "id": "opened", "pid": 1}}, f)
+        with open(replacement, "w", encoding="utf-8") as f:
+            json.dump({"22": {"inode": 22, "id": "replacement", "pid": 2}}, f)
+        os.chmod(self.owners_path, 0o600)
+        os.chmod(replacement, 0o600)
+        real_stat = os.stat
+        real_open = os.open
+        replaced = False
+
+        def stat_then_replace(path, *args, **kwargs):
+            nonlocal replaced
+            result = real_stat(path, *args, **kwargs)
+            if path == self.owners_path and not replaced:
+                os.replace(replacement, self.owners_path)
+                replaced = True
+            return result
+
+        def open_then_replace(path, flags, *args, **kwargs):
+            nonlocal replaced
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == self.owners_path and not replaced:
+                os.replace(replacement, self.owners_path)
+                replaced = True
+            return fd
+
+        with unittest.mock.patch("kautuka_hook.os.stat", side_effect=stat_then_replace), \
+             unittest.mock.patch("kautuka_hook.os.open", side_effect=open_then_replace), \
+             unittest.mock.patch("kautuka_hook.is_owner_live", return_value=True):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertTrue(valid)
+        self.assertIsNone(reason)
+        self.assertTrue(replaced, "The owners pathname must be replaced during the test")
+        self.assertIn("11", data)
+        self.assertNotIn("22", data)
+
+    def test_path_based_read_negative_control_observes_replacement(self):
+        replacement = os.path.join(self.temp_dir.name, "replacement.json")
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            f.write("opened")
+        with open(replacement, "w", encoding="utf-8") as f:
+            f.write("replacement")
+        os.replace(replacement, self.owners_path)
+
+        # Control: a path-based read after replacement sees the replacement file.
+        with open(self.owners_path, encoding="utf-8") as f:
+            observed = f.read()
+        self.assertEqual(observed, "replacement")
+
     def _real_proc_info(self):
         live_pid = os.getpid()
         if os.path.exists(f"/proc/{live_pid}/ns/net"):
