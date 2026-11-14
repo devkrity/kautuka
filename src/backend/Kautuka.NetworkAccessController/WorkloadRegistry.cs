@@ -60,6 +60,15 @@ public interface IWorkloadRegistry
     /// <summary>Atomically changes a matching workload identity to deny-all without replacing a different container.</summary>
     bool TryQuarantine(string ip, string expectedContainerId, string? alternateContainerId = null) => false;
 
+    /// <summary>Atomically promotes a quarantined exact identity to caller-supplied verified policy.</summary>
+    bool TryPromoteVerified(RegistryEntry expectedQuarantined, RegistryEntry desired) => false;
+
+    /// <summary>Registers a deny-all candidate only when its IP is not already owned.</summary>
+    bool TryRegisterQuarantined(RegistryEntry candidate) => false;
+
+    /// <summary>Returns whether this exact workload identity was verified in the current process.</summary>
+    bool IsVerified(string ip, string containerId) => false;
+
     void Rebuild(IEnumerable<RegistryEntry> entries);
 
     bool TryGetByIp(string? ip, out RegistryEntry? entry);
@@ -76,6 +85,7 @@ public interface IWorkloadRegistry
 public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) : IWorkloadRegistry
 {
     private readonly ConcurrentDictionary<string, RegistryEntry> entriesByIp = new(StringComparer.Ordinal);
+    private readonly HashSet<(string Ip, string ContainerId)> verifiedIdentities = [];
     private readonly object writeLock = new();
     private readonly ILogger<WorkloadRegistry> logger = logger ?? NullLogger<WorkloadRegistry>.Instance;
     private long registryConflicts;
@@ -107,6 +117,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             entriesByIp[normalized.Ip] = normalized;
+            verifiedIdentities.Remove((normalized.Ip, normalized.ContainerId));
         }
 
         if (!string.IsNullOrEmpty(evictedContainerId))
@@ -141,6 +152,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             if (removed)
             {
                 removedContainerId = existing.ContainerId;
+                verifiedIdentities.Remove((normalizedIp, existing.ContainerId));
             }
         }
 
@@ -181,6 +193,8 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             entriesByIp[normalizedIp] = existing with { ContainerId = trimmedActual };
+            verifiedIdentities.Remove((normalizedIp, existing.ContainerId));
+            verifiedIdentities.Remove((normalizedIp, trimmedActual));
             promoted = true;
         }
 
@@ -211,6 +225,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
             }
 
             entriesByIp[normalizedIp] = current with { Egress = "deny-all", Attribution = "none" };
+            verifiedIdentities.Remove((normalizedIp, current.ContainerId));
             if (string.Equals(current.Purpose, "probe", StringComparison.OrdinalIgnoreCase))
             {
                 probeContainerId = current.ContainerId;
@@ -226,6 +241,68 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         return true;
     }
 
+    public bool TryPromoteVerified(RegistryEntry expectedQuarantined, RegistryEntry desired)
+    {
+        RegistryEntry expected = ValidateAndNormalize(expectedQuarantined);
+        RegistryEntry promoted = ValidateAndNormalize(desired);
+        if (expected.Egress != "deny-all" || expected.Attribution != "none"
+            || !string.Equals(expected.Ip, promoted.Ip, StringComparison.Ordinal)
+            || !string.Equals(expected.ContainerId, promoted.ContainerId, StringComparison.Ordinal)
+            || (expected with { Egress = promoted.Egress, Attribution = promoted.Attribution }) != promoted)
+        {
+            return false;
+        }
+
+        lock (writeLock)
+        {
+            if (!entriesByIp.TryGetValue(expected.Ip, out RegistryEntry? current) || current != expected)
+            {
+                return false;
+            }
+
+            entriesByIp[expected.Ip] = promoted;
+            verifiedIdentities.Add((promoted.Ip, promoted.ContainerId));
+            return true;
+        }
+    }
+
+    public bool TryRegisterQuarantined(RegistryEntry candidate)
+    {
+        RegistryEntry normalized = ValidateAndNormalize(candidate);
+        if (normalized.Egress != "deny-all" || normalized.Attribution != "none")
+        {
+            return false;
+        }
+
+        lock (writeLock)
+        {
+            if (entriesByIp.ContainsKey(normalized.Ip))
+            {
+                return false;
+            }
+
+            entriesByIp[normalized.Ip] = normalized;
+            verifiedIdentities.Remove((normalized.Ip, normalized.ContainerId));
+            return true;
+        }
+    }
+
+    public bool IsVerified(string ip, string containerId)
+    {
+        if (string.IsNullOrWhiteSpace(containerId)
+            || !NetworkDestinationNormalizer.TryNormalizeIpv4(ip, out string normalizedIp, out _))
+        {
+            return false;
+        }
+
+        lock (writeLock)
+        {
+            return verifiedIdentities.Contains((normalizedIp, containerId.Trim()))
+                && entriesByIp.TryGetValue(normalizedIp, out RegistryEntry? entry)
+                && string.Equals(entry.ContainerId, containerId.Trim(), StringComparison.Ordinal);
+        }
+    }
+
     public void Rebuild(IEnumerable<RegistryEntry> entries)
     {
         ArgumentNullException.ThrowIfNull(entries);
@@ -239,6 +316,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         List<string> removedIds;
         lock (writeLock)
         {
+            verifiedIdentities.Clear();
             removedIds = entriesByIp.Values
                 .Select(static e => e.ContainerId)
                 .Where(id => !activeIds.Contains(id))

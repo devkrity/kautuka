@@ -80,8 +80,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connectors);
+        WorkspaceDesiredStateSnapshot authoritativeSnapshot = desiredStateStore.Snapshot;
         var notes = new List<string>();
-        ContainerContext[] workspaces = [.. desiredStateStore.Snapshot.DesiredWorkspaces
+        ContainerContext[] workspaces = [.. authoritativeSnapshot.DesiredWorkspaces
             .Where(static workspace => !string.IsNullOrWhiteSpace(workspace.UserId))
             .DistinctBy(static workspace => (workspace.ScopeType, workspace.ScopeId, workspace.UserId))];
         if (workspaces.Length == 0)
@@ -159,7 +160,25 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     }
                     if (inspection.Exists && inspection.IsRunning && inspection.Matches(expectedConnector))
                     {
-                        trackedConnectorContainers[runtimeKey] = containerName;
+                        try
+                        {
+                            await EnsureConnectorContainerRunningAsync(
+                                expectedConnector,
+                                runtimeKey,
+                                containerName,
+                                executionContext,
+                                mountedWorkspace,
+                                cancellationToken,
+                                identityContext: workspace,
+                                authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
+                            await ResetConnectorCooldownAsync(expectedConnector, runtimeKey, containerName).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+                        {
+                            notes.Add("Connector " + connector.ConnectorId + " could not be re-verified after Manager restart.");
+                            logger.LogWarning(ex, "[ContainerConnector] Reconcile did not re-verify connector '{ConnectorId}'.", connector.ConnectorId);
+                        }
+
                         continue;
                     }
 
@@ -178,7 +197,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                             executionContext,
                             mountedWorkspace,
                             cancellationToken,
-                            identityContext: workspace).ConfigureAwait(false);
+                            identityContext: workspace,
+                            authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
                         await ResetConnectorCooldownAsync(expectedConnector, runtimeKey, containerName).ConfigureAwait(false);
                         notes.Add("Connector " + connector.ConnectorId + " was replaced because " + reason + ".");
                     }
@@ -318,6 +338,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentNullException.ThrowIfNull(connector);
 
+        WorkspaceDesiredStateSnapshot authoritativeSnapshot = desiredStateStore.Snapshot;
         string connectorId = connector.ConnectorId;
         bool containerPrepared = false;
         EphemeralWorkload? ephemeralWorkload = null;
@@ -344,7 +365,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "probe-start");
 
-            transportLaunch = await CreateTransportAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = true;
             var tools = await ListMcpToolsAsync(transportLaunch, ClientOptionsFor(effectiveConnector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
@@ -439,6 +460,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
 
+        WorkspaceDesiredStateSnapshot authoritativeSnapshot = desiredStateStore.Snapshot;
         WorkspaceMcpContainerConnectorDefinition? connector = null;
         bool containerPrepared = false;
         EphemeralWorkload? ephemeralWorkload = null;
@@ -462,7 +484,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "list-start");
 
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             var tools = await ListMcpToolsAsync(transportLaunch, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
@@ -529,6 +551,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
         ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
 
+        WorkspaceDesiredStateSnapshot authoritativeSnapshot = desiredStateStore.Snapshot;
         WorkspaceMcpContainerConnectorDefinition? connector = null;
         bool containerPrepared = false;
         EphemeralWorkload? ephemeralWorkload = null;
@@ -552,7 +575,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "call-start");
 
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, transportLaunch.CancellationToken);
@@ -707,8 +730,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? workspaceContext = null,
         WorkspaceMcpExecutionContext executionContext = WorkspaceMcpExecutionContext.Unspecified,
         bool isProbe = false,
+        WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         CancellationToken cancellationToken = default)
     {
+        authoritativeSnapshot ??= desiredStateStore.Snapshot;
         bool canExecute = connector.Enabled || (allowInternalSystemConnector && connector.IsInternalSystemConnector);
 
         if (requireEnabled && !canExecute)
@@ -831,7 +856,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
                     cancellationToken,
                     isProbe: isProbe,
-                    identityContext: workspaceContext).ConfigureAwait(false);
+                    identityContext: workspaceContext,
+                    authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
                 arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
             }
 
@@ -1085,7 +1111,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? workspaceContext,
         CancellationToken cancellationToken,
         bool isProbe = false,
-        ContainerContext? identityContext = null)
+        ContainerContext? identityContext = null,
+        WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null)
     {
         await using var connectorLease = (await connectorLocks
             .AcquireAsync(runtimeKey, cancellationToken)
@@ -1107,6 +1134,26 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         await CancelConnectorCooldownAsync(runtimeKey).ConfigureAwait(false);
         if (inspection.IsRunning && inspection.Matches(connector))
         {
+            if (workloadRegistry is not null && !isProbe)
+            {
+                string? reuseLaunchUserId = string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId;
+                NetworkAccess.IWorkloadLaunchLease reuseLease = workloadLaunchGate is null
+                    ? NoopLaunchLease.Instance
+                    : await workloadLaunchGate.AcquireLaunchLeaseAsync(reuseLaunchUserId, cancellationToken).ConfigureAwait(false);
+                await using var reuseLeaseScope = reuseLease.ConfigureAwait(false);
+                using CancellationTokenSource reuseCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, reuseLease.CancellationToken);
+                cancellationToken = reuseCancellation.Token;
+                await EnsureExistingConnectorVerifiedAsync(
+                    connector,
+                    executionContext,
+                    inspection,
+                    identity,
+                    compatProfile,
+                    identityContext ?? workspaceContext,
+                    authoritativeSnapshot ?? desiredStateStore.Snapshot,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             trackedConnectorContainers[runtimeKey] = containerName;
             return;
         }
@@ -1197,6 +1244,157 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         trackedConnectorContainers[runtimeKey] = containerName;
     }
 
+    private async Task EnsureExistingConnectorVerifiedAsync(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        WorkspaceMcpExecutionContext executionContext,
+        ConnectorContainerInspection inspection,
+        ConnectorContainerSpecBuilder.ConnectorIdentity identity,
+        NetworkAccess.ImageCompatProfile? compatProfile,
+        ContainerContext? identityContext,
+        WorkspaceDesiredStateSnapshot authoritativeSnapshot,
+        CancellationToken cancellationToken)
+    {
+        if (!PodmanContainerIdentity.IsCanonicalContainerId(inspection.CanonicalContainerId)
+            || string.IsNullOrWhiteSpace(inspection.WorkloadIp))
+        {
+            throw new ContainerInspectionUnavailableException($"Connector '{connector.ConnectorId}' did not expose a canonical container ID and workload IP; it remains quarantined.");
+        }
+
+        string containerId = inspection.CanonicalContainerId!;
+        string ip = inspection.WorkloadIp;
+        string attribution = identity.Egress == "deny-all"
+            ? "none"
+            : identity.Systemwide
+                ? (string.IsNullOrWhiteSpace(identity.UserId) ? "none" : "user")
+                : (string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
+        string? compat = compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null;
+        var desired = new Kautuka.NetworkAccessController.RegistryEntry(
+            ip,
+            string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId,
+            string.IsNullOrWhiteSpace(identity.AgentId) ? null : identity.AgentId,
+            containerId,
+            identity.Kind,
+            connector.ConnectorId,
+            ExecutionContextLabel(executionContext),
+            identity.Systemwide,
+            identity.Egress,
+            attribution,
+            compat,
+            DateTimeOffset.UtcNow);
+
+        Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry?.FindByIp(ip);
+        if (current is null)
+        {
+            var candidate = desired with { Egress = "deny-all", Attribution = "none" };
+            if (workloadRegistry?.TryRegisterQuarantined(candidate) != true)
+            {
+                throw new ContainerInspectionUnavailableException($"Connector '{connector.ConnectorId}' workload address is already owned by another registry identity.");
+            }
+
+            current = candidate;
+        }
+
+        if (current != (desired with
+        {
+            Egress = current.Egress,
+            Attribution = current.Attribution,
+            RegisteredUtc = current.RegisteredUtc,
+        }))
+        {
+            throw new ContainerInspectionUnavailableException($"Connector '{connector.ConnectorId}' runtime identity does not match current desired state and trusted compatibility profile.");
+        }
+
+        if (workloadRegistry!.IsVerified(ip, containerId)
+            && current.Egress == desired.Egress
+            && current.Attribution == desired.Attribution)
+        {
+            return;
+        }
+
+        if (current.Egress != "deny-all" || current.Attribution != "none")
+        {
+            if (!workloadRegistry.TryQuarantine(ip, containerId))
+            {
+                throw new ContainerInspectionUnavailableException($"Connector '{connector.ConnectorId}' identity changed before quarantine.");
+            }
+
+            current = workloadRegistry.FindByIp(ip);
+        }
+
+        if (postStartVerifier is null)
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' cannot be authorized because post-start verification is unavailable.");
+        }
+
+        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, compatProfile, workloadRegistry, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        workloadLaunchGate?.EnsureLaunchAllowed(identity.UserId);
+
+        WorkspaceDesiredStateSnapshot latestSnapshot = desiredStateStore.Snapshot;
+        if (!SameDesiredStateIdentity(authoritativeSnapshot, latestSnapshot))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' desired state authority changed during re-verification; it remains quarantined.");
+        }
+
+        WorkspaceMcpContainerConnectorDefinition? latest = latestSnapshot.DesiredContainerConnectors
+            .FirstOrDefault(candidate => string.Equals(candidate.ConnectorId, connector.ConnectorId, StringComparison.Ordinal));
+        if (latest is null
+            || latest.DesiredStateVersion != connector.DesiredStateVersion)
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' desired state changed during re-verification; it remains quarantined.");
+        }
+
+        if (identityContext is not null)
+        {
+            ContainerContext? latestWorkspace = desiredStateStore.Snapshot.DesiredWorkspaces.FirstOrDefault(candidate =>
+                string.Equals(candidate.ScopeType, identityContext.ScopeType, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(candidate.ScopeId, identityContext.ScopeId, StringComparison.Ordinal)
+                && string.Equals(candidate.UserId, identityContext.UserId, StringComparison.Ordinal));
+            if (latestWorkspace is null
+                || latestWorkspace.DesiredStateVersion != identityContext.DesiredStateVersion
+                || !string.Equals(latestWorkspace.SpecFingerprint, identityContext.SpecFingerprint, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Connector '{connector.ConnectorId}' owner workspace changed during re-verification; it remains quarantined.");
+            }
+        }
+
+        NetworkAccess.ImageCompatProfile? latestCompatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+        if (!SameCompatRelaxations(latestCompatProfile, compatProfile))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' trusted compatibility profile changed during re-verification; it remains quarantined.");
+        }
+
+        current = workloadRegistry.FindByIp(ip);
+        if (current is null || !string.Equals(current.ContainerId, containerId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' registry identity changed before re-verification could be promoted.");
+        }
+
+        desired = desired with { RegisteredUtc = current.RegisteredUtc };
+        cancellationToken.ThrowIfCancellationRequested();
+        workloadLaunchGate?.EnsureLaunchAllowed(identity.UserId);
+        if (!workloadRegistry.TryPromoteVerified(current, desired))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' registry identity or policy changed before re-verification could be promoted.");
+        }
+    }
+
+    private static bool SameDesiredStateIdentity(
+        WorkspaceDesiredStateSnapshot expected,
+        WorkspaceDesiredStateSnapshot current)
+        => expected.AcceptedVersion == current.AcceptedVersion
+            && string.Equals(expected.PublisherEpoch, current.PublisherEpoch, StringComparison.Ordinal)
+            && string.Equals(expected.ContentHash, current.ContentHash, StringComparison.Ordinal);
+
+    private static bool SameCompatRelaxations(
+        NetworkAccess.ImageCompatProfile? left,
+        NetworkAccess.ImageCompatProfile? right)
+        => left is null
+            ? right is null
+            : right is not null
+                && string.Equals(left.ImageDigest, right.ImageDigest, StringComparison.Ordinal)
+                && left.Relaxations.SequenceEqual(right.Relaxations, StringComparer.Ordinal);
+
     private async Task ResetConnectorCooldownAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string runtimeKey,
@@ -1263,6 +1461,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return new ConnectorContainerInspection(false, null, 0, string.Empty, null);
         }
 
+        string? canonicalContainerId = null;
+        string? workloadIp = null;
+        if (PodmanContainerIdentity.TryRead(inspectJson, out string inspectedId, out string inspectedIp))
+        {
+            canonicalContainerId = inspectedId;
+            workloadIp = inspectedIp;
+        }
+
         string? imageId = await TryReadImageIdAsync(connector?.Image, cancellationToken).ConfigureAwait(false);
         try
         {
@@ -1274,7 +1480,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             string? drift = LiveContainerSpec.DescribeDrift(
                 inspectJson,
                 LiveContainerSpec.ForConnector(workspaceContext, ConnectorEnvAssignments(connector), imageId));
-            return new ConnectorContainerInspection(true, state, desiredVersion, fingerprint, drift);
+            return new ConnectorContainerInspection(true, state, desiredVersion, fingerprint, drift, canonicalContainerId, workloadIp);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
         {
@@ -1755,7 +1961,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string? State,
         long DesiredStateVersion,
         string SpecFingerprint,
-        string? Drift)
+        string? Drift,
+        string? CanonicalContainerId = null,
+        string? WorkloadIp = null)
     {
         public bool IsRunning => string.Equals(State, "running", StringComparison.OrdinalIgnoreCase);
 

@@ -417,8 +417,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     /// <summary>
-    /// Reconstructs the IWorkloadRegistry from live container io.kautuka.* labels before
-    /// the Envoy listener starts accepting connections. Kills and removes any unlabelled containers.
+    /// Reconstructs candidate workload identities from live container io.kautuka.* labels before
+    /// the Envoy listener starts accepting connections. Labels are not post-start verification:
+    /// rebuilt entries stay deny-all until their current desired owner re-verifies them. Kills and
+    /// removes any unlabelled containers.
     /// </summary>
     public async Task RebuildRegistryFromLiveContainersAsync(
         IWorkloadRegistry registry,
@@ -571,8 +573,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 string.IsNullOrWhiteSpace(connector) ? null : connector,
                                 execContext,
                                 systemwide,
-                                string.IsNullOrWhiteSpace(egress) ? "normal" : egress,
-                                attribution,
+                                // Labels identify a candidate workload, but they are not proof that
+                                // its post-start security verification completed in this process.
+                                // Rebuilt entries stay quarantined until an authoritative desired
+                                // workload is matched and re-verified by its owner.
+                                "deny-all",
+                                "none",
                                 string.IsNullOrWhiteSpace(compat) ? null : compat,
                                 DateTimeOffset.UtcNow,
                                 string.IsNullOrWhiteSpace(purpose) ? null : purpose);

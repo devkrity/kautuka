@@ -17,7 +17,9 @@ public sealed class PodmanContainerTool(
     Hosting.NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
     Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null,
     Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = null,
-    Hosting.NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null) : IContainerTool
+    Hosting.NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null,
+    WorkspaceDesiredStateStore? desiredStateStore = null,
+    RuntimeImageAllowlist? runtimeImageAllowlist = null) : IContainerTool
 {
     private readonly ConcurrentDictionary<string, byte> primedWorkspaces = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> driftNotes = new();
@@ -27,6 +29,8 @@ public sealed class PodmanContainerTool(
     private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
     private readonly Hosting.NetworkAccess.WorkloadPostStartVerifier? postStartVerifier = postStartVerifier;
     private readonly Hosting.NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = workloadLaunchGate;
+    private readonly WorkspaceDesiredStateStore? desiredStateStore = desiredStateStore;
+    private readonly RuntimeImageAllowlist runtimeImageAllowlist = runtimeImageAllowlist ?? RuntimeImageAllowlist.Empty;
 
     public IReadOnlyList<string> TakeDriftNotes()
     {
@@ -42,12 +46,14 @@ public sealed class PodmanContainerTool(
     public Task PrimeWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         return PrimeDirectoriesAsync(context);
     }
 
     public async Task<ContainerContext> RebuildWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         string containerName = BuildContainerName(context);
         await using var lease = (await containerLocks.AcquireAsync(containerName, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
         await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
@@ -59,6 +65,7 @@ public sealed class PodmanContainerTool(
     public async Task<bool> DeleteWorkspaceAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context);
         string containerName = BuildContainerName(context);
         await using var lease = (await containerLocks.AcquireAsync(containerName, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
         await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
@@ -75,6 +82,7 @@ public sealed class PodmanContainerTool(
     public async Task<OciSandboxSession> SpawnSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         return await EnsureContainerRunningAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
@@ -98,6 +106,7 @@ public sealed class PodmanContainerTool(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         ArgumentNullException.ThrowIfNull(command);
 
         OciSandboxSession session = await EnsureContainerRunningAsync(context, cancellationToken).ConfigureAwait(false);
@@ -107,12 +116,14 @@ public sealed class PodmanContainerTool(
     public async Task<OciSandboxSession> InspectSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         return (await InspectContainerStateAsync(context, cancellationToken).ConfigureAwait(false)).Session;
     }
 
     public async Task CloseSandboxAsync(ContainerContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        context = NormalizeDesiredRuntimeContext(context);
         await StopAndDeleteContainerAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
@@ -182,6 +193,7 @@ public sealed class PodmanContainerTool(
 
     private async Task<OciSandboxSession> EnsureContainerRunningAsync(ContainerContext context, CancellationToken cancellationToken)
     {
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         Hosting.NetworkAccess.IWorkloadLaunchLease acquiredLaunchLease = workloadLaunchGate is null
             ? NoopLaunchLease.Instance
             : await workloadLaunchGate.AcquireLaunchLeaseAsync(context.UserId, cancellationToken).ConfigureAwait(false);
@@ -194,12 +206,25 @@ public sealed class PodmanContainerTool(
         await using var containerLease = (await containerLocks
             .AcquireAsync(containerName, cancellationToken)
             .ConfigureAwait(false)).ConfigureAwait(false);
+        context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
         await PrimeDirectoriesAsync(context).ConfigureAwait(false);
 
         ContainerInspection inspection = await InspectContainerStateAsync(context, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
+        }
+        catch
+        {
+            QuarantineInspectedSandboxBeforeMutation(context, inspection, forceQuarantine: true);
+            throw;
+        }
+
         bool matchesDesiredSpec = inspection.Matches(context);
+        QuarantineInspectedSandboxBeforeMutation(context, inspection);
         if (inspection.Session.Running && matchesDesiredSpec)
         {
+            await EnsureExistingSandboxVerifiedAsync(context, inspection, cancellationToken).ConfigureAwait(false);
             return inspection.Session;
         }
 
@@ -216,6 +241,8 @@ public sealed class PodmanContainerTool(
                 OciSandboxSession? started = await TryStartExistingContainerAsync(context, inspection, cancellationToken).ConfigureAwait(false);
                 if (started is not null)
                 {
+                    ContainerInspection afterStart = await InspectContainerStateAsync(context, cancellationToken).ConfigureAwait(false);
+                    await EnsureExistingSandboxVerifiedAsync(context, afterStart, cancellationToken).ConfigureAwait(false);
                     return started;
                 }
             }
@@ -231,21 +258,39 @@ public sealed class PodmanContainerTool(
         string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
             .AllocateNextIp(workloadRegistry);
 
-        if (workloadRegistry is not null)
+        Kautuka.NetworkAccessController.RegistryEntry desiredEntry = BuildSandboxRegistryEntry(context, allocatedIp, containerName);
+        Kautuka.NetworkAccessController.RegistryEntry quarantinedEntry = desiredEntry with { Egress = "deny-all", Attribution = "none" };
+        if (workloadRegistry is not null && !workloadRegistry.TryRegisterQuarantined(quarantinedEntry))
         {
-            workloadRegistry.Register(BuildSandboxRegistryEntry(context, allocatedIp, containerName));
+            throw new InvalidOperationException($"Sandbox '{containerName}' could not claim its allocated workload address without replacing another registry identity.");
         }
 
+        IReadOnlyList<string> runArguments = BuildRunArguments(
+            context,
+            containerName,
+            allocatedIp,
+            workloadLaunchGate?.IsBraked(context.UserId) ?? true);
         ContainerExecutionResult createResult = await RunPodmanAsync(
-            BuildRunArguments(context, containerName, allocatedIp, workloadLaunchGate?.IsBraked(context.UserId) ?? true),
+            runArguments,
             context.DefaultTimeoutSeconds,
             cancellationToken,
             containerName,
             context.ContainerEnvironment).ConfigureAwait(false);
 
+        bool hasCreatedId = Hosting.PodmanContainerIdentity.TryReadCanonicalLaunchOutput(createResult.StdOut, out string createdId);
+        if (hasCreatedId && workloadRegistry is not null
+            && !workloadRegistry.UpdateContainerId(allocatedIp, containerName, createdId))
+        {
+            throw new InvalidOperationException($"Sandbox '{containerName}' started, but its immutable container identity could not be bound to the quarantined workload entry.");
+        }
+
         if (createResult.ExitCode != 0)
         {
-            workloadRegistry?.Deregister(allocatedIp, containerName);
+            if (hasCreatedId)
+            {
+                _ = workloadRegistry?.TryQuarantine(allocatedIp, createdId);
+            }
+
             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
                 $"Podman run for container '{containerName}'",
                 createResult.ExitCode,
@@ -253,17 +298,247 @@ public sealed class PodmanContainerTool(
                 createResult.StdErr));
         }
 
+        if (!hasCreatedId && workloadRegistry is not null)
+        {
+            throw new InvalidOperationException($"Podman run for sandbox '{containerName}' completed without a canonical cidfile identity; the workload remains quarantined.");
+        }
+
+        if (postStartVerifier is null && workloadRegistry is not null)
+        {
+            throw new InvalidOperationException($"Sandbox '{containerName}' cannot be authorized because post-start verification is unavailable.");
+        }
+
         if (postStartVerifier is not null)
         {
             await postStartVerifier.VerifyWorkloadAsync(
-                containerName,
+                hasCreatedId ? createdId : containerName,
                 allocatedIp,
                 compatProfile: null,
                 registry: workloadRegistry,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (hasCreatedId)
+        {
+            PromoteSandboxAfterVerification(context, allocatedIp, createdId);
+        }
+
         return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);
+    }
+
+    private async Task EnsureExistingSandboxVerifiedAsync(
+        ContainerContext context,
+        ContainerInspection inspection,
+        CancellationToken cancellationToken)
+    {
+        if (!Hosting.PodmanContainerIdentity.IsCanonicalContainerId(inspection.CanonicalContainerId)
+            || string.IsNullOrWhiteSpace(inspection.WorkloadIp))
+        {
+            throw new ContainerInspectionUnavailableException("The existing sandbox did not expose a canonical container ID and workload IP; it remains quarantined.");
+        }
+
+        string containerId = inspection.CanonicalContainerId!;
+        string ip = inspection.WorkloadIp;
+        Kautuka.NetworkAccessController.RegistryEntry desired = BuildSandboxRegistryEntry(context, ip, containerId);
+        if (workloadRegistry is null)
+        {
+            if (postStartVerifier is not null)
+            {
+                await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, null, cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry.FindByIp(ip);
+        if (current is null)
+        {
+            Kautuka.NetworkAccessController.RegistryEntry candidate = desired with { Egress = "deny-all", Attribution = "none" };
+            if (!workloadRegistry.TryRegisterQuarantined(candidate))
+            {
+                throw new ContainerInspectionUnavailableException("The existing sandbox workload address is already owned by another registry identity.");
+            }
+
+            current = candidate;
+        }
+
+        if (current != (desired with { Egress = current.Egress, Attribution = current.Attribution, RegisteredUtc = current.RegisteredUtc }))
+        {
+            throw new ContainerInspectionUnavailableException("The existing sandbox identity does not match the current trusted desired context.");
+        }
+
+        if (workloadRegistry.IsVerified(ip, containerId) && current.Egress == desired.Egress && current.Attribution == desired.Attribution)
+        {
+            try
+            {
+                EnsureSandboxContextIsCurrent(context);
+            }
+            catch
+            {
+                QuarantineInspectedSandboxBeforeMutation(context, inspection, forceQuarantine: true);
+                throw;
+            }
+
+            return;
+        }
+
+        if (current.Egress != "deny-all" || current.Attribution != "none")
+        {
+            if (!workloadRegistry.TryQuarantine(ip, containerId))
+            {
+                throw new ContainerInspectionUnavailableException("The existing sandbox identity changed before it could be quarantined.");
+            }
+
+            current = workloadRegistry.FindByIp(ip);
+        }
+
+        if (postStartVerifier is null)
+        {
+            throw new InvalidOperationException("Sandbox post-start verification is unavailable; the existing workload remains quarantined.");
+        }
+
+        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, workloadRegistry, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        workloadLaunchGate?.EnsureLaunchAllowed(context.UserId);
+        PromoteSandboxAfterVerification(context, ip, containerId);
+    }
+
+    private void QuarantineInspectedSandboxBeforeMutation(
+        ContainerContext context,
+        ContainerInspection inspection,
+        bool forceQuarantine = false)
+    {
+        if (workloadRegistry is null
+            || !Hosting.PodmanContainerIdentity.IsCanonicalContainerId(inspection.CanonicalContainerId))
+        {
+            return;
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry? current = string.IsNullOrWhiteSpace(inspection.WorkloadIp)
+            ? null
+            : workloadRegistry.FindByIp(inspection.WorkloadIp);
+        if (current is null || !string.Equals(current.ContainerId, inspection.CanonicalContainerId, StringComparison.Ordinal))
+        {
+            current = workloadRegistry.GetAll().FirstOrDefault(entry => string.Equals(entry.ContainerId, inspection.CanonicalContainerId, StringComparison.Ordinal));
+        }
+
+        if (current is null || !string.Equals(current.ContainerId, inspection.CanonicalContainerId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry desired = BuildSandboxRegistryEntry(
+            context,
+            current.Ip,
+            inspection.CanonicalContainerId!) with
+        { RegisteredUtc = current.RegisteredUtc };
+        if (!forceQuarantine
+            && !string.IsNullOrWhiteSpace(inspection.WorkloadIp)
+            && inspection.Session.Running
+            && inspection.Matches(context)
+            && workloadRegistry.IsVerified(current.Ip, inspection.CanonicalContainerId!)
+            && current == desired)
+        {
+            return;
+        }
+
+        if (current.Egress != "deny-all" || current.Attribution != "none")
+        {
+            _ = workloadRegistry.TryQuarantine(current.Ip, inspection.CanonicalContainerId!);
+        }
+    }
+
+    private void PromoteSandboxAfterVerification(ContainerContext context, string ip, string containerId)
+    {
+        if (workloadRegistry is null)
+        {
+            return;
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry.FindByIp(ip);
+        if (current is null || !string.Equals(current.ContainerId, containerId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The sandbox registry identity changed before verification could be promoted.");
+        }
+
+        Kautuka.NetworkAccessController.RegistryEntry desired = BuildSandboxRegistryEntry(context, ip, containerId)
+            with
+        { RegisteredUtc = current.RegisteredUtc };
+        workloadLaunchGate?.EnsureLaunchAllowed(context.UserId);
+        EnsureSandboxContextIsCurrent(context);
+        if (!workloadRegistry.TryPromoteVerified(current, desired))
+        {
+            throw new InvalidOperationException("The sandbox registry identity or desired policy changed before verification could be promoted.");
+        }
+
+    }
+
+    private void EnsureSandboxContextIsCurrent(ContainerContext context)
+    {
+        if (desiredStateStore is null)
+        {
+            return;
+        }
+
+        WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
+        ContainerContext? latest = snapshot.DesiredWorkspaces.FirstOrDefault(candidate =>
+            string.Equals(candidate.ScopeType, context.ScopeType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(candidate.ScopeId, context.ScopeId, StringComparison.Ordinal)
+            && string.Equals(candidate.UserId, context.UserId, StringComparison.Ordinal));
+        if (latest is null)
+        {
+            throw new InvalidOperationException("Sandbox desired state changed during verification; the workload remains quarantined.");
+        }
+
+        ContainerContext expectedRuntimeContext = NormalizeDesiredRuntimeContext(context, requireDesired: true, capturedSnapshot: snapshot);
+        if (expectedRuntimeContext.DesiredStateVersion != context.DesiredStateVersion
+            || !string.Equals(expectedRuntimeContext.Image, context.Image, StringComparison.Ordinal)
+            || !string.Equals(expectedRuntimeContext.SpecFingerprint, context.SpecFingerprint, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Sandbox desired state changed during verification; the workload remains quarantined.");
+        }
+    }
+
+    private ContainerContext NormalizeDesiredRuntimeContext(
+        ContainerContext context,
+        bool requireDesired = false,
+        WorkspaceDesiredStateSnapshot? capturedSnapshot = null)
+    {
+        if (desiredStateStore is null)
+        {
+            return context;
+        }
+
+        WorkspaceDesiredStateSnapshot snapshot = capturedSnapshot ?? desiredStateStore.Snapshot;
+        ContainerContext? latest = snapshot.DesiredWorkspaces.FirstOrDefault(candidate =>
+            string.Equals(candidate.ScopeType, context.ScopeType, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(candidate.ScopeId, context.ScopeId, StringComparison.Ordinal)
+            && string.Equals(candidate.UserId, context.UserId, StringComparison.Ordinal));
+        if (latest is null)
+        {
+            if (requireDesired)
+            {
+                throw new InvalidOperationException("Workspace identity is no longer present in accepted desired state; refusing sandbox launch or execution.");
+            }
+
+            return context;
+        }
+
+        string[] connectorIds = snapshot.DesiredSandboxConnectorBindings
+            .Where(binding => string.Equals(binding.ScopeType, context.ScopeType, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(binding.ScopeId, context.ScopeId, StringComparison.Ordinal))
+            .SelectMany(static binding => binding.ConnectorIds)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        ContainerContext normalized = latest with
+        {
+            Image = runtimeImageAllowlist.SelectReleasedSandboxImage(latest.Image),
+            DesiredStateVersion = snapshot.AcceptedVersion,
+        };
+        return normalized with { SpecFingerprint = WorkspaceContainerSpecFingerprint.Compute(normalized, connectorIds) };
     }
 
     private async Task<ContainerExecutionResult> ExecuteInContainerAsync(
@@ -436,7 +711,17 @@ public sealed class PodmanContainerTool(
                 null,
                 0,
                 string.Empty,
+                null,
+                null,
                 null);
+        }
+
+        string? canonicalContainerId = null;
+        string? workloadIp = null;
+        if (Hosting.PodmanContainerIdentity.TryRead(inspectJson, out string inspectedId, out string inspectedIp))
+        {
+            canonicalContainerId = inspectedId;
+            workloadIp = inspectedIp;
         }
 
         string? imageId = await TryReadImageIdAsync(QualifyLocalImage(context.Image), cancellationToken).ConfigureAwait(false);
@@ -463,7 +748,9 @@ public sealed class PodmanContainerTool(
             state,
             desiredVersion,
             fingerprint,
-            drift);
+            drift,
+            canonicalContainerId,
+            workloadIp);
     }
 
     private async Task<string?> TryReadImageIdAsync(string image, CancellationToken cancellationToken)
@@ -735,7 +1022,9 @@ public sealed class PodmanContainerTool(
         string? State,
         long DesiredStateVersion,
         string SpecFingerprint,
-        string? Drift)
+        string? Drift,
+        string? CanonicalContainerId = null,
+        string? WorkloadIp = null)
     {
         public bool Matches(ContainerContext context)
             => string.IsNullOrEmpty(Drift)
