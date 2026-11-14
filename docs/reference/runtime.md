@@ -25,7 +25,7 @@ Administrators can load live package-proxy cache inventory on demand at `GET /ap
 
 `KautukaHostPathPolicy` selects a user-scoped development root and `/var/lib/kautuka` in production, then derives service state directories. Do not construct service paths independently.
 
-Sidecar catalogs use `/var/lib/kautuka` as the production host-volume root. In development, Manager maps volumes beneath that root into the configured shared data root; paths outside it remain unchanged. Production keeps the catalog paths as configured.
+Sidecar catalogs use `/var/lib/kautuka` as the production host-volume root. On Linux development, Manager maps volumes beneath that root into the configured shared data root; paths outside it remain unchanged. Linux production keeps catalog paths as configured, including when `ContainerStateRoot` overrides the shared data root. Windows retains its existing override remapping behavior.
 
 Important files include:
 

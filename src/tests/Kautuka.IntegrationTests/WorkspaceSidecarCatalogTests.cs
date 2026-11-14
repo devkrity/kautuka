@@ -1,3 +1,4 @@
+using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 
@@ -285,6 +286,79 @@ public sealed class WorkspaceSidecarCatalogTests
             Assert.Equal(
                 Path.GetFullPath("/var/lib/kautuka-escape/stateful"),
                 sidecar.Volumes[1].HostPath);
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProductionModeKeepsSharedStateVolumeAtProductionRootWhenStateRootIsOverridden()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return;
+        }
+
+        string tempRoot = CreateTempDirectory();
+
+        try
+        {
+            const string productionVolume = "/var/lib/kautuka/sidecars/stateful";
+            const string outsideVolume = "/var/lib/kautuka-escape/stateful";
+
+            Assert.Equal(
+                Path.GetFullPath(productionVolume),
+                WorkspaceSidecarCatalogLoader.ResolveVolumeHostPath(
+                    tempRoot,
+                    KautukaHostMode.Prod,
+                    Path.Combine(tempRoot, "production-override"),
+                    productionVolume));
+            Assert.Equal(
+                Path.GetFullPath(outsideVolume),
+                WorkspaceSidecarCatalogLoader.ResolveVolumeHostPath(
+                    tempRoot,
+                    KautukaHostMode.Prod,
+                    Path.Combine(tempRoot, "production-override"),
+                    outsideVolume));
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WindowsStillMapsProductionSharedStateVolumeToConfiguredRoot()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string tempRoot = CreateTempDirectory();
+
+        try
+        {
+            string sharedRoot = Path.Combine(tempRoot, "shared-data");
+            string mappedPath = WorkspaceSidecarCatalogLoader.ResolveVolumeHostPath(
+                tempRoot,
+                KautukaHostMode.Prod,
+                sharedRoot,
+                "/var/lib/kautuka/sidecars/stateful");
+
+            Assert.Equal(
+                Path.GetFullPath(Path.Combine(sharedRoot, "sidecars", "stateful")),
+                mappedPath);
+            Assert.True(Directory.Exists(mappedPath));
+            Assert.Equal(
+                Path.GetFullPath("/var/lib/kautuka-escape/stateful"),
+                WorkspaceSidecarCatalogLoader.ResolveVolumeHostPath(
+                    tempRoot,
+                    KautukaHostMode.Prod,
+                    sharedRoot,
+                    "/var/lib/kautuka-escape/stateful"));
         }
         finally
         {

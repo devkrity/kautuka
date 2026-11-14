@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+using Kautuka.Hosting.Hosting;
+
 using Microsoft.Extensions.Logging;
 
 namespace Kautuka.Manager.RuntimeContainer.Configuration;
@@ -154,9 +156,30 @@ public static class WorkspaceSidecarCatalogLoader
             return resolved;
         }
 
+        return ResolveVolumeHostPath(baseDirectory, runtimePaths.HostMode, runtimePaths.SharedDataRoot, resolved);
+    }
+
+    internal static string ResolveVolumeHostPath(
+        string baseDirectory,
+        KautukaHostMode hostMode,
+        string sharedDataRoot,
+        string hostPath)
+    {
+        string resolved = ResolveRelativePath(baseDirectory, hostPath) ?? hostPath;
+        if (string.IsNullOrWhiteSpace(resolved) || !Path.IsPathRooted(resolved))
+        {
+            return resolved;
+        }
+
         string normalizedResolved = Path.GetFullPath(resolved);
+        if (!OperatingSystem.IsWindows()
+            && (!OperatingSystem.IsLinux() || hostMode != KautukaHostMode.Dev))
+        {
+            return normalizedResolved;
+        }
+
         string normalizedProdRoot = Path.GetFullPath(prodSharedStateRoot);
-        string normalizedSharedRoot = Path.GetFullPath(runtimePaths.SharedDataRoot);
+        string normalizedSharedRoot = Path.GetFullPath(sharedDataRoot);
         StringComparison pathComparison = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;

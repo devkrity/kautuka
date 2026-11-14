@@ -39,6 +39,7 @@ public sealed class WorkspaceRuntimePaths
         Directory.CreateDirectory(LogsRoot);
 
         RequireSidecars = !hostEnvironment.IsDevelopment();
+        HostMode = layout.Mode;
 
         if (logger.IsEnabled(LogLevel.Information))
         {
@@ -58,6 +59,8 @@ public sealed class WorkspaceRuntimePaths
     public string OciImagesRoot { get; }
 
     public bool RequireSidecars { get; }
+
+    public KautukaHostMode HostMode { get; }
 
     private static void EnsureRuntimeDirectories(string runtimeRoot)
     {
