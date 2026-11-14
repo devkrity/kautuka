@@ -1022,8 +1022,28 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
             if (args.Count >= 2 && args[0] == "inspect" && args[1] == validCid)
             {
-                const string inspect = "[{\"Config\":{\"Labels\":{\"io.kautuka.user\":\"u1\",\"io.kautuka.agent\":\"a1\",\"io.kautuka.exec-context\":\"agent-sandbox\",\"io.kautuka.kind\":\"agent-sandbox\",\"io.kautuka.egress\":\"normal\"}},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"10.247.1.10\"}}}}]";
-                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+                var inspect = new[]
+                {
+                    new
+                    {
+                        Id = validCid,
+                        Config = new { Labels = new Dictionary<string, string> { ["io.kautuka.user"] = "u1", ["io.kautuka.agent"] = "a1", ["io.kautuka.exec-context"] = "agent-sandbox", ["io.kautuka.kind"] = "agent-sandbox", ["io.kautuka.egress"] = "normal" }, User = "65532:65532" },
+                        HostConfig = new { SecurityOpt = new[] { "no-new-privileges" }, Privileged = false, CapAdd = Array.Empty<string>(), CapDrop = new[] { "ALL" }, ReadonlyRootfs = true, NetworkMode = "kautuka-workload", Sysctls = new Dictionary<string, string> { ["net.ipv6.conf.all.disable_ipv6"] = "1" } },
+                        EffectiveCaps = Array.Empty<string>(), BoundingCaps = Array.Empty<string>(),
+                        State = new { Pid = 4242 },
+                        NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = "10.247.1.10", GlobalIPv6Address = "" } } },
+                        Mounts = Array.Empty<object>()
+                    }
+                };
+                return Task.FromResult(new PodmanCommandResult(0, System.Text.Json.JsonSerializer.Serialize(inspect), string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args.Any(arg => arg.Contains("disable_ipv6", StringComparison.Ordinal)))
+                return Task.FromResult(new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed));
+            if (args.Contains("nft", StringComparer.Ordinal))
+            {
+                string rules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", "10.247.1.10", StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, rules, string.Empty, ProcessTerminationReason.Completed));
             }
 
             return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
@@ -1044,6 +1064,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public async Task RebuildRegistryRetainsUserlessDenyAllSandboxButRejectsNormalEgress()
     {
+        const string restrictedId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string normalId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         const string image = "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         var spec = new WorkloadContainerSpec("sandbox", image, "10.247.1.10")
         {
@@ -1068,16 +1090,36 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         }
         var normalLabels = new Dictionary<string, string>(labels) { ["io.kautuka.egress"] = "normal" };
         var removed = new List<string>();
+        string inspectedIp = string.Empty;
         var podman = new PodmanCommandRunner((command, _) =>
         {
             if (command[0] == "ps")
-                return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"restricted\"},{\"Id\":\"normal\"}]", ""));
+                return Task.FromResult(new PodmanCommandResult(0, System.Text.Json.JsonSerializer.Serialize(new[] { new { Id = restrictedId, State = "running" }, new { Id = normalId, State = "running" } }), ""));
             if (command[0] == "inspect")
             {
-                bool restricted = command[1] == "restricted";
+                bool restricted = command[1] == restrictedId;
                 string ip = restricted ? "10.247.1.10" : "10.247.1.11";
+                inspectedIp = ip;
                 string labelJson = System.Text.Json.JsonSerializer.Serialize(restricted ? labels : normalLabels);
-                return Task.FromResult(new PodmanCommandResult(0, $"[{{\"Config\":{{\"Labels\":{labelJson}}},\"NetworkSettings\":{{\"Networks\":{{\"kautuka-workload\":{{\"IPAddress\":\"{ip}\"}}}}}}}}]", ""));
+                var inspect = new[]
+                {
+                    new
+                    {
+                        Id = command[1],
+                        Config = new { Labels = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(labelJson)!, User = "65532:65532" },
+                        HostConfig = new { SecurityOpt = new[] { "no-new-privileges" }, Privileged = false, CapAdd = Array.Empty<string>(), CapDrop = new[] { "ALL" }, ReadonlyRootfs = true, NetworkMode = "kautuka-workload", Sysctls = new Dictionary<string, string> { ["net.ipv6.conf.all.disable_ipv6"] = "1" } },
+                        EffectiveCaps = Array.Empty<string>(), BoundingCaps = Array.Empty<string>(), State = new { Pid = 4242 },
+                        NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = ip, GlobalIPv6Address = "" } } },
+                        Mounts = Array.Empty<object>()
+                    }
+                };
+                return Task.FromResult(new PodmanCommandResult(0, System.Text.Json.JsonSerializer.Serialize(inspect), ""));
+            }
+            if (command.Any(arg => arg.Contains("disable_ipv6", StringComparison.Ordinal))) return Task.FromResult(new PodmanCommandResult(0, "1", ""));
+            if (command.Contains("nft", StringComparer.Ordinal))
+            {
+                string rules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", inspectedIp, StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, rules, ""));
             }
             if (command[0] == "rm") removed.Add(command[2]);
             return Task.FromResult(new PodmanCommandResult(0, "", ""));
@@ -1093,7 +1135,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Equal("deny-all", entry.Egress);
         Assert.Equal("none", entry.Attribution);
         Assert.False(registry.TryGetByIp("10.247.1.11", out _));
-        Assert.Equal(new[] { "normal" }, removed);
+        Assert.Equal(new[] { normalId }, removed);
     }
 
     [Fact]

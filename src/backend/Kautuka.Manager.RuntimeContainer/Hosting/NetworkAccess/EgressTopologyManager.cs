@@ -39,6 +39,12 @@ internal sealed partial class InfraAllowlistJsonContext : JsonSerializerContext;
 /// </summary>
 public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IWorkloadStartupState, IWorkloadLaunchAdmission
 {
+    private sealed class StartupWorkloadContainmentException : InvalidOperationException
+    {
+        public StartupWorkloadContainmentException() { }
+        public StartupWorkloadContainmentException(string message) : base(message) { }
+        public StartupWorkloadContainmentException(string message, Exception innerException) : base(message, innerException) { }
+    }
     public const string WorkloadNetworkName = "kautuka-workload";
     public const string OutsideNetworkName = "kautuka-outside";
     public const string EgressPodName = "kautuka-egress";
@@ -60,6 +66,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly PodmanCommandRunner podmanRunner;
     private readonly WorkloadAddressAllocator addressAllocator;
     private readonly WorkloadPostStartVerifier postStartVerifier;
+    private readonly WorkspaceDesiredStateStore? desiredStateStore;
+    private readonly ImageCompatibilityStore? imageCompatibilityStore;
     private readonly IWorkloadRegistry registry;
     private readonly string stateDirectory;
     private readonly string envoySocketHostDir;
@@ -101,7 +109,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string? windowsDecisionEndpointIp = null,
         string? windowsEnvoyCertificateDirectory = null,
         string? windowsPodmanMachineName = null,
-        string? windowsPodmanHookStateDirectory = null)
+        string? windowsPodmanHookStateDirectory = null,
+        WorkspaceDesiredStateStore? desiredStateStore = null,
+        ImageCompatibilityStore? imageCompatibilityStore = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -112,6 +122,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.podmanRunner = podmanRunner;
         this.addressAllocator = addressAllocator;
         this.postStartVerifier = postStartVerifier;
+        this.desiredStateStore = desiredStateStore;
+        this.imageCompatibilityStore = imageCompatibilityStore;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -588,17 +600,80 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 string.IsNullOrWhiteSpace(compat) ? null : compat,
                                 DateTimeOffset.UtcNow,
                                 string.IsNullOrWhiteSpace(purpose) ? null : purpose);
+                            string inspectedContainerId = GetStringProperty(inspected, "Id");
+                            bool alreadyQuarantined = desiredStateStore?.IsWorkloadQuarantined(cid) == true
+                                || (!string.IsNullOrWhiteSpace(inspectedContainerId) && desiredStateStore?.IsWorkloadQuarantined(inspectedContainerId) == true);
+                            if (alreadyQuarantined)
+                            {
+                                if (WorkloadPostStartVerifier.IsCanonicalContainerId(inspectedContainerId))
+                                {
+                                    try
+                                    {
+                                        await podmanRunner.RunAsync(["rm", "-f", inspectedContainerId], 5, cancellationToken).ConfigureAwait(false);
+                                    }
+                                    catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
+                                    {
+                                        logger.LogWarning(cleanupException, "Could not retry removal of quarantined workload {ContainerId} during restart.", inspectedContainerId);
+                                    }
+                                }
+                                continue;
+                            }
+                            // Keep restored workloads outside the live registry until they pass verification.
+                            var candidateRegistry = new WorkloadRegistry();
+                            candidateRegistry.Register(entry);
+                            try
+                            {
+                                ImageCompatProfile? compatProfile = await ResolveInspectedImageCompatibilityProfileAsync(inspected, cancellationToken).ConfigureAwait(false);
+                                await postStartVerifier.VerifyWorkloadAsync(cid, ip, compatProfile, candidateRegistry, cancellationToken).ConfigureAwait(false);
+                            }
+                            catch (Exception verificationException) when (verificationException is not OperationCanceledException)
+                            {
+                                string immutableId = GetStringProperty(inspected, "Id");
+                                logger.LogWarning(verificationException, "Removing restored workload {ContainerId} because verification or profile resolution failed.", cid);
+                                if (WorkloadPostStartVerifier.IsCanonicalContainerId(immutableId))
+                                {
+                                    Exception? persistenceFailure = null;
+                                    Exception? cleanupFailure = null;
+                                    try { desiredStateStore?.QuarantineWorkload(immutableId); }
+                                    catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+                                    {
+                                        persistenceFailure = persistenceException;
+                                        logger.LogError(persistenceException, "Could not persist quarantine for restored workload {ContainerId}.", immutableId);
+                                    }
+                                    try
+                                    {
+                                        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", immutableId], 5, cancellationToken).ConfigureAwait(false);
+                                        if (removed.ExitCode != 0) cleanupFailure = new InvalidOperationException($"podman rm failed for restored workload '{immutableId}' (rc {removed.ExitCode}): {removed.StdErr}");
+                                    }
+                                    catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
+                                    {
+                                        cleanupFailure = cleanupException;
+                                        logger.LogError(cleanupException, "Could not remove failed restored workload {ContainerId}.", immutableId);
+                                    }
+                                    if (persistenceFailure is not null && cleanupFailure is not null)
+                                    {
+                                        CloseLaunchAdmission();
+                                        throw new StartupWorkloadContainmentException($"Failed to quarantine and remove restored workload '{immutableId}'. Startup must remain closed.", new AggregateException(persistenceFailure, cleanupFailure));
+                                    }
+                                }
+                                else
+                                {
+                                    CloseLaunchAdmission();
+                                    throw new StartupWorkloadContainmentException($"Could not establish immutable identity for restored workload '{cid}'. Startup must remain closed.", verificationException);
+                                }
+                                continue;
+                            }
 
                             rebuiltEntries.Add(entry);
                         }
-                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        catch (Exception ex) when (ex is not OperationCanceledException and not StartupWorkloadContainmentException)
                         {
                             logger.LogWarning(ex, "Skipping malformed container entry during workload registry rebuild.");
                         }
                     }
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not StartupWorkloadContainmentException)
             {
                 logger.LogError(ex, "Error parsing containers during registry rebuild.");
             }
@@ -612,6 +687,56 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     /// Executes the startup canary test (Section 4.3.4 item 5).
     /// Starts a canary workload, verifies the hook log entry and live ruleset, and removes the canary.
     /// </summary>
+    private async Task<ImageCompatProfile?> ResolveInspectedImageCompatibilityProfileAsync(JsonElement inspectedContainer, CancellationToken cancellationToken)
+    {
+        if (imageCompatibilityStore is null) return null;
+        string imageId = GetStringProperty(inspectedContainer, "Image");
+        if (string.IsNullOrWhiteSpace(imageId)) return null;
+
+        PodmanCommandResult imageInspect = await podmanRunner
+            .RunAsync(["image", "inspect", imageId], 15, cancellationToken)
+            .ConfigureAwait(false);
+        if (imageInspect.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"podman image inspect failed while resolving compatibility for '{imageId}' (rc {imageInspect.ExitCode}).");
+        }
+
+        using JsonDocument imageDocument = JsonDocument.Parse(imageInspect.StdOut);
+        JsonElement image = imageDocument.RootElement.ValueKind == JsonValueKind.Array
+            ? imageDocument.RootElement[0]
+            : imageDocument.RootElement;
+        if (image.TryGetProperty("RepoDigests", out JsonElement repoDigests)
+            && repoDigests.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement repoDigestElement in repoDigests.EnumerateArray())
+            {
+                if (repoDigestElement.ValueKind != JsonValueKind.String) continue;
+                string repoDigest = repoDigestElement.GetString() ?? string.Empty;
+                int separator = repoDigest.LastIndexOf('@');
+                if (separator < 0 || separator + 1 >= repoDigest.Length) continue;
+                string digest = repoDigest[(separator + 1)..];
+                if (digest.StartsWith("sha256:", StringComparison.Ordinal))
+                {
+                    ImageCompatProfile? profile = imageCompatibilityStore.GetProfileByDigest(digest);
+                    if (profile is not null) return profile;
+                }
+            }
+        }
+
+        // Locally built images may not have repository digests. Podman's inspected immutable
+        // image digest is trusted metadata too; never derive compatibility from container labels.
+        if (image.TryGetProperty("Digest", out JsonElement digestElement)
+            && digestElement.ValueKind == JsonValueKind.String)
+        {
+            string digest = digestElement.GetString() ?? string.Empty;
+            if (digest.StartsWith("sha256:", StringComparison.Ordinal))
+            {
+                return imageCompatibilityStore.GetProfileByDigest(digest);
+            }
+        }
+
+        return null;
+    }
     private const string CanaryBasePinnedImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
 
     public async Task<bool> RunStartupSelfTestAsync(CancellationToken cancellationToken = default)
@@ -2206,6 +2331,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
 
         var liveCids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var runningCids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var cidByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(psResult.StdOut))
         {
@@ -2223,6 +2349,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         }
 
                         liveCids.Add(cid);
+                        if (container.TryGetProperty("State", out JsonElement stateElem)
+                            && string.Equals(stateElem.GetString(), "running", StringComparison.OrdinalIgnoreCase)) runningCids.Add(cid);
 
                         if (container.TryGetProperty("Names", out JsonElement namesElem))
                         {
@@ -2255,11 +2383,135 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
+        if (desiredStateStore is not null)
+        {
+            HashSet<string> registeredContainerIds = registry.GetAll().Select(static entry => entry.ContainerId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (string quarantinedId in desiredStateStore.QuarantinedWorkloadIds)
+            {
+                if (!WorkloadPostStartVerifier.IsCanonicalContainerId(quarantinedId)
+                    || !liveCids.Contains(quarantinedId)
+                    || registeredContainerIds.Contains(quarantinedId)
+                    || cidByName.Any(pair => string.Equals(pair.Value, quarantinedId, StringComparison.OrdinalIgnoreCase)
+                        && registeredContainerIds.Contains(pair.Key)))
+                {
+                    continue;
+                }
+
+                try { desiredStateStore.QuarantineWorkload(quarantinedId); }
+                catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+                {
+                    logger.LogCritical(persistenceException, "Could not retry quarantine persistence for unregistered surviving workload {ContainerId}.", quarantinedId);
+                    CloseLaunchAdmission();
+                }
+                try
+                {
+                    PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", quarantinedId], 5, cancellationToken).ConfigureAwait(false);
+                    if (removal.ExitCode != 0)
+                    {
+                        logger.LogCritical("Persistently quarantined workload {ContainerId} survived removal (rc {ExitCode}); closing launch admission for retry.", quarantinedId, removal.ExitCode);
+                        CloseLaunchAdmission();
+                    }
+                }
+                catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
+                {
+                    logger.LogCritical(cleanupException, "Persistently quarantined workload {ContainerId} removal threw; closing launch admission for retry.", quarantinedId);
+                    CloseLaunchAdmission();
+                }
+            }
+        }
+
         // Deregister dead containers (matching both canonical hex container IDs and pre-start registered names).
         foreach (RegistryEntry entry in registry.GetAll())
         {
-            if (liveCids.Contains(entry.ContainerId))
+
+            bool hasDirectId = liveCids.Contains(entry.ContainerId);
+            bool hasNameMatch = cidByName.TryGetValue(entry.ContainerId, out string? matchedCid);
+            string? liveCid = hasDirectId ? entry.ContainerId : hasNameMatch ? matchedCid : null;
+            bool isActive = liveCid is not null && runningCids.Contains(liveCid);
+            bool isQuarantined = desiredStateStore?.IsWorkloadQuarantined(entry.ContainerId) == true
+                || (liveCid is not null && desiredStateStore?.IsWorkloadQuarantined(liveCid) == true);
+            if (liveCid is not null && isQuarantined)
             {
+                string quarantineId = WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : entry.ContainerId;
+                registry.TryQuarantine(entry.Ip, entry.ContainerId, liveCid);
+                try { desiredStateStore?.QuarantineWorkload(quarantineId); }
+                catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+                {
+                    logger.LogCritical(persistenceException, "Could not retry quarantine persistence for surviving workload {ContainerId}.", quarantineId);
+                    CloseLaunchAdmission();
+                }
+                if (WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid))
+                {
+                    try
+                    {
+                        PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", liveCid], 5, cancellationToken).ConfigureAwait(false);
+                        if (removal.ExitCode == 0)
+                        {
+                            registry.Deregister(entry.Ip, entry.ContainerId);
+                            continue;
+                        }
+                        logger.LogCritical("Quarantined workload {ContainerId} survived removal (rc {ExitCode}); closing launch admission for retry.", liveCid, removal.ExitCode);
+                    }
+                    catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
+                    {
+                        logger.LogCritical(cleanupException, "Quarantined workload {ContainerId} removal threw; closing launch admission for retry.", liveCid);
+                    }
+                }
+                CloseLaunchAdmission();
+                continue;
+            }
+            if (isActive)
+            {
+                try
+                {
+                    string canonicalId = await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip, cancellationToken).ConfigureAwait(false);
+                    if (!string.Equals(canonicalId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, canonicalId);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    string? canonicalId = ex is WorkloadRulesetVerificationException drift ? drift.CanonicalContainerId : null;
+                    canonicalId ??= WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : null;
+                    if (canonicalId is null)
+                    {
+                        logger.LogCritical(ex, "Could not establish immutable identity for active workload {ContainerId}; closing launch admission.", entry.ContainerId);
+                        registry.TryQuarantine(entry.Ip, entry.ContainerId);
+                        CloseLaunchAdmission();
+                        continue;
+                    }
+                    logger.LogWarning(ex, "Workload rules drift detected for {ContainerId}; quarantining and removing it.", canonicalId);
+                    registry.TryQuarantine(entry.Ip, entry.ContainerId, canonicalId);
+                    try
+                    {
+                        desiredStateStore?.QuarantineWorkload(canonicalId);
+                    }
+                    catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+                    {
+                        logger.LogError(persistenceException, "Could not persist quarantine for workload {ContainerId}; continuing fail-closed cleanup.", canonicalId);
+                    }
+                    PodmanCommandResult? removal = null;
+                    try { removal = await podmanRunner.RunAsync(["rm", "-f", canonicalId], 5, cancellationToken).ConfigureAwait(false); }
+                    catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
+                    {
+                        logger.LogError(cleanupException, "Could not remove quarantined workload {ContainerId}.", canonicalId);
+                    }
+                    if (removal?.ExitCode == 0)
+                    {
+                        registry.Deregister(entry.Ip, entry.ContainerId);
+                    }
+                    else
+                    {
+                        try { desiredStateStore?.QuarantineWorkload(canonicalId); }
+                        catch (Exception persistenceException) when (persistenceException is not OperationCanceledException) { logger.LogCritical(persistenceException, "Quarantine persistence retry failed for surviving workload {ContainerId}.", canonicalId); }
+                        logger.LogCritical("Quarantined workload {ContainerId} survived removal; closing launch admission for retry.", canonicalId);
+                        CloseLaunchAdmission();
+                    }
+                    if (removal?.ExitCode == 0) registry.Deregister(entry.Ip, entry.ContainerId);
+                }
+                continue;
+            }
+            if (liveCid is not null)
+            {
+                if (!string.Equals(liveCid, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, liveCid);
                 continue;
             }
 

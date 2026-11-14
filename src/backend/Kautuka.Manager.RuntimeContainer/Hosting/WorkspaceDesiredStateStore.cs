@@ -27,6 +27,7 @@ public sealed class WorkspaceDesiredStateStore
     private IReadOnlyList<ContainerContext> desiredWorkspaces = [];
     private IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> desiredContainerConnectors = [];
     private IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> desiredSandboxConnectorBindings = [];
+    private readonly HashSet<string> quarantinedWorkloadIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, WorkspaceMcpContainerRuntimeStatus> connectorStatuses = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<WorkspaceDesiredStateStore> logger;
     private readonly string? statePath;
@@ -70,6 +71,27 @@ public sealed class WorkspaceDesiredStateStore
     }
 
     public ChannelReader<WorkspaceReconcileTriggerKind> Updates => updateChannel.Reader;
+
+    public void QuarantineWorkload(string containerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        lock (sync)
+        {
+            quarantinedWorkloadIds.Add(containerId.Trim());
+            PersistState();
+        }
+    }
+
+    public bool IsWorkloadQuarantined(string containerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        lock (sync) return quarantinedWorkloadIds.Contains(containerId.Trim());
+    }
+
+    public IReadOnlyList<string> QuarantinedWorkloadIds
+    {
+        get { lock (sync) return [.. quarantinedWorkloadIds]; }
+    }
 
     public WorkspaceDesiredStateApplyResult ApplyDesiredState(
         long nextDesiredStateVersion,
@@ -464,6 +486,7 @@ public sealed class WorkspaceDesiredStateStore
         desiredWorkspaces = persisted.DesiredWorkspaces;
         desiredContainerConnectors = persisted.DesiredContainerConnectors;
         desiredSandboxConnectorBindings = persisted.DesiredSandboxConnectorBindings;
+        quarantinedWorkloadIds.UnionWith(persisted.QuarantinedWorkloadIds ?? []);
         acceptedPublisherEpoch = persisted.PublisherEpoch;
         acceptedContentHash = persisted.ContentHash;
         acceptedDesiredStateVersion = persisted.AcceptedVersion;
@@ -505,7 +528,8 @@ public sealed class WorkspaceDesiredStateStore
             lifecyclePhase,
             reconcileAttemptCount,
             lastFailureClass,
-            [.. pendingPreviousConnectors]);
+            [.. pendingPreviousConnectors],
+            [.. quarantinedWorkloadIds]);
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(
             persisted,
             WorkspaceDesiredStateJsonContext.Default.PersistedWorkspaceDesiredState);
@@ -731,7 +755,8 @@ internal sealed record PersistedWorkspaceDesiredState(
     WorkspaceDesiredStateLifecyclePhase LifecyclePhase,
     int ReconcileAttemptCount,
     string? LastFailureClass,
-    WorkspaceMcpContainerConnectorDefinition[] PendingPreviousConnectors);
+    WorkspaceMcpContainerConnectorDefinition[] PendingPreviousConnectors,
+    string[]? QuarantinedWorkloadIds = null);
 
 [JsonSerializable(typeof(WorkspaceDesiredStateContent))]
 [JsonSerializable(typeof(PersistedWorkspaceDesiredState))]
