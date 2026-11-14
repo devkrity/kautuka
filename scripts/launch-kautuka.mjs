@@ -15,6 +15,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isUnixSocketAcceptingConnections } from "./launcher-readiness.mjs";
+import { canRemoveLinuxDevelopmentNacHook, removeLinuxDevelopmentNacHook, stageLinuxDevelopmentNacHook } from "./launcher-nac-hook.mjs";
+import { killProcessTree } from "./launcher-process-tree.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -100,6 +102,7 @@ function socketFileExists(socketPath) {
 /** @type {{ name: string, process: import('node:child_process').ChildProcess }[]} */
 const children = [];
 let shuttingDown = false;
+let linuxNacHookStage;
 
 function runCommand(label, command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -156,6 +159,9 @@ function spawnService(service) {
   }
 
   const serviceEnvironment = { ...process.env };
+  if (process.platform === "linux" && service.name === "Manager" && linuxNacHookStage) {
+    Object.assign(serviceEnvironment, linuxNacHookStage.managerEnvironment);
+  }
   const useWindowsTcp = process.platform === "win32"
     && (!serviceEnvironment.Kautuka__Transport
       || serviceEnvironment.Kautuka__Transport.toLowerCase() === "tcp");
@@ -273,41 +279,6 @@ function waitForPort(service, timeoutMs = 120_000, useWindowsTcp = process.platf
   });
 }
 
-function killProcessTree(child) {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve(undefined);
-      return;
-    }
-
-    if (process.platform === "win32") {
-      const killer = spawn(
-        "taskkill",
-        ["/pid", String(child.pid), "/T", "/F"],
-        { stdio: "ignore", windowsHide: true },
-      );
-      killer.on("exit", () => resolve(undefined));
-      return;
-    }
-
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      resolve(undefined);
-      return;
-    }
-
-    setTimeout(() => {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // already stopped
-      }
-      resolve(undefined);
-    }, 2000);
-  });
-}
-
 async function shutdown(exitCode = 0) {
   if (shuttingDown) {
     return;
@@ -316,17 +287,30 @@ async function shutdown(exitCode = 0) {
   shuttingDown = true;
   process.stderr.write("[launch-kautuka] shutting down services...\n");
 
-  await Promise.all(
+  const stoppedGroups = await Promise.all(
     children.map(async ({ name, process: child }) => {
       try {
-        await killProcessTree(child);
+        const stopped = await killProcessTree(child);
+        if (!stopped) {
+          process.stderr.write(`[launch-kautuka] ${name} process group is still present; retaining temporary NAC hook files for safety.\n`);
+        }
+        return stopped;
       } catch (error) {
         process.stderr.write(
           `[launch-kautuka] failed to stop ${name}: ${error instanceof Error ? error.message : String(error)}\n`,
         );
+        return false;
       }
     }),
   );
+
+  if (linuxNacHookStage && canRemoveLinuxDevelopmentNacHook(stoppedGroups)) {
+    try {
+      removeLinuxDevelopmentNacHook(linuxNacHookStage.directory);
+    } catch (error) {
+      process.stderr.write(`[launch-kautuka] failed to remove temporary NAC hook files: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  }
 
   process.exit(exitCode);
 }
@@ -336,6 +320,12 @@ async function main() {
     process.stdout.write(`[launch-kautuka] Telegram timing capture: ${telegramDiagnosticsPath} (up to 10000 records)\n`);
   }
   const skipBuild = process.argv.includes("--skip-build");
+
+  if (process.platform === "linux" && process.env.CONTAINERS_CONF_OVERRIDE?.trim()) {
+    throw new Error(
+      "CONTAINERS_CONF_OVERRIDE is already set. The Linux development launcher needs this Podman override for its temporary NAC hook; unset it and retry.",
+    );
+  }
 
   if (!skipBuild) {
     process.stdout.write("[launch-kautuka] building solution...\n");
@@ -364,6 +354,10 @@ async function main() {
   await runCommand("stage google mail", "node", ["scripts/stage-google-mail-mcpb.mjs"]);
 
   process.stdout.write("[launch-kautuka] starting services...\n");
+  if (process.platform === "linux") {
+    linuxNacHookStage = stageLinuxDevelopmentNacHook(repoRoot, process.env);
+    process.stdout.write("[launch-kautuka] staged isolated Linux development NAC OCI hook for Manager.\n");
+  }
   for (const service of SERVICES) {
     spawnService(service);
     const child = children.at(-1);
