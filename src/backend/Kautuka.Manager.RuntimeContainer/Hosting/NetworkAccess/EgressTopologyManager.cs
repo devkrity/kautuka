@@ -810,7 +810,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
-        string boundaryPath = Path.Combine(nacDir, "boundary.nft");
+        string boundaryConfigDir = Path.Combine(nacDir, "boundary");
+        string boundaryPath = Path.Combine(boundaryConfigDir, "boundary.nft");
         string envoyPath = Path.Combine(nacDir, "envoy.yaml");
         string corefilePath = Path.Combine(nacDir, "Corefile");
 
@@ -885,22 +886,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         await EnsureBoundaryImageAsync(cancellationToken).ConfigureAwait(false);
 
         // 1. Create all pod containers first so every container ID is allowlisted before podman pod start.
+        await EnsureBoundaryContainerMountCurrentAsync(boundaryConfigDir, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-boundary",
             "egress-boundary",
             BoundaryInitImage,
-            [
-                "create",
-                "--pod", EgressPodName,
-                "--name", "kautuka-egress-boundary",
-                "--init-ctr=always",
-                "--cap-add", "NET_ADMIN",
-                "--user", "0:0",
-                "--entrypoint", "/bin/sh",
-                "-v", $"{boundaryPath}:/etc/nftables.conf:ro",
-                BoundaryInitImage,
-                "-c", $"{BuildOutsideLanSourceAddressSetupCommand()} && exec /usr/sbin/nft -f /etc/nftables.conf"
-            ],
+            BuildBoundaryCreateArgs(boundaryConfigDir, isWindowsHostNativeDev),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -1074,7 +1065,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     internal async Task<string> ReadRenderedBoundaryRulesetHashAsync(CancellationToken cancellationToken)
     {
-        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
         const string ipv6Marker = "__KUTUKA_IPV6_BOUNDARY__";
         string script =
             $"nft -f \"$1\" && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress";
@@ -1367,6 +1358,121 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         return args;
     }
+
+    internal static IReadOnlyList<string> BuildBoundaryCreateArgs(string boundaryConfigDirectory, bool isWindowsHostNativeDev)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(boundaryConfigDirectory);
+        string mountOptions = isWindowsHostNativeDev ? "ro" : "ro,z";
+        return
+        [
+            "create",
+            "--pod", EgressPodName,
+            "--name", "kautuka-egress-boundary",
+            "--init-ctr=always",
+            "--cap-add", "NET_ADMIN",
+            "--user", "0:0",
+            "--entrypoint", "/bin/sh",
+            "-v", $"{boundaryConfigDirectory}:/etc/kautuka-nac:{mountOptions}",
+            BoundaryInitImage,
+            "-c", $"{BuildOutsideLanSourceAddressSetupCommand()} && exec /usr/sbin/nft -f /etc/kautuka-nac/boundary.nft"
+        ];
+    }
+
+    internal static bool HasRequiredBoundaryContainerMount(string? inspectJson, string boundaryConfigDirectory, bool isWindowsHostNativeDev)
+    {
+        if (string.IsNullOrWhiteSpace(inspectJson) || string.IsNullOrWhiteSpace(boundaryConfigDirectory))
+        {
+            return false;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson);
+            JsonElement container = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            if (container.ValueKind != JsonValueKind.Object
+                || !container.TryGetProperty("CreateCommand", out JsonElement command)
+                || command.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            string expected = $"{Path.GetFullPath(boundaryConfigDirectory)}:/etc/kautuka-nac:{(isWindowsHostNativeDev ? "ro" : "ro,z")}";
+            StringComparison pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return command.EnumerateArray().Any(token => token.ValueKind == JsonValueKind.String
+                && string.Equals(token.GetString(), expected, pathComparison));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private async Task EnsureBoundaryContainerMountCurrentAsync(string boundaryConfigDirectory, bool isWindowsHostNativeDev, CancellationToken cancellationToken)
+    {
+        const string containerName = "kautuka-egress-boundary";
+        PodmanCommandResult inspect = await podmanRunner.RunAsync(["inspect", containerName], 10, cancellationToken).ConfigureAwait(false);
+        if (inspect.ExitCode != 0 || HasRequiredBoundaryContainerMount(inspect.StdOut, boundaryConfigDirectory, isWindowsHostNativeDev))
+        {
+            return;
+        }
+
+        PodmanCommandResult podInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+        string? podState = podInspect.ExitCode == 0 ? GetPodState(podInspect.StdOut) : null;
+        if (podState is null || !IsPodStopped(podState) && !string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Cannot safely replace the egress boundary container because the egress pod state is unknown or degraded.");
+        }
+
+        if (string.Equals(podState, "Running", StringComparison.OrdinalIgnoreCase))
+        {
+            PodmanCommandResult stopped = await podmanRunner.RunAsync(["pod", "stop", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+            if (stopped.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to stop egress pod before replacing its stale boundary config mount: {stopped.StdErr}");
+            }
+
+            PodmanCommandResult stoppedInspect = await podmanRunner.RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken).ConfigureAwait(false);
+            if (stoppedInspect.ExitCode != 0 || !IsPodStopped(GetPodState(stoppedInspect.StdOut)))
+            {
+                throw new InvalidOperationException("Egress pod did not reach a known stopped state; refusing to replace its boundary container.");
+            }
+        }
+
+        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", containerName], 20, cancellationToken).ConfigureAwait(false);
+        if (removed.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Failed to remove egress boundary container with a stale config mount: {removed.StdErr}");
+        }
+    }
+
+    private static string? GetPodState(string? inspectJson)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(inspectJson ?? string.Empty);
+            JsonElement pod = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? (doc.RootElement.GetArrayLength() > 0 ? doc.RootElement[0] : default)
+                : doc.RootElement;
+            return pod.ValueKind == JsonValueKind.Object
+                && pod.TryGetProperty("State", out JsonElement state)
+                ? state.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsPodStopped(string? state) =>
+        string.Equals(state, "Exited", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase);
 
     internal static List<string> BuildEgressPodCreateArgs(bool isWindowsHostNativeDev, string? decisionEndpointIp)
     {
@@ -1797,7 +1903,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return false;
         }
 
-        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+        string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
         try
         {
             string currentSource = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 
@@ -424,7 +425,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             // Exercise the hosted-service entry point used by production Manager startup.
             await manager.StartAsync(TestContext.Current.CancellationToken);
 
-            string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary.nft");
+            string boundaryPath = Path.Combine(stateDirectory, "nac", "boundary", "boundary.nft");
             string boundary = await File.ReadAllTextAsync(boundaryPath, TestContext.Current.CancellationToken);
             Assert.Contains("lan_approved", boundary, StringComparison.Ordinal);
         }
@@ -450,7 +451,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public async Task V7_11_NativeBoundaryRenderingUsesPodmanUnshareWithoutLaunchingAContainer()
     {
-        string boundaryPath = Path.Combine(tempDir, "nac", "boundary.nft");
+        string boundaryPath = Path.Combine(tempDir, "nac", "boundary", "boundary.nft");
         Directory.CreateDirectory(Path.GetDirectoryName(boundaryPath)!);
         await File.WriteAllTextAsync(boundaryPath, "native nft fixture", TestContext.Current.CancellationToken);
         const string ipv4 = "{\"nftables\":[{\"rule\":{\"comment\":\"private_reject\",\"expr\":[]}},{\"rule\":{\"comment\":\"wl_net_reject\",\"expr\":[]}}]}";
@@ -1110,6 +1111,104 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void BoundaryContainerUsesDedicatedRelabeledDirectoryAndDetectsOldMount_WithNegativeControl()
+    {
+        string boundaryDir = Path.Combine(tempDir, "nac", "boundary");
+        IReadOnlyList<string> linuxArgs = EgressTopologyManager.BuildBoundaryCreateArgs(boundaryDir, isWindowsHostNativeDev: false);
+        string linuxMount = linuxArgs[linuxArgs.ToList().IndexOf("-v") + 1];
+        Assert.Equal($"{Path.GetFullPath(boundaryDir)}:/etc/kautuka-nac:ro,z", linuxMount);
+        Assert.Contains(linuxArgs, arg => arg.Contains("/etc/kautuka-nac/boundary.nft", StringComparison.Ordinal));
+
+        IReadOnlyList<string> windowsArgs = EgressTopologyManager.BuildBoundaryCreateArgs("C:\\state\\nac\\boundary", isWindowsHostNativeDev: true);
+        Assert.Contains("C:\\state\\nac\\boundary:/etc/kautuka-nac:ro", windowsArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain(windowsArgs, arg => arg.EndsWith(":ro,z", StringComparison.Ordinal));
+
+        string current = JsonSerializer.Serialize(new[] { new { CreateCommand = new[] { "podman", "create", "-v", linuxMount } } });
+        string oldFileMount = """[{"CreateCommand":["podman","create","-v","/state/nac/boundary.nft:/etc/nftables.conf:ro"]}]""";
+        Assert.True(EgressTopologyManager.HasRequiredBoundaryContainerMount(current, boundaryDir, isWindowsHostNativeDev: false));
+        Assert.False(EgressTopologyManager.HasRequiredBoundaryContainerMount(oldFileMount, boundaryDir, isWindowsHostNativeDev: false));
+    }
+
+    [Fact]
+    public async Task BoundaryMountMigrationStopsOnlyForDriftAndFailsClosedOnUnknownPodState()
+    {
+        const string staleInspect = """[{"CreateCommand":["podman","create","-v","/old/boundary.nft:/etc/nftables.conf:ro"]}]""";
+        var calls = new List<IReadOnlyList<string>>();
+        string podState = "Running";
+        string boundaryInspect = staleInspect;
+        bool failPodInspect = false;
+        bool failStop = false;
+        bool failRemove = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            bool failed = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]) && failPodInspect
+                || args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]) && failStop
+                || args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]) && failRemove;
+            string output = args.SequenceEqual(["inspect", "kautuka-egress-boundary"])
+                ? boundaryInspect
+                : args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])
+                    ? $"[{{\"State\":\"{podState}\"}}]"
+                    : string.Empty;
+            if (args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]))
+            {
+                podState = "Exited";
+            }
+            return Task.FromResult(new PodmanCommandResult(failed ? 1 : 0, output, failed ? "fixture failure" : string.Empty, ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "boundary-migration.json"));
+        var verifier = new WorkloadPostStartVerifier(podman);
+        await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
+        System.Reflection.MethodInfo migrate = typeof(EgressTopologyManager).GetMethod(
+            "EnsureBoundaryContainerMountCurrentAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Boundary mount migration method was not found.");
+
+        await ((Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.Contains(calls, args => args.SequenceEqual(["pod", "stop", EgressTopologyManager.EgressPodName]));
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+        Assert.Equal(2, calls.Count(args => args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName])));
+
+        calls.Clear();
+        IReadOnlyList<string> expectedArgs = EgressTopologyManager.BuildBoundaryCreateArgs(Path.Combine(tempDir, "nac", "boundary"), false);
+        string currentMount = expectedArgs[expectedArgs.ToList().IndexOf("-v") + 1];
+        boundaryInspect = JsonSerializer.Serialize(new[] { new { CreateCommand = new[] { "podman", "create", "-v", currentMount } } });
+        await ((Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        Assert.Single(calls);
+        Assert.Equal(["inspect", "kautuka-egress-boundary"], calls[0]);
+
+        calls.Clear();
+        boundaryInspect = staleInspect;
+        podState = "Paused";
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+
+        calls.Clear();
+        failPodInspect = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+
+        failPodInspect = false;
+        failStop = true;
+        podState = "Running";
+        calls.Clear();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.DoesNotContain(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+
+        failStop = false;
+        failRemove = true;
+        podState = "Exited";
+        calls.Clear();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await (Task)migrate.Invoke(manager, [Path.Combine(tempDir, "nac", "boundary"), false, TestContext.Current.CancellationToken])!);
+        Assert.Contains(calls, args => args.SequenceEqual(["rm", "-f", "kautuka-egress-boundary"]));
+    }
+
+    [Fact]
     public void V7_20_RootlessEnvoyKeepsHostGroupsWithoutRunningAsRoot_WithNegativeControl()
     {
         IReadOnlyList<string> envoyArgs = EgressTopologyManager.BuildEnvoyCreateArgs(
@@ -1369,7 +1468,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         const string ipv4Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},{\"rule\":{\"family\":\"ip\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
         const string ipv6Rules = "{\"nftables\":[{\"table\":{\"family\":\"ip6\",\"name\":\"kautuka_egress\"}},{\"rule\":{\"family\":\"ip6\",\"table\":\"kautuka_egress\",\"chain\":\"output\",\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
-        string nacDirectory = Path.Combine(tempDir, "nac");
+        string nacDirectory = Path.Combine(tempDir, "nac", "boundary");
         Directory.CreateDirectory(nacDirectory);
         await File.WriteAllTextAsync(
             Path.Combine(nacDirectory, "boundary.nft"),
@@ -1648,7 +1747,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     private async Task SetExpectedBoundarySourceAsync(EgressTopologyManager manager, CancellationToken cancellationToken)
     {
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
-        string nacDirectory = Path.Combine(tempDir, "nac");
+        string nacDirectory = Path.Combine(tempDir, "nac", "boundary");
         Directory.CreateDirectory(nacDirectory);
         await File.WriteAllTextAsync(Path.Combine(nacDirectory, "boundary.nft"), rendered, cancellationToken);
         typeof(EgressTopologyManager)

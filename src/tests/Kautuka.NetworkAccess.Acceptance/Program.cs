@@ -931,7 +931,7 @@ public static class Program
             string outsideNetworkDevice = outsideRouteTokens[outsideDeviceIndex + 1];
             string egressDefaultRoutes = string.Join('\n', outsideDefaultRoute, workloadDefaultRoute);
 
-            string boundaryPath = Path.Combine(stateDir, "nac", "boundary.nft");
+            string boundaryPath = Path.Combine(stateDir, "nac", "boundary", "boundary.nft");
             string boundaryText = await File.ReadAllTextAsync(boundaryPath).ConfigureAwait(false);
             if (!boundaryText.Contains("comment \"lan_approved\"", StringComparison.Ordinal))
             {
