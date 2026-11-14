@@ -51,6 +51,11 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.DoesNotContain("live connector launch still need their own production evidence", guide, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("uses a dedicated service group", guide, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("nac-v7-prod-report-135bc40.json", guide, StringComparison.Ordinal);
+        Assert.Contains("nac-v7-prod-report-06a4333.json", guide, StringComparison.Ordinal);
+        Assert.Contains("source SHA `06a4333`", guide, StringComparison.Ordinal);
+        Assert.Contains("43517837642", guide, StringComparison.Ordinal);
+        Assert.DoesNotContain("current branch has no passing CI production-acceptance run", guide, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CI confirmation is pending", guide, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("CallToolAsync", guide, StringComparison.Ordinal);
         Assert.Contains("keep-groups", guide, StringComparison.Ordinal);
         Assert.Contains("source SHA `97b66ca`", guide, StringComparison.Ordinal);
@@ -142,24 +147,16 @@ public sealed class NetworkAccessArchitectureContractTests
         string fixtureSetup = source[fixtureStart..fixtureEnd];
 
         string productionSource = source[productionStart..];
-        Assert.Contains("string lanHostAddress = await ResolveHostLanAddressAsync()", productionSource, StringComparison.Ordinal);
-        Assert.Contains("string lanGatewayAddress = await ResolvePodmanHostGatewayAddressAsync(baseImage)", productionSource, StringComparison.Ordinal);
-        Assert.Contains("--connect-to", productionSource, StringComparison.Ordinal);
+        Assert.Contains("CreateRoutedLanFixtureAsync()", productionSource, StringComparison.Ordinal);
         Assert.Contains("outsideNetworkDevice", productionSource, StringComparison.Ordinal);
-        Assert.Contains("\"ip\", \"route\", \"replace\", $\"{lanHostAddress}/32\", \"via\", lanGatewayAddress, \"dev\", outsideNetworkDevice, \"onlink\"", productionSource, StringComparison.Ordinal);
-        Assert.Contains(":8443:host.containers.internal:8443", productionSource, StringComparison.Ordinal);
-        Assert.Contains("IPNetwork.Parse(EgressTopologyManager.OutsideSubnet).Contains(address)", source, StringComparison.Ordinal);
-        int gatewayStart = source.IndexOf("private static async Task<string> ResolvePodmanHostGatewayAddressAsync", StringComparison.Ordinal);
-        int gatewayEnd = source.IndexOf("private static string FindRepoRoot()", gatewayStart, StringComparison.Ordinal);
-        Assert.True(gatewayStart >= 0 && gatewayEnd > gatewayStart);
-        Assert.DoesNotContain("OutsideSubnet", source[gatewayStart..gatewayEnd], StringComparison.Ordinal);
-        Assert.DoesNotContain("lanHostAddress = await ResolvePodmanHostGatewayAddressAsync", productionSource, StringComparison.Ordinal);
-        Assert.Contains("new ProcessStartInfo(\"python3\")", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("CreateRoutedLanFixtureAsync", source, StringComparison.Ordinal);
+        Assert.Contains("new ProcessStartInfo(\"sudo\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ArgumentList.Add(\"netns\")", productionSource, StringComparison.Ordinal);
         Assert.Contains("ThreadingHTTPServer(('0.0.0.0',8443)", fixtureSetup, StringComparison.Ordinal);
-        Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", fixtureSetup, StringComparison.Ordinal);
-        Assert.Contains("Process.Start(lanServerStartInfo)", fixtureSetup, StringComparison.Ordinal);
-        Assert.DoesNotContain("\"--network\", \"host\"", fixtureSetup, StringComparison.Ordinal);
-        Assert.DoesNotContain("OutsideNetworkName", fixtureSetup, StringComparison.Ordinal);
+        Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Process.Start(lanServerStartInfo)", productionSource, StringComparison.Ordinal);
+        Assert.Contains("LAN acceptance requires the production boundary", productionSource, StringComparison.Ordinal);
+        Assert.Contains("https://lan.nac.test:8443/", productionSource, StringComparison.Ordinal);
     }
 
     [Fact]
