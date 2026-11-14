@@ -57,6 +57,9 @@ public interface IWorkloadRegistry
 
     bool UpdateContainerId(string ip, string previousContainerId, string actualContainerId) => false;
 
+    /// <summary>Atomically changes a matching workload identity to deny-all without replacing a different container.</summary>
+    bool TryQuarantine(string ip, string expectedContainerId, string? alternateContainerId = null) => false;
+
     void Rebuild(IEnumerable<RegistryEntry> entries);
 
     bool TryGetByIp(string? ip, out RegistryEntry? entry);
@@ -184,6 +187,40 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         if (promoted)
         {
             ContainerIdPromoted?.Invoke(this, new WorkloadContainerIdPromotedEventArgs(previousContainerId.Trim(), trimmedActual));
+        }
+
+        return true;
+    }
+
+    public bool TryQuarantine(string ip, string expectedContainerId, string? alternateContainerId = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedContainerId);
+        if (!NetworkDestinationNormalizer.TryNormalizeIpv4(ip, out string normalizedIp, out _))
+        {
+            return false;
+        }
+
+        string? probeContainerId = null;
+        lock (writeLock)
+        {
+            if (!entriesByIp.TryGetValue(normalizedIp, out RegistryEntry? current)
+                || (!string.Equals(current.ContainerId, expectedContainerId, StringComparison.Ordinal)
+                    && !string.Equals(current.ContainerId, alternateContainerId, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            entriesByIp[normalizedIp] = current with { Egress = "deny-all", Attribution = "none" };
+            if (string.Equals(current.Purpose, "probe", StringComparison.OrdinalIgnoreCase))
+            {
+                probeContainerId = current.ContainerId;
+            }
+        }
+
+        if (probeContainerId is not null)
+        {
+            // Existing probe grants are ephemeral and must not remain usable after quarantine.
+            ContainerDeregistered?.Invoke(this, new WorkloadContainerEventArgs(probeContainerId));
         }
 
         return true;

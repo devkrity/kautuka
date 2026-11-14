@@ -1109,21 +1109,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         if (postStartVerifier is not null)
         {
-            try
-            {
-                await postStartVerifier.VerifyWorkloadAsync(
-                    containerName,
-                    allocatedIp,
-                    compatProfile,
-                    workloadRegistry,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                await podmanCommandRunner.RunAsync(["rm", "-f", containerName], 15, CancellationToken.None).ConfigureAwait(false);
-                workloadRegistry?.Deregister(allocatedIp, containerName);
-                throw;
-            }
+            // The verifier owns failure cleanup and retains a deny-all identity when force-removal
+            // is unconfirmed. A second unchecked rm/deregister here could erase that quarantine.
+            await postStartVerifier.VerifyWorkloadAsync(
+                containerName,
+                allocatedIp,
+                compatProfile,
+                workloadRegistry,
+                cancellationToken).ConfigureAwait(false);
         }
 
         trackedConnectorContainers[runtimeKey] = containerName;
@@ -1739,7 +1732,38 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return false;
         }
 
-        workloadRegistry?.Deregister(workload.AllocatedIp, workload.VerifiedContainerId ?? workload.ContainerName);
+        // Failed verification leaves the registry identity in quarantine. Do not erase it in
+        // the outer finally path; the verifier already attempted force-removal and only confirmed
+        // removal is allowed to deregister. This also covers failures before inspect ID promotion.
+        if (workload.VerifiedContainerId is null)
+        {
+            try
+            {
+                if (workloadRegistry?.TryQuarantine(workload.AllocatedIp, workload.ContainerName) == false)
+                {
+                    Kautuka.NetworkAccessController.RegistryEntry? current = workloadRegistry.FindByIp(workload.AllocatedIp);
+                    if (current is not null
+                        && (!string.Equals(current.Egress, "deny-all", StringComparison.OrdinalIgnoreCase)
+                            || !string.Equals(current.Attribution, "none", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        logger.LogError(
+                            "Could not quarantine unverified ephemeral workload '{ContainerName}' at {Ip}; registry now identifies '{CurrentContainerId}' with an active egress policy.",
+                            workload.ContainerName,
+                            workload.AllocatedIp,
+                            current.ContainerId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // This finally path must not replace the original MCP operation/verification error.
+                logger.LogError(ex, "Could not quarantine unverified ephemeral workload '{ContainerName}' at {Ip}.", workload.ContainerName, workload.AllocatedIp);
+            }
+
+            return true;
+        }
+
+        workloadRegistry?.Deregister(workload.AllocatedIp, workload.VerifiedContainerId);
         return true;
     }
 

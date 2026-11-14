@@ -282,33 +282,72 @@ public sealed class WorkloadPostStartVerifier
             stopwatch.Stop();
             long exposureMs = stopwatch.ElapsedMilliseconds;
 
+            // Quarantine before awaiting cleanup so the identity loses any normal grant in the
+            // current process while kill/rm are in flight. Startup label-based reauthorization is
+            // a separate gap; this in-memory quarantine does not survive Manager restart.
+            bool quarantined = false;
+            string? quarantineFailure = null;
+            try
+            {
+                quarantined = registry?.TryQuarantine(allocatedIp, registeredId, containerId) == true;
+            }
+            catch (Exception quarantineException)
+            {
+                // Cleanup must still run if a registry implementation or a subscriber throws.
+                quarantineFailure = quarantineException.Message;
+            }
+
             // Kill and force remove immediately on verification failure:
+            bool removed = false;
             try
             {
-                await podmanRunner.RunAsync(["kill", containerId], 5, CancellationToken.None).ConfigureAwait(false);
+                PodmanCommandResult killResult = await podmanRunner
+                    .RunAsync(["kill", containerId], 5, CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (killResult.ExitCode != 0)
+                {
+                    // A failed kill is not proof that the process stopped. Continue to the
+                    // force-remove attempt; only confirmed removal permits deregistration.
+                }
             }
             catch
             {
-                // Ignore kill errors during cleanup
+                // A failed kill is not proof that the process stopped. Continue to force-remove.
             }
 
             try
             {
-                await podmanRunner.RunAsync(["rm", "-f", containerId], 5, CancellationToken.None).ConfigureAwait(false);
+                PodmanCommandResult removeResult = await podmanRunner
+                    .RunAsync(["rm", "-f", containerId], 5, CancellationToken.None)
+                    .ConfigureAwait(false);
+                removed = removeResult.ExitCode == 0;
             }
             catch
             {
-                // Ignore rm errors during cleanup
+                // Removal is unconfirmed; keep the container identity quarantined below.
             }
 
-            // Deregister if registry provided:
-            if (registry is not null && !registry.Deregister(allocatedIp, registeredId))
+            string? registryFinalizationFailure = null;
+            try
             {
-                registry.Deregister(allocatedIp, containerId);
+                if (removed)
+                {
+                    RegistryEntry? currentEntry = registry?.FindByIp(allocatedIp);
+                    if (currentEntry is not null
+                        && (string.Equals(currentEntry.ContainerId, registeredId, StringComparison.Ordinal)
+                            || string.Equals(currentEntry.ContainerId, containerId, StringComparison.Ordinal)))
+                    {
+                        registry!.Deregister(allocatedIp, currentEntry.ContainerId);
+                    }
+                }
+            }
+            catch (Exception registryException)
+            {
+                registryFinalizationFailure = registryException.Message;
             }
 
             throw new InvalidOperationException(
-                $"WorkloadPostStartVerifier failed for '{containerId}' at '{allocatedIp}' after {exposureMs} ms: {ex.Message}",
+                $"WorkloadPostStartVerifier failed for '{containerId}' at '{allocatedIp}' after {exposureMs} ms{(quarantineFailure is not null ? $"; quarantine failed: {quarantineFailure}" : registry is not null && !quarantined && !removed ? "; the current registry identity did not match, so quarantine could not be applied" : string.Empty)}{(registryFinalizationFailure is not null ? $"; registry finalization failed: {registryFinalizationFailure}" : string.Empty)}: {ex.Message}",
                 ex);
         }
     }
