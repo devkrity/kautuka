@@ -30,7 +30,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests.NetworkAccess;
 
-public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
+public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Fact]
     public async Task V7_4_UserCreation_Promotion_Demotion_SyncsPrivilegesAndRules_WithNegativeControl()
@@ -446,6 +446,13 @@ public sealed class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             string json = await res.Content.ReadAsStringAsync();
             Assert.True(res.StatusCode == HttpStatusCode.OK, $"{method} {path} returned {(int)res.StatusCode}: {json}");
             return JsonDocument.Parse(json);
+        }
+
+        public async Task<HttpResponseMessage> SendRawJsonAsync(HttpMethod method, string path, object body, string accessToken)
+        {
+            using var req = new HttpRequestMessage(method, path) { Content = JsonContent.Create(body) };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            return await client.SendAsync(req);
         }
 
         public async Task<HttpResponseMessage> SendRoleUpdateAsync(string userId, bool isAdmin, string accessToken)
