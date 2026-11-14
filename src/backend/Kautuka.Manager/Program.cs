@@ -34,9 +34,26 @@ string managerDataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.C
 managerDataRoot = Path.GetFullPath(managerDataRoot);
 KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
 string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
+var podmanCommandRunner = new PodmanCommandRunner();
+WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
+if (OperatingSystem.IsWindows())
+{
+    try
+    {
+        windowsPodmanDevEgress = await WindowsPodmanDevEgressOptions.CreateAsync(
+            podmanCommandRunner,
+            Path.Combine(managerDataRoot, "networkAccess", "envoy-certs"),
+            CancellationToken.None).ConfigureAwait(false);
+    }
+    catch (Exception ex)
+    {
+        await Console.Error.WriteLineAsync(
+            $"Windows Podman NAC mTLS setup failed; workload startup will remain closed: {ex.Message}").ConfigureAwait(false);
+    }
+}
 
 builder.Services.AddSingleton<WorkspaceRuntimePaths>();
-builder.Services.AddSingleton<PodmanCommandRunner>();
+builder.Services.AddSingleton(podmanCommandRunner);
 builder.Services.AddSingleton(static sp => WorkspaceSidecarCatalogLoader.Load(
     Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
     sp.GetRequiredService<WorkspaceRuntimePaths>(),
@@ -80,7 +97,11 @@ builder.Services.AddSingleton(sp =>
         Path.Combine(managerDataRoot, "networkAccess"),
         sp.GetService<ILogger<EgressTopologyManager>>(),
         envoySocketHostDir: envoySocketDir,
-        hookStateDirectory: hookStateDir));
+        hookStateDirectory: hookStateDir,
+        windowsDecisionEndpointIp: windowsPodmanDevEgress?.DecisionEndpointAddress.ToString(),
+        windowsEnvoyCertificateDirectory: windowsPodmanDevEgress?.EnvoyCertificateDirectory,
+        windowsPodmanMachineName: windowsPodmanDevEgress?.PodmanMachineName,
+        windowsPodmanHookStateDirectory: windowsPodmanDevEgress?.RemoteHookStateDirectory));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
@@ -100,6 +121,21 @@ if (OperatingSystem.IsLinux())
                 TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
                 LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
                 SocketPath = Path.Combine(socketRoot, "networkaccess-envoy", "envoy.sock"),
+            }));
+}
+else if (OperatingSystem.IsWindows() && windowsPodmanDevEgress is not null)
+{
+    builder.Services.AddSingleton<IHostedService>(sp =>
+        EnvoyAuthorizationHost.Create(
+            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.TcpMtls,
+                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
+                TcpBindAddress = windowsPodmanDevEgress.DecisionEndpointAddress,
+                TcpPort = 50051,
+                ServerCertificate = windowsPodmanDevEgress.ServerCertificate,
+                CaCertificate = windowsPodmanDevEgress.CaCertificate,
             }));
 }
 

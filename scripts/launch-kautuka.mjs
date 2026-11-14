@@ -46,26 +46,31 @@ const SERVICES = [
     name: "CredentialsHost",
     project: "src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj",
     readySocket: "credentialshost",
+    windowsPort: 20002,
   },
   {
     name: "ChannelHost",
     project: "src/backend/Kautuka.ChannelHost/Kautuka.ChannelHost.csproj",
     readySocket: "channelhost",
+    windowsPort: 20003,
   },
   {
     name: "Manager",
     project: "src/backend/Kautuka.Manager/Kautuka.Manager.csproj",
     readySocket: "manager",
+    windowsPort: 20001,
   },
   {
     name: "UpdateService",
     project: "src/backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj",
     readySocket: "updateservice",
+    windowsPort: 20004,
   },
   {
     name: "Gateway",
     project: "src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj",
     readySocket: "gateway",
+    windowsPort: 20000,
   },
   {
     name: "WebHost",
@@ -149,13 +154,24 @@ function spawnService(service) {
     throw new Error(`Project not found: ${projectPath}`);
   }
 
+  const serviceEnvironment = { ...process.env };
+  const useWindowsTcp = process.platform === "win32"
+    && (!serviceEnvironment.Kautuka__Transport
+      || serviceEnvironment.Kautuka__Transport.toLowerCase() === "tcp");
+  if (process.platform === "win32" && !serviceEnvironment.Kautuka__Transport) {
+    // Use loopback TCP for the Windows native stack. It lets readiness checks prove a
+    // listener is accepting connections instead of mistaking a stale Unix socket file
+    // for a service that finished its (potentially long) NAC startup.
+    serviceEnvironment.Kautuka__Transport = "tcp";
+  }
+
   const child = spawn(
     "dotnet",
     ["run", "--no-build", "--project", projectPath],
     {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: serviceEnvironment,
       ...(process.platform !== "win32" ? { detached: true } : {}),
     },
   );
@@ -178,13 +194,13 @@ function spawnService(service) {
     void shutdown(typeof code === "number" && code !== 0 ? code : 1);
   });
 
-  children.push({ name: service.name, process: child });
+  children.push({ name: service.name, process: child, useWindowsTcp });
 }
 
 // Gateway performs a bounded built-in MCP metadata bootstrap before binding.  Give
 // every service the same two-minute startup ceiling so a legitimate bootstrap
 // cannot race the launcher readiness check.
-function waitForPort(service, timeoutMs = 120_000) {
+function waitForPort(service, timeoutMs = 120_000, useWindowsTcp = process.platform === "win32") {
   const deadline = Date.now() + timeoutMs;
 
   return new Promise((resolve, reject) => {
@@ -194,7 +210,7 @@ function waitForPort(service, timeoutMs = 120_000) {
         return;
       }
 
-      if (service.readySocket) {
+      if (service.readySocket && !(useWindowsTcp && service.windowsPort)) {
         // Kestrel creates the socket file as it binds. Node cannot dial an AF_UNIX
         // socket on Windows, where a path is treated as a named pipe, so the file
         // appearing is the portable readiness signal.
@@ -213,7 +229,12 @@ function waitForPort(service, timeoutMs = 120_000) {
         return;
       }
 
-      const socket = createConnection({ host: "127.0.0.1", port: service.readyPort });
+      const port = service.readyPort ?? (useWindowsTcp ? service.windowsPort : undefined);
+      if (!port) {
+        reject(new Error(`${service.name} has no configured readiness endpoint`));
+        return;
+      }
+      const socket = createConnection({ host: "127.0.0.1", port });
       socket.setTimeout(1_000);
       socket.once("connect", () => {
         socket.destroy();
@@ -222,7 +243,7 @@ function waitForPort(service, timeoutMs = 120_000) {
       const retry = () => {
         socket.destroy();
         if (Date.now() >= deadline) {
-          reject(new Error(`${service.name} did not listen on port ${service.readyPort} within ${timeoutMs}ms`));
+          reject(new Error(`${service.name} did not listen on port ${port} within ${timeoutMs}ms`));
           return;
         }
         setTimeout(probe, 200);
@@ -329,8 +350,12 @@ async function main() {
   for (const service of SERVICES) {
     spawnService(service);
     const child = children.at(-1);
-    await waitForPort({ ...service, process: child.process });
-    const readyOn = service.readySocket ? socketPathFor(service) : `port ${service.readyPort}`;
+    await waitForPort({ ...service, process: child.process }, 120_000, child.useWindowsTcp);
+    const readyOn = child.useWindowsTcp && service.windowsPort
+      ? `port ${service.windowsPort}`
+      : service.readySocket
+        ? socketPathFor(service)
+        : `port ${service.readyPort}`;
     process.stdout.write(`[launch-kautuka] ${service.name} ready on ${readyOn}.\n`);
   }
 

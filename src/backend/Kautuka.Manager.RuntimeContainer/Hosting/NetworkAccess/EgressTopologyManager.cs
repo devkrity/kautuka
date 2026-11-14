@@ -66,6 +66,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly string startupGateFilePath;
     private readonly string hookLogFilePath;
     private readonly ILogger<EgressTopologyManager> logger;
+    private readonly string? windowsDecisionEndpointIp;
+    private readonly string? windowsEnvoyCertificateDirectory;
+    private readonly string? windowsPodmanMachineName;
+    private readonly string? windowsPodmanHookStateDirectory;
 
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
@@ -84,7 +88,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string stateDirectory,
         ILogger<EgressTopologyManager>? logger = null,
         string? envoySocketHostDir = null,
-        string? hookStateDirectory = null)
+        string? hookStateDirectory = null,
+        string? windowsDecisionEndpointIp = null,
+        string? windowsEnvoyCertificateDirectory = null,
+        string? windowsPodmanMachineName = null,
+        string? windowsPodmanHookStateDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -96,6 +104,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.addressAllocator = addressAllocator;
         this.postStartVerifier = postStartVerifier;
         this.registry = registry;
+        this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
+        this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
+            ? null
+            : Path.GetFullPath(windowsEnvoyCertificateDirectory);
+        this.windowsPodmanMachineName = windowsPodmanMachineName;
+        this.windowsPodmanHookStateDirectory = windowsPodmanHookStateDirectory;
         this.stateDirectory = Path.GetFullPath(stateDirectory);
         this.logger = logger ?? NullLogger<EgressTopologyManager>.Instance;
         this.envoySocketHostDir = Path.GetFullPath(string.IsNullOrWhiteSpace(envoySocketHostDir)
@@ -159,7 +173,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             await InitializeProductionAsync(
                 registry,
-                isWindowsHostNativeDev: !OperatingSystem.IsLinux(),
+                isWindowsHostNativeDev: OperatingSystem.IsWindows(),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -186,7 +200,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         => InitializeAsync(
             registry,
             isWindowsHostNativeDev,
-            decisionEndpointIp: null,
+            decisionEndpointIp: windowsDecisionEndpointIp,
             includeLanGrants: true,
             cancellationToken);
 
@@ -221,9 +235,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         await EnsureNetworksAsync(cancellationToken).ConfigureAwait(false);
 
         // 2. Ensure egress pod and containers exist, and write infra allowlist before start
-        await EnsureEgressPodAsync(isWindowsHostNativeDev, decisionEndpointIp, includeLanGrants, cancellationToken).ConfigureAwait(false);
+        await EnsureEgressPodAsync(
+            isWindowsHostNativeDev,
+            decisionEndpointIp ?? windowsDecisionEndpointIp,
+            includeLanGrants,
+            windowsEnvoyCertificateDirectory,
+            cancellationToken).ConfigureAwait(false);
 
-        if (OperatingSystem.IsLinux())
+        if (OperatingSystem.IsLinux() || isWindowsHostNativeDev)
         {
             string renderedBoundaryHash = await ReadRenderedBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
             string liveBoundaryHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
@@ -478,9 +497,22 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             // The canary is only proof of the applied boundary if the hook recorded a successful
             // ruleset application for this exact workload. A missing log must keep startup closed.
-            string logContent = File.Exists(hookLogFilePath)
-                ? await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false)
-                : string.Empty;
+            string logContent;
+            if (!string.IsNullOrWhiteSpace(windowsPodmanMachineName)
+                && !string.IsNullOrWhiteSpace(windowsPodmanHookStateDirectory))
+            {
+                PodmanCommandResult hookLog = await podmanRunner.RunAsync(
+                    ["machine", "ssh", windowsPodmanMachineName, $"cat '{windowsPodmanHookStateDirectory}/hook.log'"],
+                    10,
+                    cancellationToken).ConfigureAwait(false);
+                logContent = hookLog.ExitCode == 0 ? hookLog.StdOut : string.Empty;
+            }
+            else
+            {
+                logContent = File.Exists(hookLogFilePath)
+                    ? await File.ReadAllTextAsync(hookLogFilePath, cancellationToken).ConfigureAwait(false)
+                    : string.Empty;
+            }
             if (!HasSuccessfulCanaryHookRecord(logContent, canaryIp))
             {
                 logger.LogError("Canary hook did not record an applied workload ruleset for {CanaryIp}.", canaryIp);
@@ -751,12 +783,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         bool isWindowsHostNativeDev,
         string? decisionEndpointIp,
         bool includeLanGrants,
+        string? envoyCertificateDirectory,
         CancellationToken cancellationToken)
     {
         // Render boundary and configs
         IReadOnlyList<string> upstreamDnsIps = await DiscoverUpstreamDnsIpsAsync(cancellationToken).ConfigureAwait(false);
         string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, upstreamDnsIps);
-        string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(isWindowsMtls: isWindowsHostNativeDev);
+        string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
+            adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
+            isWindowsMtls: isWindowsHostNativeDev);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
@@ -769,6 +804,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
 
+        // Windows Podman needs the host decision endpoint configured at pod creation;
+        // container-level --add-host is rejected for containers that join a pod.
+        // Recreate only this dedicated infrastructure pod so the setting and rotated
+        // development certificates stay in sync on every Manager start.
+        if (isWindowsHostNativeDev)
+        {
+            _ = await podmanRunner.RunAsync(["pod", "rm", "-f", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
+        }
+
         // Check if pod exists:
         PodmanCommandResult inspectPod = await podmanRunner
             .RunAsync(["pod", "inspect", EgressPodName], 10, cancellationToken)
@@ -777,15 +821,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         if (inspectPod.ExitCode != 0)
         {
             logger.LogInformation("Creating egress pod {PodName}...", EgressPodName);
-            List<string> createPodArgs =
-            [
-                "pod", "create",
-                "--name", EgressPodName,
-                "--network", $"{WorkloadNetworkName}:ip={EgressPodIp}",
-                "--network", $"{OutsideNetworkName}:ip={OutsidePodIp}",
-                "--sysctl", "net.ipv4.ip_forward=0",
-                "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"
-            ];
+            List<string> createPodArgs = BuildEgressPodCreateArgs(isWindowsHostNativeDev, decisionEndpointIp);
             PodmanCommandResult podResult = await podmanRunner
                 .RunAsync(createPodArgs, 30, cancellationToken)
                 .ConfigureAwait(false);
@@ -877,13 +913,32 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             Directory.CreateDirectory(adminSocketDir);
         }
+        if (isWindowsHostNativeDev)
+        {
+            if (string.IsNullOrWhiteSpace(decisionEndpointIp)
+                || string.IsNullOrWhiteSpace(envoyCertificateDirectory))
+            {
+                throw new InvalidOperationException(
+                    "Windows Podman NAC requires a resolved host gateway address and an Envoy mTLS certificate directory.");
+            }
+
+        }
+
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-envoy",
             "egress-envoy",
             EnvoyPinnedImage,
-            BuildEnvoyCreateArgs(envoyPath, envoySocketHostDir, adminSocketDir),
+            BuildEnvoyCreateArgs(
+                envoyPath,
+                envoySocketHostDir,
+                adminSocketDir,
+                isWindowsHostNativeDev,
+                decisionEndpointIp,
+                envoyCertificateDirectory),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
+
+        await SyncWindowsPodmanInfraAllowlistAsync(cancellationToken).ConfigureAwait(false);
 
         PodmanCommandResult podStart = await podmanRunner.RunAsync(["pod", "start", EgressPodName], 30, cancellationToken).ConfigureAwait(false);
         if (podStart.ExitCode != 0)
@@ -894,6 +949,34 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
         {
             throw new InvalidOperationException($"Egress pod '{EgressPodName}' did not reach a healthy state.");
+        }
+    }
+
+    private async Task SyncWindowsPodmanInfraAllowlistAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(windowsPodmanMachineName)
+            || string.IsNullOrWhiteSpace(windowsPodmanHookStateDirectory))
+        {
+            return;
+        }
+
+        PodmanCommandResult copy = await podmanRunner.RunAsync(
+            ["machine", "cp", allowlistFilePath,
+                $"{windowsPodmanMachineName}:{windowsPodmanHookStateDirectory}/infra-allowlist.json"],
+            20,
+            cancellationToken).ConfigureAwait(false);
+        if (copy.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Failed to copy the NAC infra allowlist into Podman Machine: {copy.StdErr}");
+        }
+
+        PodmanCommandResult permissions = await podmanRunner.RunAsync(
+            ["machine", "ssh", windowsPodmanMachineName, $"chmod 600 '{windowsPodmanHookStateDirectory}/infra-allowlist.json'"],
+            10,
+            cancellationToken).ConfigureAwait(false);
+        if (permissions.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Failed to restrict Podman Machine NAC allowlist permissions: {permissions.StdErr}");
         }
     }
 
@@ -980,12 +1063,26 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         const string ipv6Marker = "__KUTUKA_IPV6_BOUNDARY__";
         string script =
             $"nft -f \"$1\" && nft -j list table ip kautuka_egress && printf '\\n{ipv6Marker}\\n' && nft -j list table ip6 kautuka_egress";
-        PodmanCommandResult rendered = await podmanRunner.RunAsync(
-            [
-                "unshare", "unshare", "-n", "sh", "-c", script, "sh", boundaryPath
-            ],
-            30,
-            cancellationToken).ConfigureAwait(false);
+        PodmanCommandResult rendered;
+        if (!string.IsNullOrWhiteSpace(windowsPodmanMachineName) && !string.IsNullOrWhiteSpace(windowsPodmanHookStateDirectory))
+        {
+            string remotePath = $"{windowsPodmanHookStateDirectory}/boundary.nft";
+            PodmanCommandResult copy = await podmanRunner.RunAsync(
+                ["machine", "cp", boundaryPath, $"{windowsPodmanMachineName}:{remotePath}"], 20, cancellationToken).ConfigureAwait(false);
+            if (copy.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Failed to copy boundary ruleset into Podman Machine: {copy.StdErr}");
+            }
+            rendered = await podmanRunner.RunAsync(
+                ["machine", "ssh", windowsPodmanMachineName, $"podman unshare unshare -n sh -c {QuoteShellArgument(script)} sh {QuoteShellArgument(remotePath)}"],
+                30, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            rendered = await podmanRunner.RunAsync(
+                ["unshare", "unshare", "-n", "sh", "-c", script, "sh", boundaryPath],
+                30, cancellationToken).ConfigureAwait(false);
+        }
 
         if (rendered.ExitCode != 0)
         {
@@ -1002,7 +1099,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return ComputeBoundaryRulesetHash(tables[0], tables[1]);
     }
 
-    private async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)
+    private static string QuoteShellArgument(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+
+    internal async Task<string> ReadBoundaryRulesetHashAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult podInspect = await podmanRunner
             .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
@@ -1066,7 +1165,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string pid = infraPid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         IReadOnlyList<string> args = ["unshare", "nsenter", "-t", pid, "-n", "nft", "-j", "list", "table", family, "kautuka_egress"];
         string output;
-        if (!Environment.IsPrivilegedProcess)
+        if (!string.IsNullOrWhiteSpace(windowsPodmanMachineName) && !string.IsNullOrWhiteSpace(windowsPodmanHookStateDirectory))
+        {
+            PodmanCommandResult nft = await podmanRunner.RunAsync(
+                ["machine", "ssh", windowsPodmanMachineName, $"podman unshare nsenter -t {pid} -n nft -j list table {family} kautuka_egress"],
+                10, cancellationToken).ConfigureAwait(false);
+            if (nft.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"Podman Machine boundary nft verification failed for {family} (rc {nft.ExitCode}): {nft.StdErr}");
+            }
+            output = nft.StdOut;
+        }
+        else if (!Environment.IsPrivilegedProcess)
         {
             PodmanCommandResult nft = await podmanRunner.RunAsync(args, 10, cancellationToken).ConfigureAwait(false);
             if (nft.ExitCode != 0)
@@ -1205,18 +1315,64 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         "-conf", "/etc/coredns/Corefile"
     ];
 
-    internal static IReadOnlyList<string> BuildEnvoyCreateArgs(string envoyPath, string envoySocketHostDir, string adminSocketDir) =>
-    [
-        "create",
-        "--pod", EgressPodName,
-        "--name", "kautuka-egress-envoy",
-        "--group-add", "keep-groups",
-        "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro",
-        "-v", $"{envoySocketHostDir}:/run/kautuka-nac:z",
-        "-v", $"{adminSocketDir}:/run/kautuka-admin:z",
-        EnvoyPinnedImage,
-        "-c", "/etc/envoy/envoy.yaml"
-    ];
+    internal static IReadOnlyList<string> BuildEnvoyCreateArgs(
+        string envoyPath,
+        string envoySocketHostDir,
+        string adminSocketDir,
+        bool isWindowsHostNativeDev = false,
+        string? decisionEndpointIp = null,
+        string? envoyCertificateDirectory = null)
+    {
+        List<string> args =
+        [
+            "create",
+            "--pod", EgressPodName,
+            "--name", "kautuka-egress-envoy",
+            "-v", $"{envoyPath}:/etc/envoy/envoy.yaml:ro"
+        ];
+
+        if (!isWindowsHostNativeDev)
+        {
+            args.Insert(5, "--group-add");
+            args.Insert(6, "keep-groups");
+            args.AddRange(["-v", $"{envoySocketHostDir}:/run/kautuka-nac:z"]);
+            args.AddRange(["-v", $"{adminSocketDir}:/run/kautuka-admin:z"]);
+        }
+        else
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(decisionEndpointIp);
+            ArgumentException.ThrowIfNullOrWhiteSpace(envoyCertificateDirectory);
+            args.AddRange([
+                "-v", $"{envoyCertificateDirectory}:/etc/envoy/certs:ro"
+            ]);
+        }
+
+        args.Add(EnvoyPinnedImage);
+        args.AddRange(["-c", "/etc/envoy/envoy.yaml"]);
+
+        return args;
+    }
+
+    internal static List<string> BuildEgressPodCreateArgs(bool isWindowsHostNativeDev, string? decisionEndpointIp)
+    {
+        List<string> args =
+        [
+            "pod", "create",
+            "--name", EgressPodName,
+            "--network", $"{WorkloadNetworkName}:ip={EgressPodIp}",
+            "--network", $"{OutsideNetworkName}:ip={OutsidePodIp}",
+            "--sysctl", "net.ipv4.ip_forward=0",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"
+        ];
+
+        if (isWindowsHostNativeDev)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(decisionEndpointIp);
+            args.AddRange(["--add-host", $"{WindowsPodmanDevEgressOptions.DecisionHostName}:{decisionEndpointIp}"]);
+        }
+
+        return args;
+    }
 
     private async Task EnsureInfraContainerCreatedAsync(
         string containerName,
@@ -1403,7 +1559,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
-        if (IsStartupGateOpen && OperatingSystem.IsLinux())
+        if (IsStartupGateOpen && (OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(windowsPodmanMachineName)))
         {
             try
             {

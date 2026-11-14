@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Text.RegularExpressions;
 using System.Text.Json.Nodes;
 
@@ -449,6 +450,90 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public async Task WindowsMachineBoundaryVerificationReadsBothLiveTablesAndRejectsDrift()
+    {
+        const string ipv4 = "{\"nftables\":[{\"rule\":{\"comment\":\"private_reject\",\"expr\":[]}},{\"rule\":{\"comment\":\"wl_net_reject\",\"expr\":[]}}]}";
+        const string ipv6 = "{\"nftables\":[{\"rule\":{\"comment\":\"ipv6_drop_pod\",\"expr\":[]}}]}";
+        var calls = new List<IReadOnlyList<string>>();
+        bool drift = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            string output = args[0] switch
+            {
+                "pod" => "{\"InfraContainerID\":\"infra\"}",
+                "inspect" => "[{\"State\":{\"Pid\":123}}]",
+                "machine" when args[1] == "cp" => "",
+                "machine" when args[3].Contains("unshare -n sh", StringComparison.Ordinal) => $"{ipv4}\n__KUTUKA_IPV6_BOUNDARY__\n{ipv6}",
+                "machine" when args[3].Contains("table ip6", StringComparison.Ordinal) => ipv6,
+                "machine" => drift ? ipv4.Replace("private_reject", "private_reject_changed", StringComparison.Ordinal) : ipv4,
+                _ => throw new InvalidOperationException("Unexpected command")
+            };
+            return Task.FromResult(new PodmanCommandResult(0, output, "", ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "cursor.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir,
+            windowsPodmanMachineName: "dev", windowsPodmanHookStateDirectory: "/home/core/.local/state/kautuka/nac");
+
+        string rendered = await manager.ReadRenderedBoundaryRulesetHashAsync(TestContext.Current.CancellationToken);
+        string live = await manager.ReadBoundaryRulesetHashAsync(TestContext.Current.CancellationToken);
+        EgressTopologyManager.RequireMatchingBoundaryRulesetHash(rendered, live);
+        Assert.Contains(calls, args => args.Count > 1 && args[0] == "machine" && args[1] == "cp");
+        Assert.Contains(calls, args => args.Count > 3 && args[2] == "dev" && args[3].Contains("nsenter -t 123 -n nft -j list table ip6", StringComparison.Ordinal));
+        drift = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ReadBoundaryRulesetHashAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WindowsMachineReconcileClosesGateForValidChangedRules()
+    {
+        const string ipv4 = "{\"nftables\":[{\"rule\":{\"comment\":\"private_reject\",\"expr\":[{\"drop\":null}]}},{\"rule\":{\"comment\":\"wl_net_reject\",\"expr\":[{\"drop\":null}]}}]}";
+        const string ipv6 = "{\"nftables\":[{\"rule\":{\"comment\":\"ipv6_drop_pod\",\"expr\":[{\"drop\":null}]}}]}";
+        const string healthy = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra\",\"Containers\":[{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},{\"Name\":\"kautuka-egress-dns\",\"State\":\"running\"},{\"Name\":\"kautuka-egress-envoy\",\"State\":\"running\"},{\"Name\":\"pod-infra\",\"State\":\"running\"}]}]";
+        bool drift = false;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            string output = args[0] switch
+            {
+                "pod" => healthy,
+                "inspect" when args[1] == "kautuka-egress-boundary" => "[{\"State\":{\"Status\":\"exited\",\"ExitCode\":0}}]",
+                "inspect" => "[{\"State\":{\"Pid\":123}}]",
+                "machine" when args.Count > 3 && args[2] == "dev" && args[3].Contains("table ip6", StringComparison.Ordinal) => ipv6,
+                "machine" when args.Count > 3 && args[2] == "dev" => drift ? ipv4.Replace("{\"drop\":null}", "{\"accept\":null}", StringComparison.Ordinal) : ipv4,
+                "ps" => "[]",
+                _ => "[]"
+            };
+            return Task.FromResult(new PodmanCommandResult(0, output, "", ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "cursor.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir,
+            windowsPodmanMachineName: "dev", windowsPodmanHookStateDirectory: "/home/core/.local/state/kautuka/nac");
+        await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
+        typeof(EgressTopologyManager).GetField("expectedBoundaryRulesetHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4, ipv6));
+        typeof(EgressTopologyManager).GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(manager, true);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.True(manager.IsStartupGateOpen);
+        drift = true;
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.False(manager.IsStartupGateOpen);
+    }
+
+    [Fact]
+    public async Task WindowsMachineBoundaryRenderingFailsClosedWhenCopyFails()
+    {
+        var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(1, "", "copy failed", ProcessTerminationReason.Completed)));
+        var registry = new WorkloadRegistry();
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "cursor.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), registry, tempDir,
+            windowsPodmanMachineName: "dev", windowsPodmanHookStateDirectory: "/home/core/.local/state/kautuka/nac");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => manager.ReadRenderedBoundaryRulesetHashAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public void U7_AddressAllocator_MonotonicCursorPersistenceAndWrap_WithNegativeControl()
     {
         string statePath = Path.Combine(tempDir, "ip-cursor.json");
@@ -829,7 +914,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.NotNull(entry);
         Assert.Equal(validCid, entry.ContainerId);
     }
-
     [Fact]
     public void V7_20_CanaryRequiresSuccessfulHookRecordForItsOwnIp_WithNegativeControl()
     {
@@ -906,6 +990,79 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void WindowsRemotePodmanEnvoyDoesNotRequestLinuxKeepGroups()
+    {
+        IReadOnlyList<string> envoyArgs = EgressTopologyManager.BuildEnvoyCreateArgs(
+            "/state/envoy.yaml",
+            "/state/sockets",
+            "/state/admin-socket",
+            isWindowsHostNativeDev: true,
+            decisionEndpointIp: "172.20.144.1",
+            envoyCertificateDirectory: "C:\\Users\\user\\.kautuka\\runtime\\manager\\networkAccess\\envoy-certs");
+
+        Assert.DoesNotContain("--group-add", envoyArgs);
+        Assert.DoesNotContain(envoyArgs, arg => arg.Contains("/run/kautuka-nac", StringComparison.Ordinal));
+        Assert.DoesNotContain(envoyArgs, arg => arg.Contains("/run/kautuka-admin", StringComparison.Ordinal));
+        Assert.DoesNotContain("--add-host", envoyArgs);
+        IReadOnlyList<string> podArgs = EgressTopologyManager.BuildEgressPodCreateArgs(
+            isWindowsHostNativeDev: true,
+            decisionEndpointIp: "172.20.144.1");
+        Assert.Contains("--add-host", podArgs);
+        Assert.Contains("kautuka-decision.internal:172.20.144.1", podArgs);
+        Assert.Contains("C:\\Users\\user\\.kautuka\\runtime\\manager\\networkAccess\\envoy-certs:/etc/envoy/certs:ro", envoyArgs);
+        Assert.Contains("/tmp/kautuka-admin.sock", BoundaryRulesetRenderer.RenderEnvoyConfig(
+            adminSocketPath: "/tmp/kautuka-admin.sock",
+            isWindowsMtls: true), StringComparison.Ordinal);
+
+        // Negative control: use the Linux rootless mode and the request regains its Linux-only options.
+        IReadOnlyList<string> linuxArgs = EgressTopologyManager.BuildEnvoyCreateArgs(
+            "/state/envoy.yaml",
+            "/state/sockets",
+            "/state/admin-socket",
+            isWindowsHostNativeDev: false);
+        Assert.Contains("--group-add", linuxArgs);
+        Assert.Contains(linuxArgs, arg => arg.Contains("/run/kautuka-nac", StringComparison.Ordinal));
+        Assert.Contains(linuxArgs, arg => arg.Contains("/run/kautuka-admin", StringComparison.Ordinal));
+        Assert.DoesNotContain("--add-host", EgressTopologyManager.BuildEgressPodCreateArgs(
+            isWindowsHostNativeDev: false,
+            decisionEndpointIp: null));
+    }
+
+    [Fact]
+    public void WindowsPodmanRouteSelectsHostGatewayAndRejectsInvalidRoutes()
+    {
+        IPAddress address = WindowsPodmanDevEgressOptions.ParsePodmanMachineHostGateway(
+            new PodmanCommandResult(0, "default via 172.20.144.1 dev eth0 proto kernel\n", string.Empty));
+
+        Assert.Equal(IPAddress.Parse("172.20.144.1"), address);
+        Assert.Throws<InvalidOperationException>(() => WindowsPodmanDevEgressOptions.ParsePodmanMachineHostGateway(
+            new PodmanCommandResult(0, "default via 127.0.0.1 dev lo\n", string.Empty)));
+        Assert.Throws<InvalidOperationException>(() => WindowsPodmanDevEgressOptions.ParsePodmanMachineHostGateway(
+            new PodmanCommandResult(1, string.Empty, "machine unavailable")));
+    }
+
+    [Fact]
+    public async Task WindowsPodmanEnvoyBundleWritesDedicatedClientKeyAndCaFiles()
+    {
+        (System.Security.Cryptography.X509Certificates.X509Certificate2 ca,
+            _,
+            System.Security.Cryptography.X509Certificates.X509Certificate2 client)
+            = EnvoyMtlsCertificateAuthority.CreateDedicatedBundle();
+        string certDir = Path.Combine(tempDir, "envoy-certs");
+
+        CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+        await WindowsPodmanDevEgressOptions.WriteClientBundleAsync(certDir, ca, client, cancellationToken);
+
+        string caPem = await File.ReadAllTextAsync(Path.Combine(certDir, "ca.crt"), cancellationToken);
+        string clientPem = await File.ReadAllTextAsync(Path.Combine(certDir, "client.crt"), cancellationToken);
+        string privateKeyPem = await File.ReadAllTextAsync(Path.Combine(certDir, "client.key"), cancellationToken);
+        Assert.Contains("BEGIN CERTIFICATE", caPem, StringComparison.Ordinal);
+        Assert.Contains("BEGIN CERTIFICATE", clientPem, StringComparison.Ordinal);
+        Assert.Contains("BEGIN PRIVATE KEY", privateKeyPem, StringComparison.Ordinal);
+        Assert.DoesNotContain("BEGIN PRIVATE KEY", caPem, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void V7_20_ExistingEgressPodMustBeHealthyAndComplete_WithNegativeControl()
     {
         const string healthy = "[{\"State\":\"Running\",\"Containers\":["
@@ -967,7 +1124,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             ?? throw new InvalidOperationException("EnsureEgressPodAsync method was not found.");
 
         InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await (Task)ensurePod.Invoke(manager, [false, null, false, CancellationToken.None])!).ConfigureAwait(false);
+            await (Task)ensurePod.Invoke(manager, [false, null, false, null, CancellationToken.None])!).ConfigureAwait(false);
 
         Assert.Contains("does not have the required workload/outside network addresses", failure.Message, StringComparison.Ordinal);
         Assert.Single(calls, args => args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName]));
@@ -978,6 +1135,11 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     [Fact]
     public async Task V7_20_WorkloadNetworkPrefersOutsideDefaultRoute_WithNegativeControl()
     {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("Existing Podman network drift validation is Linux-specific.");
+        }
+
         var createCalls = new List<string[]>();
         var creatingPodman = new PodmanCommandRunner((args, _) =>
         {

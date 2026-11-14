@@ -18,6 +18,39 @@ public sealed class WorkloadPostStartVerifierTests
     private const string ContainerId = "nac-verifier-test";
     private const string AllocatedIp = "10.247.1.80";
 
+    [Fact]
+    public void PodmanMachineMountPathsMatchOnlyTheirWindowsWorkspaceRoot()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows drive paths are resolved by the Windows host runtime.");
+        }
+
+        const string windowsRoot = @"C:\Users\amshu\.kautuka\workspaces\agents\agent-1\user-a";
+        string machineRoot = WorkloadPostStartVerifier.MapWindowsWorkspaceRootToPodmanMachinePath(windowsRoot);
+
+        Assert.Equal("/mnt/c/Users/amshu/.kautuka/workspaces/agents/agent-1/user-a", machineRoot);
+        Assert.True(WorkloadPostStartVerifier.IsWithinAllowedRoot(
+            machineRoot + "/project/file.txt",
+            [machineRoot]));
+        Assert.False(WorkloadPostStartVerifier.IsWithinAllowedRoot(
+            "/mnt/c/Users/amshu/.kautuka/workspaces/agents/agent-1/user-b/project/file.txt",
+            [machineRoot]));
+        Assert.False(WorkloadPostStartVerifier.IsWithinAllowedRoot(
+            "/mnt/c/Users/amshu/.kautuka/workspaces/agents/agent-2/user-a/project/file.txt",
+            [machineRoot]));
+        Assert.False(WorkloadPostStartVerifier.IsWithinAllowedRoot(
+            machineRoot + "/../user-b/project/file.txt",
+            [machineRoot]));
+    }
+
+    [Fact]
+    public void PosixMountPathCannotEscapeAllowedRootWithParentSegments()
+    {
+        Assert.False(WorkloadPostStartVerifier.IsWithinAllowedRoot(
+            "/workspace/user-a/../user-b/file", ["/workspace/user-a"]));
+    }
+
     private const string RootlessPodmanCapabilityInspectFragment = """
         {
           "EffectiveCaps": null,

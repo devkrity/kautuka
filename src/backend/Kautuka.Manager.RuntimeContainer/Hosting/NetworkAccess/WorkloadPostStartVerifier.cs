@@ -326,8 +326,24 @@ public sealed class WorkloadPostStartVerifier
                 && string.Equals(context.UserId, workloadIdentity.UserId, StringComparison.Ordinal))
             .Select(static context => context.HostWorkspacePath)
             .Where(static path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.Ordinal)
-            .Select(WorkspaceAuthorityPolicy.CanonicalizeRoot)];
+            .Select(WorkspaceAuthorityPolicy.CanonicalizeRoot)
+            .SelectMany(static root => OperatingSystem.IsWindows()
+                ? new[] { root, MapWindowsWorkspaceRootToPodmanMachinePath(root) }
+                : new[] { root })
+            .Distinct(StringComparer.Ordinal)];
+    }
+
+    internal static string MapWindowsWorkspaceRootToPodmanMachinePath(string windowsPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(windowsPath);
+        string fullPath = Path.GetFullPath(windowsPath);
+        if (fullPath.Length < 3 || !char.IsAsciiLetter(fullPath[0]) || fullPath[1] != ':' || fullPath[2] is not ('\\' or '/'))
+        {
+            throw new ArgumentException("Expected an absolute drive-letter path for a Podman Machine workspace.", nameof(windowsPath));
+        }
+
+        string suffix = fullPath[3..].Replace('\\', '/').TrimEnd('/');
+        return $"/mnt/{char.ToLowerInvariant(fullPath[0])}/{suffix}";
     }
 
     private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
@@ -354,8 +370,34 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    private static bool IsWithinAllowedRoot(string path, IReadOnlyList<string> allowedRoots)
+    internal static bool IsWithinAllowedRoot(string path, IReadOnlyList<string> allowedRoots)
     {
+        if (path.Length > 0 && path[0] == '/')
+        {
+            if (path.Split('/', StringSplitOptions.RemoveEmptyEntries).Any(static segment => segment is "." or ".."))
+            {
+                return false;
+            }
+
+            string normalizedPath = NormalizePodmanMachinePath(path);
+            foreach (string root in allowedRoots)
+            {
+                if (root.Length == 0 || root[0] != '/')
+                {
+                    continue;
+                }
+
+                string normalizedRoot = NormalizePodmanMachinePath(root);
+                if (string.Equals(normalizedPath, normalizedRoot, StringComparison.Ordinal)
+                    || normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         string fullPath = Path.GetFullPath(path);
         StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         foreach (string root in allowedRoots)
@@ -379,6 +421,9 @@ public sealed class WorkloadPostStartVerifier
 
         return false;
     }
+
+    private static string NormalizePodmanMachinePath(string path)
+        => "/" + string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries));
 
     private static void VerifyInspectIpv6Disable(JsonElement hostConfig)
     {
