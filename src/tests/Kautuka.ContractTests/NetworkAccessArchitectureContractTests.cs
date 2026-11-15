@@ -184,7 +184,10 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("string dnsNcCountersBefore = await RunPodNftListEgressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("ExtractNftCommentCounterPackets(dnsNcCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);
         Assert.Contains("address_prefix: 192\\.168\\.0\\.0\\r?\\n\\k<i>  prefix_len: 16", productionSource, StringComparison.Ordinal);
-        Assert.Contains("blocked={lanDeniedRc != 0}:lanMasqueradeRulePacketDeltaZero=", productionSource, StringComparison.Ordinal);
+        Assert.Contains("blocked={lanDeniedRc != 0}:privateRejectPacketDeltaZero=", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(lanCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(noGrantEgressCounters, \"private_reject\") - lanPrivateRejectBeforeNoGrant", productionSource, StringComparison.Ordinal);
+        Assert.Contains("privateRejectPacketDeltaZero={noGrantPrivateRejectDelta == 0}", productionSource, StringComparison.Ordinal);
         Assert.Contains("fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}", productionSource, StringComparison.Ordinal);
         Assert.Contains("noGrantLanObservation", productionSource, StringComparison.Ordinal);
     }

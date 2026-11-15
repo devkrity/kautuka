@@ -1593,6 +1593,7 @@ public static class Program
             }
             _ = registry.GetAll().Single(entry => string.Equals(entry.AgentId, "lan-grant", StringComparison.Ordinal));
             string lanCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long lanPrivateRejectBeforeNoGrant = ExtractNftCommentCounterPackets(lanCountersBefore, "private_reject");
             long lanApprovedBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_approved");
             long lanMasqueradeBefore = ExtractNftCommentCounterPackets(lanCountersBefore, "lan_source_masquerade");
             int lanFixtureHitsBeforeNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
@@ -1600,9 +1601,10 @@ public static class Program
                 "podman",
                 ["exec", lanWorkloadName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + lanHostName + ":8443/"]).ConfigureAwait(false);
             string noGrantEgressCounters = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            long noGrantPrivateRejectDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "private_reject") - lanPrivateRejectBeforeNoGrant;
             long noGrantMasqueradeDelta = ExtractNftCommentCounterPackets(noGrantEgressCounters, "lan_source_masquerade") - lanMasqueradeBefore;
             int lanFixtureHitsAfterNoGrant = File.Exists(lanAccessLogPath) ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length : 0;
-            string noGrantLanObservation = $"blocked={lanDeniedRc != 0}:lanMasqueradeRulePacketDeltaZero={noGrantMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}";
+            string noGrantLanObservation = $"blocked={lanDeniedRc != 0}:privateRejectPacketDeltaZero={noGrantPrivateRejectDelta == 0}:lanMasqueradeRulePacketDeltaZero={noGrantMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}";
             await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
             NetworkAccessRequest? lanCard = policyStore.ListRequests(admin).Requests
                 .Select(static view => view.Request)
@@ -1661,7 +1663,7 @@ public static class Program
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_NO_GRANT",
                 noGrantLanObservation,
-                "blocked=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
+                "blocked=True:privateRejectPacketDeltaZero=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
                 $"blocked={lanAllowedRc != 0}:lanMasqueradeRulePacketDeltaZero={lanMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterApproval == 0}",
                 "blocked=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False");
             Console.WriteLine($"[PROD_LAN_NO_GRANT] {noGrantLanAcceptance.Outcome} ({noGrantLanAcceptance.ObservedValue}; nc={noGrantLanAcceptance.NcObservedValue})");
