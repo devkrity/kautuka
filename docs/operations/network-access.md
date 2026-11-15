@@ -84,7 +84,7 @@ flowchart LR
   HOOK["OCI createRuntime hook<br/>(kautuka_hook.py)"] -.-> W1
 ```
 
-The package proxy shown in earlier NAC v7 diagrams is not deployed. Package-manager access through a proxy remains a Phase 6 design item; the current workload hook blocks that path.
+The package proxy runs at `10.247.0.3` on the workload network. Package clients resolve its name to a reserved service address and reach it through Envoy; Manager policy controls the connection. The proxy’s own upstream requests also pass through Envoy and Manager policy. Windows local development has been checked with a PyPI index request and a `uv` package install; this does not establish production or Linux live acceptance.
 
 ### Key Architectural Pillars
 
@@ -104,7 +104,7 @@ The package proxy shown in earlier NAC v7 diagrams is not deployed. Package-mana
      - Drops inter-container lateral traffic (`wl_net_drop`).
      - Drops link-local and cloud metadata addresses (`meta_drop` for `169.254.0.0/16` and Azure `168.63.129.16`).
      - Drops outbound UDP (`udp_drop`).
-     - Permits outbound TCP to `10.247.0.2:15001` and DNS to `10.247.0.2:53`. The package proxy exception is disabled until Phase 6 is implemented.
+     - Permits outbound TCP to `10.247.0.2:15001` and DNS to `10.247.0.2:53`. Package traffic follows the Envoy path; the proxy listener accepts connections from the egress pod and is not directly accessible to ordinary workloads.
    - Manager allocates a distinct workload IP before launch. Connector ownership comes from the workspace user and agent context; missing identity or address fails the start instead of falling back to a shared system identity or a fixed IP. Internal system connectors remain `deny-all` whether invoked without a user or through an agent. Systemwide per-user instances and their user-level grant attribution derive from catalogue scope, not `IsInternalSystemConnector`.
 4. **Host Services Application-Layer Enforcement**:
    - `Gateway` and `ChannelHost` outbound HTTP and WebSocket clients fail closed (`FailClosedNetworkAccessChecker` / `checker_missing`) when constructed without an explicit `INetworkAccessChecker` or `NetworkAccessWebSocketChecker`. Non-ChannelHost callers must carry an explicit `NetworkAccessContext` user identity (never defaulting missing users to `"system"`), failing closed (`unknown_source`) when unattributed and enforcing per-user brakes across OIDC link, OAuth, AI provider discovery/probes, and catalog downloads. Denials surface directly into agent runs via Narad Protocol without opening approval cards for automated system seeds.

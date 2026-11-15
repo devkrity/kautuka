@@ -211,6 +211,8 @@ public sealed class PodmanContainerToolTests
 
         List<string> arguments = InvokeBuildRunArguments(context, "kautuka-agent-alpha");
 
+        AssertOption(arguments, "--add-host", $"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}");
+
         Assert.Contains("NPM_CONFIG_REGISTRY", arguments);
         Assert.Contains("UV_INDEX_URL", arguments);
         Assert.Contains("PIP_INDEX_URL", arguments);

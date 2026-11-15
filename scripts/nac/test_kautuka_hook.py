@@ -224,6 +224,9 @@ class TestKautukaHookDecideVectors(unittest.TestCase):
             ("V51_clean_workload_low", {"id": "wl_low", "pid": 500}, ["10.247.1.5"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
             ("V52_clean_workload_mid", {"id": "wl_mid", "pid": 501}, ["10.247.50.100"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
             ("V53_clean_workload_high", {"id": "wl_high", "pid": 502}, ["10.247.255.254"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
+            ("V54_package_proxy_cid_role_image_exact", {"id": "proxy-cid", "pid": 503, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "a" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "allow", "package_proxy_rules"),
+            ("V55_package_proxy_annotation_forged_wrong_cid", {"id": "workload-cid", "pid": 504, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "a" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "refuse", "reserved_range"),
+            ("V56_package_proxy_annotation_forged_wrong_image", {"id": "proxy-cid", "pid": 505, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "b" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "refuse", "package_proxy_identity_mismatch"),
         ]
 
     def test_all_decide_vectors(self):
@@ -266,8 +269,7 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
         ]
 
         for ip in ips:
-            # Default include_pkgs_proxy=False per v7-11
-            rules = render_ruleset(ip, include_pkgs_proxy=False)
+            rules = render_ruleset(ip)
 
             if ip == "10.247.1.20":
                 with open(os.path.join(SCRIPT_DIR, "golden", "kautuka-workload.nft"), encoding="utf-8") as golden_file:
@@ -287,8 +289,8 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
             self.assertIn("ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept", rules)
 
-            # Package proxy NOT present by default (v7-11)
-            self.assertNotIn("20101", rules, "Package proxy must not be present when include_pkgs_proxy=False")
+            # Ordinary workload rules must not permit direct proxy access.
+            self.assertNotIn("20101", rules)
 
             # Verify all expected comments exist
             for c in expected_comments:
@@ -297,9 +299,11 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             # Verify closing braces
             self.assertTrue(rules.strip().endswith("}\n}"), "Ruleset must close output chain and table")
 
-    def test_ruleset_with_package_proxy_explicit(self):
-        rules = render_ruleset("10.247.1.5", include_pkgs_proxy=True)
-        self.assertIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
+    def test_package_proxy_ruleset_only_accepts_envoy_listener_and_established_replies(self):
+        rules = render_ruleset("10.247.0.3", package_proxy=True)
+        self.assertIn("ip saddr 10.247.0.2 tcp dport 20101 accept", rules)
+        self.assertIn("ct state established,related accept", rules)
+        self.assertNotIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
         self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
 
 

@@ -232,6 +232,19 @@ static_resources:
       type: ORIGINAL_DST
       lb_policy: CLUSTER_PROVIDED
       connect_timeout: 2s
+    - name: pkgs_proxy
+      type: STATIC
+      connect_timeout: 1s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: pkgs_proxy
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 10.247.0.3
+                      port_value: 20101
     - name: dfp_lan
       type: STATIC
       connect_timeout: 1s

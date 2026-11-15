@@ -152,6 +152,7 @@ internal static class ConnectorContainerSpecBuilder
             CpuLimit = 1,
             MemoryLimit = "536870912",
             CompatibilityProfile = compatProfile,
+            AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
         };
 
         var arguments = spec.Render().ToList();

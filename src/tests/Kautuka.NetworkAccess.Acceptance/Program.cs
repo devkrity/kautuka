@@ -16,6 +16,7 @@ using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 using NacController = Kautuka.NetworkAccessController.NetworkAccessController;
 
@@ -121,6 +122,218 @@ public static class AcceptanceHarness
 public static class Program
 {
     private static Func<string, IReadOnlyList<string>, Task<(int ExitCode, string StdOut, string StdErr)>>? execOverride;
+
+    private sealed class AcceptanceHttpClientFactory : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new();
+    }
+
+    private static async Task VerifyManagedPackageProxyPathAsync(
+        string repoRoot,
+        string tempRoot,
+        EgressTopologyManager topology,
+        NacController controller,
+        WorkloadRegistry registry,
+        PodmanCommandRunner podman,
+        WorkloadPostStartVerifier verifier,
+        ILoggerFactory loggerFactory)
+    {
+        const string proxyName = "kautuka-pkgs-proxy";
+        const string proxyImage = "localhost/kautuka-pkgs-proxy:acceptance";
+        string cachePath = Path.Combine(tempRoot, "package-proxy-cache");
+        string dockerfilePath = Path.Combine(repoRoot, "src", "images", "kautuka-pkgs-proxy");
+        var proxy = new WorkspaceSidecarDefinition(
+            proxyName,
+            proxyImage,
+            [],
+            [new WorkspaceSidecarVolumeBinding(cachePath, "/data")],
+            new Dictionary<string, string>
+            {
+                ["PROXY_LISTEN"] = ":20101",
+                ["PROXY_BASE_URL"] = "http://kautuka-pkgs-proxy:20101",
+                ["PROXY_CACHE_METADATA"] = "true",
+            },
+            [],
+            dockerfilePath,
+            null,
+            null,
+            RequiredForReady: true,
+            ManagerInfrastructure: true,
+            Policy: "ALWAYS");
+        var sidecarSupervisor = new WorkspaceSidecarSupervisor(
+            new WorkspaceSidecarCatalog([proxy]),
+            new AcceptanceHttpClientFactory(),
+            podman,
+            Options.Create(new ManagerContainerStartupOptions()),
+            loggerFactory.CreateLogger<WorkspaceSidecarSupervisor>(),
+            RuntimeImageAllowlist.Empty,
+            imageArchives: null,
+            egressTopologyManager: topology);
+        var runtimeSettings = new ManagerRuntimeSettings(new WorkspaceDefinition(), new SandboxRuntimeDefinition(), new WorkspaceTelemetryDefinition());
+        if (!await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, CancellationToken.None).ConfigureAwait(false))
+        {
+            PodmanCommandResult proxyState = await podman.RunAsync(["inspect", "--format", "{{json .State}}", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
+            PodmanCommandResult proxyLogs = await podman.RunAsync(["logs", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
+            await Console.Error.WriteLineAsync($"Package proxy acceptance startup diagnostics: inspect rc={proxyState.ExitCode} state={proxyState.StdOut.Trim()} inspectErr={proxyState.StdErr.Trim()}; logs rc={proxyLogs.ExitCode} logs={proxyLogs.StdOut.Trim()} logsErr={proxyLogs.StdErr.Trim()}").ConfigureAwait(false);
+            _ = await podman.RunAsync(["rm", "-f", proxyName], 15, CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException("Production package proxy sidecar did not become healthy and pass its NAC ruleset verification.");
+        }
+
+        await topology.RebuildRegistryFromLiveContainersAsync(registry, CancellationToken.None).ConfigureAwait(false);
+        if (!topology.IsPackageProxyReady || !topology.IsPackageProxyRegistered)
+        {
+            throw new InvalidOperationException("The package proxy was not retained as a healthy, verified Manager identity after production registry rebuild.");
+        }
+
+        const string builderName = "kautuka-pkgs-client";
+        const string builderIp = "10.247.1.250";
+        const string serviceHost = "kautuka-pkgs-proxy";
+        const string npmRegistry = "http://kautuka-pkgs-proxy:20101/npm/";
+        var builderSpec = new WorkloadContainerSpec(
+            builderName,
+            "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+            builderIp)
+        {
+            Kind = "builder",
+            ExecContext = "builder",
+            Egress = "proxy-only",
+            Persistent = true,
+            StartupGateOpen = topology.IsStartupGateOpen,
+            IsBraked = false,
+            ManagerRole = "builder",
+            AddHosts = [$"{serviceHost}:{NetworkAddressClassifier.PackageProxyServiceAddress}"],
+            Command = "/bin/sh",
+            Args = ["-lc", "sleep 300"],
+        };
+        registry.Register(new RegistryEntry(builderIp, null, null, builderName, "builder", null, "builder", false, "proxy-only", "none", null, DateTimeOffset.UtcNow));
+        PodmanCommandResult start = await podman.RunAsync(builderSpec.Render(), 60, CancellationToken.None).ConfigureAwait(false);
+        if (start.ExitCode != 0)
+        {
+            registry.Deregister(builderIp, builderName);
+            throw new InvalidOperationException($"Production package client failed to start: {PodmanFailureFormatter.FormatDetails(start)}");
+        }
+
+        PodmanCommandResult inspect = await podman.RunAsync(["inspect", "--format", "{{.Id}}", builderName], 10, CancellationToken.None).ConfigureAwait(false);
+        string builderId = inspect.StdOut.Trim();
+        if (inspect.ExitCode != 0 || !WorkloadPostStartVerifier.IsCanonicalContainerId(builderId))
+        {
+            throw new InvalidOperationException("Production package client did not yield a canonical Podman identity.");
+        }
+
+        registry.UpdateContainerId(builderIp, builderName, builderId);
+        WorkloadVerificationResult verified = await verifier.VerifyWorkloadAsync(
+            builderId, builderIp, registry: registry, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+        if (!verified.Passed)
+        {
+            throw new InvalidOperationException("Production package client failed its NAC post-start verification.");
+        }
+
+        var npmRequest = new[]
+        {
+            "exec", builderName, "npm", "view", "is-number", "version", "--registry", npmRegistry,
+            "--fetch-retries=0", "--fetch-timeout=10000", "--loglevel=verbose"
+        };
+        PodmanCommandResult packageFetch = await podman.RunAsync(npmRequest, 30, CancellationToken.None).ConfigureAwait(false);
+        if (packageFetch.ExitCode != 0 || string.IsNullOrWhiteSpace(packageFetch.StdOut))
+        {
+            PodmanCommandResult clientHosts = await podman.RunAsync(["exec", builderName, "cat", "/etc/hosts"], 10, CancellationToken.None).ConfigureAwait(false);
+            PodmanCommandResult clientResolve = await podman.RunAsync(["exec", builderName, "getent", "hosts", serviceHost], 10, CancellationToken.None).ConfigureAwait(false);
+            PodmanCommandResult proxyLogs = await podman.RunAsync(["logs", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
+            PodmanCommandResult envoyLogs = await podman.RunAsync(["logs", "kautuka-egress-envoy"], 10, CancellationToken.None).ConfigureAwait(false);
+            int builderPid = await InspectContainerPidAsync(builderName).ConfigureAwait(false);
+            int proxyPid = await InspectContainerPidAsync(proxyName).ConfigureAwait(false);
+            int envoyPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
+            var builderRoutes = await ExecAsync("podman", ["unshare", "nsenter", "-t", builderPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route"]).ConfigureAwait(false);
+            var builderRouteGet = await ExecAsync("podman", ["unshare", "nsenter", "-t", builderPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route", "get", NetworkAddressClassifier.PackageProxyServiceAddress]).ConfigureAwait(false);
+            var builderNft = await ExecAsync("podman", ["unshare", "nsenter", "-t", builderPid.ToString(CultureInfo.InvariantCulture), "-n", "nft", "-j", "list", "table", "inet", "kautuka_workload"]).ConfigureAwait(false);
+            var proxyRoutes = await ExecAsync("podman", ["unshare", "nsenter", "-t", proxyPid.ToString(CultureInfo.InvariantCulture), "-n", "ip", "-4", "route"]).ConfigureAwait(false);
+            var boundaryNft = await ExecAsync("podman", ["unshare", "nsenter", "-t", envoyPid.ToString(CultureInfo.InvariantCulture), "-n", "nft", "-j", "list", "table", "ip", "kautuka_egress"]).ConfigureAwait(false);
+            string recentDecisions = string.Join("; ", controller.AuditRing.List(new NetworkAccessActor("acceptance-admin", IsAdmin: true))
+                .Take(8)
+                .Select(static entry => $"{entry.SourceIp} {entry.Destination}:{entry.Port} {entry.Decision}/{entry.Reason} cluster={entry.Cluster}"));
+            string envoyNacLogs = string.Join("\n", (envoyLogs.StdOut + "\n" + envoyLogs.StdErr)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(static line => line.Contains("[nac]", StringComparison.OrdinalIgnoreCase) || line.Contains("error", StringComparison.OrdinalIgnoreCase))
+                .TakeLast(20));
+            await Console.Error.WriteLineAsync($"Package proxy fetch diagnostics: hosts rc={clientHosts.ExitCode} {clientHosts.StdOut.Trim()}; resolve rc={clientResolve.ExitCode} {clientResolve.StdOut.Trim()} {clientResolve.StdErr.Trim()}; builderPid={builderPid} routes rc={builderRoutes.ExitCode} {builderRoutes.StdOut.Trim()}; routeGet rc={builderRouteGet.ExitCode} {builderRouteGet.StdOut.Trim()}; builderNft rc={builderNft.ExitCode} {builderNft.StdOut.Trim()}; proxyPid={proxyPid} routes rc={proxyRoutes.ExitCode} {proxyRoutes.StdOut.Trim()}; boundaryNft rc={boundaryNft.ExitCode} {boundaryNft.StdOut.Trim()}; proxyLogs rc={proxyLogs.ExitCode} {proxyLogs.StdOut.Trim()} {proxyLogs.StdErr.Trim()}; envoyNacLogs={envoyNacLogs}; managerDecisions={recentDecisions}").ConfigureAwait(false);
+            throw new InvalidOperationException($"Package fetch did not complete through the managed proxy: {PodmanFailureFormatter.FormatDetails(packageFetch)}");
+        }
+
+        var admin = new NetworkAccessActor("acceptance-admin", IsAdmin: true);
+        (_, NetworkAccessRuleView serviceDeny) = controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, NetworkAddressClassifier.PackageProxyServiceAddress, "ip", NetworkAddressClassifier.PackageProxyServicePort, Allowed: false),
+            controller.PolicyStore.Revision);
+        PodmanCommandResult deniedFetch;
+        try
+        {
+            deniedFetch = await podman.RunAsync(
+                ["exec", builderName, "npm", "view", "is-number", "version", "--registry", npmRegistry, "--cache", "/tmp/nac-deny-cache"],
+                20, CancellationToken.None).ConfigureAwait(false);
+            if (deniedFetch.ExitCode == 0)
+            {
+                throw new InvalidOperationException("An explicit Manager system deny did not block package-proxy service access.");
+            }
+        }
+        finally
+        {
+            controller.PolicyStore.DeleteRule(admin, serviceDeny.Rule.Id, controller.PolicyStore.Revision);
+        }
+
+        PodmanCommandResult recoveredFetch = await podman.RunAsync(npmRequest, 45, CancellationToken.None).ConfigureAwait(false);
+        if (recoveredFetch.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Package request did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredFetch)}");
+        }
+
+        var upstreamRequest = new[]
+        {
+            "exec", builderName, "npm", "view", "is-odd", "version", "--registry", npmRegistry,
+            "--cache", "/tmp/nac-upstream-deny-cache"
+        };
+        (_, NetworkAccessRuleView upstreamDeny) = controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "registry.npmjs.org", "host", 443, Allowed: false),
+            controller.PolicyStore.Revision);
+        PodmanCommandResult deniedUpstreamFetch;
+        try
+        {
+            deniedUpstreamFetch = await podman.RunAsync(upstreamRequest, 30, CancellationToken.None).ConfigureAwait(false);
+            if (deniedUpstreamFetch.ExitCode == 0)
+            {
+                throw new InvalidOperationException("An explicit Manager system deny did not block the package proxy's upstream connection through Envoy.");
+            }
+        }
+        finally
+        {
+            controller.PolicyStore.DeleteRule(admin, upstreamDeny.Rule.Id, controller.PolicyStore.Revision);
+        }
+
+        PodmanCommandResult recoveredUpstreamFetch = await podman.RunAsync(upstreamRequest, 45, CancellationToken.None).ConfigureAwait(false);
+        if (recoveredUpstreamFetch.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"Proxy upstream did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredUpstreamFetch)}");
+        }
+
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_TWO_HOP_FETCH",
+            $"allowed={packageFetch.ExitCode == 0 && !string.IsNullOrWhiteSpace(packageFetch.StdOut)}",
+            "allowed=True",
+            $"allowed={deniedFetch.ExitCode == 0}",
+            "allowed=False");
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_EXPLICIT_DENY",
+            $"blocked={deniedFetch.ExitCode != 0}",
+            "blocked=True",
+            $"blocked={recoveredFetch.ExitCode != 0}",
+            "blocked=False");
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_UPSTREAM_DENY",
+            $"blocked={deniedUpstreamFetch.ExitCode != 0}",
+            "blocked=True",
+            $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
+            "blocked=False");
+    }
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -277,6 +490,8 @@ public static class Program
         string hookPath = Path.Combine(hooksDir, "kautuka_hook.py");
         File.Copy(hookSrc, hookPath, overwrite: true);
         File.Copy(hookTemplateSrc, Path.Combine(hooksDir, "kautuka_workload.nft.json.tmpl"), overwrite: true);
+        File.Copy(Path.Combine(repoRoot, "scripts", "nac", "kautuka_package_proxy.nft.json.tmpl"),
+            Path.Combine(hooksDir, "kautuka_package_proxy.nft.json.tmpl"), overwrite: true);
         if (OperatingSystem.IsLinux())
         {
             File.SetUnixFileMode(hookPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1004,6 +1219,8 @@ public static class Program
         string hookPath = Path.Combine(hooksDir, "kautuka_hook.py");
         File.Copy(hookSrc, hookPath, overwrite: true);
         File.Copy(hookTemplateSrc, Path.Combine(hooksDir, "kautuka_workload.nft.json.tmpl"), overwrite: true);
+        File.Copy(Path.Combine(repoRoot, "scripts", "nac", "kautuka_package_proxy.nft.json.tmpl"),
+            Path.Combine(hooksDir, "kautuka_package_proxy.nft.json.tmpl"), overwrite: true);
         if (OperatingSystem.IsLinux())
         {
             File.SetUnixFileMode(hookPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
@@ -1026,17 +1243,15 @@ public static class Program
         await File.WriteAllTextAsync(Path.Combine(hooksDir, "kautuka_hook.json"), hookJson).ConfigureAwait(false);
 
         string podmanGraphRoot = Path.Combine(podmanStorageDir, "graphroot");
-        string podmanRuntimeDirectory = OperatingSystem.IsLinux()
-            ? Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") is { Length: > 0 } runtimeDirectory
-                ? runtimeDirectory
-                : Path.Combine(tempRoot, "xdg-runtime")
-            : podmanStorageDir;
+        string podmanRuntimeDirectory = Path.Combine(Path.GetTempPath(), $"nac-run-{Guid.NewGuid():N}"[..16]);
         Directory.CreateDirectory(podmanRuntimeDirectory);
         if (OperatingSystem.IsLinux())
         {
             File.SetUnixFileMode(podmanRuntimeDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
-        string podmanRunRoot = Path.Combine(podmanRuntimeDirectory, $"kautuka-nac-{Path.GetFileName(tempRoot)}");
+        string podmanRuntimeOwnerToken = Guid.NewGuid().ToString("N");
+        await File.WriteAllTextAsync(Path.Combine(podmanRuntimeDirectory, ".acceptance-owner"), podmanRuntimeOwnerToken).ConfigureAwait(false);
+        string podmanRunRoot = Path.Combine(podmanRuntimeDirectory, "run");
         Directory.CreateDirectory(podmanRunRoot);
         if (OperatingSystem.IsLinux())
         {
@@ -1050,8 +1265,26 @@ public static class Program
         await File.WriteAllTextAsync(containersConfigPath, $"[engine]\nhooks_dir = [\"{hooksDir}\"]\n").ConfigureAwait(false);
         string? previousStorageConfig = Environment.GetEnvironmentVariable("CONTAINERS_STORAGE_CONF");
         string? previousContainersConfig = Environment.GetEnvironmentVariable("CONTAINERS_CONF");
+        string? previousPath = Environment.GetEnvironmentVariable("PATH");
         Environment.SetEnvironmentVariable("CONTAINERS_STORAGE_CONF", storageConfigPath);
         Environment.SetEnvironmentVariable("CONTAINERS_CONF", containersConfigPath);
+        string podmanBinary = previousPath?
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(directory => Path.Combine(directory, "podman"))
+            .FirstOrDefault(File.Exists)
+            ?? throw new InvalidOperationException("Production proof could not locate the rootless Podman binary.");
+        string podmanWrapperDirectory = Path.Combine(tempRoot, "podman-bin");
+        Directory.CreateDirectory(podmanWrapperDirectory);
+        string podmanWrapperPath = Path.Combine(podmanWrapperDirectory, "podman");
+        await File.WriteAllTextAsync(
+            podmanWrapperPath,
+            $"#!/bin/sh\nexec '{podmanBinary.Replace("'", "'\\''", StringComparison.Ordinal)}' --root '{podmanGraphRoot.Replace("'", "'\\''", StringComparison.Ordinal)}' --runroot '{podmanRunRoot.Replace("'", "'\\''", StringComparison.Ordinal)}' --hooks-dir '{hooksDir.Replace("'", "'\\''", StringComparison.Ordinal)}' \"$@\"\n")
+            .ConfigureAwait(false);
+        if (OperatingSystem.IsLinux())
+        {
+            File.SetUnixFileMode(podmanWrapperPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        Environment.SetEnvironmentVariable("PATH", $"{podmanWrapperDirectory}{Path.PathSeparator}{previousPath}");
 
         string wlName = PodmanContainerTool.BuildContainerName(new ContainerContext(
             "agent", "a1", "u1", Path.Combine(tempRoot, "workspaces", "users", "u1", "agents", "a1"), "/workspace",
@@ -1066,7 +1299,6 @@ public static class Program
         var registry = new WorkloadRegistry();
         using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDir, "policy-state.json"));
         using var auditRing = new NetworkAccessAuditRing(Path.Combine(stateDir, "audit.jsonl"));
-        var controller = new NacController(policyStore, registry, auditRing);
         var allocator = new WorkloadAddressAllocator(Path.Combine(stateDir, "ip-cursor.json"));
         string workspaceRoot = Path.Combine(tempRoot, "workspaces");
         Directory.CreateDirectory(workspaceRoot);
@@ -1082,6 +1314,12 @@ public static class Program
             loggerFactory.CreateLogger<EgressTopologyManager>(),
             envoySocketHostDir: socketDir,
             hookStateDirectory: nacStateDir);
+        var controller = new NacController(
+            policyStore,
+            registry,
+            auditRing,
+            isContainerAuthorizationGateOpen: () => topology.IsStartupGateOpen,
+            isPackageProxyReady: () => topology.IsPackageProxyReady);
         string sockPath = Path.Combine(socketDir, "envoy.sock");
         string lockPath = Path.Combine(socketDir, "networkaccess.lock");
         var authHost = EnvoyAuthorizationHost.Create(
@@ -1134,6 +1372,9 @@ public static class Program
                 throw new InvalidOperationException("EgressTopologyManager startup gate remained closed after InitializeAsync.");
             }
             Console.WriteLine("[PROD_STAGE] production topology initialized and canary passed");
+
+            await VerifyManagedPackageProxyPathAsync(repoRoot, tempRoot, topology, controller, registry, podman, verifier, loggerFactory)
+                .ConfigureAwait(false);
 
             int egressPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (routeExitCode, routeOutput, routeError) = await ExecAsync(
@@ -2043,6 +2284,22 @@ public static class Program
             }
             Environment.SetEnvironmentVariable("CONTAINERS_STORAGE_CONF", previousStorageConfig);
             Environment.SetEnvironmentVariable("CONTAINERS_CONF", previousContainersConfig);
+            Environment.SetEnvironmentVariable("PATH", previousPath);
+            try
+            {
+                string runtimeOwnerMarker = Path.Combine(podmanRuntimeDirectory, ".acceptance-owner");
+                if (Directory.Exists(podmanRuntimeDirectory)
+                    && string.Equals(await File.ReadAllTextAsync(runtimeOwnerMarker).ConfigureAwait(false), podmanRuntimeOwnerToken, StringComparison.Ordinal)
+                    && Path.GetDirectoryName(Path.GetFullPath(podmanRuntimeDirectory)) == Path.GetFullPath(Path.GetTempPath())
+                    && Path.GetFileName(podmanRuntimeDirectory).StartsWith("nac-run-", StringComparison.Ordinal))
+                {
+                    Directory.Delete(podmanRuntimeDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best effort cleanup of this test's uniquely marked, short Podman runroot.
+            }
             try
             {
                 string ownerMarkerPath = Path.Combine(tempRoot, ".acceptance-owner");

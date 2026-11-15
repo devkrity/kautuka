@@ -69,7 +69,6 @@ public sealed record WindowsPodmanDevEgressOptions(
 
         string stagedHookConfig = Path.Combine(resolvedCertificateDirectory, "kautuka_hook.json");
         string remoteHookScript = $"{remoteHookScriptDirectory}/kautuka_hook.py";
-        string remoteHookTemplate = $"{remoteHookScriptDirectory}/kautuka_workload.nft.json.tmpl";
         await File.WriteAllTextAsync(
             stagedHookConfig,
             $$"""
@@ -82,10 +81,10 @@ public sealed record WindowsPodmanDevEgressOptions(
             """,
             cancellationToken).ConfigureAwait(false);
 
-        await CopyToMachineAsync(podmanRunner, machineName,
-            Path.Combine(hookSourceDirectory, "kautuka_hook.py"), remoteHookScript, cancellationToken).ConfigureAwait(false);
-        await CopyToMachineAsync(podmanRunner, machineName,
-            Path.Combine(hookSourceDirectory, "kautuka_workload.nft.json.tmpl"), remoteHookTemplate, cancellationToken).ConfigureAwait(false);
+        foreach ((string sourcePath, string remotePath) in BuildHookAssetCopies(hookSourceDirectory, remoteHookScriptDirectory))
+        {
+            await CopyToMachineAsync(podmanRunner, machineName, sourcePath, remotePath, cancellationToken).ConfigureAwait(false);
+        }
         await CopyToMachineAsync(podmanRunner, machineName,
             stagedHookConfig, $"{remoteHookDirectory}/kautuka_hook.json", cancellationToken).ConfigureAwait(false);
 
@@ -241,6 +240,20 @@ public sealed record WindowsPodmanDevEgressOptions(
             .Replace("\r", "\\r", StringComparison.Ordinal)
             .Replace("\n", "\\n", StringComparison.Ordinal);
         return $"[engine]{Environment.NewLine}hooks_dir = [\"{escapedDirectory}\", {{append = true}}]{Environment.NewLine}";
+    }
+
+    internal static IReadOnlyList<(string SourcePath, string RemotePath)> BuildHookAssetCopies(
+        string sourceDirectory,
+        string remoteScriptDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(remoteScriptDirectory);
+        return
+        [
+            (Path.Combine(sourceDirectory, "kautuka_hook.py"), $"{remoteScriptDirectory}/kautuka_hook.py"),
+            (Path.Combine(sourceDirectory, "kautuka_workload.nft.json.tmpl"), $"{remoteScriptDirectory}/kautuka_workload.nft.json.tmpl"),
+            (Path.Combine(sourceDirectory, "kautuka_package_proxy.nft.json.tmpl"), $"{remoteScriptDirectory}/kautuka_package_proxy.nft.json.tmpl"),
+        ];
     }
 
     public static async Task WriteClientBundleAsync(

@@ -256,7 +256,10 @@ public sealed record WorkloadContainerSpec
 
         foreach (string host in AddHosts)
         {
-            if (!string.Equals(host, "kautuka-pkgs-proxy:10.247.0.3", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(
+                    host,
+                    $"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}",
+                    StringComparison.OrdinalIgnoreCase))
             {
                 throw new ArgumentException($"Creation rejected: add-host entry '{host}' is not an approved infrastructure mapping.", nameof(AddHosts));
             }

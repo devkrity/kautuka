@@ -1198,7 +1198,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 allocatedIp,
                 compatProfile,
                 workloadRegistry,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
         trackedConnectorContainers[runtimeKey] = containerName;
@@ -1982,7 +1982,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         NetworkAccess.WorkloadPostStartVerifier verifier = postStartVerifier
             ?? throw new InvalidOperationException("The workload post-start verifier is unavailable; refusing to use an ephemeral connector.");
-        NetworkAccess.WorkloadVerificationResult result = await verifier.VerifyWorkloadAsync(workload.ContainerName, workload.AllocatedIp, workload.CompatProfile, workloadRegistry, cancellationToken)
+        NetworkAccess.WorkloadVerificationResult result = await verifier.VerifyWorkloadAsync(workload.ContainerName, workload.AllocatedIp, workload.CompatProfile, workloadRegistry, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         workload.VerifiedContainerId = result.CanonicalContainerId;
     }

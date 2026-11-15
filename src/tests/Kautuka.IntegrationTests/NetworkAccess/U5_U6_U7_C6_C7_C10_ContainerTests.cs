@@ -896,7 +896,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Equal(golden, defaultRuleset);
         Assert.DoesNotContain("20101", defaultRuleset, StringComparison.Ordinal);
 
-        string workloadRuleset = WorkloadRulesetRenderer.Render("10.247.1.20", includePackageProxy: true);
+        string workloadRuleset = WorkloadRulesetRenderer.Render("10.247.0.3", isPackageProxy: true);
 
         // MF7: Idempotent atomic transaction structure
         Assert.StartsWith(
@@ -905,12 +905,12 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             StringComparison.Ordinal);
 
         // Rendering twice produces byte-for-byte identical text
-        string workloadRuleset2 = WorkloadRulesetRenderer.Render("10.247.1.20", includePackageProxy: true);
+        string workloadRuleset2 = WorkloadRulesetRenderer.Render("10.247.0.3", isPackageProxy: true);
         Assert.Equal(workloadRuleset, workloadRuleset2);
 
         // Negative Control (.NC):
         // Without package proxy, ruleset text changes:
-        string workloadNoProxy = WorkloadRulesetRenderer.Render("10.247.1.20", includePackageProxy: false);
+        string workloadNoProxy = WorkloadRulesetRenderer.Render("10.247.0.3", isPackageProxy: false);
         Assert.NotEqual(workloadRuleset, workloadNoProxy);
     }
 

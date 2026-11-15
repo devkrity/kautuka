@@ -298,6 +298,7 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
 
     cid = state.get("id", "")
     annotations = state.get("annotations", {}) or {}
+    is_package_proxy = annotations.get("io.kautuka.role") == "package-proxy"
 
     in_nac = False
     for ip in ips:
@@ -366,6 +367,14 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
                     return ("refuse", "infra_ip_mismatch")
                 accepted_sets.append(alternate)
         if any(set(ips) == set(candidate) and len(ips) == len(candidate) for candidate in accepted_sets):
+            if entry.get("role") == "pkgs-proxy":
+                expected_image = entry.get("image_digest")
+                if (expected != ["10.247.0.3"]
+                        or not is_package_proxy
+                        or not isinstance(expected_image, str)
+                        or annotations.get("io.kautuka.image-id") != expected_image):
+                    return ("refuse", "package_proxy_identity_mismatch")
+                return ("allow", "package_proxy_rules")
             return ("allow", "infra_allowlisted")
         else:
             return ("refuse", "infra_ip_mismatch")
@@ -424,7 +433,7 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
             if owner_cid != cid:
                 return ("refuse", "shared_netns")
 
-    return ("allow", "workload_rules")
+    return ("allow", "package_proxy_rules" if is_package_proxy else "workload_rules")
 
 
 def _is_ipv4(value):
@@ -507,9 +516,10 @@ def canonicalize_nft_json(nft_json_data, required_comments=None, required_worklo
     return canonical_json, canonical_hash
 
 
-def expected_rendered_ruleset_hash(workload_ip, required_comments):
+def expected_rendered_ruleset_hash(workload_ip, required_comments, package_proxy=False):
     """Hash the independent rendered nft JSON golden for the workload address."""
-    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kautuka_workload.nft.json.tmpl")
+    template_name = "kautuka_package_proxy.nft.json.tmpl" if package_proxy else "kautuka_workload.nft.json.tmpl"
+    template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), template_name)
     with open(template_path, "r", encoding="utf-8") as template_file:
         template = template_file.read().replace("{{IP}}", workload_ip)
     _, expected_hash = canonicalize_nft_json(
@@ -520,26 +530,27 @@ def expected_rendered_ruleset_hash(workload_ip, required_comments):
     return expected_hash
 
 
-def render_ruleset(ip, include_pkgs_proxy=False):
+def render_ruleset(ip, package_proxy=False):
     """
     Renders idempotent, atomic table inet kautuka_workload ruleset (Section 4.3.2).
     """
-    pkg_rule = "    ip daddr 10.247.0.3 tcp dport 20101 accept\n" if include_pkgs_proxy else ""
+    proxy_input_rule = "    ip saddr 10.247.0.2 tcp dport 20101 accept\n" if package_proxy else ""
+    proxy_reply_rule = "    ct state established,related accept\n" if package_proxy else ""
     return f"""table inet kautuka_workload
 delete table inet kautuka_workload
 table inet kautuka_workload {{
   chain input {{ type filter hook input priority 0; policy drop;
     iifname "lo" accept
     ct state established,related accept
-    counter drop comment "input_drop"
+{proxy_input_rule}    counter drop comment "input_drop"
   }}
   chain output {{ type filter hook output priority 0; policy drop;
     oifname "lo" accept
-    meta nfproto ipv6 counter drop comment "ipv6_drop"
+{proxy_reply_rule}    meta nfproto ipv6 counter drop comment "ipv6_drop"
     oifname != "lo" ip saddr != {ip} counter drop comment "spoof_drop"
     ip daddr 10.247.0.2 tcp dport 15001 accept
     ip daddr 10.247.0.2 meta l4proto {{ udp, tcp }} th dport 53 accept
-{pkg_rule}    ip daddr 10.247.0.0/16 counter drop comment "wl_net_drop"
+    ip daddr 10.247.0.0/16 counter drop comment "wl_net_drop"
     ip daddr {{ 169.254.0.0/16, 168.63.129.16 }} counter drop comment "meta_drop"
     meta l4proto udp counter drop comment "udp_drop"
     meta l4proto tcp accept
@@ -690,7 +701,7 @@ def main():
             sys.exit(0)
 
         workload_ip = ips[0]
-        rules_text = render_ruleset(workload_ip, include_pkgs_proxy=False)
+        rules_text = render_ruleset(workload_ip, package_proxy=(reason == "package_proxy_rules"))
         rules_sha = hashlib.sha256(rules_text.encode("utf-8")).hexdigest()
 
         apply_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-f", "-"]
@@ -723,7 +734,9 @@ def main():
                 required_comments=expected_comments,
                 required_workload_ip=workload_ip,
             )
-            expected_hash = expected_rendered_ruleset_hash(workload_ip, expected_comments)
+            expected_hash = expected_rendered_ruleset_hash(
+                workload_ip, expected_comments, package_proxy=(reason == "package_proxy_rules")
+            )
             if canonical_hash != expected_hash:
                 raise ValueError("Applied workload ruleset does not match the rendered ruleset")
             rules_sha = canonical_hash

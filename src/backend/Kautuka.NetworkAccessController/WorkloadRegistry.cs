@@ -338,7 +338,10 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         string attribution = entry.Attribution;
 
         if (entry.ContainerId.StartsWith("system::", StringComparison.Ordinal)
-            || (!entry.Systemwide && string.IsNullOrEmpty(agentId) && !string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
+            || (!entry.Systemwide
+                && string.IsNullOrEmpty(agentId)
+                && entry.Kind != "builder"
+                && !string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
         {
             egress = "deny-all";
             attribution = "none";

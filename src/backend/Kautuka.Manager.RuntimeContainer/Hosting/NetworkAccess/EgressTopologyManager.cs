@@ -103,6 +103,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly object disposeLock = new();
     private Task? disposeTask;
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<InfraAllowlistEntry> baseInfraAllowlistEntries = [];
+    private InfraAllowlistEntry? packageProxyAllowlistEntry;
+    private readonly object infraAllowlistLock = new();
+    private volatile bool packageProxyStartupReady;
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -516,6 +520,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
 
         var rebuiltEntries = new List<RegistryEntry>();
+        RegistryEntry? previouslyVerifiedPackageProxy = registry.FindByIp(PackageProxyIp);
         if (!string.IsNullOrWhiteSpace(psResult.StdOut))
         {
             try
@@ -567,6 +572,32 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             string egress = GetStringProperty(labels, "io.kautuka.egress");
                             string compat = GetStringProperty(labels, "io.kautuka.compat");
                             string purpose = GetStringProperty(labels, "io.kautuka.purpose");
+
+                            // The package proxy is a reserved service identity. Never rebuild it
+                            // from self-asserted labels; the sidecar supervisor registers it only
+                            // after checking Manager-owned image provenance, annotations and IP.
+                            if (string.Equals(agent, "package-proxy", StringComparison.Ordinal))
+                            {
+                                if (previouslyVerifiedPackageProxy is not null
+                                    && string.Equals(previouslyVerifiedPackageProxy.ContainerId, cid, StringComparison.OrdinalIgnoreCase)
+                                    && IsPreviouslyAuthorizedPackageProxy(inspected, labels, cid))
+                                {
+                                    try
+                                    {
+                                        await postStartVerifier.VerifyWorkloadRulesetAsync(
+                                            cid, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+                                        rebuiltEntries.Add(previouslyVerifiedPackageProxy);
+                                    }
+                                    catch (Exception verificationException) when (verificationException is not OperationCanceledException)
+                                    {
+                                        packageProxyStartupReady = false;
+                                        logger.LogWarning(verificationException, "Previously verified package proxy {ContainerId} no longer has the required workload rules.", cid);
+                                    }
+                                }
+                                else packageProxyStartupReady = false;
+
+                                continue;
+                            }
 
                             bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
                             bool isProbe = string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase);
@@ -678,7 +709,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             try
                             {
                                 ImageCompatProfile? compatProfile = await ResolveInspectedImageCompatibilityProfileAsync(inspected, cancellationToken).ConfigureAwait(false);
-                                await postStartVerifier.VerifyWorkloadAsync(cid, ip, compatProfile, candidateRegistry, cancellationToken).ConfigureAwait(false);
+                                await postStartVerifier.VerifyWorkloadAsync(
+                                    cid, ip, compatProfile, candidateRegistry,
+                                    isPackageProxy: string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal),
+                                    cancellationToken: cancellationToken).ConfigureAwait(false);
                             }
                             catch (Exception verificationException) when (verificationException is not OperationCanceledException)
                             {
@@ -736,6 +770,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         registry.Rebuild(rebuiltEntries);
         logger.LogInformation("Workload registry rebuilt with {Count} entries.", registry.Count);
     }
+
+    public Task RebuildRegistryFromLiveContainersAsync(CancellationToken cancellationToken = default)
+        => RebuildRegistryFromLiveContainersAsync(registry, cancellationToken);
 
     /// <summary>
     /// Executes the startup canary test (Section 4.3.4 item 5).
@@ -1111,15 +1148,200 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public void WriteInfraAllowlist(IReadOnlyList<InfraAllowlistEntry>? entries = null)
     {
-        entries ??=
-        [
-            new(EgressPodName, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"),
-            new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
-            new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
-            new(PackageProxyContainerName, "pkgs-proxy", [PackageProxyIp], "pinned"),
-        ];
+        lock (infraAllowlistLock)
+        {
+            entries ??=
+            [
+                new(EgressPodName, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"),
+                new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
+                new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
+            ];
+            baseInfraAllowlistEntries = entries.Where(entry => entry.Role != "pkgs-proxy").ToArray();
+            IReadOnlyList<InfraAllowlistEntry> persistedEntries = packageProxyAllowlistEntry is null
+                ? baseInfraAllowlistEntries
+                : [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry];
 
-        var doc = new InfraAllowlistDocument(1, entries);
+            var doc = new InfraAllowlistDocument(1, persistedEntries);
+            WriteInfraAllowlistDocument(doc);
+        }
+    }
+
+    private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
+    {
+        InfraAllowlistEntry? authorized;
+        lock (infraAllowlistLock)
+        {
+            authorized = packageProxyAllowlistEntry;
+        }
+
+        if (authorized is null
+            || !string.Equals(authorized.Id, containerId, StringComparison.OrdinalIgnoreCase)
+            || authorized.Role != "pkgs-proxy"
+            || !authorized.ExpectedIpv4.Contains(PackageProxyIp, StringComparer.Ordinal))
+        {
+            return false;
+        }
+
+        JsonElement config = inspected.GetProperty("Config");
+        JsonElement annotations = config.TryGetProperty("Annotations", out JsonElement annotationElement) ? annotationElement : default;
+        string inspectedImage = NormalizeContainerImageId(GetStringProperty(inspected, "Image"));
+        string imageAnnotation = GetStringProperty(annotations, "io.kautuka.image-id");
+        string proxyRole = GetStringProperty(annotations, "io.kautuka.role");
+        string networkIp = string.Empty;
+        if (inspected.TryGetProperty("NetworkSettings", out JsonElement networkSettings)
+            && networkSettings.TryGetProperty("Networks", out JsonElement networks)
+            && networks.TryGetProperty(WorkloadNetworkName, out JsonElement workloadNetwork))
+        {
+            networkIp = GetStringProperty(workloadNetwork, "IPAddress");
+        }
+
+        bool running = inspected.TryGetProperty("State", out JsonElement state)
+            && state.TryGetProperty("Running", out JsonElement runningValue)
+            && runningValue.ValueKind == JsonValueKind.True;
+        bool healthy = running && state.TryGetProperty("Health", out JsonElement health)
+            && string.Equals(GetStringProperty(health, "Status"), "healthy", StringComparison.OrdinalIgnoreCase);
+        return running
+            && healthy
+            && string.Equals(networkIp, PackageProxyIp, StringComparison.Ordinal)
+            && string.Equals(inspectedImage, authorized.ImageDigest, StringComparison.Ordinal)
+            && string.Equals(imageAnnotation, authorized.ImageDigest, StringComparison.Ordinal)
+            && string.Equals(proxyRole, "package-proxy", StringComparison.Ordinal)
+            && string.Equals(GetStringProperty(labels, "io.kautuka.agent"), "package-proxy", StringComparison.Ordinal)
+            && string.Equals(GetStringProperty(labels, "io.kautuka.user"), "system", StringComparison.Ordinal)
+            && string.Equals(GetStringProperty(labels, "io.kautuka.kind"), "agent-sandbox", StringComparison.Ordinal);
+    }
+
+    private static string NormalizeContainerImageId(string imageId)
+    {
+        imageId = imageId.Trim();
+        if (imageId.Length == 64 && imageId.All(Uri.IsHexDigit))
+        {
+            return $"sha256:{imageId.ToLowerInvariant()}";
+        }
+
+        if (imageId.StartsWith("sha256:", StringComparison.Ordinal)
+            && imageId.Length == 71
+            && imageId.AsSpan("sha256:".Length).ToString().All(Uri.IsHexDigit))
+        {
+            return $"sha256:{imageId["sha256:".Length..].ToLowerInvariant()}";
+        }
+
+        return string.Empty;
+    }
+
+    private async Task<bool> IsPreviouslyAuthorizedPackageProxyAsync(string containerId, CancellationToken cancellationToken)
+    {
+        PodmanCommandResult result = await podmanRunner.RunAsync(["inspect", containerId], 10, cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0) return false;
+
+        using JsonDocument document = JsonDocument.Parse(result.StdOut);
+        JsonElement inspected = document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement[0] : document.RootElement;
+        JsonElement config = inspected.GetProperty("Config");
+        JsonElement labels = config.TryGetProperty("Labels", out JsonElement labelElement) ? labelElement : default;
+        return IsPreviouslyAuthorizedPackageProxy(inspected, labels, containerId);
+    }
+
+    public async Task AuthorizePackageProxyContainerAsync(
+        string containerId,
+        string imageId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(imageId);
+        if (!imageId.StartsWith("sha256:", StringComparison.Ordinal)
+            || imageId.Length != 71)
+        {
+            throw new ArgumentException("Package proxy image ID must be a full sha256 image ID.", nameof(imageId));
+        }
+
+        lock (infraAllowlistLock)
+        {
+            packageProxyAllowlistEntry = new InfraAllowlistEntry(containerId, "pkgs-proxy", [PackageProxyIp], imageId);
+            var doc = new InfraAllowlistDocument(1, [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry]);
+            WriteInfraAllowlistDocument(doc);
+        }
+
+        await SyncWindowsPodmanInfraAllowlistAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task RevokePackageProxyContainerAsync(
+        string containerId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        lock (infraAllowlistLock)
+        {
+            if (packageProxyAllowlistEntry is not null
+                && string.Equals(packageProxyAllowlistEntry.Id, containerId, StringComparison.OrdinalIgnoreCase))
+            {
+                packageProxyAllowlistEntry = null;
+                WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, baseInfraAllowlistEntries));
+                packageProxyStartupReady = false;
+            }
+        }
+
+        if (registry.TryGetByIp(PackageProxyIp, out RegistryEntry? registered)
+            && registered is not null
+            && string.Equals(registered.ContainerId, containerId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(registered.AgentId, "package-proxy", StringComparison.Ordinal))
+        {
+            packageProxyStartupReady = false;
+            registry.Deregister(PackageProxyIp, containerId);
+        }
+
+        // Always sync, including retries after the host-side entry has already
+        // been removed. A previous machine copy may have failed while the local
+        // state was successfully updated.
+        await SyncWindowsPodmanInfraAllowlistAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public void RegisterVerifiedPackageProxyContainer(string containerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        if (registry.TryGetByIp(PackageProxyIp, out RegistryEntry? current)
+            && current is not null
+            && !string.Equals(current.AgentId, "package-proxy", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("The reserved package proxy address is already owned by another workload.");
+        }
+
+        registry.Register(new RegistryEntry(
+            PackageProxyIp, "system", "package-proxy", containerId, "agent-sandbox", null,
+            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow,
+            Purpose: "package-proxy"));
+    }
+
+    public bool IsPackageProxyRegistered
+        => registry.TryGetByIp(PackageProxyIp, out RegistryEntry? entry)
+            && entry is not null
+            && string.Equals(entry.Kind, "agent-sandbox", StringComparison.Ordinal)
+            && string.Equals(entry.UserId, "system", StringComparison.Ordinal)
+            && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)
+            && string.Equals(entry.Egress, "normal", StringComparison.Ordinal)
+            && string.Equals(entry.Attribution, "user-agent", StringComparison.Ordinal);
+
+    public void SetPackageProxyReady(bool ready)
+        => packageProxyStartupReady = ready && IsPackageProxyRegistered;
+
+    public bool IsPackageProxyReady => packageProxyStartupReady && IsPackageProxyRegistered;
+
+    public async Task<bool> VerifyPackageProxyRulesetAsync(string containerId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await postStartVerifier.VerifyWorkloadRulesetAsync(
+                containerId, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Package proxy {ContainerId} failed special workload ruleset verification.", containerId);
+            return false;
+        }
+    }
+
+    private void WriteInfraAllowlistDocument(InfraAllowlistDocument doc)
+    {
         string directory = Path.GetDirectoryName(allowlistFilePath)!;
         Directory.CreateDirectory(directory);
         if (OperatingSystem.IsLinux())
@@ -2591,6 +2813,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             bool hasNameMatch = cidByName.TryGetValue(entry.ContainerId, out string? matchedCid);
             string? liveCid = hasDirectId ? entry.ContainerId : hasNameMatch ? matchedCid : null;
             bool isActive = liveCid is not null && runningCids.Contains(liveCid);
+            bool isPackageProxy = string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal);
+            if (isPackageProxy && !isActive)
+            {
+                packageProxyStartupReady = false;
+            }
             bool isQuarantined = desiredStateStore?.IsWorkloadQuarantined(entry.ContainerId) == true
                 || (liveCid is not null && desiredStateStore?.IsWorkloadQuarantined(liveCid) == true);
             if (liveCid is not null && isQuarantined)
@@ -2627,11 +2854,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             {
                 try
                 {
-                    string canonicalId = await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip, cancellationToken).ConfigureAwait(false);
+                    if (isPackageProxy && !await IsPreviouslyAuthorizedPackageProxyAsync(liveCid!, cancellationToken).ConfigureAwait(false))
+                    {
+                        packageProxyStartupReady = false;
+                        continue;
+                    }
+
+                    string canonicalId = await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip,
+                        isPackageProxy: isPackageProxy,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (!string.Equals(canonicalId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, canonicalId);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    if (isPackageProxy) packageProxyStartupReady = false;
                     string? canonicalId = ex is WorkloadRulesetVerificationException drift ? drift.CanonicalContainerId : null;
                     canonicalId ??= WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : null;
                     if (canonicalId is null)

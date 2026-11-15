@@ -16,6 +16,8 @@ public static class NetworkAddressClassifier
 {
     public const string SinkholeAddress = "198.18.250.250";
     public const string SinkholeCidr = "198.18.0.0/15";
+    public const string PackageProxyServiceAddress = "198.18.250.249";
+    public const int PackageProxyServicePort = 20101;
     public const string WorkloadSubnetCidr = "10.247.0.0/16";
     public const string LanSourceBindAddress = "10.248.0.3";
     public const string AzureWireServerAddress = "168.63.129.16";
