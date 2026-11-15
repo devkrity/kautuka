@@ -6,6 +6,7 @@ import type { ConnectorTestPayload } from '../api/connectors';
 import { useTestConnector } from '../api/queries';
 import type { ConnectorTestResult } from '../schemas/connectorSchema';
 import type { ConnectorDraft } from '../types/connectorDraft';
+import { apiError } from '@/features/settings';
 
 interface ConnectorFormModalProps {
   draft: ConnectorDraft;
@@ -179,25 +180,32 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
 
   const buildTestPayload = (): ConnectorTestPayload => {
     const testEnvEntries = new Map(Object.entries(testEnv));
+    const isHttpTransport = draft.transport === 'http';
+    const isContainerTransport = draft.transport === 'container';
+    const isLocalTransport = !isHttpTransport && !isContainerTransport;
 
     return {
       id: draft.id || null,
       transport: draft.transport,
-      httpUrl: draft.httpUrl || null,
-      localCommand: draft.localCommand || null,
-      localArgs: draft.localArgs
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      containerImage: draft.containerImage || null,
-      containerCommand: draft.containerCommand || null,
-      containerArgs: draft.containerArgs
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      containerSidecarName: draft.containerSidecarName || null,
-      bundlePath: draft.bundlePath || null,
-      serverType: draft.serverType || null,
+      httpUrl: isHttpTransport ? draft.httpUrl || null : null,
+      localCommand: isLocalTransport ? draft.localCommand || null : null,
+      localArgs: isLocalTransport
+        ? draft.localArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+      containerImage: isContainerTransport ? draft.containerImage || null : null,
+      containerCommand: isContainerTransport ? draft.containerCommand || null : null,
+      containerArgs: isContainerTransport
+        ? draft.containerArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+      containerSidecarName: isContainerTransport ? draft.containerSidecarName || null : null,
+      bundlePath: !isHttpTransport ? draft.bundlePath || null : null,
+      serverType: !isHttpTransport ? draft.serverType || null : null,
       readinessTimeoutSeconds: Number.parseInt(draft.readinessTimeoutSeconds, 10) || null,
       jitCooldownSeconds: Number.parseInt(draft.jitCooldownSeconds, 10) || null,
       healthcheckUrl: draft.healthcheckUrl || null,
@@ -231,7 +239,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
       onError: (err) => {
         setTestResult({
           success: false,
-          message: err instanceof Error ? err.message : 'Test request failed.',
+          message: apiError(err),
           toolCount: null,
           packageChecked: null,
           toolNames: null,

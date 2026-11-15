@@ -28,6 +28,65 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         new NetworkAccessPolicyStore(Path.Combine(Path.GetTempPath(), $"nac-test-open-gate-{Guid.NewGuid():N}.json")));
 
     [Fact]
+    public async Task PackageMaterializerCleanupUsesIndependentBoundedTokenAfterRequestCancellation()
+    {
+        using var requestCancellation = new CancellationTokenSource();
+        await requestCancellation.CancelAsync();
+        bool cleanupRan = false;
+
+        await McpbImageMaterializer.RunBoundedCleanupAsync(
+            cancellationToken =>
+            {
+                Assert.True(cancellationToken.CanBeCanceled);
+                Assert.False(cancellationToken.IsCancellationRequested);
+                cleanupRan = true;
+                return Task.CompletedTask;
+            },
+            TimeSpan.FromSeconds(1));
+
+        Assert.True(cleanupRan);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await McpbImageMaterializer.RunBoundedCleanupAsync(
+                cancellationToken => Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken),
+                TimeSpan.FromMilliseconds(50)));
+    }
+
+    [Fact]
+    public async Task ProbeRequestCancellationDoesNotCancelImageBuild()
+    {
+        using var request = new CancellationTokenSource();
+        var buildStarted = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishBuild = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string> probe = WorkspaceContainerConnectorExecutionService.CompleteProbeMaterializationAsync(
+            token => { buildStarted.SetResult(token); return finishBuild.Task; },
+            request.Token, CancellationToken.None, CancellationToken.None);
+
+        CancellationToken buildToken = await buildStarted.Task;
+        await request.CancelAsync();
+        Assert.False(buildToken.IsCancellationRequested);
+        Assert.False(probe.IsCompleted);
+        finishBuild.SetResult("completed-image");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probe);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProbeImageBuildStillStopsOnAdmissionClosureOrShutdown(bool stopHost)
+    {
+        using var admission = new CancellationTokenSource();
+        using var shutdown = new CancellationTokenSource();
+        var buildStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string> probe = WorkspaceContainerConnectorExecutionService.CompleteProbeMaterializationAsync(
+            async token => { buildStarted.SetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return "image"; },
+            CancellationToken.None, admission.Token, shutdown.Token);
+        await buildStarted.Task;
+        await (stopHost ? shutdown : admission).CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probe);
+    }
+
+    [Fact]
     public async Task ImageCompatibilityLookupResolvesMaterializedTagToImmutableImageId_WithNegativeControl()
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-mcpb-image-compat-" + Guid.NewGuid().ToString("N"));
@@ -36,6 +95,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         {
             const string imageTag = "localhost/kautuka-mcpb-connector:latest";
             const string imageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            string rawPodmanImageId = imageId["sha256:".Length..];
             const string pinnedImage = "ghcr.io/example/connector@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
             const string pinnedImageDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
             var commands = new List<string[]>();
@@ -44,12 +104,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 commands.Add([.. args]);
                 if (args.SequenceEqual(["image", "inspect", imageTag], StringComparer.Ordinal))
                 {
-                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + imageId + "\",\"RepoDigests\":[]}]", string.Empty, ProcessTerminationReason.Completed));
+                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + rawPodmanImageId + "\",\"RepoDigests\":[]}]", string.Empty, ProcessTerminationReason.Completed));
                 }
 
                 if (args.SequenceEqual(["image", "inspect", pinnedImage], StringComparer.Ordinal))
                 {
-                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + imageId + "\",\"RepoDigests\":[\"ghcr.io/example/connector@" + pinnedImageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed));
+                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + rawPodmanImageId + "\",\"RepoDigests\":[\"ghcr.io/example/connector@" + pinnedImageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed));
                 }
 
                 return Task.FromResult(new PodmanCommandResult(1, string.Empty, "unexpected Podman command", ProcessTerminationReason.NonZeroExit));
@@ -577,6 +637,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 CancellationToken.None,
                 false,
                 workspace,
+                null,
             ]));
 
             InvalidOperationException exception = await Assert.ThrowsAsync<InvalidOperationException>(() => launch);
@@ -1202,6 +1263,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             isBraked: false);
 
         Assert.DoesNotContain("--entrypoint", arguments, StringComparer.Ordinal);
+        // Podman must retain the foreground builder container until the subsequent `podman commit`.
+        // `--rm` deletes it as soon as this run exits; `-d` would let commit race the installer.
+        Assert.DoesNotContain("--rm", arguments, StringComparer.Ordinal);
+        Assert.DoesNotContain("-d", arguments, StringComparer.Ordinal);
         Assert.Contains("--network", arguments, StringComparer.Ordinal);
         Assert.Contains(arguments, static argument => argument.StartsWith(ConnectorContainerSpecBuilder.WorkloadNetworkName, StringComparison.Ordinal));
         Assert.Equal("/bin/sh", arguments[^3]);
@@ -1430,6 +1495,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         bool containerExists = false;
         string? startedFingerprint = null;
         string? inspectJson = null;
+        var registry = new Kautuka.NetworkAccessController.WorkloadRegistry();
+        int launchCount = 0;
+        string? latestContainerId = null;
+        string? latestWorkloadIp = null;
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
@@ -1449,7 +1518,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             int fingerprintIndex = args.ToList().IndexOf("--label") + 1;
             startedFingerprint = args.Skip(fingerprintIndex).First(static label => label.StartsWith("kautuka.spec-fingerprint=", StringComparison.Ordinal))["kautuka.spec-fingerprint=".Length..];
             containerExists = true;
-            inspectJson = ConnectorInspectJson(hostWorkspace, startedFingerprint, desiredVersion: 7);
+            latestContainerId = new string('0', 63) + (++launchCount).ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+            latestWorkloadIp = registry.GetAll().Single(entry => string.Equals(entry.ContainerId, containerName, StringComparison.Ordinal)).Ip;
+            inspectJson = ConnectorInspectJson(hostWorkspace, startedFingerprint, desiredVersion: 7, latestContainerId, latestWorkloadIp);
+            Assert.True(PodmanContainerIdentity.TryRead(inspectJson, out string parsedId, out string parsedIp));
+            Assert.Equal(latestContainerId, parsedId);
+            Assert.Equal(latestWorkloadIp, parsedIp);
             return Success(containerName);
         }
         PodmanCommandResult Remove()
@@ -1462,7 +1536,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Directory.CreateDirectory(stateDirectory);
         try
         {
-            var registry = new Kautuka.NetworkAccessController.WorkloadRegistry();
             var desiredState = new WorkspaceDesiredStateStore();
             ContainerContext agentAlpha = FingerprintContext("agent-alpha", hostWorkspace);
             _ = desiredState.ApplyDesiredState(
@@ -1506,9 +1579,25 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     CancellationToken.None,
                     false,
                     context,
+                    null,
                 ])!).ConfigureAwait(false);
+            void MarkLatestLaunchVerifiedForFixture()
+            {
+                RegistryEntry provisional = registry.FindByIp(latestWorkloadIp!)!;
+                Assert.NotNull(provisional);
+                Assert.Equal(containerName, provisional.ContainerId);
+                Assert.True(registry.UpdateContainerId(provisional.Ip, provisional.ContainerId, latestContainerId!));
+                RegistryEntry registered = registry.FindByIp(provisional.Ip)!;
+                Assert.True(registry.TryQuarantine(registered.Ip, latestContainerId!));
+                RegistryEntry quarantined = registry.FindByIp(registered.Ip)!;
+                RegistryEntry desired = quarantined with { Egress = registered.Egress, Attribution = registered.Attribution };
+                Assert.True(registry.TryPromoteVerified(quarantined, desired));
+                Assert.True(registry.IsVerified(registered.Ip, latestContainerId!));
+            }
 
             await EnsureAsync(agentAlpha);
+            string alphaContainerId = latestContainerId!;
+            MarkLatestLaunchVerifiedForFixture();
             int runCount = commands.Count(static command => command[0] == "run");
             await EnsureAsync(agentAlpha);
 
@@ -1525,6 +1614,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Equal(runCount + 1, commands.Count(static command => command[0] == "run"));
             Assert.Contains(commands, static command => command[0] == "rm");
             Assert.NotEqual(startedFingerprint, connector.SpecFingerprint);
+            MarkLatestLaunchVerifiedForFixture();
+            RegistryEntry betaEntry = Assert.Single(registry.GetAll());
+            Assert.Equal("agent-beta", betaEntry.AgentId);
+            Assert.Equal(latestContainerId, betaEntry.ContainerId);
+            Assert.NotEqual(alphaContainerId, betaEntry.ContainerId);
         }
         finally
         {
@@ -1569,6 +1663,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         var commands = new List<string[]>();
         bool containerExists = false;
         string? inspectJson = null;
+        var registry = new WorkloadRegistry();
+        const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
@@ -1598,7 +1694,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 string fingerprint = args.Skip(labelIndex)
                     .First(static label => label.StartsWith("kautuka.spec-fingerprint=", StringComparison.Ordinal))
                     ["kautuka.spec-fingerprint=".Length..];
-                inspectJson = ConnectorInspectJson(workspace.HostWorkspacePath, fingerprint, desiredVersion: 1);
+                string workloadIp = Assert.Single(registry.GetAll()).Ip;
+                inspectJson = ConnectorInspectJson(workspace.HostWorkspacePath, fingerprint, desiredVersion: 1, containerId, workloadIp);
                 containerExists = true;
                 return Task.FromResult(Success(containerName));
             }
@@ -1611,7 +1708,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
             throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
         });
-        var registry = new WorkloadRegistry();
         await using var service = new WorkspaceContainerConnectorExecutionService(
             desired,
             runner,
@@ -1635,6 +1731,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             CancellationToken.None,
             false,
             workspace,
+            null,
         ])!).ConfigureAwait(false);
 
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
@@ -2315,13 +2412,14 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         => new("agent", agentId, "user-alpha", hostPath, "/workspace", "image@sha256:digest",
             1, "512m", 30, [], new Dictionary<string, string>());
 
-    private static string ConnectorInspectJson(string hostPath, string fingerprint, long desiredVersion)
+    private static string ConnectorInspectJson(string hostPath, string fingerprint, long desiredVersion, string containerId, string workloadIp)
         => JsonSerializer.Serialize(new[]
         {
             new
             {
+                Id = containerId,
                 Image = "sha256:current",
-                NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new() } },
+                NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = workloadIp } } },
                 State = new { Status = "running" },
                 Config = new
                 {

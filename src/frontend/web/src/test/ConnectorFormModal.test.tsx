@@ -2,6 +2,7 @@ import { ConnectorFormModal } from '@/features/connectors/components/ConnectorFo
 import type { ConnectorDraft } from '@/features/connectors/types/connectorDraft';
 import { fireEvent, screen } from '@testing-library/dom';
 import { render } from '@testing-library/react';
+import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mutateSpy = vi.fn();
@@ -45,6 +46,63 @@ function createDraft(): ConnectorDraft {
 describe('ConnectorFormModal container validation credentials', () => {
   beforeEach(() => {
     mutateSpy.mockReset();
+  });
+
+  it('omits stale local command fields when testing a saved container connector', () => {
+    const draft = {
+      ...createDraft(),
+      transport: 'container',
+      localCommand: 'uv',
+      localArgs: 'run\npython\n-m\nkautuka_web_tools.server',
+      containerCommand: 'uv',
+      containerArgs: 'run\npython\n-m\nkautuka_web_tools.server',
+    };
+
+    render(
+      <ConnectorFormModal
+        draft={draft}
+        isNew={false}
+        onSave={() => undefined}
+        onClose={() => undefined}
+        saving={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+
+    expect(mutateSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transport: 'container',
+        localCommand: null,
+        localArgs: [],
+        containerCommand: 'uv',
+        containerArgs: ['run', 'python', '-m', 'kautuka_web_tools.server'],
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it('shows the Gateway validation message when a test request is rejected', () => {
+    render(
+      <ConnectorFormModal
+        draft={createDraft()}
+        isNew={false}
+        onSave={() => undefined}
+        onClose={() => undefined}
+        saving={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
+    const [, callbacks] = mutateSpy.mock.calls[0] as [unknown, { onError: (error: unknown) => void }];
+    act(() =>
+      callbacks.onError({
+        message: 'Request failed with status code 400',
+        response: { data: { message: 'Connector test must use the saved destination.' } },
+      })
+    );
+
+    expect(screen.getByText('Connector test must use the saved destination.')).toBeInTheDocument();
   });
 
   it('adds, renames and removes masked credential rows without moving entered values', () => {

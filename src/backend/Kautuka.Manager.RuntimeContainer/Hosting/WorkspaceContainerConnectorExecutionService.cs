@@ -8,6 +8,7 @@ using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 using ModelContextProtocol.Client;
@@ -31,7 +32,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     NetworkAccess.WorkloadLaunchGate? workloadLaunchGate = null,
     Kautuka.NetworkAccessController.NetworkAccessPolicyStore? probePolicyStore = null,
     string stdioCommand = PodmanCommandRunner.BinaryName,
-    IReadOnlyList<string>? stdioArgumentsPrefix = null) : IAsyncDisposable
+    IReadOnlyList<string>? stdioArgumentsPrefix = null,
+    IHostApplicationLifetime? hostLifetime = null) : IAsyncDisposable
 {
     private const string agentSandboxInstallRoot = "/home/node/.kautuka/connectors";
     private const string agentSandboxManifestPath = "/home/node/.kautuka/connectors/.installed.json";
@@ -800,7 +802,19 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 return sandboxLaunch;
             }
 
-            connector = await PrepareRuntimeConnectorAsync(connector, isBraked, cancellationToken).ConfigureAwait(false);
+            if (isProbe)
+            {
+                connector = await CompleteProbeMaterializationAsync(
+                    token => PrepareRuntimeConnectorAsync(connector, isBraked, token),
+                    cancellationToken,
+                    launchLease.CancellationToken,
+                    hostLifetime?.ApplicationStopping ?? CancellationToken.None).ConfigureAwait(false);
+                workloadLaunchGate?.EnsureLaunchAllowed(launchUserId);
+            }
+            else
+            {
+                connector = await PrepareRuntimeConnectorAsync(connector, isBraked, cancellationToken).ConfigureAwait(false);
+            }
 
             string runtimeKey = BuildRuntimeKey(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             string containerName = BuildContainerName(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
@@ -1108,6 +1122,18 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         return AgentSandboxInstallContract.ApplyRuntime(connector, runtimeImage);
     }
 
+    internal static async Task<T> CompleteProbeMaterializationAsync<T>(
+        Func<CancellationToken, Task<T>> materialize,
+        CancellationToken requestCancellation,
+        CancellationToken admissionCancellation,
+        CancellationToken shutdownCancellation)
+    {
+        using var buildCancellation = CancellationTokenSource.CreateLinkedTokenSource(admissionCancellation, shutdownCancellation);
+        T result = await materialize(buildCancellation.Token).ConfigureAwait(false);
+        requestCancellation.ThrowIfCancellationRequested();
+        return result;
+    }
+
     private async Task EnsureConnectorContainerRunningAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string runtimeKey,
@@ -1333,7 +1359,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             throw new InvalidOperationException($"Connector '{connector.ConnectorId}' cannot be authorized because post-start verification is unavailable.");
         }
 
-        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, compatProfile, workloadRegistry, cancellationToken).ConfigureAwait(false);
+        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, compatProfile, workloadRegistry, cancellationToken: cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         workloadLaunchGate?.EnsureLaunchAllowed(identity.UserId);
 
@@ -1511,7 +1537,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             throw new ContainerInspectionUnavailableException("Connector image could not be inspected. Container changes are deferred.");
         }
 
-        return result.StdOut.Trim();
+        string inspectedImageId = result.StdOut.Trim();
+        return NormalizePodmanImageId(inspectedImageId) is { Length: > 0 } normalizedImageId
+            ? normalizedImageId
+            : inspectedImageId;
     }
 
     private async Task<ImageCompatibilityResolution> ResolveImageCompatibilityAsync(
@@ -1618,13 +1647,16 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         if (!inspectedImage.TryGetProperty("Id", out JsonElement immutableIdElement)
-            || immutableIdElement.ValueKind != JsonValueKind.String
-            || !IsSha256Digest(immutableIdElement.GetString()))
+            || immutableIdElement.ValueKind != JsonValueKind.String)
         {
             throw new ContainerInspectionUnavailableException("Connector image inspection did not return a canonical immutable SHA-256 image ID. Container changes are deferred.");
         }
 
-        string resolvedImage = immutableIdElement.GetString()!;
+        string resolvedImage = NormalizePodmanImageId(immutableIdElement.GetString());
+        if (string.IsNullOrWhiteSpace(resolvedImage))
+        {
+            throw new ContainerInspectionUnavailableException("Connector image inspection did not return a canonical immutable SHA-256 image ID. Container changes are deferred.");
+        }
         NetworkAccess.ImageCompatProfile? resolvedProfile = null;
         if (inspectedImage.TryGetProperty("RepoDigests", out JsonElement repoDigests)
             && repoDigests.ValueKind == JsonValueKind.Array)
@@ -1681,6 +1713,25 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         return true;
+    }
+
+    private static string NormalizePodmanImageId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        string trimmed = value.Trim();
+        string hex = trimmed.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+            ? trimmed["sha256:".Length..]
+            : trimmed;
+        if (hex.Length != 64 || !hex.All(Uri.IsHexDigit))
+        {
+            return string.Empty;
+        }
+
+        return $"sha256:{hex.ToLowerInvariant()}";
     }
 
     private sealed record ImageCompatibilityResolution(string Image, NetworkAccess.ImageCompatProfile? Profile);

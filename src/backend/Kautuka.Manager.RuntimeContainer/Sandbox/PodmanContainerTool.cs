@@ -346,7 +346,7 @@ public sealed class PodmanContainerTool(
         {
             if (postStartVerifier is not null)
             {
-                await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, null, cancellationToken).ConfigureAwait(false);
+                await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, null, cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             return;
@@ -399,7 +399,7 @@ public sealed class PodmanContainerTool(
             throw new InvalidOperationException("Sandbox post-start verification is unavailable; the existing workload remains quarantined.");
         }
 
-        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, workloadRegistry, cancellationToken).ConfigureAwait(false);
+        await postStartVerifier.VerifyWorkloadAsync(containerId, ip, null, workloadRegistry, cancellationToken: cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         workloadLaunchGate?.EnsureLaunchAllowed(context.UserId);
         PromoteSandboxAfterVerification(context, ip, containerId);

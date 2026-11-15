@@ -17,6 +17,7 @@ public sealed class McpbImageMaterializer(
 {
     private readonly NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
     private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
+    private static readonly TimeSpan cleanupTimeout = TimeSpan.FromSeconds(30);
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
@@ -145,7 +146,7 @@ public sealed class McpbImageMaterializer(
             }
             finally
             {
-                await TryRemoveImageAsync(systemImage, cancellationToken).ConfigureAwait(false);
+                await TryRemoveImageAsync(systemImage).ConfigureAwait(false);
             }
 
             return localImage;
@@ -284,8 +285,8 @@ public sealed class McpbImageMaterializer(
             }
             finally
             {
-                await TryRemoveImageAsync(systemImage, cancellationToken).ConfigureAwait(false);
-                await TryRemoveImageAsync(depsImage, cancellationToken).ConfigureAwait(false);
+                await TryRemoveImageAsync(systemImage).ConfigureAwait(false);
+                await TryRemoveImageAsync(depsImage).ConfigureAwait(false);
             }
 
             return localImage;
@@ -615,7 +616,12 @@ public sealed class McpbImageMaterializer(
             Args = ["-lc", installScript],
         };
 
-        return spec.Render().ToList();
+        // This is a foreground, one-shot run, but unlike ordinary runs it must survive process
+        // exit so CommitLanguagePackagesAsync can commit the installed filesystem. The caller's
+        // finally block removes this uniquely named builder container after commit (or failure).
+        List<string> arguments = spec.Render().ToList();
+        arguments.Remove("--rm");
+        return arguments;
     }
 
     private async Task CommitLanguagePackagesAsync(
@@ -702,7 +708,7 @@ public sealed class McpbImageMaterializer(
         finally
         {
             workloadRegistry?.Deregister(allocatedIp, containerName);
-            await TryRemoveContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
+            await TryRemoveContainerAsync(containerName).ConfigureAwait(false);
         }
     }
 
@@ -718,13 +724,16 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    private async Task TryRemoveImageAsync(string image, CancellationToken cancellationToken)
+    private async Task TryRemoveImageAsync(string image)
     {
         try
         {
-            _ = await podmanCommandRunner
-                .RunAsync(["rmi", "-f", image], 30, cancellationToken)
-                .ConfigureAwait(false);
+            await RunBoundedCleanupAsync(async cancellationToken =>
+            {
+                _ = await podmanCommandRunner
+                    .RunAsync(["rmi", "-f", image], (int)cleanupTimeout.TotalSeconds, cancellationToken)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -732,18 +741,32 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    private async Task TryRemoveContainerAsync(string containerName, CancellationToken cancellationToken)
+    private async Task TryRemoveContainerAsync(string containerName)
     {
         try
         {
-            _ = await podmanCommandRunner
-                .RunAsync(["rm", "-f", containerName], 30, cancellationToken)
-                .ConfigureAwait(false);
+            await RunBoundedCleanupAsync(async cancellationToken =>
+            {
+                _ = await podmanCommandRunner
+                    .RunAsync(["rm", "-f", containerName], (int)cleanupTimeout.TotalSeconds, cancellationToken)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to remove temporary MCPB package container '{Container}'.", containerName);
         }
+    }
+
+    internal static async Task RunBoundedCleanupAsync(
+        Func<CancellationToken, Task> cleanup,
+        TimeSpan? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+        TimeSpan effectiveTimeout = timeout ?? cleanupTimeout;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(effectiveTimeout, TimeSpan.Zero);
+        using var cleanupCancellation = new CancellationTokenSource(effectiveTimeout);
+        await cleanup(cleanupCancellation.Token).ConfigureAwait(false);
     }
 
     private static void ExtractBundle(string archivePath, string destinationPath)

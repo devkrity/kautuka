@@ -490,7 +490,7 @@ public sealed partial class WorkspaceGrpcService(
         WorkspaceMcpContainerConnectorDefinition probeConnector = WorkspaceGrpcContractMapper.FromProbe(request);
 
         (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage) = await this.connectorExecutionService
-            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken)
+            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken, request.UserId)
             .ConfigureAwait(false);
 
         var response = new WorkspaceMcpProbeResponse

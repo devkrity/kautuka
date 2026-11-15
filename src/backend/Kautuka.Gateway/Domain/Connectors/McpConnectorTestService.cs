@@ -185,6 +185,7 @@ internal sealed class McpConnectorTestService(
                 Image = mapped.ContainerImage,
                 Command = mapped.ContainerCommand,
                 TimeoutSeconds = ClampProbeTimeoutSeconds(request.ReadinessTimeoutSeconds),
+                UserId = request.UserId ?? string.Empty,
             };
             probRequest.Args.AddRange(mapped.ContainerArgs);
             probRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));

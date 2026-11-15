@@ -23,6 +23,8 @@ Manager creates the `kautuka-sandbox` Podman network before reconcile. Agent san
 
 The native development launcher stages the built-in `kautuka-web-tools` MCPB before service startup using the platform-native build script. If staging fails, it warns and continues with any last-known-good artifact. In Development, Gateway checks the repository's versioned MCPB artifact before bundles copied into the app output, so a fresh bundle is imported on the next startup; production bundle precedence is unchanged.
 
+If a connector test times out while its MCPB image is being built, the build continues and a later test can reuse the completed image. The timed-out test does not start the connector after the build completes. Manager shutdown or closure of workload launch admission can cancel the build.
+
 Administrators can load live package-proxy cache inventory on demand at `GET /api/runtime/diagnostics/pkgs-proxy/stats` (`AdminDiagnostics`). Gateway asks Manager to `podman exec kautuka-pkgs-proxy proxy stats -json`; Kautuka does not persist that payload. The host port stays unpublished.
 
 ## State roots

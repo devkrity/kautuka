@@ -1478,6 +1478,7 @@ public sealed class ConnectorValidationEndpointTests
 
         Assert.Equal(McpCommandTransportMapper.UvImage, captured.Image);
         Assert.Equal("npx", captured.Command);
+        Assert.False(string.IsNullOrWhiteSpace(captured.UserId));
         Assert.Equal("@modelcontextprotocol/server-filesystem", captured.Args[1]);
         Dictionary<string, string> environment = captured.Environment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         Assert.Equal("http://kautuka-pkgs-proxy:20101/npm/", environment["NPM_CONFIG_REGISTRY"]);

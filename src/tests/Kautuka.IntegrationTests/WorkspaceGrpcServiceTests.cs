@@ -8,6 +8,7 @@ using Kautuka.Manager.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
@@ -24,6 +25,77 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceGrpcServiceTests
 {
+    [Fact]
+    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "workspace-grpc-probe-identity-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        string capturedArgumentsPath = Path.Combine(stateDirectory, "probe-arguments.txt");
+        bool isWindows = OperatingSystem.IsWindows();
+        string captureScriptPath = Path.Combine(stateDirectory, isWindows ? "capture-probe-arguments.cmd" : "capture-probe-arguments.sh");
+        await File.WriteAllTextAsync(
+            captureScriptPath,
+            isWindows
+                ? $"@echo off\r\necho %* > \"{capturedArgumentsPath}\"\r\nexit /b 1\r\n"
+                : $"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{capturedArgumentsPath}'\nexit 1\n",
+            TestContext.Current.CancellationToken);
+        var commands = new List<string[]>();
+        using var policyStore = new Kautuka.NetworkAccessController.NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+        var launchGate = new WorkloadLaunchGate(new ReadyWorkloadStartupState(), policyStore);
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            return Task.FromResult(args[0] == "run"
+                ? new PodmanCommandResult(125, string.Empty, "intentional test launch stop", ProcessTerminationReason.NonZeroExit)
+                : new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+
+        await using var connectorExecution = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(),
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+            workloadLaunchGate: launchGate,
+            stdioCommand: isWindows ? "cmd.exe" : "sh",
+            stdioArgumentsPrefix: isWindows ? ["/c", captureScriptPath] : [captureScriptPath]);
+        var readiness = new WorkspaceReadinessGate();
+        readiness.SignalReady();
+        var service = new WorkspaceGrpcService(
+            null!, new WorkspaceDesiredStateStore(), readiness, new WorkspaceExecTracker(),
+            new StubRuntimeHealthProbe(true), connectorExecution, null!, null!,
+            NullLogger<WorkspaceGrpcService>.Instance);
+
+        try
+        {
+            WorkspaceMcpProbeResponse response = await service.ProbeMcpContainer(
+                new WorkspaceMcpContainerProbeRequest
+                {
+                    ConnectorId = "kautuka-web-tools",
+                    Image = "localhost/kautuka-test-probe:latest",
+                    TimeoutSeconds = 15,
+                    UserId = "test-user-identity",
+                },
+                TestServerCallContext.Instance);
+
+            Assert.False(response.Ok);
+            string launchArguments = await File.ReadAllTextAsync(capturedArgumentsPath, TestContext.Current.CancellationToken);
+            Assert.Contains("io.kautuka.user=test-user-identity", launchArguments, StringComparison.Ordinal);
+            Assert.Contains("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
+            Assert.DoesNotContain("A user identity is required before starting a connector workload.", response.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private sealed class ReadyWorkloadStartupState : IWorkloadStartupState
+    {
+        public bool IsStartupGateOpen => true;
+    }
+
     [Fact]
     public async Task V7_40_GatewaySystemScopeSurvivesDesiredStateGrpcMapping_WithNegativeControl()
     {
