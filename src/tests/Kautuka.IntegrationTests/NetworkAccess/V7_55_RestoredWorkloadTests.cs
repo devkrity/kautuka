@@ -19,7 +19,9 @@ public sealed class V7_55_RestoredWorkloadTests
     [InlineData(true, true, false, false, true)]
     [InlineData(true, true, false, false, false, true)]
     [InlineData(true, true, false, false, false, false, true)]
-    public async Task RestoredWorkloadRequiresMatchingRulesHash(bool matchingRulesHash, bool approvedProfile = false, bool profileResolutionThrows = false, bool imageInspectFails = false, bool locallyBuiltImage = false, bool repoDigestsNull = false, bool repoDigestsMissing = false)
+    [InlineData(true, true, false, false, true, false, true, true, true)]
+    [InlineData(true, true, false, false, false, false, true, true, false, true)]
+    public async Task RestoredWorkloadRequiresMatchingRulesHash(bool matchingRulesHash, bool approvedProfile = false, bool profileResolutionThrows = false, bool imageInspectFails = false, bool locallyBuiltImage = false, bool repoDigestsNull = false, bool repoDigestsMissing = false, bool imageIdFallback = false, bool imageDigestMissing = false, bool imageDigestDiffersFromId = false)
     {
         const string cid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         const string ip = "10.247.1.10";
@@ -33,7 +35,11 @@ public sealed class V7_55_RestoredWorkloadTests
             if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
             {
                 if (imageInspectFails) return Task.FromResult(new PodmanCommandResult(1, "", "image inspect failed"));
-                var imageMetadata = new Dictionary<string, object?> { ["Digest"] = locallyBuiltImage || repoDigestsNull || repoDigestsMissing ? "sha256:" + new string('a', 64) : null };
+                var imageMetadata = new Dictionary<string, object?>
+                {
+                    ["Digest"] = imageDigestMissing ? null : imageDigestDiffersFromId ? "sha256:" + new string('b', 64) : locallyBuiltImage || repoDigestsNull || repoDigestsMissing ? "sha256:" + new string('a', 64) : null,
+                    ["Id"] = imageIdFallback ? "sha256:" + new string('a', 64) : null,
+                };
                 if (!repoDigestsMissing)
                 {
                     imageMetadata["RepoDigests"] = repoDigestsNull

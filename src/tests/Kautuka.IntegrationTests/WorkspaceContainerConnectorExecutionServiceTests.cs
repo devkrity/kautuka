@@ -28,6 +28,334 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         new NetworkAccessPolicyStore(Path.Combine(Path.GetTempPath(), $"nac-test-open-gate-{Guid.NewGuid():N}.json")));
 
     [Fact]
+    public async Task ImageCompatibilityLookupResolvesMaterializedTagToImmutableImageId_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-mcpb-image-compat-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            const string imageTag = "localhost/kautuka-mcpb-connector:latest";
+            const string imageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            const string pinnedImage = "ghcr.io/example/connector@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+            const string pinnedImageDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+            var commands = new List<string[]>();
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                commands.Add([.. args]);
+                if (args.SequenceEqual(["image", "inspect", imageTag], StringComparer.Ordinal))
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + imageId + "\",\"RepoDigests\":[]}]", string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args.SequenceEqual(["image", "inspect", pinnedImage], StringComparer.Ordinal))
+                {
+                    return Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + imageId + "\",\"RepoDigests\":[\"ghcr.io/example/connector@" + pinnedImageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(1, string.Empty, "unexpected Podman command", ProcessTerminationReason.NonZeroExit));
+            });
+            var store = new ImageCompatibilityStore(Path.Combine(stateDirectory, "image-compat.json"));
+            var profile = store.SetProfile(
+                new NetworkAccessActor("admin", IsAdmin: true),
+                imageId,
+                [ImageCompatibilityStore.RootUser]);
+            var pinnedProfile = store.SetProfile(
+                new NetworkAccessActor("admin", IsAdmin: true),
+                pinnedImageDigest,
+                [ImageCompatibilityStore.WritableRootfs]);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+
+            MethodInfo method = typeof(WorkspaceContainerConnectorExecutionService)
+                .GetMethod("ResolveImageCompatibilityAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("ResolveImageCompatibilityAsync method was not found.");
+            object resolved = await InvokeImageCompatibilityResolutionAsync(method, service, imageTag);
+
+            Assert.Equal(profile, ReadProperty<ImageCompatProfile?>(resolved, "Profile"));
+            Assert.Equal(imageId, ReadProperty<string>(resolved, "Image"));
+            Assert.Contains(commands, args => args.SequenceEqual(["image", "inspect", imageTag], StringComparer.Ordinal));
+            int commandCountBeforeMutableReference = commands.Count;
+            const string mutableRegistryTag = "ghcr.io/example/connector:latest";
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await InvokeImageCompatibilityResolutionAsync(method, service, mutableRegistryTag));
+            Assert.Equal(commandCountBeforeMutableReference, commands.Count);
+            WorkspaceMcpContainerConnectorDefinition launchConnector = new(
+                "mcpb-connector", ReadProperty<string>(resolved, "Image")!, "node", ["server.js"],
+                true, false, null, null, [], 30, 600);
+            List<string> renderedLaunch = WorkspaceContainerConnectorExecutionService.BuildConnectorWorkloadRunArguments(
+                launchConnector,
+                "mcpb-test-launch",
+                WorkspaceMcpExecutionContext.Isolated,
+                CreateWorkspaceContext(),
+                persistent: false,
+                allocatedIp: "10.247.1.77",
+                isBraked: false,
+                compatProfile: profile);
+            Assert.Contains(imageId, renderedLaunch, StringComparer.Ordinal);
+
+            object pinnedResolved = await InvokeImageCompatibilityResolutionAsync(method, service, pinnedImage);
+            Assert.Equal(pinnedProfile, ReadProperty<ImageCompatProfile?>(pinnedResolved, "Profile"));
+            Assert.Equal(imageId, ReadProperty<string>(pinnedResolved, "Image"));
+
+            var cleanStore = new ImageCompatibilityStore(Path.Combine(stateDirectory, "clean-image-compat.json"));
+            await using var cleanService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(), runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: cleanStore);
+            object cleanResolution = await InvokeImageCompatibilityResolutionAsync(method, cleanService, imageTag);
+            Assert.Null(ReadProperty<ImageCompatProfile?>(cleanResolution, "Profile"));
+            Assert.Equal(imageId, ReadProperty<string>(cleanResolution, "Image"));
+
+            var malformedIdRunner = new PodmanCommandRunner((_, _) =>
+                Task.FromResult(new PodmanCommandResult(0,
+                    "[{\"Id\":\"not-a-canonical-id\",\"RepoDigests\":[\"ghcr.io/example/connector@" + pinnedImageDigest + "\"]}]",
+                    string.Empty,
+                    ProcessTerminationReason.Completed)));
+            await using var malformedIdService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(), malformedIdRunner,
+                new McpbImageMaterializer(malformedIdRunner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(malformedIdRunner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+            await Assert.ThrowsAsync<ContainerInspectionUnavailableException>(
+                async () => await InvokeImageCompatibilityResolutionAsync(method, malformedIdService, pinnedImage));
+
+            const string unapprovedImageId = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            var negativeRunner = new PodmanCommandRunner((args, _) =>
+                Task.FromResult(new PodmanCommandResult(0, "[{\"Id\":\"" + unapprovedImageId + "\",\"RepoDigests\":[]}]", string.Empty, ProcessTerminationReason.Completed)));
+            await using var negativeService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                negativeRunner,
+                new McpbImageMaterializer(negativeRunner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(negativeRunner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+            object negativeResolved = await InvokeImageCompatibilityResolutionAsync(method, negativeService, imageTag);
+            Assert.Null(ReadProperty<ImageCompatProfile?>(negativeResolved, "Profile"));
+            Assert.Equal(unapprovedImageId, ReadProperty<string>(negativeResolved, "Image"));
+
+            const string absentImage = "ghcr.io/example/acquired@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+            var acquiredProfile = store.SetProfile(
+                new NetworkAccessActor("admin", IsAdmin: true),
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                [ImageCompatibilityStore.FileOwnershipCaps]);
+            bool acquired = false;
+            var absentRunner = new PodmanCommandRunner((args, _) =>
+            {
+                if (args.SequenceEqual(["image", "inspect", absentImage], StringComparer.Ordinal))
+                {
+                    if (!acquired) return Task.FromResult(new PodmanCommandResult(1, string.Empty, "image not known", ProcessTerminationReason.NonZeroExit));
+                    return Task.FromResult(new PodmanCommandResult(0,
+                        "[{\"Id\":\"" + imageId + "\",\"Digest\":\"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"RepoDigests\":[]}]",
+                        string.Empty,
+                        ProcessTerminationReason.Completed));
+                }
+
+                if (args.SequenceEqual(["image", "exists", absentImage], StringComparer.Ordinal))
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "image not known", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args.SequenceEqual(["pull", absentImage], StringComparer.Ordinal))
+                {
+                    acquired = true;
+                    return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(1, string.Empty, "unexpected command", ProcessTerminationReason.NonZeroExit));
+            });
+            await using var absentService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                absentRunner,
+                new McpbImageMaterializer(absentRunner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(absentRunner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+            object absentResolved = await InvokeImageCompatibilityResolutionAsync(method, absentService, absentImage);
+            Assert.Equal(acquiredProfile, ReadProperty<ImageCompatProfile?>(absentResolved, "Profile"));
+            Assert.Equal(imageId, ReadProperty<string>(absentResolved, "Image"));
+            Assert.True(acquired);
+
+            var unavailableRunner = new PodmanCommandRunner((_, _) =>
+                Task.FromResult(new PodmanCommandResult(125, string.Empty, "Podman inspection failed", ProcessTerminationReason.NonZeroExit)));
+            await using var unavailableService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                unavailableRunner,
+                new McpbImageMaterializer(unavailableRunner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(unavailableRunner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+            await Assert.ThrowsAsync<ContainerInspectionUnavailableException>(
+                async () => await InvokeImageCompatibilityResolutionAsync(method, unavailableService, imageTag));
+
+            var timeoutRunner = new PodmanCommandRunner((_, _) =>
+                Task.FromResult(new PodmanCommandResult(124, string.Empty, "timed out", ProcessTerminationReason.TimedOut)));
+            await using var timeoutService = new WorkspaceContainerConnectorExecutionService(
+                new WorkspaceDesiredStateStore(),
+                timeoutRunner,
+                new McpbImageMaterializer(timeoutRunner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(timeoutRunner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                imageCompatibilityStore: store);
+            await Assert.ThrowsAsync<ContainerInspectionUnavailableException>(
+                async () => await InvokeImageCompatibilityResolutionAsync(method, timeoutService, imageTag));
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task PublicProbeMaterializesInspectsRunsAndVerifiesUsingImmutableImageId()
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("The public probe test uses a Linux Python stdio process.");
+        }
+
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-mcpb-public-probe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        string bundlePath = CreateBundleArchive();
+        try
+        {
+            const string imageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            var registry = new WorkloadRegistry();
+            var calls = new List<string[]>();
+            var pidIps = new Dictionary<string, string>(StringComparer.Ordinal);
+            bool runStarted = false;
+            int nextPid = 4240;
+            var runner = new PodmanCommandRunner((args, _) =>
+            {
+                calls.Add([.. args]);
+                if (args[0] == "image" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "image not known", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    if (args.Contains("--format", StringComparer.Ordinal))
+                    {
+                        return Task.FromResult(new PodmanCommandResult(0, imageId + Environment.NewLine, string.Empty, ProcessTerminationReason.Completed));
+                    }
+
+                    return Task.FromResult(new PodmanCommandResult(0,
+                        "[{\"Id\":\"" + imageId + "\",\"RepoDigests\":[],\"Digest\":\"\"}]",
+                        string.Empty,
+                        ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "inspect")
+                {
+                    if (!runStarted)
+                    {
+                        return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                    }
+
+                    RegistryEntry entry = Assert.Single(registry.GetAll());
+                    int pid = Interlocked.Increment(ref nextPid);
+                    pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
+                    const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                    string inspect = "[{\"Id\":\"" + containerId + "\",\"Image\":\"" + imageId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"0:0\"},\"State\":{\"Pid\":" + pid + ",\"Status\":\"running\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                    return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
+                {
+                    return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
+                }
+
+                if (args[0] == "run")
+                {
+                    runStarted = true;
+                }
+                else if (args[0] == "unshare")
+                {
+                    if (args.Contains("cat", StringComparer.Ordinal))
+                    {
+                        return Task.FromResult(new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed));
+                    }
+
+                    string ip = pidIps[args[3]];
+                    string nft = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
+                        .Replace("{{IP}}", ip, StringComparison.Ordinal);
+                    return Task.FromResult(new PodmanCommandResult(0, nft, string.Empty, ProcessTerminationReason.Completed));
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            });
+            string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'materialized-test','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n";
+            var store = new ImageCompatibilityStore(Path.Combine(stateDirectory, "image-compat.json"));
+            ImageCompatProfile profile = store.SetProfile(new NetworkAccessActor("admin", IsAdmin: true), imageId, [ImageCompatibilityStore.RootUser]);
+            var desired = new WorkspaceDesiredStateStore();
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                "binary-mcpb-probe", "localhost/fedora-minimal:44", "python3", ["-m", "bundle_server"],
+                true, false, bundlePath, "binary", [], 30, 600);
+            await using var service = new WorkspaceContainerConnectorExecutionService(
+                desired,
+                runner,
+                new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+                new PodmanContainerTool(runner),
+                NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+                workloadRegistry: registry,
+                postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
+                imageCompatibilityStore: store,
+                workloadLaunchGate: TestOpenWorkloadLaunchGate,
+                stdioCommand: "python3",
+                stdioArgumentsPrefix: ["-u", "-c", server]);
+
+            (bool ok, IReadOnlyList<McpClientTool> tools, _, string? failureMessage) = await service.ProbeConnectorAsync(
+                connector,
+                30,
+                TestContext.Current.CancellationToken,
+                "probe-user");
+
+            Assert.True(ok, failureMessage);
+            Assert.Empty(tools);
+            Assert.Contains(calls, args => args[0] == "build");
+            Assert.Contains(calls, args => args[0] == "tag");
+            Assert.Contains(calls, args => args.Length > 2 && args[0] == "image" && args[1] == "inspect"
+                && args[^1].StartsWith("localhost/kautuka-mcpb-binary:", StringComparison.Ordinal));
+            string[] run = Assert.Single(calls, args => args[0] == "run");
+            Assert.Contains(imageId, run, StringComparer.Ordinal);
+            Assert.DoesNotContain(run, static arg => arg.StartsWith("localhost/kautuka-mcpb-", StringComparison.Ordinal));
+            Assert.Contains(calls, args => args[0] == "inspect");
+            Assert.Contains(calls, args => args[0] == "unshare");
+            RegistryEntry entry = Assert.Single(registry.GetAll());
+            Assert.Equal(profile.Relaxations, entry.CompatProfile!.Split(',', StringSplitOptions.RemoveEmptyEntries));
+        }
+        finally
+        {
+            File.Delete(bundlePath);
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private static async Task<object> InvokeImageCompatibilityResolutionAsync(MethodInfo method, WorkspaceContainerConnectorExecutionService service, string image)
+    {
+        object? invocation = method.Invoke(service, [image, CancellationToken.None]);
+        Task resolutionTask = Assert.IsAssignableFrom<Task>(invocation);
+        await resolutionTask;
+        return resolutionTask.GetType().GetProperty("Result")?.GetValue(resolutionTask)
+            ?? throw new InvalidOperationException("Image compatibility resolution returned no result.");
+    }
+
+    private static T? ReadProperty<T>(object instance, string propertyName)
+    {
+        object? value = instance.GetType().GetProperty(propertyName)?.GetValue(instance);
+        return value is null ? default : Assert.IsType<T>(value);
+    }
+
+    [Fact]
     public async Task V7_41_ConnectorStartupFailureIncludesContainerLogs_WithNegativeControl()
     {
         if (!OperatingSystem.IsLinux())

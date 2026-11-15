@@ -115,6 +115,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     }
 
                     WorkspaceMcpContainerConnectorDefinition runtimeConnector;
+                    NetworkAccess.ImageCompatProfile? compatProfile;
                     try
                     {
                         workloadLaunchGate?.EnsureLaunchAllowed(workspace.UserId);
@@ -127,6 +128,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                             preparationLease.CancellationToken);
                         bool isBraked = workloadLaunchGate?.IsBraked(workspace.UserId) ?? true;
                         runtimeConnector = await PrepareRuntimeConnectorAsync(connector, isBraked, preparationCancellation.Token).ConfigureAwait(false);
+                        ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(runtimeConnector.Image, preparationCancellation.Token).ConfigureAwait(false);
+                        runtimeConnector = runtimeConnector with { Image = imageResolution.Image };
+                        compatProfile = imageResolution.Profile;
                     }
                     catch (Exception ex) when (ex is InvalidOperationException or IOException)
                     {
@@ -136,7 +140,6 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     }
 
                     ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(runtimeConnector, workspace, purpose: null);
-                    NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(runtimeConnector.Image);
                     WorkspaceMcpContainerConnectorDefinition expectedConnector = runtimeConnector with
                     {
                         SpecFingerprint = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(
@@ -786,7 +789,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     isProbe ? "probe" : null);
                 string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
                     .AllocateNextIp(workloadRegistry);
-                NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+                ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
+                connector = connector with { Image = imageResolution.Image };
+                NetworkAccess.ImageCompatProfile? compatProfile = imageResolution.Profile;
                 string attribution = identity.Egress == "deny-all"
                     ? "none"
                     : (isProbe || string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
@@ -1094,7 +1099,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             connector,
             identityContext ?? workspaceContext,
             isProbe ? "probe" : null);
-        NetworkAccess.ImageCompatProfile? compatProfile = imageCompatibilityStore?.GetProfileByDigest(connector.Image);
+        ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
+        connector = connector with { Image = imageResolution.Image };
+        NetworkAccess.ImageCompatProfile? compatProfile = imageResolution.Profile;
         connector = connector with
         {
             SpecFingerprint = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(
@@ -1300,6 +1307,177 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         return result.StdOut.Trim();
     }
+
+    private async Task<ImageCompatibilityResolution> ResolveImageCompatibilityAsync(
+        string? image,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(image))
+        {
+            return new ImageCompatibilityResolution(image ?? string.Empty, null);
+        }
+
+        if (imageCompatibilityStore is null)
+        {
+            return new ImageCompatibilityResolution(image, null);
+        }
+
+        // Do not let a successful local inspection turn an externally mutable registry
+        // tag into an apparently trusted image ID. Only immutable external references
+        // and appliance-local image names may enter this resolution path.
+        ContainerImageProvenancePolicy.EnsureTrusted(image, "Connector runtime");
+
+        // MCPB materialization returns a local tag (localhost/kautuka-mcpb-...). Resolve
+        // every reference through Podman before consulting the digest-keyed compatibility
+        // store. Prefer the immutable repository manifest digest for pinned images, then
+        // fall back to Podman's immutable local image ID for locally built images. Never
+        // derive compatibility from connector or container labels.
+        PodmanCommandResult result = await podmanCommandRunner
+            .RunAsync(["image", "inspect", image], 10, cancellationToken)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StdOut))
+        {
+            // Distinguish an absent local image from Podman/timeout errors. `image exists`
+            // returns 1 only when absent; any other failure means resolution is unavailable.
+            if (result.TerminationReason == ProcessTerminationReason.NonZeroExit)
+            {
+                PodmanCommandResult exists = await podmanCommandRunner
+                    .RunAsync(["image", "exists", image], 10, cancellationToken)
+                    .ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (exists.ExitCode == 1)
+                {
+                    if (ContainerImageProvenancePolicy.IsLocalImage(image))
+                    {
+                        // Local MCPB images are materialized earlier in PrepareRuntimeConnectorAsync.
+                        // Do not try to pull a localhost tag or infer a profile from a missing image.
+                        return new ImageCompatibilityResolution(image, null);
+                    }
+
+                    // Resolve pinned registry images through the manager-owned acquisition path
+                    // before selecting a stored compatibility profile. This guarantees the
+                    // later run references the inspected immutable image ID.
+                    ContainerImageProvenancePolicy.EnsureTrusted(image, "Connector runtime");
+                    PodmanCommandResult pull = await podmanCommandRunner
+                        .RunAsync(["pull", image], 300, cancellationToken)
+                        .ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (pull.ExitCode != 0)
+                    {
+                        throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"Acquire connector image '{image}'", pull));
+                    }
+
+                    result = await podmanCommandRunner
+                        .RunAsync(["image", "inspect", image], 10, cancellationToken)
+                        .ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StdOut))
+                    {
+                        throw new ContainerInspectionUnavailableException("Acquired connector image could not be inspected. Container changes are deferred.");
+                    }
+                }
+                else
+                {
+                    throw new ContainerInspectionUnavailableException("Connector image could not be inspected. Container changes are deferred.");
+                }
+            }
+        }
+
+        JsonElement inspectedImage;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(result.StdOut);
+            if (document.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                if (document.RootElement.GetArrayLength() == 0)
+                {
+                    throw new JsonException("Podman image inspection returned an empty array.");
+                }
+
+                inspectedImage = document.RootElement[0].Clone();
+            }
+            else if (document.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                inspectedImage = document.RootElement.Clone();
+            }
+            else
+            {
+                throw new JsonException("Podman image inspection returned an invalid JSON shape.");
+            }
+        }
+        catch (JsonException ex)
+        {
+            throw new ContainerInspectionUnavailableException("Connector image inspection returned invalid metadata. Container changes are deferred.", ex);
+        }
+
+        if (!inspectedImage.TryGetProperty("Id", out JsonElement immutableIdElement)
+            || immutableIdElement.ValueKind != JsonValueKind.String
+            || !IsSha256Digest(immutableIdElement.GetString()))
+        {
+            throw new ContainerInspectionUnavailableException("Connector image inspection did not return a canonical immutable SHA-256 image ID. Container changes are deferred.");
+        }
+
+        string resolvedImage = immutableIdElement.GetString()!;
+        NetworkAccess.ImageCompatProfile? resolvedProfile = null;
+        if (inspectedImage.TryGetProperty("RepoDigests", out JsonElement repoDigests)
+            && repoDigests.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement repoDigestElement in repoDigests.EnumerateArray())
+            {
+                if (repoDigestElement.ValueKind != JsonValueKind.String) continue;
+                string repoDigest = repoDigestElement.GetString() ?? string.Empty;
+                int separator = repoDigest.LastIndexOf('@');
+                if (separator < 0 || separator + 1 >= repoDigest.Length) continue;
+                string digest = repoDigest[(separator + 1)..];
+                if (IsSha256Digest(digest))
+                {
+                    resolvedProfile = imageCompatibilityStore.GetProfileByDigest(digest);
+                    if (resolvedProfile is not null) return new ImageCompatibilityResolution(resolvedImage, resolvedProfile);
+                }
+            }
+        }
+
+        if (inspectedImage.TryGetProperty("Digest", out JsonElement digestElement)
+            && digestElement.ValueKind == JsonValueKind.String)
+        {
+            string digest = digestElement.GetString() ?? string.Empty;
+            if (IsSha256Digest(digest))
+            {
+                resolvedProfile = imageCompatibilityStore.GetProfileByDigest(digest);
+                if (resolvedProfile is not null) return new ImageCompatibilityResolution(resolvedImage, resolvedProfile);
+            }
+        }
+
+        // Locally built images may have neither a repository manifest digest nor a usable
+        // distribution digest. Their canonical Podman image ID remains a trusted fallback.
+        resolvedProfile = imageCompatibilityStore.GetProfileByDigest(resolvedImage);
+
+        return new ImageCompatibilityResolution(resolvedImage, resolvedProfile);
+    }
+
+    private static bool IsSha256Digest(string? value)
+    {
+        if (value is not { Length: 71 } || !value.StartsWith("sha256:", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (int index = 7; index < value.Length; index++)
+        {
+            char digit = value[index];
+            if ((digit < '0' || digit > '9')
+                && (digit < 'a' || digit > 'f')
+                && (digit < 'A' || digit > 'F'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private sealed record ImageCompatibilityResolution(string Image, NetworkAccess.ImageCompatProfile? Profile);
 
     private static List<string> ConnectorEnvAssignments(WorkspaceMcpContainerConnectorDefinition? connector)
     {

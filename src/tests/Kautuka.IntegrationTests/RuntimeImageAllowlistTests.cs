@@ -67,6 +67,25 @@ public sealed class RuntimeImageAllowlistTests
     }
 
     [Fact]
+    public void BareImageIdCannotBypassLoadedSignedAllowlist()
+    {
+        RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
+        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerImageProvenancePolicy.EnsureTrusted(
+                "sha256:" + new string('a', 64),
+                "sandbox",
+                allowlist.ImageReferences,
+                requireListed: true));
+        Assert.Contains("allowlist", ex.Message, StringComparison.Ordinal);
+
+        ContainerImageProvenancePolicy.EnsureTrusted(
+            "sha256:" + new string('a', 64),
+            "connector",
+            allowlist.ImageReferences,
+            requireListed: false);
+    }
+
+    [Fact]
     public void UserConnectorDigestsRemainAdmittedWithoutAllowlistMembership()
     {
         RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();

@@ -785,7 +785,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             string digest = digestElement.GetString() ?? string.Empty;
             if (digest.StartsWith("sha256:", StringComparison.Ordinal))
             {
-                return imageCompatibilityStore.GetProfileByDigest(digest);
+                ImageCompatProfile? profile = imageCompatibilityStore.GetProfileByDigest(digest);
+                if (profile is not null) return profile;
+            }
+        }
+
+        // Locally built images may expose no manifest digest. Their immutable Podman ID
+        // is still a trusted SHA-256 identity; labels from the restored container are not.
+        if (image.TryGetProperty("Id", out JsonElement imageIdElement)
+            && imageIdElement.ValueKind == JsonValueKind.String)
+        {
+            string immutableImageId = imageIdElement.GetString() ?? string.Empty;
+            if (immutableImageId.StartsWith("sha256:", StringComparison.Ordinal))
+            {
+                return imageCompatibilityStore.GetProfileByDigest(immutableImageId);
             }
         }
 
