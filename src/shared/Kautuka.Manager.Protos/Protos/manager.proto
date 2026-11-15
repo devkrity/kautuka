@@ -22,6 +22,8 @@ service ManagerService {
   rpc ListMcpContainerTools (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerListToolsResponse);
   rpc CallMcpContainerTool  (WorkspaceMcpContainerCallRequest) returns (WorkspaceMcpContainerCallResponse);
   rpc CheckOutbound       (NetworkAccessCheckOutboundRequest) returns (NetworkAccessCheckOutboundResponse);
+  rpc BeginProviderTest   (NetworkAccessProviderTestRequest) returns (NetworkAccessProviderTestResponse);
+  rpc EndProviderTest     (NetworkAccessProviderTestEndRequest) returns (WorkspaceBoolResponse);
   rpc ListRequests        (NetworkAccessListRequestsRequest)  returns (NetworkAccessListRequestsResponse);
   rpc DecideRequest       (NetworkAccessDecideRequest)        returns (NetworkAccessDecideResponse);
   rpc ListRules           (NetworkAccessListRulesRequest)     returns (NetworkAccessListRulesResponse);
@@ -392,6 +394,16 @@ message NetworkAccessCheckOutboundResponse {
   string request_id = 3;
   bool open_internet_badge = 4;
 }
+
+message NetworkAccessProviderTestRequest {
+  NetworkAccessActorMessage actor = 1;
+  string host = 2;
+  int32 port = 3;
+  bool allow_lan = 4;
+}
+
+message NetworkAccessProviderTestResponse { string token = 1; }
+message NetworkAccessProviderTestEndRequest { NetworkAccessActorMessage actor = 1; string token = 2; }
 
 message NetworkAccessRequestMessage {
   string id = 1;

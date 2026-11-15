@@ -8,6 +8,30 @@ namespace Kautuka.NetworkAccessController;
 /// </summary>
 public sealed class NetworkAccessController
 {
+    private sealed record ProviderTestGrant(string UserId, string Host, int Port, bool AllowLan);
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProviderTestGrant> providerTests = new(StringComparer.Ordinal);
+
+    public string BeginProviderTest(NetworkAccessActor actor, string host, int port, bool allowLan)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Provider tests require an administrator.");
+        if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+        string normalized;
+        if (!NetworkDestinationNormalizer.TryNormalizeIpv4(host, out normalized, out _)
+            && !NetworkDestinationNormalizer.TryNormalizeHostname(host, out normalized, out _))
+            throw new ArgumentException("Invalid provider host.", nameof(host));
+        string token = Guid.NewGuid().ToString("N");
+        providerTests[token] = new(actor.UserId, normalized, port, allowLan);
+        return token;
+    }
+
+    public void EndProviderTest(NetworkAccessActor actor, string token)
+    {
+        ArgumentNullException.ThrowIfNull(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Provider tests require an administrator.");
+        if (providerTests.TryGetValue(token, out ProviderTestGrant? grant) && grant.UserId == actor.UserId)
+            providerTests.TryRemove(token, out _);
+    }
     public const string ClusterDfpPublic = "dfp_public";
     public const string ClusterDfpLan = "dfp_lan";
     public const string ClusterOrigDstPublic = "orig_dst_public";
@@ -496,6 +520,14 @@ public sealed class NetworkAccessController
                     }
 
                     return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
+                }
+
+                if (input.Purpose == "provider-test" && input.CorrelationId is { Length: > 0 } token
+                    && providerTests.TryGetValue(token, out ProviderTestGrant? grant)
+                    && grant.UserId == userId && grant.Host == normalizedDestination && grant.Port == input.Port
+                    && (destKind != "ip" || !NetworkAddressClassifier.IsNonPublicV4(normalizedDestination) || grant.AllowLan))
+                {
+                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test");
                 }
 
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(

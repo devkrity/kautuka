@@ -310,7 +310,7 @@ export const ProviderForm: React.FC<{
         {pendingNetworkTarget && (
           <div className="rounded-lg border border-attention/40 bg-attention/10 p-3 text-sm">
             <p className="font-medium text-foreground">
-              Allow systemwide outbound access to{' '}
+              Allow this test to contact{' '}
               <code>
                 {pendingNetworkTarget.host}:{pendingNetworkTarget.port}
               </code>
@@ -318,14 +318,14 @@ export const ProviderForm: React.FC<{
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               Testing this provider connection sends a request from Gateway to this endpoint.
-              Provider rules apply systemwide across all users and agents.
+              This permission ends when the test finishes. Saving the provider creates a systemwide rule.
             </p>
             <div className="mt-3 flex justify-end gap-2">
               <Button type="button" variant="secondary" size="sm" onClick={onCancelNetworkApproval}>
                 Cancel
               </Button>
               <Button type="button" size="sm" onClick={onConfirmNetworkApproval} disabled={testing}>
-                Allow Systemwide &amp; Test
+                Allow &amp; Test
               </Button>
             </div>
           </div>

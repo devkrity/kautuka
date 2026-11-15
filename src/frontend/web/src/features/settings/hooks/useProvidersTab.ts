@@ -3,7 +3,6 @@ import { useQueryClient } from '@tanstack/react-query';
 import { settingsAdmin } from '@/features/settings';
 import {
   checkProviderSystemwideRule,
-  grantProviderSystemwideRule,
   resolveProviderNetworkTarget,
   type ProviderNetworkTarget,
 } from '@/features/network-access/networkAccess';
@@ -112,7 +111,7 @@ export function useProvidersTab() {
     setPendingNetworkApproval(null);
   };
 
-  const runProviderTestCall = async () => {
+  const runProviderTestCall = async (allowTemporaryNetworkAccess = false) => {
     const httpTimeoutSeconds = normalizeHttpTimeoutSeconds(form.http_timeout_seconds);
     if (httpTimeoutSeconds === 'invalid') {
       setResult({ success: false, message: 'HTTP timeout must be a positive number of seconds.' });
@@ -125,6 +124,7 @@ export function useProvidersTab() {
       const response = await settingsAdmin.testProvider({
         id: form.id.trim() || undefined,
         type: form.type,
+        allowTemporaryNetworkAccess,
         settings: {
           base_url: form.base_url.trim() || null,
           api_key: form.api_key.trim() || null,
@@ -174,18 +174,8 @@ export function useProvidersTab() {
     const pending = pendingNetworkApproval;
     if (!pending) return;
 
-    setTesting(true);
-    setResult(null);
-    try {
-      await grantProviderSystemwideRule(pending.target, pending.expectedRevision);
-      setPendingNetworkApproval(null);
-    } catch (err) {
-      setResult({ success: false, message: apiError(err) });
-      setTesting(false);
-      return;
-    }
-
-    await runProviderTestCall();
+    setPendingNetworkApproval(null);
+    await runProviderTestCall(true);
   };
 
   const cancelNetworkApproval = () => {

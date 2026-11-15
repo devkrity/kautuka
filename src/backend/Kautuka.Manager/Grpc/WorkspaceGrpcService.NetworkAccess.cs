@@ -17,6 +17,19 @@ public sealed partial class WorkspaceGrpcService
     private NacController Nac => networkAccessController
         ?? throw new RpcException(new Status(StatusCode.Unavailable, "Network access controller is not available."));
 
+    public override Task<NetworkAccessProviderTestResponse> BeginProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
+        => ExecuteNacRpc(() => new NetworkAccessProviderTestResponse
+        {
+            Token = Nac.BeginProviderTest(ToActor(request.Actor), request.Host, request.Port, request.AllowLan),
+        });
+
+    public override Task<WorkspaceBoolResponse> EndProviderTest(NetworkAccessProviderTestEndRequest request, ServerCallContext context)
+        => ExecuteNacRpc(() =>
+        {
+            Nac.EndProviderTest(ToActor(request.Actor), request.Token);
+            return new WorkspaceBoolResponse { Ok = true };
+        });
+
     public override Task<NetworkAccessCheckOutboundResponse> CheckOutbound(
         NetworkAccessCheckOutboundRequest request,
         ServerCallContext context)

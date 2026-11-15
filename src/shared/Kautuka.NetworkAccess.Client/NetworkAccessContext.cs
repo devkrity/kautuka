@@ -10,7 +10,8 @@ public sealed record NetworkAccessScope(
     string? Purpose = null,
     string? Service = null,
     bool Systemwide = false,
-    string ExecutionContext = "app");
+    string ExecutionContext = "app",
+    string? CorrelationId = null);
 
 /// <summary>
 /// Provides an AsyncLocal ambient scope for attributing outbound HTTP/WebSocket requests to users, agents, and connectors.
@@ -28,7 +29,8 @@ public static class NetworkAccessContext
         string? purpose = null,
         string? service = null,
         bool systemwide = false,
-        string executionContext = "app")
+        string executionContext = "app",
+        string? correlationId = null)
     {
         var scope = new NetworkAccessScope(
             UserId: userId,
@@ -37,7 +39,8 @@ public static class NetworkAccessContext
             Purpose: purpose,
             Service: service,
             Systemwide: systemwide,
-            ExecutionContext: string.IsNullOrWhiteSpace(executionContext) ? "app" : executionContext);
+            ExecutionContext: string.IsNullOrWhiteSpace(executionContext) ? "app" : executionContext,
+            CorrelationId: correlationId);
 
         return BeginScope(scope);
     }

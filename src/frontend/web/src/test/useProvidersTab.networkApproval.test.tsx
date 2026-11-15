@@ -44,7 +44,7 @@ describe('useProvidersTab systemwide provider test approval', () => {
     };
   }
 
-  it('requests admin confirmation before creating a persistent systemwide rule', async () => {
+  it('uses temporary test approval without creating a persistent rule', async () => {
     const { result } = renderHook(() => useProvidersTab(), { wrapper: createWrapper() });
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -71,10 +71,8 @@ describe('useProvidersTab systemwide provider test approval', () => {
 
     await act(async () => result.current.confirmNetworkApprovalAndTest());
 
-    expect(grantRuleMock).toHaveBeenCalledWith({ host: 'api.openai.com', port: 443 }, 4);
+    expect(grantRuleMock).not.toHaveBeenCalled();
     expect(settingsAdminMock.testProvider).toHaveBeenCalledTimes(1);
-    expect(grantRuleMock.mock.invocationCallOrder[0]).toBeLessThan(
-      settingsAdminMock.testProvider.mock.invocationCallOrder[0],
-    );
+    expect(settingsAdminMock.testProvider).toHaveBeenCalledWith(expect.objectContaining({ allowTemporaryNetworkAccess: true }));
   });
 });

@@ -60,6 +60,8 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "ListMcpContainerTools",
         servicePrefix + "CallMcpContainerTool",
         servicePrefix + "CheckOutbound",
+        servicePrefix + "BeginProviderTest",
+        servicePrefix + "EndProviderTest",
         servicePrefix + "ListRequests",
         servicePrefix + "DecideRequest",
         servicePrefix + "ListRules",

@@ -1,8 +1,5 @@
 import { useCurrentUser } from '@/features/auth';
 import {
-    checkProviderSystemwideRule,
-    grantProviderSystemwideRule,
-    resolveProviderNetworkTarget,
     type ProviderNetworkTarget,
 } from '@/features/network-access/networkAccess';
 import {
@@ -370,7 +367,7 @@ export function useOnboardingFlow() {
     };
   };
 
-  const saveSetup = async (options?: { networkApproved?: boolean }) => {
+  const saveSetup = async () => {
     const providerId =
       providerForm.id.trim() ||
       getGeneratedProviderId(
@@ -413,20 +410,6 @@ export function useOnboardingFlow() {
       setError(null);
       setProviderValidation(null);
 
-      const target = options?.networkApproved === true
-        ? null
-        : resolveProviderNetworkTarget(providerType, settings.base_url);
-      if (target) {
-        const ruleStatus = await checkProviderSystemwideRule(target);
-        if (!ruleStatus.alreadyAllowed) {
-          setPendingProviderNetworkApproval({
-            target,
-            expectedRevision: ruleStatus.expectedRevision,
-          });
-          return;
-        }
-      }
-
       setSaving(true);
       try {
         await continueSaveAfterNetworkApproval(providerId, providerType, settings, providerModel);
@@ -440,21 +423,8 @@ export function useOnboardingFlow() {
   };
 
   const confirmProviderNetworkApprovalAndSave = async () => {
-    const pending = pendingProviderNetworkApproval;
-    if (!pending) return;
-
-    try {
-      setSaving(true);
-      setError(null);
-      await grantProviderSystemwideRule(pending.target, pending.expectedRevision);
-      setPendingProviderNetworkApproval(null);
-    } catch (err) {
-      setError(apiError(err));
-      setSaving(false);
-      return;
-    }
-
-    await saveSetup({ networkApproved: true });
+    setPendingProviderNetworkApproval(null);
+    await saveSetup();
   };
 
   const cancelProviderNetworkApproval = () => {
@@ -467,30 +437,6 @@ export function useOnboardingFlow() {
     settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
     providerModel: string
   ) => {
-    const providerTest = await settingsAdmin.testProvider({
-      id: providerId,
-      type: providerType,
-      settings: {
-        ...settings,
-        default_model: providerModel,
-      },
-    });
-
-      const validation: ProviderTestResult = {
-        success: Boolean(providerTest.data.success),
-        message:
-          typeof providerTest.data.message === 'string'
-            ? providerTest.data.message
-            : 'Provider validation failed.',
-      };
-
-      setProviderValidation(validation);
-
-      if (!validation.success) {
-        setError(validation.message);
-        return;
-      }
-
       await settingsAdmin.saveProvider({
         id: providerId,
         type: providerType,

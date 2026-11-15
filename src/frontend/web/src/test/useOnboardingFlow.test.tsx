@@ -303,7 +303,7 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(testProviderMock).toHaveBeenCalledTimes(1);
+    expect(testProviderMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(probeModelCandidateMock).toHaveBeenCalledWith({
       providerId: 'generated-provider',
@@ -314,7 +314,7 @@ describe('useOnboardingFlow existing setup detection', () => {
     await waitFor(() => expect(result.current.stage).toBe('recommendations'));
   });
 
-  it('v7-37: asks for a systemwide grant before the test call and never calls the provider until confirmed', async () => {
+  it('saves the provider without a test or separate network prompt', async () => {
     listAgentsMock.mockResolvedValue({ data: { agents: [] } });
     checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 7 });
 
@@ -328,30 +328,10 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    // Prompt shown, nothing sent, nothing saved, no rule written (not on save).
-    expect(result.current.pendingProviderNetworkApproval?.target.host).toBe('generativelanguage.googleapis.com');
-    expect(testProviderMock).not.toHaveBeenCalled();
-    expect(saveProviderMock).not.toHaveBeenCalled();
-    expect(grantRuleMock).not.toHaveBeenCalled();
-
-    // Cancel: still no outbound call and no rule.
-    act(() => result.current.cancelProviderNetworkApproval());
     expect(result.current.pendingProviderNetworkApproval).toBeNull();
     expect(testProviderMock).not.toHaveBeenCalled();
+    expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(grantRuleMock).not.toHaveBeenCalled();
-
-    // Re-trigger and confirm: grant first, then the test call.
-    await act(async () => {
-      await result.current.saveSetup();
-    });
-    await act(async () => {
-      await result.current.confirmProviderNetworkApprovalAndSave();
-    });
-
-    expect(grantRuleMock).toHaveBeenCalledTimes(1);
-    expect(grantRuleMock.mock.calls[0][1]).toBe(7);
-    expect(testProviderMock).toHaveBeenCalledTimes(1);
-    expect(grantRuleMock.mock.invocationCallOrder[0]).toBeLessThan(testProviderMock.mock.invocationCallOrder[0]);
   });
 
   it('v7-37 negative control: no prompt and no grant when the provider address is already allowed', async () => {
@@ -369,7 +349,7 @@ describe('useOnboardingFlow existing setup detection', () => {
 
     expect(result.current.pendingProviderNetworkApproval).toBeNull();
     expect(grantRuleMock).not.toHaveBeenCalled();
-    expect(testProviderMock).toHaveBeenCalledTimes(1);
+    expect(testProviderMock).not.toHaveBeenCalled();
   });
 
   it('requires a second confirmation when the starter model probe returns a warning', async () => {

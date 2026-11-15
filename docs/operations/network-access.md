@@ -292,9 +292,9 @@ When container startup fails with exit code 126 or 1, check the `reason` field i
 
 ## 6. AI Provider Endpoints (v7-37)
 - There is no built-in localhost or Ollama exception. Gateway calls to a provider endpoint are denied until an admin grants a rule.
-- At the **Test connection** step (Settings > Providers, and the first-run wizard), before the outbound test call, the admin is asked to allow the provider's address systemwide. Nothing is written on save, and Cancel sends no request and writes no rule.
-- The grant is a `system`-scope rule (admin only; `PUT /api/network-access/rules`). Loopback addresses are accepted only in a `system` rule with an admin LAN grant. The provider integration test passed in CI run 43517837642; the frontend approval/cancel test remains separately covered by the frontend suite.
-- The provider test runs with a systemwide NAC identity so the pending request is attributed to the admin's provider test and can be approved through the system-scope rule flow. The focused test exercises `ProviderValidationService` and the provider's outbound NAC handler, then verifies the request exists before any rule is written.
+- If the address is not already allowed, **Test connection** asks the administrator for temporary access to the provider's host and port. The allowance is limited to that test and ends when it finishes; testing creates no persistent rule.
+- Saving a provider ensures a `system`-scope allow rule exists for its host and port, regardless of test results. Saving replaces a matching systemwide block; loopback and private IPv4 provider addresses receive a LAN grant. If Manager cannot be reached, the save is rejected.
+- The temporary test uses the Manager outbound policy check with the test's identity; its completion operation removes the allowance. These changes have focused tests and have not yet been proven by a CI run.
 
 ## SELinux infrastructure config mounts
 
