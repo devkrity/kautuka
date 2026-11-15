@@ -301,6 +301,14 @@ public static class Program
         PodmanCommandResult deniedUpstreamFetch;
         try
         {
+            // The policy applies when Envoy authorizes a new TCP connection. Restart the
+            // proxy so the request cannot reuse a connection opened before this deny.
+            PodmanCommandResult restart = await podman.RunAsync(["restart", proxyName], 30, CancellationToken.None).ConfigureAwait(false);
+            if (restart.ExitCode != 0 || !await sidecarSupervisor.EnsureReadyAsync(runtimeSettings, CancellationToken.None).ConfigureAwait(false))
+            {
+                throw new InvalidOperationException($"Could not restart and verify the package proxy before the upstream deny check: {PodmanFailureFormatter.FormatDetails(restart)}");
+            }
+
             deniedUpstreamFetch = await podman.RunAsync(upstreamRequest, 30, CancellationToken.None).ConfigureAwait(false);
             if (deniedUpstreamFetch.ExitCode == 0)
             {
