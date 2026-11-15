@@ -61,16 +61,93 @@ jobs:
           sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$runtime_dir"
           echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
 
+      - name: Run Disabled-Brake Production Negative Control
+        shell: bash
+        run: |
+          set -euo pipefail
+          mutant_root="$RUNNER_TEMP/kautuka-brake-nc-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -e "$mutant_root" ]]; then
+            echo "Refusing to reuse existing mutation worktree path: $mutant_root" >&2
+            exit 1
+          fi
+          cleanup_mutant_worktree() {
+            git -C "$GITHUB_WORKSPACE" worktree remove --force "$mutant_root" || true
+            git -C "$GITHUB_WORKSPACE" worktree prune
+          }
+          trap cleanup_mutant_worktree EXIT
+
+          git -C "$GITHUB_WORKSPACE" worktree add --detach "$mutant_root" "$GITHUB_SHA"
+          python3 - "$mutant_root/src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          call = """            string? targetUser = string.Equals(request.Scope, "system", StringComparison.OrdinalIgnoreCase)
+                          ? null
+                          : (string.IsNullOrWhiteSpace(request.UserId) ? request.Actor.UserId : request.UserId);
+                      await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, context.CancellationToken).ConfigureAwait(false);"""
+          if source.count(call) != 1:
+              raise SystemExit(f"Expected exactly one production EngageBrakeAsync block; found {source.count(call)}")
+          path.write_text(source.replace(call, "            // NC mutation: intentionally omit the production workload stop."), encoding="utf-8")
+          PY
+
+          git -C "$mutant_root" diff --binary HEAD -- src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs > "$GITHUB_WORKSPACE/nac-brake-nc-mutation.patch"
+          test -s "$GITHUB_WORKSPACE/nac-brake-nc-mutation.patch"
+          git -C "$mutant_root" rev-parse HEAD > "$GITHUB_WORKSPACE/nac-brake-nc-source-revision.txt"
+          dotnet build "$mutant_root/src/tests/Kautuka.NetworkAccess.Acceptance/Kautuka.NetworkAccess.Acceptance.csproj" -c Release
+
+          baseline_manager="$GITHUB_WORKSPACE/src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.Manager.dll"
+          mutant_manager="$mutant_root/src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.Manager.dll"
+          test -f "$baseline_manager"
+          test -f "$mutant_manager"
+          baseline_hash="$(sha256sum "$baseline_manager" | cut -d ' ' -f 1)"
+          mutant_hash="$(sha256sum "$mutant_manager" | cut -d ' ' -f 1)"
+          if [[ "$baseline_hash" == "$mutant_hash" ]]; then
+            echo "The mutated Manager build is byte-identical to the normal build." >&2
+            exit 1
+          fi
+          {
+            echo "source_revision=$(cat "$GITHUB_WORKSPACE/nac-brake-nc-source-revision.txt")"
+            echo "normal_manager_sha256=$baseline_hash"
+            echo "mutated_manager_sha256=$mutant_hash"
+            echo "mutation_patch_sha256=$(sha256sum "$GITHUB_WORKSPACE/nac-brake-nc-mutation.patch" | cut -d ' ' -f 1)"
+          } > "$GITHUB_WORKSPACE/nac-brake-nc-build-evidence.txt"
+
+          set +e
+          dotnet "$mutant_root/src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll" \
+            --prod-run "$GITHUB_WORKSPACE/nac-brake-nc-report.json"
+          mutant_exit=$?
+          set -e
+          if [[ "$mutant_exit" -eq 0 ]]; then
+            echo "The production acceptance unexpectedly passed with EngageBrakeAsync disabled." >&2
+            exit 1
+          fi
+          jq -e --arg expected 'existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True' '
+            [ .observations[] | select(.testId == "PROD_USER_BRAKE") ] as $matches
+            | ($matches | length) == 1
+              and $matches[0].observedValue == $expected
+              and ($matches[0].outcome | startswith("FAIL"))
+              and ($matches[0].ncFlipped == false)
+          ' "$GITHUB_WORKSPACE/nac-brake-nc-report.json"
+
       - name: Run Production NAC and C6 Acceptance
         run: |
-          dotnet src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll --prod-run "$GITHUB_WORKSPACE/nac-prod-report.json"
+          dotnet src/tests/Kautuka.NetworkAccess.Acceptance/bin/Release/net10.0/Kautuka.NetworkAccess.Acceptance.dll \
+            --prod-run "$GITHUB_WORKSPACE/nac-prod-report.json" \
+            --brake-nc-report "$GITHUB_WORKSPACE/nac-brake-nc-report.json"
 
       - name: Upload production acceptance report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nac-prod-report-${{ github.sha }}
-          path: nac-prod-report.json
+          path: |
+            nac-prod-report.json
+            nac-brake-nc-report.json
+            nac-brake-nc-mutation.patch
+            nac-brake-nc-source-revision.txt
+            nac-brake-nc-build-evidence.txt
           if-no-files-found: warn
           retention-days: 90
 

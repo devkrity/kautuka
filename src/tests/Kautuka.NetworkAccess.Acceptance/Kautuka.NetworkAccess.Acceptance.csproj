@@ -11,6 +11,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\backend\Kautuka.Manager\Kautuka.Manager.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.Manager.RuntimeContainer\Kautuka.Manager.RuntimeContainer.csproj" />
     <ProjectReference Include="..\..\backend\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
   </ItemGroup>

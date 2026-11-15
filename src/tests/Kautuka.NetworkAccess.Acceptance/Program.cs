@@ -7,6 +7,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
+using Grpc.Core;
+
+using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
@@ -17,6 +20,7 @@ using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using NacController = Kautuka.NetworkAccessController.NetworkAccessController;
 
@@ -122,7 +126,6 @@ public static class AcceptanceHarness
 public static class Program
 {
     private static Func<string, IReadOnlyList<string>, Task<(int ExitCode, string StdOut, string StdErr)>>? execOverride;
-
     private sealed class AcceptanceHttpClientFactory : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => new();
@@ -231,7 +234,7 @@ public static class Program
         var npmRequest = new[]
         {
             "exec", builderName, "npm", "view", "is-number", "version", "--registry", npmRegistry,
-            "--fetch-retries=0", "--fetch-timeout=10000", "--loglevel=verbose"
+            "--cache", "/tmp/nac-allow-cache", "--fetch-retries=0", "--fetch-timeout=10000", "--loglevel=verbose"
         };
         PodmanCommandResult packageFetch = await podman.RunAsync(npmRequest, 30, CancellationToken.None).ConfigureAwait(false);
         if (packageFetch.ExitCode != 0 || string.IsNullOrWhiteSpace(packageFetch.StdOut))
@@ -334,6 +337,8 @@ public static class Program
             $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
             "blocked=False");
     }
+    private const string UserBrakeDisabledHookObservation =
+        "existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True";
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -357,8 +362,19 @@ public static class Program
                 return 1;
             }
 
-            string? outPath = prodIdx + 1 < args.Length ? args[prodIdx + 1] : null;
-            return await RunProductionTopologyProofAsync(outPath).ConfigureAwait(false);
+            string? outPath = prodIdx + 1 < args.Length && !args[prodIdx + 1].StartsWith("--", StringComparison.Ordinal)
+                ? args[prodIdx + 1]
+                : null;
+            int brakeNcReportIdx = Array.FindIndex(args, a => string.Equals(a, "--brake-nc-report", StringComparison.OrdinalIgnoreCase));
+            string? brakeNcReportPath = brakeNcReportIdx >= 0 && brakeNcReportIdx + 1 < args.Length
+                ? args[brakeNcReportIdx + 1]
+                : null;
+            if (brakeNcReportIdx >= 0 && string.IsNullOrWhiteSpace(brakeNcReportPath))
+            {
+                await Console.Error.WriteLineAsync("--brake-nc-report requires the report emitted by a separate run with WorkspaceGrpcService.SetBrake's EngageBrakeAsync call disabled.").ConfigureAwait(false);
+                return 1;
+            }
+            return await RunProductionTopologyProofAsync(outPath, brakeNcReportPath).ConfigureAwait(false);
         }
 
         if (!args.Contains("--live", StringComparer.OrdinalIgnoreCase))
@@ -383,6 +399,7 @@ public static class Program
                 Console.WriteLine("Production cleanup self-test passed (mismatched Podman isolation suppressed all Podman mutations; verified cleanup control allowed).");
                 return 0;
             }
+
             Console.WriteLine("Harness self-test verified G9 enforcement. Pass --live on Linux rootless Podman to execute live container & Envoy v1.40.2 proofs.");
             return 0;
         }
@@ -397,6 +414,15 @@ public static class Program
         string? liveOutPath = liveIdx >= 0 && liveIdx + 1 < args.Length && !args[liveIdx + 1].StartsWith("--", StringComparison.Ordinal)
             ? args[liveIdx + 1]
             : null;
+        int liveBrakeNcReportIdx = Array.FindIndex(args, static arg => string.Equals(arg, "--brake-nc-report", StringComparison.OrdinalIgnoreCase));
+        string? liveBrakeNcReportPath = liveBrakeNcReportIdx >= 0 && liveBrakeNcReportIdx + 1 < args.Length
+            ? args[liveBrakeNcReportIdx + 1]
+            : null;
+        if (liveBrakeNcReportIdx >= 0 && string.IsNullOrWhiteSpace(liveBrakeNcReportPath))
+        {
+            await Console.Error.WriteLineAsync("--brake-nc-report requires the report emitted by a separate run with WorkspaceGrpcService.SetBrake's EngageBrakeAsync call disabled.").ConfigureAwait(false);
+            return 1;
+        }
         string? fedoraOutPath = liveOutPath is null
             ? null
             : Path.Combine(
@@ -404,7 +430,7 @@ public static class Program
                 $"{Path.GetFileNameWithoutExtension(liveOutPath)}.fedora{Path.GetExtension(liveOutPath)}");
         int fedoraResult = await RunLiveFedoraAcceptanceAsync(
             fedoraOutPath is null ? ["--live"] : ["--live", fedoraOutPath]).ConfigureAwait(false);
-        int productionResult = await RunProductionTopologyProofAsync(liveOutPath).ConfigureAwait(false);
+        int productionResult = await RunProductionTopologyProofAsync(liveOutPath, liveBrakeNcReportPath).ConfigureAwait(false);
         return fedoraResult == 0 && productionResult == 0 ? 0 : 1;
     }
 
@@ -1115,6 +1141,205 @@ public static class Program
         return stdOut;
     }
 
+    private static async Task RunProductionUserBrakeProofAsync(
+        string workspaceRoot,
+        ContainerContext sourceContext,
+        string baseImage,
+        PodmanContainerTool containerTool,
+        NacController controller,
+        EgressTopologyManager topology,
+        WorkspaceDesiredStateStore desiredState,
+        ContainerContext dnsContext,
+        string? brakeNcReportPath,
+        List<AcceptanceObservation> observations)
+    {
+        // Unique identities and agent IDs keep every Podman object created by this proof
+        // unambiguously owned by this invocation and safe to clean up on every exit path.
+        string suffix = Guid.NewGuid().ToString("N")[..12];
+        string brakeUser = $"brake-a-{suffix}";
+        string otherUser = $"brake-b-{suffix}";
+        string existingAgent = $"brake-existing-{suffix}";
+        string otherAgent = $"brake-other-{suffix}";
+        string blockedAgent = $"brake-blocked-{suffix}";
+        string restoredAgent = $"brake-restored-{suffix}";
+        ContainerContext ContextFor(string userId, string agentId)
+        {
+            string workspace = Path.Combine(workspaceRoot, "users", userId, "agents", agentId);
+            Directory.CreateDirectory(workspace);
+            return sourceContext with
+            {
+                ScopeId = agentId,
+                AgentId = agentId,
+                UserId = userId,
+                HostWorkspacePath = workspace,
+                Image = baseImage,
+            };
+        }
+
+        ContainerContext existingContext = ContextFor(brakeUser, existingAgent);
+        ContainerContext otherContext = ContextFor(otherUser, otherAgent);
+        ContainerContext blockedContext = ContextFor(brakeUser, blockedAgent);
+        ContainerContext restoredContext = ContextFor(brakeUser, restoredAgent);
+        _ = desiredState.ApplyDesiredState(
+            desiredState.Snapshot.AcceptedVersion + 1,
+            WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(
+                new WorkspaceDefinition { BaseRoot = workspaceRoot },
+                new SandboxRuntimeDefinition { Image = baseImage, DefaultTimeout = 30 },
+                new WorkspaceTelemetryDefinition()),
+            [dnsContext, existingContext, otherContext, blockedContext, restoredContext],
+            [],
+            []);
+        string[] ownedContainerNames =
+        [
+            PodmanContainerTool.BuildContainerName(existingContext),
+            PodmanContainerTool.BuildContainerName(otherContext),
+            PodmanContainerTool.BuildContainerName(blockedContext),
+            PodmanContainerTool.BuildContainerName(restoredContext),
+        ];
+        var grpcService = new WorkspaceGrpcService(
+            null!, null!, null!, null!, null!, null!, null!, null!,
+            NullLogger<WorkspaceGrpcService>.Instance,
+            controller,
+            egressTopologyManager: topology);
+        var callContext = new AcceptanceServerCallContext();
+        var admin = new NetworkAccessActorMessage { UserId = "admin-1", IsAdmin = true };
+        bool brakeEngaged = false;
+        try
+        {
+            OciSandboxSession existingSession = await containerTool.SpawnSandboxAsync(existingContext, CancellationToken.None).ConfigureAwait(false);
+            OciSandboxSession otherSession = await containerTool.SpawnSandboxAsync(otherContext, CancellationToken.None).ConfigureAwait(false);
+            string existingBefore = await InspectContainerStateAsync(existingSession.ContainerName).ConfigureAwait(false);
+            string otherBefore = await InspectContainerStateAsync(otherSession.ContainerName).ConfigureAwait(false);
+            if (!string.Equals(existingBefore, "running", StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(otherBefore, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"User-brake fixture workloads were not both running before the brake (target={existingBefore}, other={otherBefore}).");
+            }
+
+            // The handler can persist the brake before a later operation throws. Always
+            // attempt the release in finally after beginning the SetBrake request.
+            brakeEngaged = true;
+            NetworkAccessBrakeMessage brakeOn = await grpcService.SetBrake(
+                new NetworkAccessSetBrakeRequest
+                {
+                    Actor = admin,
+                    Scope = "user",
+                    UserId = brakeUser,
+                    On = true,
+                },
+                callContext).ConfigureAwait(false);
+            string existingAfter = await InspectContainerStateAsync(existingSession.ContainerName).ConfigureAwait(false);
+            string otherAfter = await InspectContainerStateAsync(otherSession.ContainerName).ConfigureAwait(false);
+            bool brakedExistingStopped = string.Equals(existingAfter, "exited", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(existingAfter, "stopped", StringComparison.OrdinalIgnoreCase);
+            bool otherUserStillRunning = string.Equals(otherAfter, "running", StringComparison.OrdinalIgnoreCase);
+
+            bool newLaunchRejectedByBrake = false;
+            try
+            {
+                _ = await containerTool.SpawnSandboxAsync(blockedContext, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("user network brake is active", StringComparison.OrdinalIgnoreCase))
+            {
+                newLaunchRejectedByBrake = true;
+            }
+
+            _ = await grpcService.SetBrake(
+                new NetworkAccessSetBrakeRequest
+                {
+                    Actor = admin,
+                    Scope = "user",
+                    UserId = brakeUser,
+                    On = false,
+                },
+                callContext).ConfigureAwait(false);
+            brakeEngaged = false;
+            OciSandboxSession restoredSession = await containerTool.SpawnSandboxAsync(restoredContext, CancellationToken.None).ConfigureAwait(false);
+            string restoredState = await InspectContainerStateAsync(restoredSession.ContainerName).ConfigureAwait(false);
+            bool restoredLaunchRunning = string.Equals(restoredState, "running", StringComparison.OrdinalIgnoreCase);
+            bool responseContainsUser = brakeOn.Users.Any(user => string.Equals(user.UserId, brakeUser, StringComparison.Ordinal));
+            string ncObservedValue = brakeNcReportPath is null
+                ? "NC_NOT_RUN"
+                : await ReadBrakeNcObservedValueAsync(brakeNcReportPath).ConfigureAwait(false);
+            observations.Add(AcceptanceHarness.Record(
+                "PROD_USER_BRAKE",
+                $"existingStopped={brakedExistingStopped}:otherUserRunning={otherUserStillRunning}:newLaunchRejected={newLaunchRejectedByBrake}:releaseLaunchRunning={restoredLaunchRunning}:responseContainsUser={responseContainsUser}",
+                "existingStopped=True:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True",
+                ncObservedValue,
+                UserBrakeDisabledHookObservation));
+            Console.WriteLine("[PROD_STAGE] production user-brake stop, scope, launch refusal, and release checks completed");
+        }
+        finally
+        {
+            if (brakeEngaged)
+            {
+                try
+                {
+                    _ = await grpcService.SetBrake(
+                        new NetworkAccessSetBrakeRequest
+                        {
+                            Actor = admin,
+                            Scope = "user",
+                            UserId = brakeUser,
+                            On = false,
+                        },
+                        callContext).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Cleanup continues even if the brake release call fails.
+                }
+            }
+
+            _ = await ExecAsync("podman", ["rm", "-f", .. ownedContainerNames]).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<string> ReadBrakeNcObservedValueAsync(string reportPath)
+    {
+        string fullPath = Path.GetFullPath(reportPath);
+        if (!File.Exists(fullPath))
+        {
+            throw new FileNotFoundException("The separately captured mutated-handler production report was not found.", fullPath);
+        }
+
+        string json = await File.ReadAllTextAsync(fullPath).ConfigureAwait(false);
+        ProductionProofReport report = JsonSerializer.Deserialize(json, AcceptanceJsonContext.Default.ProductionProofReport)
+            ?? throw new InvalidDataException("The mutated-handler NC report was empty or invalid.");
+        AcceptanceObservation[] matches = report.Observations
+            .Where(static observation => string.Equals(observation.TestId, "PROD_USER_BRAKE", StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            throw new InvalidDataException($"The mutated-handler NC report must contain exactly one PROD_USER_BRAKE observation; found {matches.Length}.");
+        }
+
+        AcceptanceObservation ncObservation = matches[0];
+        if (!string.Equals(ncObservation.ObservedValue, UserBrakeDisabledHookObservation, StringComparison.Ordinal)
+            || ncObservation.NcFlipped
+            || !ncObservation.Outcome.StartsWith("FAIL", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The imported NC report does not show the expected failed user-brake scenario with EngageBrakeAsync disabled.");
+        }
+
+        return ncObservation.ObservedValue;
+    }
+
+    private static async Task<string> InspectContainerStateAsync(string containerName)
+    {
+        var (exitCode, output, error) = await ExecAsync(
+            "podman",
+            ["inspect", "--format", "{{.State.Status}}", containerName]).ConfigureAwait(false);
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"Could not inspect acceptance workload '{containerName}' (rc={exitCode}; {error}).");
+        }
+
+        return output.Trim();
+    }
+
     private static long ExtractNftCommentCounterPackets(string nftJson, string commentTag)
     {
         using JsonDocument doc = JsonDocument.Parse(nftJson);
@@ -1190,7 +1415,7 @@ public static class Program
     private static int CountLines(string path)
         => File.Exists(path) ? File.ReadAllLines(path).Count(l => !string.IsNullOrWhiteSpace(l)) : 0;
 
-    private static async Task<int> RunProductionTopologyProofAsync(string? outputReportPath)
+    private static async Task<int> RunProductionTopologyProofAsync(string? outputReportPath, string? brakeNcReportPath)
     {
         string repoRoot = FindRepoRoot();
         string baseTmp = Directory.Exists("/var/tmp") ? "/var/tmp" : Path.GetTempPath();
@@ -2058,6 +2283,18 @@ public static class Program
                 expectedRevision: policyStore.Revision);
             bool startupGateOpenBeforeFinalNegativeControl = topology.IsStartupGateOpen;
 
+            await RunProductionUserBrakeProofAsync(
+                workspaceRoot,
+                wlContext,
+                baseImage,
+                containerTool,
+                controller,
+                topology,
+                desiredState,
+                wl3Context,
+                brakeNcReportPath,
+                observations).ConfigureAwait(false);
+
             string currentCorefile = await File.ReadAllTextAsync(corefilePath).ConfigureAwait(false);
             if (!string.Equals(currentCorefile, corefile, StringComparison.Ordinal))
             {
@@ -2392,7 +2629,7 @@ public static class Program
         bool rejected = false;
         try
         {
-            _ = await RunProductionTopologyProofAsync(null).ConfigureAwait(false);
+            _ = await RunProductionTopologyProofAsync(null, null).ConfigureAwait(false);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("requires rootless Podman with isolated storage", StringComparison.Ordinal))
         {
@@ -2478,5 +2715,30 @@ public static class Program
         string stdOut = await stdOutTask.ConfigureAwait(false);
         string stdErr = await stdErrTask.ConfigureAwait(false);
         return (proc.ExitCode, stdOut, stdErr);
+    }
+
+    private sealed class AcceptanceServerCallContext : ServerCallContext
+    {
+        private readonly Metadata requestHeaders = [];
+        private readonly Metadata responseTrailers = [];
+        private readonly Dictionary<object, object> userState = [];
+
+        protected override string MethodCore => "/kautuka.manager.v1.ManagerService/SetBrake";
+        protected override string HostCore => "localhost";
+        protected override string PeerCore => "unix:acceptance";
+        protected override DateTime DeadlineCore => DateTime.MaxValue;
+        protected override Metadata RequestHeadersCore => requestHeaders;
+        protected override CancellationToken CancellationTokenCore => CancellationToken.None;
+        protected override Metadata ResponseTrailersCore => responseTrailers;
+        protected override Status StatusCore { get; set; }
+        protected override WriteOptions? WriteOptionsCore { get; set; }
+        protected override AuthContext AuthContextCore => new(string.Empty, []);
+        protected override IDictionary<object, object> UserStateCore => userState;
+
+        protected override ContextPropagationToken CreatePropagationTokenCore(ContextPropagationOptions? options)
+            => throw new NotSupportedException();
+
+        protected override Task WriteResponseHeadersAsyncCore(Metadata responseHeaders)
+            => Task.CompletedTask;
     }
 }

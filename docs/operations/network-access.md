@@ -12,6 +12,8 @@ On Linux, existing Envoy, CoreDNS, and boundary containers are reused only when 
 
 During reconciliation, transient egress pod health or boundary verification failures close launch admission while Manager recreates and verifies the pod. A failed recovery is retried; a proven ruleset hash mismatch latches the incident and stops workloads. An unrelated closed gate still permits registry reconciliation without starting recovery. Focused tests cover these paths with a simulated Podman runner.
 
+The production acceptance workflow includes a user-brake scenario for stopping the selected user's existing workload, leaving another user's workload running, rejecting a new launch while paused, and allowing a launch after release. A separate CI run with the workload-stop call disabled provides its negative control. Live verification of this new scenario is pending a successful CI run.
+
 The Envoy authorization host rejects wildcard TCP bind addresses; the wildcard listener used for detection tests exists only in the test fixture.
 
 ### Windows native development path
