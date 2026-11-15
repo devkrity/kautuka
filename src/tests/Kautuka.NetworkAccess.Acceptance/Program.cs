@@ -452,13 +452,13 @@ public static class Program
         removedFlowCount = 0;
         string[] lines = (stdout + "\n" + stderr)
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (lines.Length != 1)
+        if (lines.Length == 0)
         {
             return false;
         }
 
         Match match = Regex.Match(
-            lines[0],
+            lines[^1],
             @"^(?:conntrack v[0-9.]+ \(conntrack-tools\):\s*)?(?<count>[0-9]+)\s+flow\s+(?:entries\s+have|entry\s+has)\s+been deleted\.?$",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (!match.Success || !long.TryParse(match.Groups["count"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out removedFlowCount))
@@ -466,8 +466,17 @@ public static class Program
             return false;
         }
 
+        if (lines.Length > 1
+            && (exitCode != 0 || removedFlowCount != lines.Length - 1
+                || lines[..^1].Any(static line => !Regex.IsMatch(line,
+                    @"^udp\s+\d+\s+\d+\s+src=\S+\s+dst=\S+\s+sport=\d+\s+dport=\d+\s+src=\S+\s+dst=\S+\s+sport=\d+\s+dport=\d+(?:\s+.*)?$",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))))
+        {
+            return false;
+        }
+
         // conntrack returns nonzero for its documented no-match result on some versions.
-        // Accept only that exact output; any stderr error or extra output is rejected above.
+        // Accept only a recognized summary and, when present, matching UDP flow records.
         return exitCode == 0 || (exitCode != 0 && removedFlowCount == 0);
     }
 
@@ -475,6 +484,8 @@ public static class Program
     {
         if (!TryParseConntrackDeleteResult(1, "0 flow entries have been deleted.\n", string.Empty, out long zeroCount) || zeroCount != 0
             || !TryParseConntrackDeleteResult(0, "2 flow entries have been deleted.\n", string.Empty, out long positiveCount) || positiveCount != 2
+            || !TryParseConntrackDeleteResult(0, "udp 17 7 src=10.248.0.2 dst=10.248.0.1 sport=35857 dport=53 src=10.248.0.1 dst=10.248.0.2 sport=53 dport=35857 mark=0 use=1\n", "conntrack v1.4.9 (conntrack-tools): 1 flow entries have been deleted.\n", out long listedCount) || listedCount != 1
+            || TryParseConntrackDeleteResult(0, "unexpected output\n", "conntrack v1.4.9 (conntrack-tools): 1 flow entries have been deleted.\n", out _)
             || TryParseConntrackDeleteResult(1, "0 flow entries have been deleted.\n", "conntrack: Operation failed: Permission denied\n", out _)
             || TryParseConntrackDeleteResult(127, string.Empty, "conntrack: command not found\n", out _)
             || TryParseConntrackDeleteResult(1, "1 flow entry has been deleted.\n", string.Empty, out _))
