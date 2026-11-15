@@ -1202,7 +1202,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
         if (inspection.Exists)
         {
-            if (!await RemoveConnectorContainerAsync(containerName, cancellationToken).ConfigureAwait(false))
+            if (!await RemoveConnectorContainerAsync(containerName, inspection, cancellationToken).ConfigureAwait(false))
             {
                 throw new ContainerInspectionUnavailableException($"Connector container '{containerName}' removal did not complete. Recreation is deferred.");
             }
@@ -1468,7 +1468,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             return;
         }
 
-        if (!await RemoveConnectorContainerAsync(containerName, cancellationToken).ConfigureAwait(false))
+        if (!await RemoveConnectorContainerAsync(containerName, inspection, cancellationToken).ConfigureAwait(false))
         {
             return;
         }
@@ -1505,7 +1505,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (!LiveContainerSpec.TryReadLabels(inspectJson, out string? state, out long desiredVersion, out string fingerprint))
             {
-                return new ConnectorContainerInspection(true, state, 0, string.Empty, "the container inspect could not be read");
+                return new ConnectorContainerInspection(true, state, 0, string.Empty, "the container inspect could not be read", canonicalContainerId, workloadIp);
             }
 
             string? drift = LiveContainerSpec.DescribeDrift(
@@ -1759,20 +1759,38 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         return assignments;
     }
 
-    private async Task<bool> RemoveConnectorContainerAsync(string containerName, CancellationToken cancellationToken)
+    private async Task<bool> RemoveConnectorContainerAsync(
+        string containerName,
+        ConnectorContainerInspection? observedInspection,
+        CancellationToken cancellationToken)
     {
+        ConnectorContainerInspection inspection = observedInspection
+            ?? await InspectContainerStateAsync(containerName, null, null, cancellationToken).ConfigureAwait(false);
+        if (!inspection.Exists)
+        {
+            logger.LogWarning("Connector container '{ContainerName}' was not present in the supplied inspection; destructive cleanup is deferred.", containerName);
+            return false;
+        }
+
+        string? canonicalContainerId = inspection.CanonicalContainerId;
+        if (!PodmanContainerIdentity.IsCanonicalContainerId(canonicalContainerId))
+        {
+            logger.LogWarning("Connector container '{ContainerName}' did not expose a canonical ID in its original inspection; destructive cleanup is deferred.", containerName);
+            return false;
+        }
+
         PodmanCommandResult result = await podmanCommandRunner
-            .RunAsync(["rm", "-f", containerName], 15, cancellationToken)
+            .RunAsync(["rm", "-f", canonicalContainerId!], 15, cancellationToken)
             .ConfigureAwait(false);
 
         if (result.ExitCode == 0)
         {
             if (workloadRegistry is not null)
             {
-                var entry = workloadRegistry.GetAll().FirstOrDefault(e => string.Equals(e.ContainerId, containerName, StringComparison.OrdinalIgnoreCase));
-                if (entry is not null)
+                foreach (Kautuka.NetworkAccessController.RegistryEntry entry in workloadRegistry.GetAll()
+                    .Where(entry => string.Equals(entry.ContainerId, canonicalContainerId, StringComparison.Ordinal)))
                 {
-                    workloadRegistry.Deregister(entry.Ip, entry.ContainerId);
+                    workloadRegistry.Deregister(entry.Ip, canonicalContainerId);
                 }
             }
             return true;
@@ -2162,7 +2180,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             try
             {
-                await RemoveConnectorContainerAsync(containerName, CancellationToken.None).ConfigureAwait(false);
+                await RemoveConnectorContainerAsync(containerName, null, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

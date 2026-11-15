@@ -109,7 +109,7 @@ public sealed class PodmanReconciliationFailureTests
                 var connector = new WorkspaceMcpContainerConnectorDefinition("test", "localhost/test:local", "node", [], true, false, null, null, [], 30, 600);
                 MethodInfo method = typeof(WorkspaceContainerConnectorExecutionService).GetMethod("EnsureConnectorContainerRunningAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
                 await Assert.ThrowsAsync<ContainerInspectionUnavailableException>(() => (Task)method.Invoke(service,
-                    [connector, "test", "test-container", WorkspaceMcpExecutionContext.Isolated, null, TestContext.Current.CancellationToken, false, context])!);
+                    [connector, "test", "test-container", WorkspaceMcpExecutionContext.Isolated, null, TestContext.Current.CancellationToken, false, context, null])!);
             }
             else
             {
@@ -142,7 +142,8 @@ public sealed class PodmanReconciliationFailureTests
     private static PodmanCommandResult Success(string output) => new(0, output, "", ProcessTerminationReason.Completed);
     private static PodmanCommandResult Error() => new(125, "", "synthetic backend failure", ProcessTerminationReason.NonZeroExit);
     private const string stoppedInspection = """
-        [{"Image":"sha256:old","State":{"Status":"exited"},"HostConfig":{},
+        [{"Id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","Image":"sha256:old","State":{"Status":"exited"},"HostConfig":{},
+        "NetworkSettings":{"Networks":{"kautuka-workload":{"IPAddress":"10.88.0.9"}}},
         "Config":{"Labels":{"kautuka.desired-version":"0","kautuka.spec-fingerprint":"old"}}}]
         """;
 }

@@ -471,6 +471,114 @@ public sealed class WorkloadRegistryTrustLifecycleTests
     }
 
     [Fact]
+    public async Task ConnectorInspectionRetainsIdWhenLabelsAreMissing()
+    {
+        const string id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        string inspection = "[{\"Id\":\"" + id + "\",\"HostConfig\":{},\"Config\":{},\"State\":{\"Status\":\"exited\"}}]";
+        var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, inspection, string.Empty, ProcessTerminationReason.Completed)));
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        MethodInfo inspect = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("InspectContainerStateAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Task task = (Task)inspect.Invoke(service, ["connector", null, null, TestContext.Current.CancellationToken])!;
+        await task;
+        object result = task.GetType().GetProperty("Result")!.GetValue(task)!;
+        Assert.Equal(id, result.GetType().GetProperty("CanonicalContainerId")!.GetValue(result));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("invalid-id")]
+    public async Task ConnectorRemovalDefersWhenInspectedIdIsInvalid(string id)
+    {
+        string inspection = "[{\"Id\":\"" + id + "\",\"HostConfig\":{},\"Config\":{\"Labels\":{}},\"State\":{\"Status\":\"exited\"}}]";
+        bool removed = false;
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "rm") removed = true;
+            return Task.FromResult(new PodmanCommandResult(0, inspection, string.Empty, ProcessTerminationReason.Completed));
+        });
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        MethodInfo remove = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("RemoveConnectorContainerAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        bool result = await ((Task<bool>)remove.Invoke(service, ["connector", null, TestContext.Current.CancellationToken])!);
+        Assert.False(result);
+        Assert.False(removed);
+    }
+
+    [Fact]
+    public async Task ConnectorRemovalUsesInspectedCanonicalIdAndKeepsReusedNameReplacement()
+    {
+        const string containerName = "kautuka-mcp-user-a-agent-a-shared-files";
+        const string oldContainerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const string replacementContainerId = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const string oldIp = "10.247.1.61";
+        const string replacementIp = "10.247.1.62";
+        string imageDigest = "sha256:" + new string('a', 64);
+        var registry = new WorkloadRegistry();
+        DateTimeOffset registered = DateTimeOffset.UtcNow;
+        RegistryEntry oldEntry = new(
+            oldIp, "user-a", "agent-a", oldContainerId, "connector", "user-a::shared", "isolated-with-agent-files", false,
+            "normal", "user-agent", null, registered);
+        RegistryEntry replacementEntry = oldEntry with { Ip = replacementIp, ContainerId = replacementContainerId };
+        registry.Register(oldEntry);
+        string initialInspectJson = CreateConnectorInspectJson(oldContainerId, string.Empty, imageDigest, "fingerprint", "user-a::shared", kind: "connector");
+        string replacementInspectJson = CreateConnectorInspectJson(replacementContainerId, replacementIp, imageDigest, "fingerprint", "user-a::shared", kind: "connector");
+        int inspectCount = 0;
+        string? removalTarget = null;
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "inspect")
+            {
+                inspectCount++;
+                string observed = inspectCount == 1 ? initialInspectJson : replacementInspectJson;
+                return Task.FromResult(new PodmanCommandResult(0, observed, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            if (args[0] == "rm")
+            {
+                removalTarget = args[2];
+                return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+            }
+
+            throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
+        });
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(),
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            workloadRegistry: registry);
+        MethodInfo remove = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("RemoveConnectorContainerAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("RemoveConnectorContainerAsync was not found.");
+        MethodInfo inspect = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("InspectContainerStateAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("InspectContainerStateAsync was not found.");
+
+        Task inspectionTask = (Task)inspect.Invoke(service, [containerName, null, null, TestContext.Current.CancellationToken])!;
+        await inspectionTask;
+        object inspection = inspectionTask.GetType().GetProperty("Result")!.GetValue(inspectionTask)!;
+        // The mutable name now points at B. Cleanup must use the identity captured from A.
+        registry.Register(replacementEntry);
+        bool removed = await ((Task<bool>)remove.Invoke(service, [containerName, inspection, TestContext.Current.CancellationToken])!);
+
+        Assert.True(removed);
+        Assert.Equal(1, inspectCount);
+        Assert.Equal(oldContainerId, removalTarget);
+        RegistryEntry retained = Assert.Single(registry.GetAll());
+        Assert.Equal(replacementIp, retained.Ip);
+        Assert.Equal(replacementContainerId, retained.ContainerId);
+        Assert.Null(registry.FindByIp(oldIp));
+    }
+
+    [Fact]
     public async Task DesiredReconcileReverifiesAndRestoresRunningSystemwideConnectorWithTrustedCompatProfile()
     {
         if (!OperatingSystem.IsWindows())
