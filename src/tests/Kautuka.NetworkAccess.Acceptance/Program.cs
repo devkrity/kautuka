@@ -304,7 +304,12 @@ public static class Program
             deniedUpstreamFetch = await podman.RunAsync(upstreamRequest, 30, CancellationToken.None).ConfigureAwait(false);
             if (deniedUpstreamFetch.ExitCode == 0)
             {
-                throw new InvalidOperationException("An explicit Manager system deny did not block the package proxy's upstream connection through Envoy.");
+                string decisions = string.Join("; ", controller.AuditRing.List(admin)
+                    .Where(static entry => entry.UserId == "system" && entry.AgentId == "package-proxy")
+                    .Take(10)
+                    .Select(static entry => $"{entry.TimestampUtc:O} {entry.Destination}:{entry.Port} {entry.Decision}/{entry.Reason}"));
+                PodmanCommandResult proxyLogs = await podman.RunAsync(["logs", "--tail", "30", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
+                throw new InvalidOperationException($"An explicit Manager system deny did not block the package proxy's upstream connection through Envoy. Recent proxy decisions: {decisions}; proxy logs: {proxyLogs.StdOut} {proxyLogs.StdErr}");
             }
         }
         finally
