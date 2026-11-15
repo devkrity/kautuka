@@ -123,7 +123,8 @@ internal static class NetworkAccessPolicyAuthorizer
             return true;
         }
 
-        if (req.Systemwide && req.Attribution != "user-agent")
+        if (req.Systemwide && req.Attribution != "user-agent"
+            && !(string.Equals(req.Purpose, "probe", StringComparison.OrdinalIgnoreCase) && req.Attribution == "user"))
         {
             return false;
         }
@@ -145,18 +146,9 @@ internal static class NetworkAccessPolicyAuthorizer
             throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may grant LAN access.");
         }
 
-        if (request.Systemwide)
-        {
-            if (!actor.IsAdmin)
-            {
-                throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a systemwide connector probe request.");
-            }
-
-            return;
-        }
-
         if (string.IsNullOrWhiteSpace(request.UserId))
         {
+            if (actor.IsAdmin) return;
             throw new InvalidOperationException("User probe request is missing userId.");
         }
 

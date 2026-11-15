@@ -1429,7 +1429,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.True(controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.112", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
 
-            // 2. Systemwide connector probe container (even if UserId is set on a user with canApproveOwn, systemwide probe ALWAYS goes to admin!)
+            // 2. Systemwide availability does not change the owner's probe permissions.
             registry.Register(new RegistryEntry(
                 "10.247.1.120",
                 "user-x",
@@ -1449,36 +1449,44 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 new ContainerConnectionInput("10.247.1.120", "93.184.216.34", 443, "sys-probe.example.com"));
             Assert.False(sysProbeTry.Allowed);
 
-            // User-x CANNOT see or approve the systemwide probe request even with canApproveOwn = true
-            NetworkAccessListRequestsResponse userListAfterSys = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
-            Assert.DoesNotContain(userListAfterSys.Requests, r => r.Destination == "sys-probe.example.com");
-
-            // Admin sees the systemwide probe request and temporarily allows it without creating a persistent rule
-            NetworkAccessListRequestsResponse adminList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
-            NetworkAccessRequestMessage? sysReq = adminList.Requests.FirstOrDefault(r => r.Destination == "sys-probe.example.com");
-            Assert.NotNull(sysReq);
-
-            // User-x attempting to decide systemwide probe request throws PermissionDenied
-            await Assert.ThrowsAsync<RpcException>(async () =>
-            {
-                _ = await svc.DecideRequest(new NetworkAccessDecideRequest
-                {
-                    Actor = userX,
-                    RequestId = sysReq.Id,
-                    Allow = true,
-                    Scope = "connector-system",
-                    ExpectedRevision = adminList.Revision,
-                }, ctx);
-            });
-
-            // Admin temporarily approves systemwide probe -> NO persistent rule written; works during probe; gone on exit!
-            NetworkAccessDecideResponse decideSysProbe = await svc.DecideRequest(new NetworkAccessDecideRequest
+            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
+                UserId = "user-x",
+                CanApproveOwn = false,
+                CanAllowAllAgents = false,
+            }, ctx);
+            NetworkAccessListRequestsResponse unprivilegedList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            NetworkAccessRequestMessage unprivilegedRequest = Assert.Single(unprivilegedList.Requests, r => r.Destination == "sys-probe.example.com");
+            Assert.True(unprivilegedRequest.WaitingForAdmin);
+            await Assert.ThrowsAsync<RpcException>(() => svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userX,
+                RequestId = unprivilegedRequest.Id,
+                Allow = true,
+                Scope = "agent",
+                ExpectedRevision = unprivilegedList.Revision,
+            }, ctx));
+            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
+            {
+                Actor = admin,
+                UserId = "user-x",
+                CanApproveOwn = true,
+                CanAllowAllAgents = false,
+            }, ctx);
+            NetworkAccessListRequestsResponse userListAfterSys = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
+            NetworkAccessRequestMessage? sysReq = userListAfterSys.Requests.FirstOrDefault(r => r.Destination == "sys-probe.example.com");
+            Assert.NotNull(sysReq);
+            Assert.False(sysReq.WaitingForAdmin);
+
+            // The owner's temporary approval writes no persistent rule.
+            NetworkAccessDecideResponse decideSysProbe = await svc.DecideRequest(new NetworkAccessDecideRequest
+            {
+                Actor = userX,
                 RequestId = sysReq.Id,
                 Allow = true,
-                Scope = "connector-system",
-                ExpectedRevision = adminList.Revision,
+                Scope = "agent",
+                ExpectedRevision = userListAfterSys.Revision,
             }, ctx);
             Assert.True(decideSysProbe.Rule is null || string.IsNullOrEmpty(decideSysProbe.Rule.Id));
             Assert.True(controller.EvaluateContainerConnection(

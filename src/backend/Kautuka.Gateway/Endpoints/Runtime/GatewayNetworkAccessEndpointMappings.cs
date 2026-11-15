@@ -874,7 +874,8 @@ internal static partial class GatewayRuntimeEndpointMappings
 
         bool canApproveOwn = ownerPrivs?.CanApproveOwn ?? false;
         bool canAllowAllAgents = ownerPrivs?.CanAllowAllAgents ?? false;
-        bool isSystemwide = (req.Systemwide && req.Attribution != "user-agent") || req.Attribution is "none" || req.ActorKind is "first-party";
+        bool isUserProbe = string.Equals(req.Purpose, "probe", StringComparison.OrdinalIgnoreCase) && req.Attribution == "user";
+        bool isSystemwide = (req.Systemwide && req.Attribution != "user-agent" && !isUserProbe) || req.Attribution is "none" || req.ActorKind is "first-party";
         bool waitingForAdmin = req.WaitingForAdmin || isSystemwide || !canApproveOwn;
 
         return new NetworkAccessRequestDto(

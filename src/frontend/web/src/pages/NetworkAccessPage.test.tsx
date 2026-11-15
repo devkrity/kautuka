@@ -864,6 +864,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
     });
 
     it('renders temporary probe card without permanent scope options (v7-14)', async () => {
+      mockViewer.role = 'user';
       const requestsData = createDefaultRequests(
         [
           {
@@ -872,7 +873,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             userDisplayName: 'Ravi',
             connectorId: 'conn-probe',
             connectorDisplayName: 'GitHub MCP',
-            systemwide: false,
+            systemwide: true,
             attribution: 'user',
             destination: 'api.github.com',
             destKind: 'host',

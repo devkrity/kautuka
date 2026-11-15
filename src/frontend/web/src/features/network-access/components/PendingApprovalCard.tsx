@@ -42,8 +42,8 @@ export function PendingApprovalCard({
   const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
 
-  const isSystemwide = Boolean(request.systemwide) && request.attribution !== 'user-agent';
   const isProbe = request.purpose === 'probe';
+  const isSystemwide = Boolean(request.systemwide) && request.attribution !== 'user-agent' && !(isProbe && request.attribution === 'user');
   const isPrivate = destinationScope(request.destination) === 'private';
   const destFormatted = formatDestinationDisplay(request.destination, request.port);
 

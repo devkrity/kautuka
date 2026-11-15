@@ -236,7 +236,7 @@ public sealed partial class NetworkAccessPolicyStore
                     continue;
                 }
 
-                bool waitingForAdmin = !actor.IsAdmin && (req.Systemwide || !callerPrivs.CanApproveOwn);
+                bool waitingForAdmin = !actor.IsAdmin && !callerPrivs.CanApproveOwn;
                 views.Add(new NetworkAccessRequestView(
                     req,
                     WaitingForAdmin: waitingForAdmin,

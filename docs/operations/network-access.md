@@ -133,7 +133,7 @@ When an agent or connector attempts an outbound connection to an unapproved dest
 4. **Connector Probes (`v7-14`)**:
    - Probe containers (`io.kautuka.purpose=probe`) receive a temporary, **in-memory only** allow or block scoped strictly to `(probe container, user, connector, destination, port)`.
    - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared when the probe operation completes, independently of container deregistration. Subsequent runtime containers ask normally and write standard persistent rules.
-   - User-owned connector probes go to the connector owner if they hold `canApproveOwn` (otherwise an administrator); systemwide connector probes always route exclusively to administrators.
+   - Connector probes go to the invoking user if they hold `canApproveOwn` (otherwise an administrator), regardless of whether the connector is available systemwide. Probe approvals remain temporary.
    - A probe container can have at most 64 temporary approval cards. Further distinct destinations are denied without creating a card. Persisted legacy requests marked as probes cannot be approved into permanent rules.
 
 ### 2.2 User Privileges
