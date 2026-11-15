@@ -526,7 +526,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             var runner = new PodmanCommandRunner((args, _) => Task.FromResult(args[0] switch
             {
                 "inspect" => new PodmanCommandResult(0, inspectJson, string.Empty, ProcessTerminationReason.Completed),
-                "image" => new PodmanCommandResult(0, imageDigest, string.Empty, ProcessTerminationReason.Completed),
+                "image" => new PodmanCommandResult(0, args.Contains("--format", StringComparer.Ordinal) ? imageDigest : "[{\"Id\":\"" + imageDigest + "\",\"RepoDigests\":[\"example/image@" + imageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed),
                 "machine" when args.Contains("cat", StringComparer.Ordinal) => new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed),
                 "machine" => new PodmanCommandResult(0, ruleset, string.Empty, ProcessTerminationReason.Completed),
                 _ => new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed),
@@ -986,13 +986,12 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 NullLogger<EgressTopologyManager>.Instance);
             await using (manager.ConfigureAwait(false))
             {
-                await manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+                InvalidOperationException failure = await Assert.ThrowsAnyAsync<InvalidOperationException>(
+                    () => manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken));
+                Assert.Contains("Startup must remain closed", failure.Message, StringComparison.Ordinal);
             }
 
-            RegistryEntry rebuilt = Assert.Single(registry.GetAll());
-            Assert.Equal(containerId, rebuilt.ContainerId);
-            Assert.Equal("deny-all", rebuilt.Egress);
-            Assert.Equal("none", rebuilt.Attribution);
+            Assert.Empty(registry.GetAll());
         }
         finally
         {

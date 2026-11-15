@@ -7,9 +7,10 @@ public sealed class V7_20_AcceptanceHarnessContractTests
     {
         string sourcePath = Path.Combine(AppContext.BaseDirectory, "Fixtures", "NetworkAccessAcceptanceProgram.cs");
         string source = File.ReadAllText(sourcePath);
-        const string methodStart = "private static async Task<int> RunProductionTopologyProofAsync(string? outputReportPath)";
+        const string methodStart = "private static async Task<int> RunProductionTopologyProofAsync(";
         const string methodEnd = "private static async Task BestEffortCleanupAsync(";
         int start = source.IndexOf(methodStart, StringComparison.Ordinal);
+        Assert.True(start >= 0, "The production acceptance method source must be available for the contract check.");
         int end = source.IndexOf(methodEnd, start, StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start, "The production acceptance method source must be available for the contract check.");
         string productionProof = source[start..end];

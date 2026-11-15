@@ -284,7 +284,7 @@ public sealed class NetworkAccessArchitectureContractTests
             cancellationToken: cancellationToken).GetCompilationUnitRoot(cancellationToken);
         MethodDeclarationSyntax productionRun = source.DescendantNodes()
             .OfType<MethodDeclarationSyntax>()
-            .Single(method => method.Identifier.ValueText == "RunProductionTopologyProofAsync");
+            .Single(method => method.Identifier.ValueText == "RunProductionTopologyProofAsync" && method.Body is not null);
         string[] calls = productionRun.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
             .Select(invocation => invocation.Expression switch
@@ -316,7 +316,7 @@ public sealed class NetworkAccessArchitectureContractTests
         string workflow = await File.ReadAllTextAsync(workflowPath, cancellationToken);
         Assert.Contains("--prod-run", workflow, StringComparison.Ordinal);
         string acceptanceSource = await File.ReadAllTextAsync(acceptancePath, cancellationToken);
-        Assert.Contains("Environment.GetEnvironmentVariable(\"XDG_RUNTIME_DIR\")", acceptanceSource, StringComparison.Ordinal);
+        Assert.Contains("Path.Combine(Path.GetTempPath(), $\"nac-run-", acceptanceSource, StringComparison.Ordinal);
         Assert.Contains("podmanRunRoot", acceptanceSource, StringComparison.Ordinal);
     }
 
