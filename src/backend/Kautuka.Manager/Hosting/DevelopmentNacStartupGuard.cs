@@ -13,7 +13,9 @@ internal sealed class DevelopmentNacStartupGuard(
 {
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        if (environment.IsDevelopment() && !workloadStartupState.IsStartupGateOpen)
+        if (environment.IsDevelopment()
+            && !workloadStartupState.IsStartupGateOpen
+            && workloadStartupState is not EgressTopologyManager { IsStartupRetryPending: true })
         {
             const string message = "NAC startup gate is closed; Development Manager startup is aborted.";
             logger.LogCritical("{StartupFailure}", message);

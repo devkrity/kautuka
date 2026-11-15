@@ -32,7 +32,7 @@ public static class WorkloadRulesetRenderer
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool includePackageProxy = false)
+    public static string Render(string allocatedIp, bool isPackageProxy = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
@@ -41,10 +41,6 @@ public static class WorkloadRulesetRenderer
             throw new ArgumentException($"Invalid workload IPv4 address: '{allocatedIp}'.", nameof(allocatedIp));
         }
 
-        string pkgRule = includePackageProxy
-            ? "    ip daddr 10.247.0.3 tcp dport 20101 accept\n"
-            : string.Empty;
-
         var sb = new StringBuilder();
         sb.AppendLine("table inet kautuka_workload");
         sb.AppendLine("delete table inet kautuka_workload");
@@ -52,18 +48,22 @@ public static class WorkloadRulesetRenderer
         sb.AppendLine("  chain input { type filter hook input priority 0; policy drop;");
         sb.AppendLine("    iifname \"lo\" accept");
         sb.AppendLine("    ct state established,related accept");
+        if (isPackageProxy)
+        {
+            sb.AppendLine("    ip saddr 10.247.0.2 tcp dport 20101 accept");
+        }
         sb.AppendLine("    counter drop comment \"input_drop\"");
         sb.AppendLine("  }");
         sb.AppendLine("  chain output { type filter hook output priority 0; policy drop;");
         sb.AppendLine("    oifname \"lo\" accept");
+        if (isPackageProxy)
+        {
+            sb.AppendLine("    ct state established,related accept");
+        }
         sb.AppendLine("    meta nfproto ipv6 counter drop comment \"ipv6_drop\"");
         sb.AppendLine(CultureInfo.InvariantCulture, $"    oifname != \"lo\" ip saddr != {normalizedIp} counter drop comment \"spoof_drop\"");
         sb.AppendLine("    ip daddr 10.247.0.2 tcp dport 15001 accept");
         sb.AppendLine("    ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept");
-        if (includePackageProxy)
-        {
-            sb.Append(pkgRule);
-        }
         sb.AppendLine("    ip daddr 10.247.0.0/16 counter drop comment \"wl_net_drop\"");
         sb.AppendLine("    ip daddr { 169.254.0.0/16, 168.63.129.16 } counter drop comment \"meta_drop\"");
         sb.AppendLine("    meta l4proto udp counter drop comment \"udp_drop\"");
@@ -75,10 +75,11 @@ public static class WorkloadRulesetRenderer
         return sb.ToString();
     }
 
-    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp)
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
-        string tmpl = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl");
+        string templateName = isPackageProxy ? "kautuka_package_proxy.nft.json.tmpl" : "kautuka_workload.nft.json.tmpl";
+        string tmpl = BoundaryRulesetRenderer.ResolveTemplate(templateName);
         string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);
         return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(goldenJson, RequiredWorkloadComments, allocatedIp.Trim());
     }

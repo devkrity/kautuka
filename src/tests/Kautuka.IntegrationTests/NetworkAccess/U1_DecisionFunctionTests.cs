@@ -172,6 +172,129 @@ public sealed class U1_DecisionFunctionTests : IDisposable
     }
 
     [Fact]
+    public void PackageProxyDefaultPolicyAllowsOnlyTheReservedServiceAndHonorsOverrides()
+    {
+        const string packageServiceIp = "198.18.250.249";
+        const int packageServicePort = 20101;
+        string statePath = Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json");
+        var store = new NetworkAccessPolicyStore(statePath);
+        var controller = new NacController(store, new WorkloadRegistry());
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.1.20", null, null, "ctr-builder", "builder", null, "builder", false,
+            "proxy-only", "none", null, DateTimeOffset.UtcNow));
+        NetworkAccessDecisionResult builderPackage = controller.EvaluateContainerConnection(
+            "10.247.1.20", packageServiceIp, packageServicePort, isTls: false, sni: null);
+        Assert.True(builderPackage.Allowed, builderPackage.Reason);
+        Assert.Equal("pkgs_proxy", builderPackage.Cluster);
+
+        NetworkAccessDecisionResult builderOtherPort = controller.EvaluateContainerConnection(
+            "10.247.1.20", packageServiceIp, 443, isTls: false, sni: null);
+        Assert.False(builderOtherPort.Allowed);
+        NetworkAccessDecisionResult builderOtherIp = controller.EvaluateContainerConnection(
+            "10.247.1.20", "198.18.250.248", packageServicePort, isTls: false, sni: null);
+        Assert.False(builderOtherIp.Allowed);
+
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.1.21", null, null, "ctr-deny-all", "system", null, "system", false,
+            "deny-all", "none", null, DateTimeOffset.UtcNow));
+        Assert.False(controller.EvaluateContainerConnection(
+            "10.247.1.21", packageServiceIp, packageServicePort, isTls: false, sni: null).Allowed);
+
+        RegisterOrdinaryAgent(controller, "10.247.1.22", "user-x", "agent-x");
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("agent", "user-x", "agent-x", null, packageServiceIp, "ip", packageServicePort, Allowed: false),
+            controller.PolicyStore.Revision);
+        NetworkAccessDecisionResult explicitlyBlocked = controller.EvaluateContainerConnection(
+            "10.247.1.22", packageServiceIp, packageServicePort, isTls: false, sni: null);
+        Assert.False(explicitlyBlocked.Allowed);
+        Assert.Equal("blocked", explicitlyBlocked.Reason);
+
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.0.3", "system", "package-proxy", "ctr-package-proxy", "agent-sandbox", null,
+            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        NetworkAccessDecisionResult proxyUpstream = controller.EvaluateContainerConnection(
+            "10.247.0.3", "198.18.250.250", 443, isTls: true, sni: "registry.npmjs.org");
+        Assert.True(proxyUpstream.Allowed);
+        Assert.Equal(NacController.ClusterDfpPublic, proxyUpstream.Cluster);
+
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("agent", "system", "package-proxy", null, "registry.npmjs.org", "host", 443, Allowed: false),
+            controller.PolicyStore.Revision);
+        NetworkAccessDecisionResult proxyExplicitlyBlocked = controller.EvaluateContainerConnection(
+            "10.247.0.3", "198.18.250.250", 443, isTls: true, sni: "registry.npmjs.org");
+        Assert.False(proxyExplicitlyBlocked.Allowed);
+        Assert.Equal("blocked", proxyExplicitlyBlocked.Reason);
+
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("system", null, null, null, "registry.example", "host", 443, Allowed: false),
+            controller.PolicyStore.Revision);
+        controller.PolicyStore.SetRule(
+            admin,
+            new RuleWriteSpec("agent", "system", "package-proxy", null, "registry.example", "host", 443, Allowed: true),
+            controller.PolicyStore.Revision);
+        NetworkAccessDecisionResult systemDenyBeatsProxyAgentAllow = controller.EvaluateContainerConnection(
+            "10.247.0.3", "198.18.250.250", 443, isTls: true, sni: "registry.example");
+        Assert.False(systemDenyBeatsProxyAgentAllow.Allowed);
+        Assert.Equal("blocked", systemDenyBeatsProxyAgentAllow.Reason);
+
+        NetworkAccessDecisionResult proxyPrivateIp = controller.EvaluateContainerConnection(
+            "10.247.0.3", "10.1.2.3", 443, isTls: false, sni: null);
+        Assert.False(proxyPrivateIp.Allowed);
+        Assert.Equal("not_public", proxyPrivateIp.Reason);
+    }
+
+    [Fact]
+    public void PackageProxyUnavailableFailsOnlyPackagePathAndUnrelatedWorkloadCanStillEgress()
+    {
+        bool proxyReady = false;
+        var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json"));
+        var registry = new WorkloadRegistry();
+        var controller = new NacController(store, registry, isPackageProxyReady: () => proxyReady);
+        RegisterOrdinaryAgent(controller, "10.247.1.30", "user-x", "agent-x");
+        var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+        store.SetRule(admin, new RuleWriteSpec("agent", "user-x", "agent-x", null, "example.com", "host", 443, Allowed: true), store.Revision);
+
+        NetworkAccessDecisionResult unavailableProxy = controller.EvaluateContainerConnection(
+            "10.247.1.30", "198.18.250.249", 20101, isTls: false, sni: null);
+        Assert.False(unavailableProxy.Allowed);
+        Assert.Equal("package_proxy_unavailable", unavailableProxy.Reason);
+
+        NetworkAccessDecisionResult unrelatedTraffic = controller.EvaluateContainerConnection(
+            "10.247.1.30", "198.18.250.250", 443, isTls: true, sni: "example.com");
+        Assert.True(unrelatedTraffic.Allowed, unrelatedTraffic.Reason);
+
+        controller.Registry.Register(new RegistryEntry(
+            "10.247.1.31", "user-x", null, "ctr-user-connector", "connector", "connector-x", "isolated",
+            true, "normal", "user", null, DateTimeOffset.UtcNow));
+        NetworkAccessDecisionResult userConnectorPackage = controller.EvaluateContainerConnection(
+            "10.247.1.31", "198.18.250.249", 20101, isTls: false, sni: null);
+        Assert.False(userConnectorPackage.Allowed);
+        Assert.Equal("package_proxy_unavailable", userConnectorPackage.Reason);
+
+        proxyReady = true;
+        userConnectorPackage = controller.EvaluateContainerConnection(
+            "10.247.1.31", "198.18.250.249", 20101, isTls: false, sni: null);
+        Assert.True(userConnectorPackage.Allowed, userConnectorPackage.Reason);
+        Assert.Equal("pkgs_proxy", userConnectorPackage.Cluster);
+
+        store.SetRule(admin, new RuleWriteSpec("user", "user-x", null, "connector-x", "198.18.250.249", "ip", 20101, Allowed: false), store.Revision);
+        userConnectorPackage = controller.EvaluateContainerConnection(
+            "10.247.1.31", "198.18.250.249", 20101, isTls: false, sni: null);
+        Assert.False(userConnectorPackage.Allowed);
+        Assert.Equal("blocked", userConnectorPackage.Reason);
+
+        NetworkAccessDecisionResult readyProxy = controller.EvaluateContainerConnection(
+            "10.247.1.30", "198.18.250.249", 20101, isTls: false, sni: null);
+        Assert.True(readyProxy.Allowed, readyProxy.Reason);
+        Assert.Equal("pkgs_proxy", readyProxy.Cluster);
+    }
+
+    [Fact]
     public void U1_DecisionOrder_CoversUnknownSource_DenyAll_ProxyOnly_TlsNoSni_SinkholePlain_AndLanClusters_WithNegativeControl()
     {
         NacController controller = CreateController(out _);

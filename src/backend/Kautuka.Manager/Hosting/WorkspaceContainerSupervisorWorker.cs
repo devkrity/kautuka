@@ -212,6 +212,16 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             logger.LogWarning("Workspace sidecars are not ready; continuing because strict sidecar mode is disabled.");
         }
 
+        if (egressTopologyManager is not null)
+        {
+            await egressTopologyManager.RebuildRegistryFromLiveContainersAsync(cancellationToken).ConfigureAwait(false);
+            if (!egressTopologyManager.IsPackageProxyRegistered)
+            {
+                egressTopologyManager.SetPackageProxyReady(false);
+                logger.LogWarning("Package proxy is unavailable or not registered. Package fetches will fail closed until it is healthy.");
+            }
+        }
+
         ManagedContainerReconcileResult sidecarOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
             "sidecar",
             sidecarSupervisor.ManagedContainerNames,

@@ -28,6 +28,19 @@ internal static class ContainerImageProvenancePolicy
             return;
         }
 
+        // A bare SHA-256 image ID is a canonical content address returned by Podman
+        // inspection. It cannot be retargeted like a registry tag.
+        if (IsSha256ImageId(normalized))
+        {
+            if (requireListed && allowedImages is { Count: > 0 } && !allowedImages.Contains(normalized))
+            {
+                throw new InvalidOperationException(
+                    $"{subject} image '{normalized}' is not on the signed Kautuka runtime-image allowlist.");
+            }
+
+            return;
+        }
+
         if (!HasSha256Digest(normalized))
         {
             throw new InvalidOperationException(
@@ -74,6 +87,24 @@ internal static class ContainerImageProvenancePolicy
         }
 
         foreach (char character in digest)
+        {
+            if (!char.IsAsciiHexDigit(character))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal static bool IsSha256ImageId(string image)
+    {
+        if (!image.StartsWith("sha256:", StringComparison.Ordinal) || image.Length != 71)
+        {
+            return false;
+        }
+
+        foreach (char character in image.AsSpan(7))
         {
             if (!char.IsAsciiHexDigit(character))
             {

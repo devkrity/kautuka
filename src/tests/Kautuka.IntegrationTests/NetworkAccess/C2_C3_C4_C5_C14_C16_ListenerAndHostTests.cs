@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Runtime.InteropServices;
+using System.Reflection;
 
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -16,8 +17,11 @@ using Kautuka.NetworkAccessController;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using EnvoyAuth = Kautuka.NetworkAccess.Protos.Envoy.Service.Auth.V3.Authorization;
@@ -31,6 +35,88 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
+    [Fact]
+    public async Task EnvoyAuthorizationHost_ActualLoggerFactoryUsesInformationMinimum()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            NacController controller = CreateController(Path.Combine(tempDir, "state"), out _);
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+                SocketPath = Path.Combine(tempDir, "networkaccess.sock"),
+            });
+            await host.StartAsync(TestContext.Current.CancellationToken);
+
+            var serverField = typeof(EnvoyAuthorizationHost).GetField("server", BindingFlags.Instance | BindingFlags.NonPublic);
+            var server = Assert.IsType<WebApplication>(serverField?.GetValue(host));
+            ILogger logger = server.Services.GetRequiredService<ILoggerFactory>().CreateLogger("EnvoyAuthorizationHost.Test");
+            Assert.False(logger.IsEnabled(LogLevel.Trace));
+            Assert.False(logger.IsEnabled(LogLevel.Debug));
+            Assert.True(logger.IsEnabled(LogLevel.Information));
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task EnvoyCheck_PortBounds_DeniesOnlyValuesOutsideTcpRange()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            NacController controller = CreateController(Path.Combine(tempDir, "state"), out IWorkloadRegistry registry);
+            registry.Register(new RegistryEntry(
+                "10.247.0.10",
+                "u1",
+                "a1",
+                "c1",
+                "agent-sandbox",
+                null,
+                "agent-sandbox",
+                false,
+                "normal",
+                "user-agent",
+                null,
+                DateTimeOffset.UtcNow));
+
+            string socketPath = Path.Combine(tempDir, "networkaccess.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socketPath,
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+            });
+
+            await host.StartAsync(TestContext.Current.CancellationToken);
+            using GrpcChannel channel = CreateUdsChannel(socketPath);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+
+            foreach ((uint port, int expectedStatus, string expectedReason) in new[]
+            {
+                (0u, 7, "bad_destination"),
+                (1u, 7, "no_rule"),
+                (65535u, 7, "no_rule"),
+                (65536u, 7, "bad_destination"),
+            })
+            {
+                CheckResponse response = await client.CheckAsync(
+                    BuildCheckRequest("10.247.0.10", "93.184.216.34", port, "example.com"),
+                    cancellationToken: TestContext.Current.CancellationToken);
+
+                Assert.Equal(expectedStatus, response.Status.Code);
+                Assert.Equal(expectedReason, response.Status.Message);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
     [Fact]
     public async Task C2_SingleInstanceLock_PreventsUnlinkOfLiveSocket_AndReplacesStaleSocket_WithNegativeControl()
     {
@@ -410,6 +496,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     [Fact]
     public async Task C5_WindowsListenerBindAddress_NeverWildcard_WithNegativeControl()
     {
+        Assert.Null(typeof(EnvoyAuthorizationHostOptions).GetProperty(
+            "AllowWildcardBindForNegativeControl",
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Static
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic));
+
         string tempDir = CreateTempDir();
         try
         {
@@ -450,22 +543,18 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                 Assert.False(ContainsWildcardBindAddress(specificHost.BoundAddresses));
             }
 
-            // C5.NC: Test fixture forced to bind 0.0.0.0 via AllowWildcardBindForNegativeControl = true
-            // is caught by ContainsWildcardBindAddress.
-            await using (var ncWildcardHost = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
-            {
-                TransportMode = EnvoyListenerTransportMode.TcpMtls,
-                LockFilePath = Path.Combine(tempDir, "lock3"),
-                TcpBindAddress = IPAddress.Any,
-                TcpPort = 0,
-                ServerCertificate = serverCert,
-                CaCertificate = caCert,
-                AllowWildcardBindForNegativeControl = true,
-            }))
+            // C5.NC: Exercise the wildcard-address detector against a separate test-local Kestrel listener.
+            var wildcardBuilder = WebApplication.CreateBuilder();
+            wildcardBuilder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(IPAddress.Any, 0));
+            await using (WebApplication ncWildcardHost = wildcardBuilder.Build())
             {
                 await ncWildcardHost.StartAsync(TestContext.Current.CancellationToken);
-                Assert.True(ncWildcardHost.IsListening);
-                Assert.True(ContainsWildcardBindAddress(ncWildcardHost.BoundAddresses));
+                IEnumerable<string> wildcardAddresses = ncWildcardHost.Services
+                    .GetRequiredService<IServer>()
+                    .Features
+                    .Get<IServerAddressesFeature>()!
+                    .Addresses;
+                Assert.True(ContainsWildcardBindAddress(wildcardAddresses));
             }
 
             caCert.Dispose();

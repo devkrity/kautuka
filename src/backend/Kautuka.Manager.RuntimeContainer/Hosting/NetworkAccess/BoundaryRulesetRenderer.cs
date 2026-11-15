@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Globalization;
 
 using Kautuka.NetworkAccessController;
 
@@ -124,6 +125,7 @@ public static class BoundaryRulesetRenderer
         {
             sb.AppendLine(lanApprovedRule);
         }
+        sb.AppendLine(CultureInfo.InvariantCulture, $"    ip daddr {WorkloadRulesetRenderer.PackageProxyIp} tcp dport {WorkloadRulesetRenderer.PackageProxyPort} counter accept comment \"package_proxy_cluster\"");
         sb.Append("    ").AppendLine(privateRejectRule);
         sb.AppendLine("    ip daddr 10.247.0.0/16 counter reject comment \"wl_net_reject\"");
         sb.AppendLine("    accept");

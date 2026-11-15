@@ -910,6 +910,7 @@ public sealed class PodmanContainerTool(
             MemoryLimit = !string.IsNullOrWhiteSpace(context.DefaultMemoryLimit) ? context.DefaultMemoryLimit : null,
             PidsLimit = 256,
             Environment = envList,
+            AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
         };
 
         return spec.Render().ToList();

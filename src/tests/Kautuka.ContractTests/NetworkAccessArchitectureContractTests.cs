@@ -128,9 +128,10 @@ public sealed class NetworkAccessArchitectureContractTests
             })
             .ToArray();
 
-        Assert.DoesNotContain("RunLiveFedoraAcceptanceAsync", calls, StringComparer.Ordinal);
-        Assert.True(calls.Count(call => string.Equals(call, "RunProductionTopologyProofAsync", StringComparison.Ordinal)) >= 2,
-            "Both --live and --prod-run must use the production topology acceptance path.");
+        Assert.Contains("RunLiveFedoraAcceptanceAsync", calls, StringComparer.Ordinal);
+        Assert.Contains("RunProductionTopologyProofAsync", calls, StringComparer.Ordinal);
+        string acceptanceSource = await File.ReadAllTextAsync(acceptancePath, TestContext.Current.CancellationToken);
+        Assert.Contains("Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!)", acceptanceSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -156,7 +157,39 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("lanServerStartInfo.ArgumentList.Add(lanHostAddress)", productionSource, StringComparison.Ordinal);
         Assert.Contains("Process.Start(lanServerStartInfo)", productionSource, StringComparison.Ordinal);
         Assert.Contains("LAN acceptance requires the production boundary", productionSource, StringComparison.Ordinal);
-        Assert.Contains("https://lan.nac.test:8443/", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string rebindHostName = $\"rebind.{lanHostAddress}.nip.io\";", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string lanHostName = $\"lan.{lanHostAddress}.nip.io\";", productionSource, StringComparison.Ordinal);
+        Assert.Contains("getent", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string.Equals(currentCorefile, corefile, StringComparison.Ordinal)", productionSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionSource, StringComparison.Ordinal);
+        Assert.Contains("\"https://\" + lanHostName + \":8443/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("PROD_LAN_NO_GRANT", productionSource, StringComparison.Ordinal);
+        Assert.Contains("private_reject", productionSource, StringComparison.Ordinal);
+        Assert.Contains("10.248.0.2", productionSource, StringComparison.Ordinal);
+        Assert.Contains("10.248.0.3", productionSource, StringComparison.Ordinal);
+        Assert.Contains("LAN acceptance workload NICs", productionSource, StringComparison.Ordinal);
+        Assert.Contains("lanWorkloadPid", productionSource, StringComparison.Ordinal);
+        Assert.Contains("lanMasqueradeRulePacketDeltaZero", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(outsideSourceOut, @\"\\bsrc 10\\.248\\.0\\.2\\b\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(workloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("Regex.IsMatch(lanWorkloadAddresses, @\"\\b10\\.248\\.0\\.[23]/\"", productionSource, StringComparison.Ordinal);
+        Assert.Contains("envoyPrivateFilterRemoved=True:allowLanGrant=False", productionSource, StringComparison.Ordinal);
+        Assert.Contains("RunPodNftListEgressAsync(\"kautuka-egress-envoy\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(rebindNcCountersAfter, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcRejectDelta > 0", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcMasqueradeDelta == 0", productionSource, StringComparison.Ordinal);
+        Assert.Contains("rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore", productionSource, StringComparison.Ordinal);
+        Assert.Contains("authorizationGate=notAttached:packetPathOnly=True", productionSource, StringComparison.Ordinal);
+        Assert.Contains("NetworkAccessTopologyGateTests", productionSource, StringComparison.Ordinal);
+        Assert.Contains("string dnsNcCountersBefore = await RunPodNftListEgressAsync", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(dnsNcCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("address_prefix: 192\\.168\\.0\\.0\\r?\\n\\k<i>  prefix_len: 16", productionSource, StringComparison.Ordinal);
+        Assert.Contains("blocked={lanDeniedRc != 0}:privateRejectPacketDeltaZero=", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(lanCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);
+        Assert.Contains("ExtractNftCommentCounterPackets(noGrantEgressCounters, \"private_reject\") - lanPrivateRejectBeforeNoGrant", productionSource, StringComparison.Ordinal);
+        Assert.Contains("privateRejectPacketDeltaZero={noGrantPrivateRejectDelta == 0}", productionSource, StringComparison.Ordinal);
+        Assert.Contains("fixtureHitsZero={lanFixtureHitsAfterNoGrant == lanFixtureHitsBeforeNoGrant}", productionSource, StringComparison.Ordinal);
+        Assert.Contains("noGrantLanObservation", productionSource, StringComparison.Ordinal);
     }
 
     [Fact]

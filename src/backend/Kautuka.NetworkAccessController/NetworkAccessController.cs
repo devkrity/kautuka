@@ -12,11 +12,13 @@ public sealed class NetworkAccessController
     public const string ClusterDfpLan = "dfp_lan";
     public const string ClusterOrigDstPublic = "orig_dst_public";
     public const string ClusterOrigDstLan = "orig_dst_lan";
+    public const string ClusterPackageProxy = "pkgs_proxy";
 
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
+    private readonly Func<bool>? isPackageProxyReady;
 
     private long checks;
     private long allowed;
@@ -29,7 +31,8 @@ public sealed class NetworkAccessController
         NetworkAccessPolicyStore policyStore,
         IWorkloadRegistry registry,
         NetworkAccessAuditRing? auditRing = null,
-        Func<bool>? isContainerAuthorizationGateOpen = null)
+        Func<bool>? isContainerAuthorizationGateOpen = null,
+        Func<bool>? isPackageProxyReady = null)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
@@ -37,6 +40,7 @@ public sealed class NetworkAccessController
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
+        this.isPackageProxyReady = isPackageProxyReady;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -154,8 +158,9 @@ public sealed class NetworkAccessController
             return RecordDeny(now, sourceIp, null, sni ?? destinationIp ?? string.Empty, destinationPort, "unknown_source");
         }
 
-        // 1a. Entry has egress == deny-all or proxy-only -> deny (deny_all, no request recorded)
-        if (entry.Egress is "deny-all" or "proxy-only")
+        // 1a. deny-all remains absolute. proxy-only is constrained below to the one
+        // Manager-seeded package-cache service destination.
+        if (entry.Egress == "deny-all")
         {
             return RecordDeny(now, sourceIp, entry, sni ?? destinationIp ?? string.Empty, destinationPort, "deny_all");
         }
@@ -200,6 +205,24 @@ public sealed class NetworkAccessController
             destKind = "ip";
         }
 
+        bool isPackageProxyService = IsPackageProxyService(destKind, normalizedDestination, destinationPort);
+        if (isPackageProxyService && HasPackageServiceExplicitDeny(state, entry, destKind, normalizedDestination, destinationPort))
+        {
+            policyStore.IncrementBlockedRequestAttemptInMemory(
+                entry.UserId, entry.AgentId, entry.ConnectorId, entry.Systemwide,
+                destKind, normalizedDestination, destinationPort);
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
+        }
+
+        if (isPackageProxyService && isPackageProxyReady?.Invoke() == false)
+        {
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "package_proxy_unavailable");
+        }
+        if (entry.Egress == "proxy-only" && !isPackageProxyService)
+        {
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "deny_all");
+        }
+
         bool isProbe = string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase);
 
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
@@ -215,7 +238,7 @@ public sealed class NetworkAccessController
         {
             if (tempAllowed)
             {
-                string cluster = GetClusterName(isTls, tempAllowLan);
+                string cluster = GetDecisionClusterName(isTls, tempAllowLan, destKind, normalizedDestination, destinationPort);
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort, "probe_temporary_allow", cluster, openInternetBadge: false);
             }
 
@@ -228,7 +251,7 @@ public sealed class NetworkAccessController
         switch (match.Kind)
         {
             case ScopeMatchKind.Allowed:
-                string cluster = GetClusterName(isTls, match.AllowLan);
+                string cluster = GetDecisionClusterName(isTls, match.AllowLan, destKind, normalizedDestination, destinationPort);
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort, match.Reason, cluster, match.OpenInternetBadge);
 
             case ScopeMatchKind.DeniedNotPublic:
@@ -246,6 +269,17 @@ public sealed class NetworkAccessController
                 return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
 
             default:
+                if (isPackageProxyService)
+                {
+                    ScopeMatchOutcome serviceDefault = ResolvePackageServiceDefault(state, destKind, normalizedDestination, destinationPort);
+                    if (serviceDefault.Kind == ScopeMatchKind.Allowed)
+                    {
+                        string serviceCluster = GetDecisionClusterName(isTls, serviceDefault.AllowLan, destKind, normalizedDestination, destinationPort);
+                        return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
+                            serviceDefault.Reason, serviceCluster, serviceDefault.OpenInternetBadge);
+                    }
+                }
+
                 // 7. No rule at any applicable scope -> deny (no_rule) and record/dedupe pending request
                 string actorKind = entry.Kind == "connector" ? "connector" : "agent";
                 if (isProbe)
@@ -489,6 +523,52 @@ public sealed class NetworkAccessController
         }
     }
 
+    private bool HasPackageServiceExplicitDeny(
+        NetworkAccessPolicyState state,
+        RegistryEntry entry,
+        string destKind,
+        string destination,
+        int port)
+    {
+        IReadOnlyList<NetworkAccessRule> rules = state.Rules;
+        if (FindExactRule(rules, "system", null, null, null, destKind, destination, port) is { Allowed: false })
+        {
+            return true;
+        }
+
+        if (entry.Attribution == "user-agent")
+        {
+            if (FindExactRule(rules, "agent", entry.UserId, entry.AgentId, null, destKind, destination, port) is { Allowed: false }) return true;
+            if (!string.IsNullOrEmpty(entry.UserId) && policyStore.HasBothPrivileges(entry.UserId)
+                && FindExactRule(rules, "user", entry.UserId, null, null, destKind, destination, port) is { Allowed: false }) return true;
+        }
+
+        if (entry.Attribution == "user"
+            && FindExactRule(rules, "user", entry.UserId, null, entry.ConnectorId, destKind, destination, port) is { Allowed: false }) return true;
+
+        if (!string.IsNullOrEmpty(entry.ConnectorId)
+            && FindExactRule(rules, "connector-system", null, null, entry.ConnectorId, destKind, destination, port) is { Allowed: false }) return true;
+
+        return false;
+    }
+
+    private ScopeMatchOutcome ResolvePackageServiceDefault(
+        NetworkAccessPolicyState state,
+        string destKind,
+        string destination,
+        int port)
+    {
+        NetworkAccessRule? systemRule = FindExactRule(state.Rules, "system", null, null, null, destKind, destination, port)
+            ?? policyStore.SeedRules.FirstOrDefault(rule =>
+                string.Equals(rule.ScopeKind, "system", StringComparison.Ordinal)
+                && string.Equals(rule.DestKind, destKind, StringComparison.Ordinal)
+                && string.Equals(rule.Destination, destination, StringComparison.Ordinal)
+                && rule.Port == port);
+        return systemRule is { Allowed: true }
+            ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_system", systemRule.AllowLan, OpenInternetBadge: false)
+            : new ScopeMatchOutcome(ScopeMatchKind.NoMatch, "no_rule", false, false);
+    }
+
     private ScopeMatchOutcome ResolveContainerScopeRule(
         NetworkAccessPolicyState state,
         RegistryEntry entry,
@@ -498,6 +578,13 @@ public sealed class NetworkAccessController
     {
         if (!entry.Systemwide && entry.Attribution == "user-agent")
         {
+            if (string.Equals(entry.UserId, "system", StringComparison.Ordinal)
+                && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)
+                && FindExactRule(state.Rules, "system", null, null, null, destKind, destination, port) is { Allowed: false })
+            {
+                return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+            }
+
             // (a) Exact agent (userId, agentId) rule first
             NetworkAccessRule? agentRule = FindExactRule(
                 state.Rules,
@@ -513,6 +600,61 @@ public sealed class NetworkAccessController
                 return agentRule.Allowed
                     ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_agent", agentRule.AllowLan, OpenInternetBadge: false)
                     : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+            }
+
+            if (string.Equals(entry.UserId, "system", StringComparison.Ordinal)
+                && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal))
+            {
+                NetworkAccessRule? explicitSystemRule = FindExactRule(
+                    state.Rules,
+                    scopeKind: "system",
+                    userId: null,
+                    agentId: null,
+                    connectorId: null,
+                    destKind,
+                    destination,
+                    port);
+                if (explicitSystemRule is not null)
+                {
+                    if (!explicitSystemRule.Allowed)
+                    {
+                        return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+                    }
+
+                    if (destKind == "ip"
+                        && NetworkAddressClassifier.IsNonPublicV4(destination)
+                        && !explicitSystemRule.AllowLan)
+                    {
+                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
+                    }
+
+                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_system", explicitSystemRule.AllowLan, OpenInternetBadge: false);
+                }
+
+                NetworkAccessRule? anyPublicRule = FindExactRule(
+                    state.Rules,
+                    scopeKind: "agent",
+                    userId: "system",
+                    agentId: "package-proxy",
+                    connectorId: null,
+                    destKind: "any-public",
+                    destination: string.Empty,
+                    port: 0)
+                    ?? policyStore.SeedRules.FirstOrDefault(rule =>
+                        string.Equals(rule.ScopeKind, "agent", StringComparison.Ordinal)
+                        && string.Equals(rule.UserId, "system", StringComparison.Ordinal)
+                        && string.Equals(rule.AgentId, "package-proxy", StringComparison.Ordinal)
+                        && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal)
+                        && rule.Allowed);
+                if (anyPublicRule is { Allowed: true })
+                {
+                    if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination))
+                    {
+                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
+                    }
+
+                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "seed", AllowLan: false, OpenInternetBadge: true);
+                }
             }
 
             // (b) Exact user (userId, connectorId == null) rule — active ONLY while user holds both flags!
@@ -630,6 +772,37 @@ public sealed class NetworkAccessController
             }
         }
 
+        // The package cache is a Manager-owned system service. Its exact system rule
+        // supplies the default allow; a systemwide explicit deny overrides the seed.
+        if (IsPackageProxyService(destKind, destination, port))
+        {
+            NetworkAccessRule? systemRule = FindExactRule(
+                state.Rules,
+                scopeKind: "system",
+                userId: null,
+                agentId: null,
+                connectorId: null,
+                destKind,
+                destination,
+                port);
+            if (systemRule is not null)
+            {
+                return systemRule.Allowed
+                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_system", systemRule.AllowLan, OpenInternetBadge: false)
+                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+            }
+
+            NetworkAccessRule? seedRule = policyStore.SeedRules.FirstOrDefault(rule =>
+                string.Equals(rule.ScopeKind, "system", StringComparison.Ordinal)
+                && string.Equals(rule.DestKind, destKind, StringComparison.Ordinal)
+                && string.Equals(rule.Destination, destination, StringComparison.Ordinal)
+                && rule.Port == port);
+            if (seedRule is not null && seedRule.Allowed)
+            {
+                return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "seed", seedRule.AllowLan, OpenInternetBadge: false);
+            }
+        }
+
         return new ScopeMatchOutcome(ScopeMatchKind.NoMatch, "no_rule", false, false);
     }
 
@@ -731,6 +904,21 @@ public sealed class NetworkAccessController
         => isTls
             ? (allowLan ? ClusterDfpLan : ClusterDfpPublic)
             : (allowLan ? ClusterOrigDstLan : ClusterOrigDstPublic);
+
+    private static string GetDecisionClusterName(
+        bool isTls,
+        bool allowLan,
+        string destKind,
+        string destination,
+        int port)
+        => IsPackageProxyService(destKind, destination, port)
+            ? ClusterPackageProxy
+            : GetClusterName(isTls, allowLan);
+
+    private static bool IsPackageProxyService(string destKind, string destination, int port)
+        => string.Equals(destKind, "ip", StringComparison.Ordinal)
+            && string.Equals(destination, NetworkAddressClassifier.PackageProxyServiceAddress, StringComparison.Ordinal)
+            && port == NetworkAddressClassifier.PackageProxyServicePort;
 
     private NetworkAccessDecisionResult RecordAllow(
         DateTimeOffset now,

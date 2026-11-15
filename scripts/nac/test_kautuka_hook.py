@@ -13,6 +13,7 @@ Tests:
 """
 import concurrent.futures
 import json
+import multiprocessing
 import os
 import stat
 import subprocess
@@ -37,7 +38,91 @@ from kautuka_hook import (
     get_pid_start_ticks,
     canonicalize_nft_json,
     main,
+    log_hook,
 )
+
+
+def _hook_log_process_writer(log_path, max_bytes, barrier, worker_id, disable_flock=False):
+    import kautuka_hook
+
+    kautuka_hook.HOOK_LOG_FILE = log_path
+    kautuka_hook.STATE_DIR = os.path.dirname(log_path)
+    kautuka_hook.HOOK_LOG_MAX_BYTES = max_bytes
+    if disable_flock:
+        kautuka_hook.fcntl = None
+    barrier.wait(timeout=10)
+    for index in range(5):
+        kautuka_hook.log_hook(index, 1, f"process-{worker_id}-{index}", index, [], None, "allow", "test", "", {})
+
+
+class TestHookLogRotation(unittest.TestCase):
+    def test_hook_log_rotates_and_is_private(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("x" * (5 * 1024 * 1024))
+            with unittest.mock.patch("kautuka_hook.STATE_DIR", temp_dir), \
+                 unittest.mock.patch("kautuka_hook.HOOK_LOG_FILE", log_path):
+                log_hook(29, 1, "container-29", 29, [], None, "allow", "test", "", {})
+
+            self.assertTrue(os.path.exists(log_path))
+            if hasattr(os, "getuid"):
+                self.assertEqual(stat.S_IMODE(os.stat(log_path).st_mode), 0o600)
+            backups = [f"{log_path}.{i}" for i in range(1, 4)]
+            self.assertTrue(os.path.exists(backups[0]), "oversized active log was not rotated")
+            self.assertTrue(all(os.path.getsize(path) <= 5 * 1024 * 1024 for path in [log_path, *backups] if os.path.exists(path)))
+            if hasattr(os, "getuid"):
+                self.assertEqual(stat.S_IMODE(os.stat(backups[0]).st_mode), 0o600)
+            with open(log_path, encoding="utf-8") as f:
+                current = f.read()
+            self.assertIn('"id": "container-29"', current)
+
+    def test_concurrent_hook_log_writes_remain_valid_json_lines(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            with unittest.mock.patch("kautuka_hook.STATE_DIR", temp_dir), \
+                 unittest.mock.patch("kautuka_hook.HOOK_LOG_FILE", log_path):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(log_hook, i, 1, f"c-{i}", i, [], None, "allow", "test", "", {}) for i in range(80)]
+                    for future in futures:
+                        future.result()
+            with open(log_path, encoding="utf-8") as f:
+                records = [json.loads(line) for line in f]
+            self.assertEqual(len(records), 80)
+
+    def test_multiprocess_hook_log_rotation_preserves_records(self):
+        if not hasattr(os, "getuid"):
+            self.skipTest("cross-process flock is available only on POSIX")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = os.path.join(temp_dir, "hook.log")
+            max_bytes = 6000
+            # Seed a valid log close enough to the threshold that the first
+            # concurrent writes rotate it, while all new records fit afterward.
+            with open(log_path, "w", encoding="utf-8") as f:
+                for index in range(10):
+                    f.write(json.dumps({"id": f"seed-{index}", "padding": "x" * 500}) + "\n")
+            context = multiprocessing.get_context("spawn")
+            barrier = context.Barrier(2)
+            workers = [
+                context.Process(target=_hook_log_process_writer, args=(log_path, max_bytes, barrier, worker_id))
+                for worker_id in range(2)
+            ]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(15)
+            self.assertTrue(all(not worker.is_alive() for worker in workers), "hook log writers did not finish")
+            self.assertTrue(all(worker.exitcode == 0 for worker in workers), f"writer exit codes: {[worker.exitcode for worker in workers]}")
+
+            records = []
+            for path in [log_path, *(f"{log_path}.{i}" for i in range(1, 4))]:
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        records.extend(json.loads(line) for line in f)
+            written_ids = {record.get("id") for record in records}
+            self.assertTrue(os.path.exists(f"{log_path}.1"), "concurrent writes did not rotate the seeded log")
+            expected_ids = {f"process-{worker_id}-{index}" for worker_id in range(2) for index in range(5)}
+            self.assertTrue(expected_ids.issubset(written_ids), f"missing process records: {sorted(expected_ids - written_ids)}")
 
 
 class TestKautukaHookDecideVectors(unittest.TestCase):
@@ -139,6 +224,9 @@ class TestKautukaHookDecideVectors(unittest.TestCase):
             ("V51_clean_workload_low", {"id": "wl_low", "pid": 500}, ["10.247.1.5"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
             ("V52_clean_workload_mid", {"id": "wl_mid", "pid": 501}, ["10.247.50.100"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
             ("V53_clean_workload_high", {"id": "wl_high", "pid": 502}, ["10.247.255.254"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
+            ("V54_package_proxy_cid_role_image_exact", {"id": "proxy-cid", "pid": 503, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "a" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "allow", "package_proxy_rules"),
+            ("V55_package_proxy_annotation_forged_wrong_cid", {"id": "workload-cid", "pid": 504, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "a" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "refuse", "reserved_range"),
+            ("V56_package_proxy_annotation_forged_wrong_image", {"id": "proxy-cid", "pid": 505, "annotations": {"io.kautuka.role": "package-proxy", "io.kautuka.image-id": "sha256:" + "b" * 64}}, ["10.247.0.3"], {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": "sha256:" + "a" * 64}}, {}, 100, True, None, True, None, "refuse", "package_proxy_identity_mismatch"),
         ]
 
     def test_all_decide_vectors(self):
@@ -181,8 +269,7 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
         ]
 
         for ip in ips:
-            # Default include_pkgs_proxy=False per v7-11
-            rules = render_ruleset(ip, include_pkgs_proxy=False)
+            rules = render_ruleset(ip)
 
             if ip == "10.247.1.20":
                 with open(os.path.join(SCRIPT_DIR, "golden", "kautuka-workload.nft"), encoding="utf-8") as golden_file:
@@ -202,8 +289,8 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
             self.assertIn("ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept", rules)
 
-            # Package proxy NOT present by default (v7-11)
-            self.assertNotIn("20101", rules, "Package proxy must not be present when include_pkgs_proxy=False")
+            # Ordinary workload rules must not permit direct proxy access.
+            self.assertNotIn("20101", rules)
 
             # Verify all expected comments exist
             for c in expected_comments:
@@ -212,9 +299,11 @@ class TestKautukaHookRulesetRendering(unittest.TestCase):
             # Verify closing braces
             self.assertTrue(rules.strip().endswith("}\n}"), "Ruleset must close output chain and table")
 
-    def test_ruleset_with_package_proxy_explicit(self):
-        rules = render_ruleset("10.247.1.5", include_pkgs_proxy=True)
-        self.assertIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
+    def test_package_proxy_ruleset_only_accepts_envoy_listener_and_established_replies(self):
+        rules = render_ruleset("10.247.0.3", package_proxy=True)
+        self.assertIn("ip saddr 10.247.0.2 tcp dport 20101 accept", rules)
+        self.assertIn("ct state established,related accept", rules)
+        self.assertNotIn("ip daddr 10.247.0.3 tcp dport 20101 accept", rules)
         self.assertIn("ip daddr 10.247.0.2 tcp dport 15001 accept", rules)
 
 
@@ -314,6 +403,135 @@ class TestKautukaHookOwnersIntegrity(unittest.TestCase):
         data, valid, reason = read_owners_file(self.owners_path)
         self.assertFalse(valid, "Corrupt owners file must not be considered valid")
         self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_symlink_owners_file_fails_closed(self):
+        target = os.path.join(self.temp_dir.name, "target.json")
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(target, 0o600)
+        os.symlink(target, self.owners_path)
+
+        data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid, "A symlink owners file must not be accepted")
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_symlink_negative_control_without_nofollow(self):
+        target = os.path.join(self.temp_dir.name, "target.json")
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(target, 0o600)
+        os.symlink(target, self.owners_path)
+        real_open = os.open
+
+        def open_following_symlinks(path, flags, *args, **kwargs):
+            return real_open(path, flags & ~os.O_NOFOLLOW, *args, **kwargs)
+
+        # Control: with the relevant protection removed, the attack fixture is accepted.
+        with unittest.mock.patch("kautuka_hook.os.open", side_effect=open_following_symlinks):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertTrue(valid)
+        self.assertIsNone(reason)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX owner and mode checks")
+    def test_wrong_mode_rejected_from_opened_file(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o644)
+
+        data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_mode_change_after_path_check_is_rejected_by_fstat(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o600)
+        real_open = os.open
+        changed = False
+
+        def open_then_relax_mode(path, flags, *args, **kwargs):
+            nonlocal changed
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == self.owners_path and not changed:
+                os.chmod(path, 0o644)
+                changed = True
+            return fd
+
+        with unittest.mock.patch("kautuka_hook.os.open", side_effect=open_then_relax_mode):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid, "Mode changes on the opened inode must be caught by fstat")
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX owner checks")
+    def test_wrong_owner_rejected_from_opened_file(self):
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+        os.chmod(self.owners_path, 0o600)
+        real_fstat = os.fstat
+
+        def foreign_owner(fd):
+            st = real_fstat(fd)
+            return unittest.mock.Mock(st_mode=st.st_mode, st_uid=os.geteuid() + 1)
+
+        with unittest.mock.patch("kautuka_hook.os.fstat", side_effect=foreign_owner):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertFalse(valid)
+        self.assertEqual(reason, "owners_unreadable")
+
+    @unittest.skipUnless(os.name == "posix" and hasattr(os, "O_NOFOLLOW"), "requires POSIX O_NOFOLLOW")
+    def test_path_replaced_after_open_reads_validated_descriptor(self):
+        replacement = os.path.join(self.temp_dir.name, "replacement.json")
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            json.dump({"11": {"inode": 11, "id": "opened", "pid": 1}}, f)
+        with open(replacement, "w", encoding="utf-8") as f:
+            json.dump({"22": {"inode": 22, "id": "replacement", "pid": 2}}, f)
+        os.chmod(self.owners_path, 0o600)
+        os.chmod(replacement, 0o600)
+        real_stat = os.stat
+        real_open = os.open
+        replaced = False
+
+        def stat_then_replace(path, *args, **kwargs):
+            nonlocal replaced
+            result = real_stat(path, *args, **kwargs)
+            if path == self.owners_path and not replaced:
+                os.replace(replacement, self.owners_path)
+                replaced = True
+            return result
+
+        def open_then_replace(path, flags, *args, **kwargs):
+            nonlocal replaced
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == self.owners_path and not replaced:
+                os.replace(replacement, self.owners_path)
+                replaced = True
+            return fd
+
+        with unittest.mock.patch("kautuka_hook.os.stat", side_effect=stat_then_replace), \
+             unittest.mock.patch("kautuka_hook.os.open", side_effect=open_then_replace), \
+             unittest.mock.patch("kautuka_hook.is_owner_live", return_value=True):
+            data, valid, reason = read_owners_file(self.owners_path)
+        self.assertTrue(valid)
+        self.assertIsNone(reason)
+        self.assertTrue(replaced, "The owners pathname must be replaced during the test")
+        self.assertIn("11", data)
+        self.assertNotIn("22", data)
+
+    def test_path_based_read_negative_control_observes_replacement(self):
+        replacement = os.path.join(self.temp_dir.name, "replacement.json")
+        with open(self.owners_path, "w", encoding="utf-8") as f:
+            f.write("opened")
+        with open(replacement, "w", encoding="utf-8") as f:
+            f.write("replacement")
+        os.replace(replacement, self.owners_path)
+
+        # Control: a path-based read after replacement sees the replacement file.
+        with open(self.owners_path, encoding="utf-8") as f:
+            observed = f.read()
+        self.assertEqual(observed, "replacement")
 
     def _real_proc_info(self):
         live_pid = os.getpid()

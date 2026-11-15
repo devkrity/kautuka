@@ -610,6 +610,7 @@ public sealed class McpbImageMaterializer(
             IsBraked = isBraked,
             Environment = indexEnvironment,
             CompatibilityProfile = builderCompat,
+            AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
             Command = "/bin/sh",
             Args = ["-lc", installScript],
         };
@@ -708,12 +709,12 @@ public sealed class McpbImageMaterializer(
     private async Task EnsureSandboxNetworkExistsAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult existsResult = await podmanCommandRunner
-            .RunAsync(["network", "exists", ConnectorContainerSpecBuilder.SandboxNetworkName], 10, cancellationToken)
+            .RunAsync(["network", "exists", NetworkAccess.WorkloadContainerSpec.DefaultNetworkName], 10, cancellationToken)
             .ConfigureAwait(false);
         if (existsResult.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"MCPB language-package install requires Podman network '{ConnectorContainerSpecBuilder.SandboxNetworkName}' so npm/pip/uv can reach kautuka-pkgs-proxy. Refusing public-index fallback.");
+                $"MCPB language-package install requires Podman network '{NetworkAccess.WorkloadContainerSpec.DefaultNetworkName}' so npm/pip/uv can reach the NAC-routed kautuka-pkgs-proxy. Refusing public-index fallback.");
         }
     }
 

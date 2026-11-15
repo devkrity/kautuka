@@ -176,6 +176,7 @@ public sealed class ConnectorContainerSpecBuilderTests
             isBraked: false);
 
         AssertOption(arguments, "--network", $"{ConnectorContainerSpecBuilder.WorkloadNetworkName}:ip=10.247.1.1");
+        AssertOption(arguments, "--add-host", $"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}");
         AssertOption(arguments, "--cap-drop", "ALL");
         AssertOption(arguments, "--pids-limit", "128");
         AssertOption(arguments, "--read-only", "--tmpfs");

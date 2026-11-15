@@ -28,6 +28,9 @@
     <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_workload.nft.json.tmpl">
       <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_workload.nft.json.tmpl</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_package_proxy.nft.json.tmpl">
+      <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_package_proxy.nft.json.tmpl</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

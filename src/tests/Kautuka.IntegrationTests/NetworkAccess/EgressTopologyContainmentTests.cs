@@ -227,13 +227,21 @@ public sealed class EgressTopologyContainmentTests
     {
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
         string boundaryDirectory = Path.Combine(root, "nac", "boundary");
+        string envoyDirectory = Path.Combine(root, "nac", "envoy");
+        string dnsDirectory = Path.Combine(root, "nac", "dns");
         Directory.CreateDirectory(boundaryDirectory);
+        Directory.CreateDirectory(envoyDirectory);
+        Directory.CreateDirectory(dnsDirectory);
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig("/run/kautuka-admin/admin.sock", isWindowsMtls: false);
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressTopologyManager.EgressPodIp);
         await File.WriteAllTextAsync(
             Path.Combine(boundaryDirectory, "boundary.nft"),
             rendered + "# drift",
             TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(envoyDirectory, "envoy.yaml"), envoy, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(dnsDirectory, "Corefile"), corefile, TestContext.Current.CancellationToken);
         SetPrivateField(manager, "isStartupGateOpen", true);
-        SetPrivateField(manager, "expectedBoundaryNftSourceHash", EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
+        SetPrivateField(manager, "expectedBoundaryNftSourceHash", EgressTopologyManager.ComputeReconcileConfigurationHash(rendered, envoy, corefile));
     }
 
     private static void SetPrivateField(EgressTopologyManager manager, string name, object value)

@@ -6,6 +6,14 @@ using Kautuka.NetworkAccessController;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 
+internal sealed class WorkloadRulesetVerificationException : InvalidOperationException
+{
+    public WorkloadRulesetVerificationException() { }
+    public WorkloadRulesetVerificationException(string message) : base(message) { }
+    public WorkloadRulesetVerificationException(string canonicalContainerId, Exception innerException) : base("Workload ruleset verification failed.", innerException) => CanonicalContainerId = canonicalContainerId;
+    public string CanonicalContainerId { get; } = string.Empty;
+}
+
 public sealed record WorkloadVerificationResult(
     string ContainerId,
     string AllocatedIp,
@@ -44,6 +52,7 @@ public sealed class WorkloadPostStartVerifier
         string allocatedIp,
         ImageCompatProfile? compatProfile = null,
         IWorkloadRegistry? registry = null,
+        bool isPackageProxy = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
@@ -274,7 +283,14 @@ public sealed class WorkloadPostStartVerifier
                 }
 
                 await VerifyNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
-                await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    throw;
+                }
             }
             else
             {
@@ -284,7 +300,14 @@ public sealed class WorkloadPostStartVerifier
                 }
 
                 await VerifyPodmanMachineNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
-                await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    throw;
+                }
             }
 
             stopwatch.Stop();
@@ -303,6 +326,7 @@ public sealed class WorkloadPostStartVerifier
             try
             {
                 quarantined = registry?.TryQuarantine(allocatedIp, registeredId, containerId) == true;
+                desiredStateStore?.QuarantineWorkload(canonicalContainerId ?? containerId);
             }
             catch (Exception quarantineException)
             {
@@ -400,7 +424,7 @@ public sealed class WorkloadPostStartVerifier
         return $"/mnt/{char.ToLowerInvariant(fullPath[0])}/{suffix}";
     }
 
-    private static bool IsCanonicalContainerId(string? value) =>
+    internal static bool IsCanonicalContainerId(string? value) =>
         value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
     private static void VerifyCapabilitySet(JsonElement container, string propertyName, IReadOnlySet<string> allowed)
@@ -566,11 +590,31 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
+    public async Task<string> VerifyWorkloadRulesetAsync(string containerId, string allocatedIp, bool isPackageProxy = false, CancellationToken cancellationToken = default)
+    {
+        PodmanCommandResult result = await podmanRunner.RunAsync(["inspect", containerId], 15, cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0) throw new InvalidOperationException("podman inspect failed during workload rules reconcile.");
+        using JsonDocument document = JsonDocument.Parse(result.StdOut);
+        JsonElement container = document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement[0] : document.RootElement;
+        string? canonicalId = container.TryGetProperty("Id", out JsonElement id) ? id.GetString() : null;
+        if (!IsCanonicalContainerId(canonicalId)) throw new InvalidOperationException("Workload rules reconcile requires a canonical container ID.");
+        int pid = container.GetProperty("State").GetProperty("Pid").GetInt32();
+        try
+        {
+            await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            throw new WorkloadRulesetVerificationException(canonicalId!, ex);
+        }
+        return canonicalId!;
+    }
     internal async Task VerifyNetnsRulesetAsync(
         int pid,
         string allocatedIp,
         CancellationToken cancellationToken,
-        bool? usePodmanMachineOverride = null)
+        bool? usePodmanMachineOverride = null,
+        bool isPackageProxy = false)
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string stdOut;
@@ -637,7 +681,7 @@ public sealed class WorkloadPostStartVerifier
             WorkloadRulesetRenderer.RequiredWorkloadComments,
             allocatedIp);
 
-        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp);
+        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy);
         if (!string.Equals(liveHash, expectedHash, StringComparison.Ordinal))
         {
             throw new InvalidOperationException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");

@@ -1,7 +1,10 @@
 using System.Reflection;
+using System.Text.Json;
 
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,7 +18,7 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceSidecarSupervisorReadinessTests
 {
     [Fact]
-    public void BuildRunArgumentsUsesSandboxNetworkAliasForServiceDiscovery()
+    public void PackageProxyRunsOnWorkloadNetworkWithFixedIdentityAndAddress()
     {
         WorkspaceSidecarDefinition sidecar = new(
             Name: "kautuka-pkgs-proxy",
@@ -32,11 +35,236 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
 
         int networkIndex = arguments.IndexOf("--network");
         Assert.True(networkIndex >= 0);
-        Assert.Equal("kautuka-sandbox", arguments[networkIndex + 1]);
+        Assert.Equal("kautuka-workload:ip=10.247.0.3", arguments[networkIndex + 1]);
 
         int aliasIndex = arguments.IndexOf("--network-alias");
         Assert.True(aliasIndex >= 0);
         Assert.Equal("kautuka-pkgs-proxy", arguments[aliasIndex + 1]);
+        Assert.Contains("io.kautuka.role=package-proxy", arguments);
+        Assert.Contains("io.kautuka.user=system", arguments);
+        Assert.Contains("io.kautuka.agent=package-proxy", arguments);
+        Assert.Contains("io.kautuka.egress=normal", arguments);
+        int dnsIndex = arguments.IndexOf("--dns");
+        Assert.True(dnsIndex >= 0);
+        Assert.Equal(EgressTopologyManager.EgressPodIp, arguments[dnsIndex + 1]);
+        Assert.Contains("--health-cmd", arguments);
+        Assert.Contains("wget -q -O /dev/null http://127.0.0.1:20101/health || exit 1", arguments);
+    }
+
+    [Fact]
+    public async Task PackageProxyReadinessExecutesAndRequiresImageHealthcheckAsync()
+    {
+        bool healthcheckInvoked = false;
+        int inspectCount = 0;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.Count > 0 && args[0] == "inspect")
+            {
+                inspectCount++;
+                string healthStatus = inspectCount == 1 ? string.Empty : "healthy";
+                string inspect = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    HostConfig = new { Dns = new[] { EgressTopologyManager.EgressPodIp } },
+                    Config = new { },
+                    State = new { Status = "running", Health = new { Status = healthStatus } }
+                });
+                return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty));
+            }
+
+            if (args.SequenceEqual(["healthcheck", "run", "kautuka-pkgs-proxy"]))
+            {
+                healthcheckInvoked = true;
+                return Task.FromResult(new PodmanCommandResult(0, "healthy", string.Empty));
+            }
+
+            throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
+        });
+        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(new WorkspaceSidecarDefinition(
+            Name: "kautuka-pkgs-proxy",
+            Image: "localhost/kautuka-pkgs-proxy:local",
+            Ports: [],
+            Environment: new Dictionary<string, string>(),
+            Command: [],
+            BuildContext: null,
+            Dockerfile: null,
+            HealthCheck: null,
+            RequiredForReady: true), podman);
+        MethodInfo isHealthy = typeof(WorkspaceSidecarSupervisor)
+            .GetMethod("IsHealthyAsync", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("IsHealthyAsync method was not found.");
+
+        Task<bool> pending = Assert.IsType<Task<bool>>(isHealthy.Invoke(supervisor, [
+            new WorkspaceSidecarDefinition(
+                Name: "kautuka-pkgs-proxy",
+                Image: "localhost/kautuka-pkgs-proxy:local",
+                Ports: [],
+                Environment: new Dictionary<string, string>(),
+                Command: [],
+                BuildContext: null,
+                Dockerfile: null,
+                HealthCheck: null,
+                RequiredForReady: true),
+            TestContext.Current.CancellationToken]));
+
+        Assert.True(await pending.ConfigureAwait(true));
+        Assert.True(healthcheckInvoked);
+        Assert.Equal(2, inspectCount);
+    }
+
+    [Fact]
+    public async Task PackageProxyMachineAllowlistSyncCompletesBeforePodmanStartAsync()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-proxy-machine-sync-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        string imageId = "sha256:" + new string('a', 64);
+        var events = new List<string>();
+        var registry = new WorkloadRegistry();
+        var podman = new PodmanCommandRunner(async (args, cancellationToken) =>
+        {
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect")
+            {
+                return new PodmanCommandResult(0, imageId, string.Empty);
+            }
+
+            if (args.Count > 0 && args[0] == "create")
+            {
+                return new PodmanCommandResult(0, containerId, string.Empty);
+            }
+
+            if (args.Count >= 2 && args[0] == "inspect")
+            {
+                var inspect = new
+                {
+                    Id = containerId,
+                    Image = imageId,
+                    HostConfig = new { Dns = new[] { EgressTopologyManager.EgressPodIp } },
+                    Config = new
+                    {
+                        Annotations = new Dictionary<string, string>
+                        {
+                            ["io.kautuka.role"] = "package-proxy",
+                            ["io.kautuka.image-id"] = imageId
+                        },
+                        Labels = new Dictionary<string, string>
+                        {
+                            ["io.kautuka.user"] = "system",
+                            ["io.kautuka.agent"] = "package-proxy",
+                            ["io.kautuka.kind"] = "agent-sandbox",
+                            ["io.kautuka.exec-context"] = "agent-sandbox",
+                            ["io.kautuka.egress"] = "normal"
+                        }
+                    },
+                    State = new { Running = true, Status = "running" },
+                    NetworkSettings = new
+                    {
+                        Networks = new Dictionary<string, object>
+                        {
+                            [EgressTopologyManager.WorkloadNetworkName] = new { IPAddress = WorkloadRulesetRenderer.PackageProxyIp }
+                        }
+                    }
+                };
+                return new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { inspect }), string.Empty);
+            }
+
+            if (args.Count > 1 && args[0] == "machine" && args[1] == "cp")
+            {
+                events.Add("machine-copy");
+                using JsonDocument allowlist = JsonDocument.Parse(await File.ReadAllTextAsync(args[2], cancellationToken));
+                JsonElement entry = allowlist.RootElement.GetProperty("entries")[0];
+                Assert.Equal(containerId, entry.GetProperty("id").GetString());
+                Assert.Equal("pkgs-proxy", entry.GetProperty("role").GetString());
+                Assert.Equal(imageId, entry.GetProperty("image_digest").GetString());
+                return new PodmanCommandResult(0, string.Empty, string.Empty);
+            }
+
+            if (args.Count > 1 && args[0] == "machine" && args[1] == "ssh")
+            {
+                events.Add("machine-chmod");
+                return new PodmanCommandResult(0, string.Empty, string.Empty);
+            }
+
+            if (args.Count > 0 && args[0] == "start")
+            {
+                events.Add("start");
+                return new PodmanCommandResult(0, containerId, string.Empty);
+            }
+
+            throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
+        });
+        await using var egress = new EgressTopologyManager(
+            podman,
+            new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+            new WorkloadPostStartVerifier(podman),
+            registry,
+            root,
+            windowsPodmanMachineName: "acceptance-machine",
+            windowsPodmanHookStateDirectory: Path.Combine(root, "hook-state"));
+        WorkspaceSidecarDefinition sidecar = new(
+            Name: "kautuka-pkgs-proxy",
+            Image: "localhost/kautuka-pkgs-proxy:local",
+            Ports: [],
+            Environment: new Dictionary<string, string>(),
+            Command: [],
+            BuildContext: null,
+            Dockerfile: null,
+            HealthCheck: null,
+            RequiredForReady: true);
+        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(sidecar, podman, egress);
+
+        try
+        {
+            Assert.True(await supervisor.CreateAuthorizeAndStartPackageProxyAsync(sidecar, TestContext.Current.CancellationToken).ConfigureAwait(true));
+            Assert.Equal(["machine-copy", "machine-chmod", "start"], events);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void PackageProxyIdentityVerificationDetectsDnsDrift()
+    {
+        string imageId = "sha256:" + new string('a', 64);
+        bool Verify(string dnsAddress)
+        {
+            var inspect = new
+            {
+                Image = imageId,
+                HostConfig = new { Dns = new[] { dnsAddress } },
+                Config = new
+                {
+                    Annotations = new Dictionary<string, string>
+                    {
+                        ["io.kautuka.role"] = "package-proxy",
+                        ["io.kautuka.image-id"] = imageId
+                    },
+                    Labels = new Dictionary<string, string>
+                    {
+                        ["io.kautuka.user"] = "system",
+                        ["io.kautuka.agent"] = "package-proxy",
+                        ["io.kautuka.kind"] = "agent-sandbox",
+                        ["io.kautuka.exec-context"] = "agent-sandbox",
+                        ["io.kautuka.egress"] = "normal"
+                    }
+                },
+                NetworkSettings = new
+                {
+                    Networks = new Dictionary<string, object>
+                    {
+                        [EgressTopologyManager.WorkloadNetworkName] = new { IPAddress = WorkloadRulesetRenderer.PackageProxyIp }
+                    }
+                }
+            };
+            MethodInfo verify = typeof(WorkspaceSidecarSupervisor)
+                .GetMethod("IsPackageProxyInspectAuthorized", BindingFlags.Static | BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("IsPackageProxyInspectAuthorized method was not found.");
+            return (bool)verify.Invoke(null, [JsonSerializer.Serialize(new[] { inspect }), imageId, true])!;
+        }
+
+        Assert.True(Verify(EgressTopologyManager.EgressPodIp));
+        Assert.False(Verify("10.255.255.254"));
     }
 
     [Fact]
@@ -212,7 +440,10 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
     private static WorkspaceSidecarSupervisor CreateSupervisor(WorkspaceSidecarDefinition sidecar)
         => CreateSupervisor(sidecar, new PodmanCommandRunner());
 
-    private static WorkspaceSidecarSupervisor CreateSupervisor(WorkspaceSidecarDefinition sidecar, PodmanCommandRunner podman)
+    private static WorkspaceSidecarSupervisor CreateSupervisor(
+        WorkspaceSidecarDefinition sidecar,
+        PodmanCommandRunner podman,
+        EgressTopologyManager? egressTopologyManager = null)
     {
         ServiceCollection services = new();
         services.AddHttpClient("manager.sidecars");
@@ -224,7 +455,8 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             provider.GetRequiredService<IHttpClientFactory>(),
             podman,
             Options.Create(new ManagerContainerStartupOptions()),
-            NullLogger<WorkspaceSidecarSupervisor>.Instance);
+            NullLogger<WorkspaceSidecarSupervisor>.Instance,
+            egressTopologyManager: egressTopologyManager);
     }
 
     private static ManagerRuntimeSettings CreateRuntimeSettings()

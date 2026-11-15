@@ -237,6 +237,15 @@ public static class NetworkDestinationNormalizer
                     throw new ArgumentException("invalid_destination: Workload subnet addresses (10.247.0.0/16) cannot be added to rules.", nameof(destination));
                 }
 
+                // This single RFC 2544 benchmarking address is a virtual package-cache
+                // service destination. Envoy rewrites it to the workload-network proxy;
+                // no other address in the benchmarking range is permitted.
+                if (string.Equals(normalizedIp, NetworkAddressClassifier.PackageProxyServiceAddress, StringComparison.Ordinal)
+                    && port == NetworkAddressClassifier.PackageProxyServicePort)
+                {
+                    return ("ip", normalizedIp, port);
+                }
+
                 if (NetworkAddressClassifier.IsSinkholeRange(normalizedIp))
                 {
                     throw new ArgumentException("invalid_destination: DNS sinkhole range (198.18.0.0/15) cannot be added to rules.", nameof(destination));

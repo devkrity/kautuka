@@ -21,6 +21,35 @@ public sealed class WindowsPodmanDevEgressOptionsTests
     }
 
     [Fact]
+    public void HookAssetsStagePackageProxyGoldenAfterTheWorkloadGolden()
+    {
+        string sourceDirectory = Path.Combine(Path.GetTempPath(), "kautuka-nac-hook-assets-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(sourceDirectory);
+        try
+        {
+            string[] assetNames = [
+                "kautuka_hook.py",
+                "kautuka_workload.nft.json.tmpl",
+                "kautuka_package_proxy.nft.json.tmpl",
+            ];
+            foreach (string assetName in assetNames)
+            {
+                File.WriteAllText(Path.Combine(sourceDirectory, assetName), "test");
+            }
+
+            IReadOnlyList<(string SourcePath, string RemotePath)> copies =
+                WindowsPodmanDevEgressOptions.BuildHookAssetCopies(sourceDirectory, "/home/user/.local/lib/kautuka/nac");
+
+            Assert.Equal(assetNames, copies.Select(copy => Path.GetFileName(copy.SourcePath)));
+            Assert.Equal(assetNames.Select(name => $"/home/user/.local/lib/kautuka/nac/{name}"), copies.Select(copy => copy.RemotePath));
+        }
+        finally
+        {
+            Directory.Delete(sourceDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task PodmanMachinePreservesEarlierAndLaterHookDirectoriesWhenAvailable()
     {
         if (!OperatingSystem.IsWindows())

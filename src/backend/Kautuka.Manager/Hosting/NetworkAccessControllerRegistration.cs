@@ -12,7 +12,9 @@ public static class NetworkAccessControllerRegistration
             sp.GetRequiredService<Kautuka.NetworkAccessController.IWorkloadRegistry>(),
             sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessAuditRing>(),
             isContainerAuthorizationGateOpen: () =>
-                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsStartupGateOpen));
+                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsStartupGateOpen,
+            isPackageProxyReady: () =>
+                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsPackageProxyReady));
         return services;
     }
 }

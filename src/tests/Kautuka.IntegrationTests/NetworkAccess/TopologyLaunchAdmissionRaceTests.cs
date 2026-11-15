@@ -368,7 +368,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
 
             reconcileTask = manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
 
-            // Incident closure cancels admission immediately and scans without waiting for MCP
+            // Incident closure schedules admission cancellation and scans without waiting for MCP
             // startup. The active lease keeps the scan incomplete until a later rescan.
             for (int attempt = 0; attempt < 100 && manager.IsStartupGateOpen; attempt++)
             {
@@ -378,8 +378,8 @@ public sealed class TopologyLaunchAdmissionRaceTests
             Assert.False(manager.IsStartupGateOpen);
             await reconcileTask.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
             Assert.False(manager.TopologyContainmentCompleteForTests);
-            Assert.True(launchCancellationToken.IsCancellationRequested);
             Assert.True(cancellationCallbackStarted.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.True(launchCancellationToken.IsCancellationRequested);
             releaseCancellationCallback.Set();
 
             releaseLaunch.TrySetResult();
@@ -422,11 +422,19 @@ public sealed class TopologyLaunchAdmissionRaceTests
     {
         string rendered = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: true);
         string boundaryDirectory = Path.Combine(root, "nac", "boundary");
+        string envoyDirectory = Path.Combine(root, "nac", "envoy");
+        string dnsDirectory = Path.Combine(root, "nac", "dns");
         Directory.CreateDirectory(boundaryDirectory);
+        Directory.CreateDirectory(envoyDirectory);
+        Directory.CreateDirectory(dnsDirectory);
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig("/run/kautuka-admin/admin.sock", isWindowsMtls: false);
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressTopologyManager.EgressPodIp);
         await File.WriteAllTextAsync(
             Path.Combine(boundaryDirectory, "boundary.nft"),
             rendered + "# drift",
             TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(envoyDirectory, "envoy.yaml"), envoy, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(Path.Combine(dnsDirectory, "Corefile"), corefile, TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .SetValue(manager, true);
@@ -435,7 +443,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
             .SetValue(manager, false);
         typeof(EgressTopologyManager)
             .GetField("expectedBoundaryNftSourceHash", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
-            .SetValue(manager, EgressTopologyManager.ComputeBoundaryNftSourceHash(rendered));
+            .SetValue(manager, EgressTopologyManager.ComputeReconcileConfigurationHash(rendered, envoy, corefile));
     }
 
     private static void SetStartupGateOpen(EgressTopologyManager manager, bool value)

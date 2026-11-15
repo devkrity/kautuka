@@ -43,9 +43,6 @@ public sealed record EnvoyAuthorizationHostOptions
 
     public string ExpectedClientSan { get; init; } = EnvoyMtlsCertificateAuthority.DefaultClientDnsSan;
 
-    /// <summary>Test-only negative control flag for C5.NC to allow binding 0.0.0.0 in a negative control fixture.</summary>
-    public bool AllowWildcardBindForNegativeControl { get; init; }
-
     public EnvoyAuthorizationFaultHook? FaultHook { get; init; }
 }
 
@@ -285,8 +282,7 @@ public sealed class EnvoyAuthorizationHost : IHostedService, IAsyncDisposable
             return false;
         }
 
-        if (!options.AllowWildcardBindForNegativeControl
-            && (IPAddress.Any.Equals(options.TcpBindAddress) || IPAddress.IPv6Any.Equals(options.TcpBindAddress)))
+        if (IPAddress.Any.Equals(options.TcpBindAddress) || IPAddress.IPv6Any.Equals(options.TcpBindAddress))
         {
             return false;
         }

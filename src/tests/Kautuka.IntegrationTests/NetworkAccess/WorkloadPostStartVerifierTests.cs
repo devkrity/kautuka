@@ -365,7 +365,7 @@ public sealed class WorkloadPostStartVerifierTests
                 [], []);
 
             await new WorkloadPostStartVerifier(runner, desiredState).VerifyWorkloadAsync(
-                ContainerId, AllocatedIp, compatProfile, registry, CancellationToken.None);
+                ContainerId, AllocatedIp, compatProfile, registry, cancellationToken: CancellationToken.None);
         }
         finally
         {
