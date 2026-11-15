@@ -18,7 +18,7 @@ public sealed class V7_20_AcceptanceHarnessContractTests
         Assert.Contains(".nip.io", productionProof, StringComparison.Ordinal);
         Assert.Contains("The live NAC proof requires external nip.io DNS resolution.", productionProof, StringComparison.Ordinal);
         Assert.Contains("The acceptance harness changed the production CoreDNS configuration after topology startup.", productionProof, StringComparison.Ordinal);
-        Assert.Contains("authorizationGate=notAttached:packetPathOnly=True", productionProof, StringComparison.Ordinal);
+        Assert.Contains("authorizationGateBypassed=True:packetPathOnly=True", productionProof, StringComparison.Ordinal);
         Assert.Contains("NetworkAccessTopologyGateTests", productionProof, StringComparison.Ordinal);
         Assert.DoesNotContain("File.WriteAllTextAsync(corefilePath", productionProof, StringComparison.Ordinal);
 

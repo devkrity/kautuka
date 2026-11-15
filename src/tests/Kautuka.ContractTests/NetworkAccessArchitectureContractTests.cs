@@ -179,7 +179,7 @@ public sealed class NetworkAccessArchitectureContractTests
         Assert.Contains("rebindNcRejectDelta > 0", productionSource, StringComparison.Ordinal);
         Assert.Contains("rebindNcMasqueradeDelta == 0", productionSource, StringComparison.Ordinal);
         Assert.Contains("rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore", productionSource, StringComparison.Ordinal);
-        Assert.Contains("authorizationGate=notAttached:packetPathOnly=True", productionSource, StringComparison.Ordinal);
+        Assert.Contains("authorizationGateBypassed=True:packetPathOnly=True", productionSource, StringComparison.Ordinal);
         Assert.Contains("NetworkAccessTopologyGateTests", productionSource, StringComparison.Ordinal);
         Assert.Contains("string dnsNcCountersBefore = await RunPodNftListEgressAsync", productionSource, StringComparison.Ordinal);
         Assert.Contains("ExtractNftCommentCounterPackets(dnsNcCountersBefore, \"private_reject\")", productionSource, StringComparison.Ordinal);

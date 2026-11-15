@@ -1563,11 +1563,12 @@ public static class Program
             loggerFactory.CreateLogger<EgressTopologyManager>(),
             envoySocketHostDir: socketDir,
             hookStateDirectory: nacStateDir);
+        int packetPathOnlyGateOverride = 0;
         var controller = new NacController(
             policyStore,
             registry,
             auditRing,
-            isContainerAuthorizationGateOpen: () => topology.IsStartupGateOpen,
+            isContainerAuthorizationGateOpen: () => Volatile.Read(ref packetPathOnlyGateOverride) == 1 || topology.IsStartupGateOpen,
             isPackageProxyReady: () => topology.IsPackageProxyReady);
         string sockPath = Path.Combine(socketDir, "envoy.sock");
         string lockPath = Path.Combine(socketDir, "networkaccess.lock");
@@ -2337,11 +2338,11 @@ public static class Program
 
             // The Envoy filter negative control deliberately edits the rendered file. Stop
             // the Manager reconcile lifecycle only after all launches and checks have
-            // completed. The standalone acceptance auth host keeps the policy store and
-            // controller active, but it has no production startup-gate callback; this final
-            // control therefore proves the Envoy packet path only. Gate-denial behavior is
+            // completed. The acceptance auth host retains the controller, but its gate
+            // is explicitly bypassed for this isolated packet-path control only. Gate-denial behavior is
             // covered separately by NetworkAccessTopologyGateTests.
             await topology.DisposeAsync().ConfigureAwait(false);
+            Volatile.Write(ref packetPathOnlyGateOverride, 1);
             string envoyConfigPath = Path.Combine(stateDir, "nac", "envoy", "envoy.yaml");
             string originalEnvoyConfig = await File.ReadAllTextAsync(envoyConfigPath).ConfigureAwait(false);
             const string removePrivateLanFilterRangePattern = @"(?m)^(?<i>[ \t]*)- address_prefix: 192\.168\.0\.0\r?\n\k<i>  prefix_len: 16\r?\n";
@@ -2377,13 +2378,13 @@ public static class Program
                     ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
                     : 0;
                 string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
-                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}:authorizationGate=notAttached:packetPathOnly=True";
+                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}:authorizationGateBypassed={Volatile.Read(ref packetPathOnlyGateOverride) == 1}:packetPathOnly=True";
                 rebindAcceptance = AcceptanceHarness.Record(
                     "PROD_E_REBIND",
                     rebindObservation,
                     "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
                     rebindNcObservation,
-                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGate=notAttached:packetPathOnly=True");
+                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGateBypassed=True:packetPathOnly=True");
             }
             finally
             {
