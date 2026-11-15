@@ -24,6 +24,34 @@ namespace Kautuka.IntegrationTests;
 public sealed class McpAgentToolProviderTests
 {
     [Fact]
+    public async Task SystemwideIsolatedConnectorReceivesInvokingUserAndAgentContext()
+    {
+        var grpcService = new CapturingWorkspaceGrpcService();
+        var provider = new McpAgentToolProvider(
+            new StaticPlatformConfigurationProvider(new PlatformConfiguration
+            {
+                McpServers = [new McpServerDefinition
+                {
+                    Id = "kautuka-google-mail", Name = "Gmail", Scope = GatewayOwnershipScopes.System,
+                    Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true,
+                }],
+            }),
+            CreateNoOpCredentialResolver(), new CapturingMcpHttpClientFactory(), grpcService,
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        var agent = new AgentDefinition
+        {
+            Id = "agent-alpha",
+            Name = "Agent Alpha",
+            Sandbox = new AgentSandboxDefinition { Enabled = false },
+            McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "kautuka-google-mail", Context = "Mail" }],
+        };
+        _ = await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-alpha"), CancellationToken.None);
+        WorkspaceMcpContainerCallRequest request = Assert.IsType<WorkspaceMcpContainerCallRequest>(grpcService.LastListToolsRequest);
+        Assert.Equal("user-alpha", request.WorkspaceContext?.UserId);
+        Assert.Equal("agent-alpha", request.WorkspaceContext?.ScopeId);
+    }
+
+    [Fact]
     public async Task InternalParserBoundToAgentRemainsDenyAllAndCannotCreateApprovalCard_WithNegativeControl()
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-parser-agent-" + Guid.NewGuid().ToString("N"));

@@ -1624,6 +1624,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         ];
 
         Assert.Equal(2, notes.Length);
+        Assert.All(notes, workspace => Assert.Equal("user-ash", workspace.UserId));
         Assert.DoesNotContain(notes, workspace => workspace.HostWorkspacePath.EndsWith(Path.Combine("agents", "ash-notes"), StringComparison.OrdinalIgnoreCase));
         Assert.Contains(notes, workspace => workspace.ScopeId.Contains("agent-a", StringComparison.Ordinal));
         Assert.Contains(notes, workspace => workspace.ScopeId.Contains("agent-b", StringComparison.Ordinal));
@@ -2950,13 +2951,14 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.True(catalog.TryGetMcpServer("kautuka-m365-mail", out _));
         Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-google-mail");
         Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-m365-mail");
+        Assert.All(catalog.ListMcpServers().Where(server => server.Id is "kautuka-google-mail" or "kautuka-m365-mail"), server => Assert.False(server.IsInternalSystemConnector));
         GatewayState reloaded = CreateState(temp.SqlitePath);
         Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-google-mail");
         Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-m365-mail");
     }
 
     [Fact]
-    public async Task SaveSystemMcpServerAsyncMarksConnectorAsInternalSystem()
+    public async Task SaveSystemMcpServerAsyncDoesNotMarkConnectorAsInternalSystem()
     {
         using var temp = new TemporaryGatewayStateDirectory();
         GatewayState state = CreateState(temp.SqlitePath);
@@ -2990,12 +2992,12 @@ public sealed class WorkspaceDesiredStatePublicationTests
             },
             TestContext.Current.CancellationToken).ConfigureAwait(true);
 
-        Assert.True(saved.IsInternalSystemConnector);
+        Assert.False(saved.IsInternalSystemConnector);
         Assert.False(saved.Enabled);
         Assert.Contains("connector-save", publisher.Reasons);
         Assert.True(store.TryGetMcpServer("kautuka-web-tools", out GatewayMcpServer? persisted));
         Assert.NotNull(persisted);
-        Assert.True(persisted!.IsInternalSystemConnector);
+        Assert.False(persisted!.IsInternalSystemConnector);
     }
 
     [Fact]

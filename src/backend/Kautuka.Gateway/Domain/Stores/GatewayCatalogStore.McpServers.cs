@@ -39,7 +39,7 @@ internal sealed partial class GatewayCatalogStore
     public async Task<GatewayMcpServer> SaveSystemMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, CancellationToken cancellationToken = default)
     {
         SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { return await SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, null, true, cancellationToken).ConfigureAwait(false); }
+        try { return await SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, null, false, cancellationToken).ConfigureAwait(false); }
         finally { mutex.Release(); }
     }
 

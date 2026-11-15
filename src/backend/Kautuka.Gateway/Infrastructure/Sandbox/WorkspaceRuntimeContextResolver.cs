@@ -462,7 +462,9 @@ internal sealed class WorkspaceRuntimeContextResolver(
     {
         if (!IsSharedSystemAgent(configuration, agentId))
         {
-            yield return ResolveAgentWorkspace(configuration, agentId, null);
+            string? ownerUserId = configuration.Agents.FirstOrDefault(agent =>
+                string.Equals(agent.Id, agentId, StringComparison.Ordinal))?.OwnerUserId;
+            yield return ResolveAgentWorkspace(configuration, agentId, ownerUserId);
             yield break;
         }
 
