@@ -298,6 +298,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                     TestContext.Current.CancellationToken,
                     false,
                     workspaceContext,
+                    null,
                 ])!);
                 failureDetail = failure.ToString();
             }
