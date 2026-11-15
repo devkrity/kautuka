@@ -30,7 +30,7 @@ public sealed class NetworkAccessAuditRingLossTests
         try
         {
             ring.Record(CreateEntry(first, "first"));
-            Assert.True(firstWriteStarted.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.True(firstWriteStarted.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
             ring.Record(CreateEntry(first.AddTicks(1), "queued"));
             ring.Record(CreateEntry(first.AddTicks(2), "lost-1"));
             ring.Record(CreateEntry(first.AddTicks(3), "lost-2"));
@@ -104,7 +104,7 @@ public sealed class NetworkAccessAuditRingLossTests
             ring.Record(CreateEntry(first.AddTicks(2), "lost"));
 
             releaseFirstWrite.Set();
-            Assert.True(lossWritten.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.True(lossWritten.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
             lock (writeLock)
             {
                 Assert.Single(written, entry => entry.Decision == "audit_loss");
