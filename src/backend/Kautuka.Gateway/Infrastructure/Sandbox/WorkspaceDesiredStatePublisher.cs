@@ -188,6 +188,7 @@ internal sealed class WorkspaceDesiredStatePublisher(
         {
             Append(builder, workspace.ScopeType);
             Append(builder, workspace.ScopeId);
+            Append(builder, workspace.AgentId ?? string.Empty);
             Append(builder, workspace.UserId ?? string.Empty);
             Append(builder, workspace.HostWorkspacePath);
             Append(builder, workspace.ContainerWorkspacePath);

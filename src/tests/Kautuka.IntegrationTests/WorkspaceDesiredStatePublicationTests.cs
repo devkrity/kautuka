@@ -1804,6 +1804,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         var provider = new SqlitePlatformConfigurationProvider(database, new SqliteAgentDefinitionStore(configuration, database));
         var resolver = new WorkspaceRuntimeContextResolver(provider, configuration, database);
         WorkspaceRuntimeContext first = resolver.ResolveAgentWorkspace("agent-a");
+        Assert.Equal("agent-a", first.AgentId);
         Assert.EndsWith(Path.Combine("agents", "user-ash-agent-a"), first.HostWorkspacePath, StringComparison.OrdinalIgnoreCase);
         Directory.CreateDirectory(first.HostWorkspacePath);
         File.WriteAllText(Path.Combine(first.HostWorkspacePath, "kept.txt"), "kept-note");

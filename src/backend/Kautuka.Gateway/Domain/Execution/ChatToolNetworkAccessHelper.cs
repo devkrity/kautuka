@@ -84,7 +84,7 @@ internal static class ChatToolNetworkAccessHelper
                 NetworkAccessRequestMessage? recent = listResp.Requests
                     .Where(r =>
                         string.Equals(r.Status, "pending", StringComparison.Ordinal)
-                        && !r.Systemwide
+                        && (!r.Systemwide || r.Attribution == "user-agent")
                         && !string.IsNullOrWhiteSpace(r.UserId)
                         && string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase)
                         && !string.IsNullOrWhiteSpace(r.AgentId)

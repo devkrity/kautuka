@@ -439,7 +439,14 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
                 throw new ArgumentException("Systemwide connector requires a connectorId.", nameof(entry));
             }
 
-            if (attribution == "user")
+            if (attribution == "user-agent")
+            {
+                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId))
+                {
+                    throw new ArgumentException("Agent-attributed connector requires both userId and agentId.", nameof(entry));
+                }
+            }
+            else if (attribution == "user")
             {
                 if (string.IsNullOrEmpty(userId))
                 {

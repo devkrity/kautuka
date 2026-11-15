@@ -123,7 +123,7 @@ internal static class NetworkAccessPolicyAuthorizer
             return true;
         }
 
-        if (req.Systemwide)
+        if (req.Systemwide && req.Attribution != "user-agent")
         {
             return false;
         }
@@ -197,7 +197,7 @@ internal static class NetworkAccessPolicyAuthorizer
             throw new UnauthorizedAccessException("PermissionDenied: Probe requests require temporary in-memory authorization and cannot be decided from persisted records.");
         }
 
-        if (request.Systemwide)
+        if (request.Systemwide && request.Attribution != "user-agent")
         {
             if (!actor.IsAdmin)
             {

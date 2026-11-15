@@ -400,7 +400,8 @@ public sealed class WorkloadPostStartVerifier
 
         return [.. desiredStateStore.Snapshot.DesiredWorkspaces
             .Where(context => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(context.ScopeId, workloadIdentity.AgentId, StringComparison.Ordinal)
+                && (string.Equals(context.AgentId, workloadIdentity.AgentId, StringComparison.Ordinal)
+                    || string.Equals(context.ScopeId, workloadIdentity.AgentId, StringComparison.Ordinal))
                 && string.Equals(context.UserId, workloadIdentity.UserId, StringComparison.Ordinal))
             .Select(static context => context.HostWorkspacePath)
             .Where(static path => !string.IsNullOrWhiteSpace(path))

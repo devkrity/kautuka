@@ -888,7 +888,7 @@ public sealed class PodmanContainerTool(
         var spec = new Hosting.NetworkAccess.WorkloadContainerSpec(containerName, image, ip)
         {
             UserId = context.UserId ?? string.Empty,
-            AgentId = IsAgentScope(context) ? context.ScopeId ?? string.Empty : string.Empty,
+            AgentId = IsAgentScope(context) ? context.AgentId ?? context.ScopeId : string.Empty,
             ExecContext = "agent-sandbox",
             Kind = "agent-sandbox",
             Systemwide = false,
@@ -939,7 +939,7 @@ public sealed class PodmanContainerTool(
         return new Kautuka.NetworkAccessController.RegistryEntry(
             allocatedIp,
             hasUserIdentity ? context.UserId : null,
-            hasAgentScope ? context.ScopeId : null,
+            hasAgentScope ? context.AgentId ?? context.ScopeId : null,
             containerName,
             "agent-sandbox",
             null,

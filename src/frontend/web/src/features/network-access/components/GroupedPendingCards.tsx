@@ -42,7 +42,7 @@ export function GroupedPendingCards({
     });
 
     for (const req of sorted) {
-      if (!req.agentId || req.systemwide) {
+      if (!req.agentId || (req.systemwide && req.attribution !== 'user-agent')) {
         // Individual ungrouped card
         result.push({
           key: req.id,
@@ -58,7 +58,7 @@ export function GroupedPendingCards({
         (g) =>
           g.requests.length > 0 &&
           g.requests[0]?.agentId === req.agentId &&
-          !g.requests[0]?.systemwide &&
+          (!g.requests[0]?.systemwide || g.requests[0]?.attribution === 'user-agent') &&
           Math.abs(new Date(g.requests[0]?.firstSeenUtc ?? 0).getTime() - reqTime) <= 60000
       );
 

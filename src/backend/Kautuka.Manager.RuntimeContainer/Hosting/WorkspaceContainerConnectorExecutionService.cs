@@ -1297,9 +1297,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         string ip = inspection.WorkloadIp;
         string attribution = identity.Egress == "deny-all"
             ? "none"
-            : identity.Systemwide
-                ? (string.IsNullOrWhiteSpace(identity.UserId) ? "none" : "user")
-                : (string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
+            : (string.IsNullOrWhiteSpace(identity.AgentId) ? (string.IsNullOrWhiteSpace(identity.UserId) ? "none" : "user") : "user-agent");
         string? compat = compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null;
         var desired = new Kautuka.NetworkAccessController.RegistryEntry(
             ip,

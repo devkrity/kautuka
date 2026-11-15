@@ -33,7 +33,7 @@ internal static class ConnectorContainerSpecBuilder
         ArgumentNullException.ThrowIfNull(connector);
         string userId = workspaceContext?.UserId ?? string.Empty;
         string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-            ? (workspaceContext?.ScopeId ?? string.Empty)
+            ? (workspaceContext?.AgentId ?? workspaceContext?.ScopeId ?? string.Empty)
             : string.Empty;
         bool systemwide = string.Equals(connector.CatalogScope, "system", StringComparison.OrdinalIgnoreCase);
 
@@ -57,7 +57,7 @@ internal static class ConnectorContainerSpecBuilder
             throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
         }
 
-        return new ConnectorIdentity(userId, systemwide ? string.Empty : agentId, systemwide, "normal", "connector");
+        return new ConnectorIdentity(userId, agentId, systemwide, "normal", "connector");
     }
 
     public static List<string> BuildRun(

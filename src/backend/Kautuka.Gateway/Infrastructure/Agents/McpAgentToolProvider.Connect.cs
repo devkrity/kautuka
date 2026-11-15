@@ -288,6 +288,7 @@ internal sealed partial class McpAgentToolProvider
         {
             ScopeType = workspace.ScopeType,
             ScopeId = workspace.ScopeId,
+            AgentId = workspace.AgentId ?? string.Empty,
             UserId = workspace.UserId ?? string.Empty,
             HostWorkspacePath = workspace.HostWorkspacePath,
             ContainerWorkspacePath = workspace.ContainerWorkspacePath,

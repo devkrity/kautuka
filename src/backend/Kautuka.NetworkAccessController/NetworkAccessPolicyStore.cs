@@ -221,7 +221,7 @@ public sealed partial class NetworkAccessPolicyStore
                     continue;
                 }
 
-                bool waitingForAdmin = !actor.IsAdmin && (req.Systemwide || !callerPrivs.CanApproveOwn);
+                bool waitingForAdmin = !actor.IsAdmin && ((req.Systemwide && req.Attribution != "user-agent") || !callerPrivs.CanApproveOwn);
                 views.Add(new NetworkAccessRequestView(
                     req,
                     WaitingForAdmin: waitingForAdmin,
@@ -699,7 +699,7 @@ public sealed partial class NetworkAccessPolicyStore
 
     private static bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
     {
-        if (req.Systemwide)
+        if (req.Systemwide && req.Attribution != "user-agent")
         {
             if (req.Attribution == "none")
             {
@@ -836,6 +836,11 @@ public sealed partial class NetworkAccessPolicyStore
             {
                 return userRule.Allowed;
             }
+        }
+
+        if (req.Systemwide && req.Attribution == "user-agent")
+        {
+            return EvaluatesToAllow(state, req with { Attribution = "user", AgentId = null });
         }
 
         if (!string.IsNullOrEmpty(req.UserId) && !string.IsNullOrEmpty(req.ConnectorId))

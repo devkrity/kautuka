@@ -656,7 +656,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             }
                             else if (systemwide)
                             {
-                                attribution = string.IsNullOrWhiteSpace(user) ? "none" : "user";
+                                attribution = string.IsNullOrWhiteSpace(user) ? "none" : (string.IsNullOrWhiteSpace(agent) ? "user" : "user-agent");
                             }
                             else if (isProbe)
                             {

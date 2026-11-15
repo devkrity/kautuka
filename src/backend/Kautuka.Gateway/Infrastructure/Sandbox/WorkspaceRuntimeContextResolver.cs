@@ -411,7 +411,8 @@ internal sealed class WorkspaceRuntimeContextResolver(
             sandboxImage,
             sandbox.DefaultTimeout,
             baseCapabilities,
-            BuildResolvedContainerEnvironment(sandbox.ContainerEnvironment));
+            BuildResolvedContainerEnvironment(sandbox.ContainerEnvironment))
+        { AgentId = agentId };
     }
 
     private ManagerRuntimeSettingsPayload ResolveRuntimeSettings(PlatformConfiguration configuration)

@@ -340,7 +340,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           userDisplayName: 'Alice',
           agentId: 'agent-alice',
           agentDisplayName: 'AliceAgent',
-          systemwide: false,
+          systemwide: true,
           attribution: 'user-agent',
           destination: 'alice-dest.com',
           destKind: 'host',

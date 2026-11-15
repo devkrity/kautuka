@@ -244,6 +244,7 @@ message WorkspaceMcpProbeResponse {
 }
 
 message WorkspaceContextMessage {
+  string              agent_id                     = 15;
   string              scope_type                   = 1;
   string              scope_id                     = 2;
   string              user_id                      = 3;

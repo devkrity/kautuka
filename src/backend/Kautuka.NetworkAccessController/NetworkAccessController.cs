@@ -373,6 +373,7 @@ public sealed class NetworkAccessController
         string userId = input.UserId.Trim();
         string agentId = string.IsNullOrWhiteSpace(input.AgentId) ? "gateway" : input.AgentId.Trim();
         string? connectorId = string.IsNullOrWhiteSpace(input.ConnectorId) ? null : input.ConnectorId.Trim();
+        bool attributedAgent = connectorId is not null && !string.IsNullOrWhiteSpace(input.AgentId);
         string origin = string.IsNullOrWhiteSpace(input.Origin) ? "gateway" : input.Origin.Trim();
 
         // 0. Emergency Brake check FIRST
@@ -463,14 +464,14 @@ public sealed class NetworkAccessController
         var syntheticEntry = new RegistryEntry(
             Ip: "127.0.0.1",
             UserId: userId,
-            AgentId: input.Systemwide ? null : agentId,
+            AgentId: input.Systemwide && !attributedAgent ? null : agentId,
             ContainerId: origin,
             Kind: input.Systemwide || !string.IsNullOrEmpty(connectorId) ? "connector" : "agent-sandbox",
             ConnectorId: connectorId,
             ExecContext: "app",
             Systemwide: input.Systemwide,
             Egress: "normal",
-            Attribution: input.Systemwide ? "user" : "user-agent",
+            Attribution: input.Systemwide && !attributedAgent ? "user" : "user-agent",
             CompatProfile: null,
             RegisteredUtc: now);
 
@@ -486,7 +487,7 @@ public sealed class NetworkAccessController
             case ScopeMatchKind.BlockedByRule:
                 policyStore.IncrementBlockedRequestAttemptInMemory(
                     userId,
-                    input.Systemwide ? null : agentId,
+                    input.Systemwide && !attributedAgent ? null : agentId,
                     connectorId,
                     input.Systemwide,
                     destKind,
@@ -532,14 +533,14 @@ public sealed class NetworkAccessController
 
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     userId,
-                    input.Systemwide ? null : agentId,
+                    input.Systemwide && !attributedAgent ? null : agentId,
                     connectorId,
                     input.Systemwide,
-                    attribution: input.Systemwide ? "user" : "user-agent",
+                    attribution: input.Systemwide && !attributedAgent ? "user" : "user-agent",
                     destKind,
                     normalizedDestination,
                     input.Port,
-                    actorKind: "first-party",
+                    actorKind: input.Systemwide && attributedAgent ? "connector" : "first-party",
                     origin,
                     input.Purpose,
                     compatProfile: null,
@@ -608,7 +609,7 @@ public sealed class NetworkAccessController
         string destination,
         int port)
     {
-        if (!entry.Systemwide && entry.Attribution == "user-agent")
+        if (entry.Attribution == "user-agent")
         {
             if (string.Equals(entry.UserId, "system", StringComparison.Ordinal)
                 && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)
@@ -707,6 +708,13 @@ public sealed class NetworkAccessController
                         ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_user", userRule.AllowLan, OpenInternetBadge: false)
                         : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
                 }
+            }
+
+            // Preserve existing connector-specific rules after the ordinary agent and user scopes.
+            if (entry.Systemwide && !string.IsNullOrEmpty(entry.ConnectorId))
+            {
+                ScopeMatchOutcome legacy = ResolveContainerScopeRule(state, entry with { AgentId = null, Attribution = "user" }, destKind, destination, port);
+                if (legacy.Kind != ScopeMatchKind.NoMatch) return legacy;
             }
 
             // (c) Dedicated connector container: check admin any-public rule for (userId, connectorId)
