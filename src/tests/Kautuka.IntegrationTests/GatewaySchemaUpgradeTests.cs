@@ -41,7 +41,6 @@ public sealed class GatewaySchemaUpgradeTests
     }
 
     [Theory]
-    [InlineData("")]
     [InlineData("ALTER TABLE runtime_users ADD COLUMN private_extension TEXT; UPDATE runtime_users SET private_extension='preserve';")]
     [InlineData("CREATE TABLE unsupported_extension(value TEXT); INSERT INTO unsupported_extension VALUES ('preserve');")]
     [InlineData("UPDATE runtime_users SET telegramuser_idsJson='[123]';")]
@@ -70,6 +69,60 @@ public sealed class GatewaySchemaUpgradeTests
     }
 
     [Fact]
+    public void KnownUnmarkedLegacySchemaUpgradesAndPreservesData()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        string fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFileName));
+        using (var connection = new SqliteConnection($"Data Source={temp.SqlitePath}"))
+        {
+            connection.Open();
+            connection.ExecuteScript(fixture);
+            connection.ExecuteScript("DROP TABLE gateway_schema; INSERT INTO runtime_users(username, user_id, created_at, updated_at, telegramuser_idsJson, telegram_bot_ids_json) VALUES ('alice', 'user-1', 'created', 'updated', '[]', '[]'); INSERT INTO mcp_servers(id, name, transport, http_url, encrypted_env_json, env_keys_json, created_at, updated_at) VALUES ('remote-1', 'Remote', 'http', 'https://example.com/mcp', 'legacy-envelope', '[\"MCP_AUTH_TOKEN\"]', 'created', 'updated');");
+        }
+
+        KautukaDatabase database = CreateDatabase(temp.SqlitePath);
+        database.EnsureReady();
+        using SqliteConnection migrated = new(database.ConnectionString);
+        migrated.Open();
+        SqliteGatewaySchemaBootstrapper.ValidateExisting(migrated);
+        Assert.Equal(SqliteGatewaySchemaBootstrapper.SchemaId, migrated.ExecuteScalar<string>("SELECT schema_id FROM gateway_schema"));
+        Assert.Equal("user-1", migrated.ExecuteScalar<string>("SELECT user_id FROM runtime_users WHERE username='alice'"));
+        Assert.Equal("legacy-envelope", migrated.ExecuteScalar<string>("SELECT encrypted_env_json FROM mcp_servers WHERE id='remote-1'"));
+        migrated.ExecuteScript("UPDATE runtime_users SET display_name='Alice' WHERE username='alice';");
+        database.EnsureReady();
+        Assert.Equal("Alice", migrated.ExecuteScalar<string>("SELECT display_name FROM runtime_users WHERE username='alice'"));
+    }
+
+    [Fact]
+    public void KnownUnmarkedLegacySchemaIsUnchangedWhenAnotherWriterHoldsTheDatabase()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        string fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFileName));
+        using var connection = new SqliteConnection($"Data Source={temp.SqlitePath};Default Timeout=1");
+        connection.Open();
+        connection.ExecuteScript("PRAGMA journal_mode=WAL;");
+        connection.ExecuteScript(fixture);
+        connection.ExecuteScript("DROP TABLE gateway_schema; INSERT INTO runtime_users(username, user_id, created_at, updated_at) VALUES ('alice', 'user-1', 'created', 'updated');");
+        using var writer = new SqliteConnection($"Data Source={temp.SqlitePath};Default Timeout=1;Pooling=False");
+        writer.Open();
+        using SqliteTransaction writeTransaction = writer.BeginTransaction();
+        using (SqliteCommand command = writer.CreateCommand())
+        {
+            command.Transaction = writeTransaction;
+            command.CommandText = "UPDATE runtime_users SET display_name='in progress' WHERE username='alice'";
+            command.ExecuteNonQuery();
+        }
+
+        Assert.Throws<SqliteException>(() => SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection));
+        writeTransaction.Rollback();
+        writer.Close();
+        Assert.Equal(0L, connection.ExecuteScalar<long>("SELECT COUNT(*) FROM sqlite_schema WHERE name='gateway_schema'"));
+        Assert.Equal("user-1", connection.ExecuteScalar<string>("SELECT user_id FROM runtime_users WHERE username='alice'"));
+        SqliteGatewaySchemaBootstrapper.EnsureCurrent(connection);
+        SqliteGatewaySchemaBootstrapper.ValidateExisting(connection);
+    }
+
+    [Fact]
     public void UnmarkedSingleLegacyColumnIsNotRecognized()
     {
         using var connection = new SqliteConnection("Data Source=:memory:");
@@ -86,7 +139,8 @@ public sealed class GatewaySchemaUpgradeTests
     [InlineData("gateway-2026-10-10.1")]
     [InlineData("gateway-2026-10-19.1")]
     [InlineData("gateway-2026-10-23.1")]
-    public void ProductionBootstrapMigratesKnownLegacyMarkersAndPreservesForeignKeyChildren(string sourceSchemaId)
+    [InlineData(null)]
+    public void ProductionBootstrapMigratesKnownLegacyMarkersAndPreservesForeignKeyChildren(string? sourceSchemaId)
     {
         using var temp = new TemporaryGatewayStateDirectory();
         string fixture = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", fixtureFileName));
@@ -95,7 +149,9 @@ public sealed class GatewaySchemaUpgradeTests
             connection.Open();
             connection.ExecuteScript("PRAGMA foreign_keys=ON;");
             connection.ExecuteScript(fixture);
-            connection.ExecuteScript($"UPDATE gateway_schema SET schema_id='{sourceSchemaId}';");
+            connection.ExecuteScript(sourceSchemaId is null
+                ? "DROP TABLE gateway_schema;"
+                : $"UPDATE gateway_schema SET schema_id='{sourceSchemaId}';");
             connection.ExecuteScript(
                 """
                 INSERT INTO autopilot_schedules(

@@ -23,7 +23,7 @@ Manager's hosted-service stop and dependency-injection container disposal both d
 
 Treat a failed migration as an integrity boundary, not a normal retry.
 
-Gateway startup can restore a missing marker when the database exactly matches the current schema. Unmarked legacy databases and unrecognized or partially modified schemas fail closed; preserve the database for recovery and do not add a marker manually.
+Gateway startup can restore a missing marker when the database exactly matches the current schema. It can also upgrade the exact recorded `gateway-2026-10-10.1` schema without a marker: the upgrade is validated on a copy before replacing the original. Other unmarked legacy databases and unrecognized or partially modified schemas fail closed; preserve the database for recovery and do not add a marker manually.
 
 1. Stop only the service whose startup reports the migration failure; do not delete or edit its database, journal, or migration marker.
 2. Preserve the release version, schema version, sanitized error code, database checksum/size, and the exact migration identifier. Do not copy rows containing credentials, prompts, or provider payloads.

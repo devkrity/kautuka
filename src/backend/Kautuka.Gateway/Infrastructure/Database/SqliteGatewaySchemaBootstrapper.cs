@@ -38,6 +38,11 @@ internal static class SqliteGatewaySchemaBootstrapper
                 CreateSchemaMarker(connection, SchemaId);
                 schemaId = SchemaId;
             }
+            else if (schemaId is null && HasExactLegacySchemaWithoutMarker(connection))
+            {
+                UpgradeUnmarkedLegacySchema(connection);
+                return;
+            }
             if (schemaId is null
                 || (!string.Equals(schemaId, SchemaId, StringComparison.Ordinal)
                     && !priorSupportedSchemaIds.Contains(schemaId)
@@ -79,6 +84,23 @@ internal static class SqliteGatewaySchemaBootstrapper
     private static bool HasExactCurrentSchemaWithoutMarker(SqliteConnection connection)
     {
         IReadOnlyDictionary<SchemaObjectKey, string> expected = CreateExpectedSchema();
+        return MatchesSchemaWithoutMarker(connection, expected);
+    }
+
+    private static bool HasExactLegacySchemaWithoutMarker(SqliteConnection connection)
+    {
+        using var expectedConnection = new SqliteConnection("Data Source=:memory:");
+        expectedConnection.Open();
+        using SqliteCommand command = expectedConnection.CreateCommand();
+#pragma warning disable CA2100 // Fixed, versioned embedded schema; no external input.
+        command.CommandText = SqliteEmbeddedSql.GatewayLegacy20261010;
+#pragma warning restore CA2100
+        command.ExecuteNonQuery();
+        return MatchesSchemaWithoutMarker(connection, ReadSchema(expectedConnection), exactText: true);
+    }
+
+    private static bool MatchesSchemaWithoutMarker(SqliteConnection connection, IReadOnlyDictionary<SchemaObjectKey, string> expected, bool exactText = false)
+    {
         IReadOnlyDictionary<SchemaObjectKey, string> actual = ReadSchema(connection);
         var markerKey = new SchemaObjectKey("table", "gateway_schema");
         if (!expected.ContainsKey(markerKey) || actual.Count != expected.Count - 1)
@@ -94,13 +116,48 @@ internal static class SqliteGatewaySchemaBootstrapper
             }
 
             if (!actual.TryGetValue(key, out string? actualSql)
-                || !string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal))
+                || !(exactText
+                    ? string.Equals(expectedSql, actualSql, StringComparison.Ordinal)
+                    : string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal)))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static void UpgradeUnmarkedLegacySchema(SqliteConnection connection)
+    {
+        // Keep the source exclusively locked from the snapshot through replacement so
+        // another writer cannot make changes that the completed backup would overwrite.
+        using SqliteCommand modeCommand = connection.CreateCommand();
+        modeCommand.CommandText = "PRAGMA locking_mode";
+        string previousMode = Convert.ToString(modeCommand.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? "normal";
+        try
+        {
+            Execute(connection, "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+            if (!HasExactLegacySchemaWithoutMarker(connection))
+            {
+                throw new InvalidOperationException("Gateway schema changed while the unmarked legacy upgrade was starting; no changes were made.");
+            }
+
+            using var staged = new SqliteConnection("Data Source=:memory:");
+            staged.Open();
+            connection.BackupDatabase(staged);
+            CreateSchemaMarker(staged, "gateway-2026-10-10.1");
+            ApplyCompatibleUpgrades(staged);
+            ValidateExisting(staged);
+            AdvanceGatewaySchemaId(staged);
+            staged.BackupDatabase(connection);
+        }
+        finally
+        {
+            if (string.Equals(previousMode, "normal", StringComparison.OrdinalIgnoreCase))
+            {
+                Execute(connection, "PRAGMA locking_mode=NORMAL; BEGIN; COMMIT;");
+            }
+        }
     }
 
     private static void CreateSchemaMarker(SqliteConnection connection, string schemaId)
