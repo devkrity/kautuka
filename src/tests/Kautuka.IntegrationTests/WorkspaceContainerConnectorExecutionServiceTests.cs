@@ -1902,10 +1902,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
         Assert.Contains("-d", arguments, StringComparer.Ordinal);
         Assert.DoesNotContain("--rm", arguments, StringComparer.Ordinal);
-        Assert.Equal("localhost/fedora-minimal:44", arguments[^4]);
-        Assert.Equal("sh", arguments[^3]);
-        Assert.Equal("-lc", arguments[^2]);
-        Assert.Equal("tail -f /dev/null", arguments[^1]);
+        int imageIndex = arguments.IndexOf("localhost/fedora-minimal:44");
+        int entrypointIndex = arguments.IndexOf("--entrypoint");
+        Assert.InRange(entrypointIndex, 0, imageIndex - 2);
+        Assert.Equal("tail", arguments[entrypointIndex + 1]);
+        Assert.Equal(["-f", "/dev/null"], arguments.Skip(imageIndex + 1));
     }
 
     [Fact]
@@ -2030,6 +2031,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         List<string> arguments = InvokeBuildPodmanRunArguments(service, connector, "test-container", null);
 
         Assert.Equal("run", arguments[0]);
+        Assert.DoesNotContain("--entrypoint", arguments, StringComparer.Ordinal);
         Assert.Equal(connector.Image, arguments[^1]);
     }
 

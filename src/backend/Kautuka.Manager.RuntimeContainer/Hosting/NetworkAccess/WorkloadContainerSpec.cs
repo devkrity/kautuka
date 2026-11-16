@@ -173,6 +173,10 @@ public sealed record WorkloadContainerSpec
         if (Persistent)
         {
             args.Add("-d");
+            if (ManagerRole == "connector")
+            {
+                args.AddRange(["--entrypoint", "tail"]);
+            }
         }
         else
         {
@@ -288,7 +292,14 @@ public sealed record WorkloadContainerSpec
 
         if (Persistent)
         {
-            args.AddRange(["sh", "-lc", "tail -f /dev/null"]);
+            if (ManagerRole == "connector")
+            {
+                args.AddRange(["-f", "/dev/null"]);
+            }
+            else
+            {
+                args.AddRange(["sh", "-lc", "tail -f /dev/null"]);
+            }
         }
         else if (!string.IsNullOrWhiteSpace(Command))
         {
