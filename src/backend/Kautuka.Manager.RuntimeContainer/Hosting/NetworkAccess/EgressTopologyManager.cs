@@ -1457,6 +1457,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             .ConfigureAwait(false);
 
         var allowlistEntries = new List<InfraAllowlistEntry>();
+        string? infraContainerId = null;
         if (podInspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(podInspect.StdOut))
         {
             try
@@ -1468,6 +1469,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 string infraId = podElem.TryGetProperty("InfraContainerID", out JsonElement infElem) ? infElem.GetString() ?? string.Empty : string.Empty;
                 if (!string.IsNullOrWhiteSpace(infraId))
                 {
+                    infraContainerId = infraId;
                     knownInfraContainerIds.Add(infraId);
                     allowlistEntries.Add(new(infraId, "egress-pod", [EgressPodIp, OutsidePodIp], "pinned"));
                 }
@@ -1532,6 +1534,24 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         await EnsureConfigContainerMountCurrentAsync(
             "kautuka-egress-envoy", Path.GetDirectoryName(envoyPath)!, "/etc/kautuka-envoy", isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
+        string? podSelinuxLevel = null;
+        if (useDevelopmentSelinuxDomain && !isWindowsHostNativeDev)
+        {
+            if (string.IsNullOrWhiteSpace(infraContainerId))
+                throw new InvalidOperationException("Cannot determine the SELinux level of the egress pod.");
+            PodmanCommandResult infraInspect = await podmanRunner.RunAsync(
+                ["inspect", infraContainerId], 10, cancellationToken).ConfigureAwait(false);
+            if (infraInspect.ExitCode != 0)
+                throw new InvalidOperationException("Cannot inspect the SELinux level of the egress pod.");
+            using JsonDocument infraDocument = JsonDocument.Parse(infraInspect.StdOut);
+            JsonElement infra = infraDocument.RootElement.ValueKind == JsonValueKind.Array
+                ? infraDocument.RootElement[0] : infraDocument.RootElement;
+            string processLabel = GetStringProperty(infra, "ProcessLabel");
+            string[] labelParts = processLabel.Split(':', 4);
+            if (labelParts.Length != 4 || string.IsNullOrWhiteSpace(labelParts[3]))
+                throw new InvalidOperationException("The egress pod did not report a valid SELinux level.");
+            podSelinuxLevel = labelParts[3];
+        }
         await EnsureInfraContainerCreatedAsync(
             "kautuka-egress-envoy",
             "egress-envoy",
@@ -1543,7 +1563,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 isWindowsHostNativeDev,
                 decisionEndpointIp,
                 envoyCertificateDirectory,
-                useDevelopmentSelinuxDomain),
+                useDevelopmentSelinuxDomain,
+                podSelinuxLevel),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -1939,7 +1960,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         bool isWindowsHostNativeDev = false,
         string? decisionEndpointIp = null,
         string? envoyCertificateDirectory = null,
-        bool useDevelopmentSelinuxDomain = false)
+        bool useDevelopmentSelinuxDomain = false,
+        string? podSelinuxLevel = null)
     {
         List<string> args =
         [
@@ -1953,7 +1975,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             if (useDevelopmentSelinuxDomain)
             {
+                ArgumentException.ThrowIfNullOrWhiteSpace(podSelinuxLevel);
                 args.AddRange(["--security-opt", "label=type:kautuka_envoy.process"]);
+                args.AddRange(["--security-opt", $"label=level:{podSelinuxLevel}"]);
             }
             args.Insert(5, "--group-add");
             args.Insert(6, "keep-groups");
