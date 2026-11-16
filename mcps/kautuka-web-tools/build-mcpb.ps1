@@ -49,8 +49,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "MCPB ZIP integrity validation failed (exit $LASTEXITCODE)" }
 
     if (Test-Path -LiteralPath $outputFile) {
-        [System.IO.File]::Replace($tempFile, $outputFile, $backupFile)
-        if (Test-Path -LiteralPath $backupFile) { Remove-Item -LiteralPath $backupFile -Force }
+        & node (Join-Path $repoRoot 'scripts/validate-mcpb-archive.mjs') --same-content $outputFile $tempFile
+        if ($LASTEXITCODE -eq 0) {
+            Remove-Item -LiteralPath $tempFile -Force
+        } else {
+            [System.IO.File]::Replace($tempFile, $outputFile, $backupFile)
+            if (Test-Path -LiteralPath $backupFile) { Remove-Item -LiteralPath $backupFile -Force }
+        }
     } else {
         [System.IO.File]::Move($tempFile, $outputFile)
     }

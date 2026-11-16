@@ -31,6 +31,10 @@ if [[ ! -s "$temp_file" ]]; then
 fi
 node "$repo_root/scripts/validate-mcpb-archive.mjs" "$temp_file"
 
-mv -f -- "$temp_file" "$output_file"
+if [[ -f "$output_file" ]] && node "$repo_root/scripts/validate-mcpb-archive.mjs" --same-content "$output_file" "$temp_file"; then
+    rm -f -- "$temp_file"
+else
+    mv -f -- "$temp_file" "$output_file"
+fi
 
 echo "$output_file"

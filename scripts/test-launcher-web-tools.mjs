@@ -92,6 +92,15 @@ if (process.platform === "linux" || process.platform === "win32") {
     const success = run("success");
     assert.equal(success.status, 0, `${success.stdout}\n${success.stderr}`);
     assert.deepEqual(readFileSync(artifact), readFileSync(validZip));
+    const sameContents = storedZip("manifest.json", "{}");
+    sameContents.writeUInt16LE(123, 10); // Local ZIP timestamp changes on each pack.
+    writeFileSync(validZip, sameContents);
+    assert.equal(run("success").status, 0);
+    assert.deepEqual(readFileSync(artifact), storedZip("manifest.json", "{}"), "unchanged contents retain the existing archive bytes");
+    const changedContents = storedZip("manifest.json", '{"changed":true}');
+    writeFileSync(validZip, changedContents);
+    assert.equal(run("success").status, 0);
+    assert.deepEqual(readFileSync(artifact), changedContents, "changed contents replace the archive");
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
