@@ -48,6 +48,21 @@ describe('ConnectorFormModal container validation credentials', () => {
     mutateSpy.mockReset();
   });
 
+  it('shows save progress only while the connector is being saved', () => {
+    const props = {
+      draft: createDraft(),
+      isNew: false,
+      onSave: vi.fn(),
+      onClose: vi.fn(),
+      saveStatus: 'Preparing the connector and checking its tools.',
+    };
+    const { rerender } = render(<ConnectorFormModal {...props} saving={true} />);
+    expect(screen.getByRole('status')).toHaveTextContent(props.saveStatus);
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    rerender(<ConnectorFormModal {...props} saving={false} />);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('omits stale local command fields when testing a saved container connector', () => {
     const draft = {
       ...createDraft(),
@@ -94,7 +109,10 @@ describe('ConnectorFormModal container validation credentials', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Test connection' }));
-    const [, callbacks] = mutateSpy.mock.calls[0] as [unknown, { onError: (error: unknown) => void }];
+    const [, callbacks] = mutateSpy.mock.calls[0] as [
+      unknown,
+      { onError: (error: unknown) => void },
+    ];
     act(() =>
       callbacks.onError({
         message: 'Request failed with status code 400',

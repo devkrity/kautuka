@@ -14,6 +14,7 @@ interface ConnectorFormModalProps {
   onSave: (draft: ConnectorDraft, credValues: Record<string, string>) => void;
   onClose: () => void;
   saving: boolean;
+  saveStatus?: string;
   saveLabel?: string;
   onToolCountSaved?: (toolCount: number, toolNames: string[] | null) => void;
 }
@@ -31,6 +32,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
   onSave,
   onClose,
   saving,
+  saveStatus,
   saveLabel,
   onToolCountSaved,
 }) => {
@@ -750,45 +752,56 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         )}
 
         {/* footer */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={testing || saving || invalidRows}
-            onClick={handleTest}
-          >
-            {testing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <FlaskConical className="h-3.5 w-3.5" />
-            )}
-            {testing ? 'Testing…' : 'Test connection'}
-          </Button>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={onClose}>
-              Cancel
-            </Button>
+        <div className="border-t border-border px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <Button
               type="button"
+              variant="outline"
               size="sm"
-              disabled={
-                saving || invalidRows || (isNew && (!draft.name.trim() || !draft.id.trim()))
-              }
-              onClick={() =>
-                onSave(
-                  draft,
-                  Object.fromEntries(
-                    Object.entries(credValues).filter(
-                      ([key, value]) => declaredEnvKeys.includes(key) && value.trim().length > 0
+              disabled={testing || saving || invalidRows}
+              onClick={handleTest}
+            >
+              {testing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FlaskConical className="h-3.5 w-3.5" />
+              )}
+              {testing ? 'Testing…' : 'Test connection'}
+            </Button>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={
+                  saving || invalidRows || (isNew && (!draft.name.trim() || !draft.id.trim()))
+                }
+                onClick={() =>
+                  onSave(
+                    draft,
+                    Object.fromEntries(
+                      Object.entries(credValues).filter(
+                        ([key, value]) => declaredEnvKeys.includes(key) && value.trim().length > 0
+                      )
                     )
                   )
-                )
-              }
-            >
-              {saveButtonLabel}
-            </Button>
+                }
+              >
+                {saveButtonLabel}
+              </Button>
+            </div>
           </div>
+          {saving && (
+            <p
+              role="status"
+              className="mt-2 flex items-center justify-end gap-2 text-sm text-muted-foreground"
+            >
+              <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+              {saveStatus ?? 'Saving connector settings. This may take a few minutes.'}
+            </p>
+          )}
         </div>
       </DialogContent>
     </Dialog>
