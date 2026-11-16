@@ -225,7 +225,7 @@ internal static class GatewayConnectorEndpointMappings
             string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
 
             McpConnectorTestResult validation = await mcpConnectorTestService
-                .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector), ct)
+                .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector, user.Id), ct)
                 .ConfigureAwait(false);
 
             if (!validation.Success)
@@ -665,10 +665,11 @@ internal static class GatewayConnectorEndpointMappings
         [.. server.HttpHeaders ?? []],
         server.RequiresCredentialReentry);
 
-    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector)
+    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector, string userId)
         => new()
         {
             Id = serverId,
+            UserId = userId,
             Transport = connector.Transport ?? "container",
             ContainerImage = connector.ContainerImage,
             ContainerCommand = connector.ContainerCommand,

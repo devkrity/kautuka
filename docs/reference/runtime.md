@@ -25,6 +25,8 @@ The native development launcher stages the built-in `kautuka-web-tools` MCPB bef
 
 If a connector test times out while its MCPB image is being built, the build continues and a later test can reuse the completed image. The timed-out test does not start the connector after the build completes. Manager shutdown or closure of workload launch admission can cancel the build.
 
+MCPB import validation runs with the identity of the user importing the connector.
+
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.
 
 Administrators can load live package-proxy cache inventory on demand at `GET /api/runtime/diagnostics/pkgs-proxy/stats` (`AdminDiagnostics`). Gateway asks Manager to `podman exec kautuka-pkgs-proxy proxy stats -json`; Kautuka does not persist that payload. The host port stays unpublished.

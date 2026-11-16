@@ -1331,6 +1331,7 @@ public sealed class ConnectorValidationEndpointTests
         string? bundlePath = response.RootElement.GetProperty("connector").GetProperty("bundlePath").GetString();
         Assert.False(string.IsNullOrWhiteSpace(bundlePath));
         GatewayConnectorTestRequest captured = fixture.GetCapturedTestRequestForBundle(bundlePath);
+        Assert.Equal(fixture.AdminUserId(), captured.UserId);
         Assert.Equal("container", captured.Transport);
         Assert.Equal("node", captured.ServerType);
         Assert.Equal(bundlePath, captured.BundlePath);
