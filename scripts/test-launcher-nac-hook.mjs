@@ -43,6 +43,7 @@ try {
   const hooksDirectory = path.join(stagedRoot, "hooks.d");
   const hookScript = path.join(stagedRoot, "kautuka_hook.py");
   const hookTemplate = path.join(stagedRoot, "kautuka_workload.nft.json.tmpl");
+  const proxyTemplate = path.join(stagedRoot, "kautuka_package_proxy.nft.json.tmpl");
   const configName = readdirSync(hooksDirectory).find((name) => name.endsWith(".json"));
   assert.match(configName ?? "", /^kautuka-dev-kautuka-dev-nac-/);
   const hookConfigPath = path.join(hooksDirectory, configName);
@@ -53,6 +54,8 @@ try {
   // hooks_dir append override even when no user-installed Kautuka hook exists.
   assert.ok(existsSync(hookScript), "staged development hook script exists");
   assert.ok(existsSync(hookTemplate), "adjacent nft template exists");
+  assert.ok(existsSync(proxyTemplate), "package proxy nft template exists beside the hook");
+  assert.equal(readFileSync(proxyTemplate, "utf8"), readFileSync(path.join(repositoryRoot, "scripts", "nac", "kautuka_package_proxy.nft.json.tmpl"), "utf8"));
   assert.equal(hookJson.hook.path, hookScript);
   assert.deepEqual(hookJson.hook.args, ["kautuka_hook.py"]);
   assert.deepEqual(hookJson.stages, ["createRuntime"]);
@@ -84,6 +87,7 @@ try {
   assert.equal(statSync(hookConfigPath).mode & 0o777, 0o600);
   assert.equal(statSync(hookScript).mode & 0o777, 0o700);
   assert.equal(statSync(hookTemplate).mode & 0o777, 0o600);
+  assert.equal(statSync(proxyTemplate).mode & 0o777, 0o600);
 
   // Negative control: an inherited override is rejected instead of silently replacing it.
   assert.throws(

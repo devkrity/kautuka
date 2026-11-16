@@ -5,6 +5,7 @@ import path from "node:path";
 const HOOK_FILES = [
   "kautuka_hook.py",
   "kautuka_workload.nft.json.tmpl",
+  "kautuka_package_proxy.nft.json.tmpl",
 ];
 const SAFE_HOOK_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -46,10 +47,13 @@ export function stageLinuxDevelopmentNacHook(repoRoot, inheritedEnv = process.en
     mkdirSync(hooksDirectory, { mode: 0o700 });
     const hookScript = path.join(runDirectory, "kautuka_hook.py");
     const hookTemplate = path.join(runDirectory, "kautuka_workload.nft.json.tmpl");
+    const proxyTemplate = path.join(runDirectory, "kautuka_package_proxy.nft.json.tmpl");
     copyFileSync(path.join(nacSource, HOOK_FILES[0]), hookScript);
     copyFileSync(path.join(nacSource, HOOK_FILES[1]), hookTemplate);
+    copyFileSync(path.join(nacSource, HOOK_FILES[2]), proxyTemplate);
     chmodSync(hookScript, 0o700);
     chmodSync(hookTemplate, 0o600);
+    chmodSync(proxyTemplate, 0o600);
 
     const home = effectiveHome(inheritedEnv);
     const managerWorkingDirectory = path.resolve(options.managerWorkingDirectory ?? repoRoot);
