@@ -104,7 +104,10 @@ builder.Services.AddSingleton(sp =>
         windowsPodmanHookStateDirectory: windowsPodmanDevEgress?.RemoteHookStateDirectory,
         desiredStateStore: sp.GetRequiredService<WorkspaceDesiredStateStore>(),
         imageCompatibilityStore: sp.GetRequiredService<ImageCompatibilityStore>(),
-        policyStore: sp.GetRequiredService<NetworkAccessPolicyStore>()));
+        policyStore: sp.GetRequiredService<NetworkAccessPolicyStore>(),
+        useDevelopmentSelinuxDomain: builder.Environment.IsDevelopment()
+            && OperatingSystem.IsLinux()
+            && Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX") == "1"));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());

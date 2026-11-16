@@ -1266,6 +1266,19 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void DevelopmentEnvoyUsesItsOwnSelinuxDomainOnlyWhenRequested()
+    {
+        string envoy = Path.Combine(tempDir, "envoy.yaml");
+        IReadOnlyList<string> enabled = EgressTopologyManager.BuildEnvoyCreateArgs(
+            envoy, "sockets", "admin", useDevelopmentSelinuxDomain: true);
+        Assert.Contains("--security-opt", enabled);
+        Assert.Contains("label=type:kautuka_envoy.process", enabled);
+
+        IReadOnlyList<string> ordinary = EgressTopologyManager.BuildEnvoyCreateArgs(envoy, "sockets", "admin");
+        Assert.DoesNotContain("label=type:kautuka_envoy.process", ordinary);
+    }
+
+    [Fact]
     public void DnsAndEnvoyConfigsUseDedicatedReadOnlyRelabeledDirectoryMounts_WithNegativeControl()
     {
         string dnsDir = Path.Combine(tempDir, "nac", "dns");

@@ -81,6 +81,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly string? windowsEnvoyCertificateDirectory;
     private readonly string? windowsPodmanMachineName;
     private readonly string? windowsPodmanHookStateDirectory;
+    private readonly bool useDevelopmentSelinuxDomain;
 
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
@@ -123,7 +124,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string? windowsPodmanHookStateDirectory = null,
         WorkspaceDesiredStateStore? desiredStateStore = null,
         ImageCompatibilityStore? imageCompatibilityStore = null,
-        NetworkAccessPolicyStore? policyStore = null)
+        NetworkAccessPolicyStore? policyStore = null,
+        bool useDevelopmentSelinuxDomain = false)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -137,6 +139,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.desiredStateStore = desiredStateStore;
         this.imageCompatibilityStore = imageCompatibilityStore;
         this.policyStore = policyStore;
+        this.useDevelopmentSelinuxDomain = useDevelopmentSelinuxDomain;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -1539,7 +1542,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 adminSocketDir,
                 isWindowsHostNativeDev,
                 decisionEndpointIp,
-                envoyCertificateDirectory),
+                envoyCertificateDirectory,
+                useDevelopmentSelinuxDomain),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -1934,7 +1938,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string adminSocketDir,
         bool isWindowsHostNativeDev = false,
         string? decisionEndpointIp = null,
-        string? envoyCertificateDirectory = null)
+        string? envoyCertificateDirectory = null,
+        bool useDevelopmentSelinuxDomain = false)
     {
         List<string> args =
         [
@@ -1946,6 +1951,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (!isWindowsHostNativeDev)
         {
+            if (useDevelopmentSelinuxDomain)
+            {
+                args.AddRange(["--security-opt", "label=type:kautuka_envoy.process"]);
+            }
             args.Insert(5, "--group-add");
             args.Insert(6, "keep-groups");
             args.AddRange(["-v", $"{envoySocketHostDir}:/run/kautuka-nac:z"]);

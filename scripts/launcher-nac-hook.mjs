@@ -23,6 +23,14 @@ function effectiveXdgStateHome(env, managerWorkingDirectory) {
   return path.join(effectiveHome(env), ".local", "state");
 }
 
+function selinuxIsEnforcing() {
+  try {
+    return readFileSync("/sys/fs/selinux/enforce", "utf8").trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** Stage the Linux development-only OCI hook and return a Manager-only environment. */
 export function stageLinuxDevelopmentNacHook(repoRoot, inheritedEnv = process.env, options = {}) {
   const existingOverride = inheritedEnv.CONTAINERS_CONF_OVERRIDE;
@@ -89,6 +97,9 @@ export function stageLinuxDevelopmentNacHook(repoRoot, inheritedEnv = process.en
         ...inheritedEnv,
         XDG_STATE_HOME: xdgStateHome,
         CONTAINERS_CONF_OVERRIDE: overridePath,
+        ...(options.selinuxEnforcing ?? selinuxIsEnforcing()
+          ? { KAUTUKA_DEV_ENVOY_SELINUX: "1" }
+          : {}),
       },
     };
   } catch (error) {

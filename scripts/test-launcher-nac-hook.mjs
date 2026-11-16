@@ -108,6 +108,14 @@ try {
   removeLinuxDevelopmentNacHook(staged?.directory);
 }
 
+const enforcingStage = stageLinuxDevelopmentNacHook(repositoryRoot, inheritedEnv, { selinuxEnforcing: true });
+try {
+  assert.equal(enforcingStage.managerEnvironment.KAUTUKA_DEV_ENVOY_SELINUX, "1");
+  assert.equal(inheritedEnv.KAUTUKA_DEV_ENVOY_SELINUX, undefined);
+} finally {
+  removeLinuxDevelopmentNacHook(enforcingStage.directory);
+}
+
 // The fallback matches Manager's Linux home-state path when XDG_STATE_HOME is absent,
 // and a changed HOME is reflected in both Manager's effective XDG value and hook env.
 const alteredHome = path.join(os.tmpdir(), "kautuka-home-with-spaces");
