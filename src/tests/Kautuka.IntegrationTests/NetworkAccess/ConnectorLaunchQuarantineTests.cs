@@ -129,6 +129,7 @@ public sealed class ConnectorLaunchQuarantineTests
             Assert.Equal(("deny-all", "none"), observedAtRun);
             string[][] runs = [.. commands.Where(static args => args[0] == "run")];
             Assert.Single(runs);
+            Assert.Contains("--entrypoint", runs[0], StringComparer.Ordinal);
             Assert.Contains(commands, args => args.Length > 1 && args[0] == "inspect" && args[1] == canonicalId);
             RegistryEntry promoted = Assert.Single(registry.GetAll());
             Assert.Equal(canonicalId, promoted.ContainerId);
