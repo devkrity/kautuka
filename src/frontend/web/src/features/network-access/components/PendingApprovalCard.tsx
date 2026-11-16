@@ -114,7 +114,7 @@ export function PendingApprovalCard({
   // Case 2: Ordinary Agent / User Connector Probe Request Card
   const userLabel = request.userDisplayName || request.userId || 'User';
   const agentLabel = request.agentDisplayName || request.agentId || 'Agent';
-  const connectorLabel = request.connectorDisplayName || request.connectorId || 'Connector';
+  const connectorLabel = request.connectorDisplayName || 'this connector';
   const connectorInfo = request.connectorDisplayName ? ` (${request.connectorDisplayName})` : '';
   const agentTitle = !request.agentDisplayName && !request.agentId
     ? `${userLabel}'s ${connectorLabel} wants to reach ${destFormatted}`
@@ -178,7 +178,7 @@ export function PendingApprovalCard({
               disabled={disabled || submitting}
               onClick={() => void handleAllowAgent()}
             >
-              {isProbe ? 'Allow for this probe' : 'Allow'}
+              {isProbe ? 'Allow for this probe' : request.agentId ? `Allow for ${agentLabel}` : 'Allow'}
             </Button>
             <Button
               type="button"
@@ -193,7 +193,7 @@ export function PendingApprovalCard({
           {!isProbe && request.agentId && request.connectorId && (
             <button type="button" className="text-sm font-medium text-primary hover:underline"
               disabled={disabled || submitting} onClick={() => void handleAllowConnector()}>
-              Allow for {connectorLabel}
+              Allow {connectorLabel} for all {isOwner ? 'my' : `${userLabel}'s`} activity
             </button>
           )}
 

@@ -8,6 +8,27 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Fact]
+    public async Task RequestsResolveUserScopedConnectorToCatalogueName()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string token = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        string userId = fixture.UserStore.ListUsers().Single(user => user.Username == "admin").Id;
+        await fixture.CatalogStore.SaveMcpServerAsync("web", new GatewayConnectorUpsertRequest
+        {
+            Name = "Web Tools",
+            Transport = "http",
+            HttpUrl = "https://example.com/mcp",
+            Enabled = true,
+        }, "system", null, TestContext.Current.CancellationToken);
+        fixture.Registry.Register(new RegistryEntry(
+            "10.247.1.41", userId, "agent-one", "ctr-web", "connector", $"{userId}::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.41", "93.184.216.34", 443, "www.bbc.com"));
+        using JsonDocument result = await fixture.SendGetAsync("/api/network-access/requests", token);
+        JsonElement request = result.RootElement.GetProperty("requests").EnumerateArray().Single();
+        Assert.Equal("Web Tools", request.GetProperty("connectorDisplayName").GetString());
+        Assert.Equal($"{userId}::web", request.GetProperty("connectorId").GetString());
+    }
+    [Fact]
     public async Task V7_13_DirectDecisionHttpEnforcesOwnerAndAllAgentsPrivileges_WithNegativeControl()
     {
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();

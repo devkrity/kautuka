@@ -13,6 +13,23 @@ vi.mock('@/features/settings/api/queries', () => ({ useAgents: () => ({ data: []
 vi.mock('@/features/connectors/api/queries', () => ({ useConnectors: () => ({ data: [{ id: 'web', name: 'Web Tools', scope: 'user', ownerUserId: 'alice' }] }) }));
 
 describe('network access user scopes', () => {
+  it('explains each approval scope without exposing runtime connector IDs', async () => {
+    const request: NetworkAccessRequestDto = {
+      id: 'request-scopes', userId: 'alice', userDisplayName: 'Alice', agentId: 'agent-1',
+      agentDisplayName: 'My Assistant', connectorId: 'alice::web', connectorDisplayName: 'Web Tools',
+      systemwide: true, attribution: 'user-agent', destination: 'www.bbc.com', destKind: 'host',
+      port: 443, actorKind: 'connector', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
+    };
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<PendingApprovalCard request={request} currentUser={{ id: 'alice', role: 'user' }}
+      userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
+    expect(screen.getByRole('button', { name: 'Allow for My Assistant' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow Web Tools for all my activity' }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ scope: 'connector' })));
+    expect(screen.getByRole('button', { name: 'Allow for all my activity' })).toBeInTheDocument();
+    expect(screen.queryByText(/alice::web/)).not.toBeInTheDocument();
+  });
   it('offers one permission to manage own network access', () => {
     const save = vi.fn();
     render(<UserNetworkPrivilegesForm canApproveOwn={false} isAdminViewer onSave={save} />);

@@ -4,6 +4,8 @@ Network access defaults to deny. A request has a destination and, when known, a 
 
 Rules can target the whole platform, one user, a user and agent, or a user and connector. Only administrators manage platform rules. Users with the privilege to manage their own network access can manage their own user, user-and-agent and user-and-connector rules; administrators can manage them too. There is no connector-across-users rule.
 
+Approval cards identify the agent and connector by name when available. Their choices distinguish allowing the agent, allowing the connector across the user's activity, and allowing all of the user's activity. The underlying connector ID stays the same for rule matching.
+
 When a user's management privilege is removed, their own rules pause until it is restored. Rules created by an administrator remain active.
 
 Manager checks every rule whose target and destination match. An explicit block wins over every applicable allow; otherwise an applicable allow permits the new connection. No matching allow means deny. Emergency brakes and hard deny-all remain above all rules. Existing network and LAN restrictions continue to apply.

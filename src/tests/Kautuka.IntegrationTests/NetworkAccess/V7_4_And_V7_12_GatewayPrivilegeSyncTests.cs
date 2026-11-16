@@ -330,6 +330,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         public Kautuka.NetworkAccessController.NetworkAccessController Controller { get; }
         public string PolicyStorePath => Path.Combine(root, "nac", "policy.json");
         public IGatewayUserStore UserStore => app.Services.GetRequiredService<IGatewayUserStore>();
+        public IGatewayCatalogStore CatalogStore => app.Services.GetRequiredService<IGatewayCatalogStore>();
         public IManagerGrpcService ManagerService => managerService;
         public bool FailPrivilegeSync
         {

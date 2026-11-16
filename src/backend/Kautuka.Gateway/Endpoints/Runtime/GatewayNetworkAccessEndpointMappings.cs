@@ -758,6 +758,17 @@ internal static partial class GatewayRuntimeEndpointMappings
         });
     }
 
+    private static string? ResolveConnectorDisplayName(IGatewayCatalogStore catalog, string? connectorId, string? userId)
+    {
+        if (string.IsNullOrWhiteSpace(connectorId)) return null;
+        if (catalog.TryGetMcpServer(connectorId, out GatewayMcpServer? exact) && exact is not null) return exact.Name;
+
+        string prefix = $"{userId}::";
+        return !string.IsNullOrWhiteSpace(userId) && connectorId.StartsWith(prefix, StringComparison.Ordinal)
+            && catalog.TryGetMcpServer(connectorId[prefix.Length..], out GatewayMcpServer? scoped) && scoped is not null
+            ? scoped.Name : null;
+    }
+
     private static NetworkAccessRuleDto MapRuleToDto(
         NetworkAccessRuleMessage rule,
         IGatewayUserStore userStore,
@@ -777,11 +788,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             agentDisplayName = a.Name;
         }
 
-        string? connectorDisplayName = null;
-        if (!string.IsNullOrWhiteSpace(rule.ConnectorId) && catalogStore.TryGetMcpServer(rule.ConnectorId, out GatewayMcpServer? c) && c is not null)
-        {
-            connectorDisplayName = c.Name;
-        }
+        string? connectorDisplayName = ResolveConnectorDisplayName(catalogStore, rule.ConnectorId, rule.UserId);
 
         string summaryText = FormatRuleSummaryText(rule, userDisplayName, agentDisplayName, connectorDisplayName);
 
@@ -838,11 +845,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             agentDisplayName = agent.Name;
         }
 
-        string? connectorDisplayName = null;
-        if (!string.IsNullOrWhiteSpace(req.ConnectorId) && catalogStore.TryGetMcpServer(req.ConnectorId, out GatewayMcpServer? connector) && connector is not null)
-        {
-            connectorDisplayName = connector.Name;
-        }
+        string? connectorDisplayName = ResolveConnectorDisplayName(catalogStore, req.ConnectorId, req.UserId);
 
         UserPrivilegesSummaryDto? ownerPrivs = null;
         if (!string.IsNullOrWhiteSpace(req.UserId) && !string.Equals(req.UserId, "system", StringComparison.Ordinal))
