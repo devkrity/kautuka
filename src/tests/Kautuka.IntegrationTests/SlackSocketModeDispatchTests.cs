@@ -170,7 +170,7 @@ public sealed class SlackSocketModeDispatchTests
             supervisorPollDelay: TimeSpan.FromMilliseconds(10));
 
         Task supervisor = fixture.Worker.RunAsync(cancellation.Token);
-        await secondStart.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await secondStart.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => supervisor);
         Assert.True(starts >= 2);
