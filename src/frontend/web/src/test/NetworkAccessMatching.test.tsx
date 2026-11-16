@@ -24,10 +24,10 @@ describe('network access user scopes', () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<PendingApprovalCard request={request} currentUser={{ id: 'alice', role: 'user' }}
       userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
-    expect(screen.getByRole('button', { name: 'Allow for My Assistant' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Allow Web Tools for all my activity' }));
+    expect(screen.getByRole('button', { name: 'Allow My Assistant to access this site' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Allow this site whenever I use Web Tools' }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ scope: 'connector' })));
-    expect(screen.getByRole('button', { name: 'Allow for all my activity' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Allow this site for everything I use' })).toBeInTheDocument();
     expect(screen.queryByText(/alice::web/)).not.toBeInTheDocument();
   });
   it('offers one permission to manage own network access', () => {
@@ -76,7 +76,7 @@ describe('network access user scopes', () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<PendingApprovalCard request={request} currentUser={{ id: 'alice', role: 'user' }}
       userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Allow access' }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith(expect.objectContaining({ allow: true, scope: 'connector', expectedRevision: 4 })));
     expect(screen.queryByText(/Waiting for an administrator/i)).not.toBeInTheDocument();
   });

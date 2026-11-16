@@ -178,7 +178,7 @@ export function PendingApprovalCard({
               disabled={disabled || submitting}
               onClick={() => void handleAllowAgent()}
             >
-              {isProbe ? 'Allow for this probe' : request.agentId ? `Allow for ${agentLabel}` : 'Allow'}
+              {isProbe ? 'Allow for this probe' : request.agentId ? `Allow ${agentLabel} to access this site` : 'Allow access'}
             </Button>
             <Button
               type="button"
@@ -193,7 +193,9 @@ export function PendingApprovalCard({
           {!isProbe && request.agentId && request.connectorId && (
             <button type="button" className="text-sm font-medium text-primary hover:underline"
               disabled={disabled || submitting} onClick={() => void handleAllowConnector()}>
-              Allow {connectorLabel} for all {isOwner ? 'my' : `${userLabel}'s`} activity
+              {isOwner
+                ? `Allow this site whenever I use ${connectorLabel}`
+                : `Allow this site whenever ${userLabel} uses ${connectorLabel}`}
             </button>
           )}
 
@@ -207,8 +209,8 @@ export function PendingApprovalCard({
                 onClick={() => void handleAllowAllAgents()}
               >
                 {isOwner
-                  ? 'Allow for all my activity'
-                  : `Allow for all of ${userLabel}'s activity`}
+                  ? 'Allow this site for everything I use'
+                  : `Allow this site for everything ${userLabel} uses`}
               </button>
               {confirmedAllScope && (
                 <p className="text-xs text-muted-foreground mt-1">
