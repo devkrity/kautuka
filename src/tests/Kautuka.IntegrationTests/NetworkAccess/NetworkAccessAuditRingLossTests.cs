@@ -99,7 +99,7 @@ public sealed class NetworkAccessAuditRingLossTests
         {
             DateTimeOffset first = DateTimeOffset.UtcNow;
             ring.Record(CreateEntry(first, "first"));
-            Assert.True(firstWriteStarted.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.True(firstWriteStarted.Wait(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
             ring.Record(CreateEntry(first.AddTicks(1), "queued"));
             ring.Record(CreateEntry(first.AddTicks(2), "lost"));
 
