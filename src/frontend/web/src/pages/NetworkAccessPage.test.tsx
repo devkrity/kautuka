@@ -328,7 +328,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
   // ──────────────── UX3: Ownership and Attribution ────────────────
   describe('UX3: ownership boundaries and systemwide connectors', () => {
-    it('non-admin user sees only their own requests or read-only waiting message for systemwide connector', async () => {
+    it('non-admin can decide their own requests regardless of connector availability', async () => {
       mockViewer.id = 'user-alice';
       mockViewer.displayName = 'Alice';
       mockViewer.role = 'user';
@@ -355,6 +355,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
         {
           id: 'req-systemwide',
           userId: 'user-alice',
+          connectorId: 'shared-search',
           connectorDisplayName: 'SharedSearch',
           systemwide: true,
           attribution: 'user',
@@ -378,10 +379,10 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       const aliceCard = screen.getByTestId('request-card-req-alice');
       expect(within(aliceCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
 
-      // Alice cannot decide the systemwide connector request: sees "Waiting for an administrator to approve"
+      // Catalogue availability does not change Alice's authority over her request.
       const systemwideCard = screen.getByTestId('request-card-req-systemwide');
       expect(within(systemwideCard).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
-      expect(within(systemwideCard).getByText(/Waiting for an administrator to approve/i)).toBeVisible();
+      expect(within(systemwideCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
     });
 
     it('NC: administrator CAN decide the systemwide connector request (nc_flipped == true)', async () => {
@@ -393,6 +394,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
         {
           id: 'req-systemwide',
           userId: 'user-alice',
+          connectorId: 'shared-search',
           userDisplayName: 'Alice',
           connectorDisplayName: 'SharedSearch',
           systemwide: true,
@@ -413,8 +415,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const systemwideCard = await screen.findByTestId('request-card-req-systemwide');
-      expect(within(systemwideCard).getByRole('button', { name: /Allow for everyone/i })).toBeVisible();
-      expect(within(systemwideCard).getByRole('button', { name: /Allow for Alice only/i })).toBeVisible();
+      expect(within(systemwideCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(systemwideCard).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
     });
 
     it('administrator can decide another user request even when the owner is waiting for admin', async () => {
@@ -443,7 +445,6 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
           origin: 'container',
           waitingForAdmin: true,
           ownerCanApproveOwn: false,
-          ownerCanAllowAllAgents: true,
         },
       ]);
       setupMockApis({ requests: requestsData });
@@ -453,7 +454,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       const card = await screen.findByTestId('request-card-req-owner-needs-admin');
       expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
       expect(within(card).getByRole('button', { name: /Keep blocked/i })).toBeVisible();
-      expect(within(card).queryByRole('button', { name: /Allow for all of Alice's agents/i })).not.toBeInTheDocument();
+      expect(within(card).getByRole('button', { name: /Allow for all of Alice's activity/i })).toBeVisible();
       expect(within(card).queryByText(/Waiting for an administrator to approve/i)).not.toBeInTheDocument();
 
       await user.click(within(card).getByRole('button', { name: /^Allow$/ }));
@@ -607,103 +608,27 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
     });
   });
 
-  // ──────────────── UX7: Systemwide Connector Card ────────────────
-  describe('UX7: systemwide connector card', () => {
-    it('admin card for attributed container has 3 buttons and writes appropriate scope', async () => {
+  // Connector availability does not change request scope.
+  describe('connector request cards', () => {
+    it('lets an administrator decide an attributed connector request for that user', async () => {
       const user = userEvent.setup();
-      const requestsData = createDefaultRequests([
-        {
-          id: 'req-sys-user',
-          userId: 'user-ravi',
-          userDisplayName: 'Ravi',
-          connectorDisplayName: 'GlobalSearch',
-          systemwide: true,
-          attribution: 'user',
-          destination: 'api.search.com',
-          destKind: 'host',
-          port: 443,
-          actorKind: 'connector',
-          firstSeenUtc: '2026-11-11T10:00:00Z',
-          lastSeenUtc: '2026-11-11T10:00:01Z',
-          attempts: 1,
-          status: 'pending',
-          origin: 'container',
-        },
-      ]);
-      setupMockApis({ requests: requestsData });
-
+      setupMockApis({ requests: createDefaultRequests([{
+        id: 'req-connector', userId: 'user-ravi', userDisplayName: 'Ravi', connectorId: 'search',
+        connectorDisplayName: 'GlobalSearch', systemwide: true, attribution: 'user',
+        destination: 'api.search.com', destKind: 'host', port: 443, actorKind: 'connector',
+        firstSeenUtc: '2026-11-11T10:00:00Z', lastSeenUtc: '2026-11-11T10:00:01Z',
+        attempts: 1, status: 'pending', origin: 'container',
+      }]) });
       renderComponent(<NetworkAccessPage />);
-
-      expect(
-        await screen.findByText(/GlobalSearch \(used by Ravi\) wants to reach api\.search\.com/)
-      ).toBeVisible();
-
-      const allowEveryone = screen.getByRole('button', { name: 'Allow for everyone' });
-      const allowUser = screen.getByRole('button', { name: 'Allow for Ravi only' });
-      const keepBlocked = screen.getByRole('button', { name: 'Keep blocked' });
-
-      expect(allowEveryone).toBeVisible();
-      expect(allowUser).toBeVisible();
-      expect(keepBlocked).toBeVisible();
-
-      // Click Allow for everyone
-      await user.click(allowEveryone);
-      expect(post).toHaveBeenCalledWith(
-        '/network-access/requests/req-sys-user/decision',
-        expect.objectContaining({
-          allow: true,
-          scope: 'connector-system',
-        })
-      );
-
-      // Click Allow for Ravi only
-      await user.click(allowUser);
-      expect(post).toHaveBeenCalledWith(
-        '/network-access/requests/req-sys-user/decision',
-        expect.objectContaining({
-          allow: true,
-          scope: 'user',
-        })
-      );
-    });
-
-    it('admin card for shared container has 2 buttons and shared notice', async () => {
-      const requestsData = createDefaultRequests([
-        {
-          id: 'req-sys-none',
-          connectorDisplayName: 'SharedSearch',
-          systemwide: true,
-          attribution: 'none',
-          destination: 'shared.api.com',
-          destKind: 'host',
-          port: 443,
-          actorKind: 'connector',
-          firstSeenUtc: '2026-11-11T10:00:00Z',
-          lastSeenUtc: '2026-11-11T10:00:01Z',
-          attempts: 1,
-          status: 'pending',
-          origin: 'container',
-        },
-      ]);
-      setupMockApis({ requests: requestsData });
-
-      renderComponent(<NetworkAccessPage />);
-
-      expect(
-        await screen.findByText(/SharedSearch \(used by everyone\) wants to reach shared\.api\.com/)
-      ).toBeVisible();
-      expect(
-        screen.getByText(/This connector is shared, so Kautuka can't tell which person's request this is\./)
-      ).toBeVisible();
-
-      expect(screen.getByRole('button', { name: 'Allow for everyone' })).toBeVisible();
-      expect(screen.getByRole('button', { name: 'Keep blocked' })).toBeVisible();
-      expect(screen.queryByRole('button', { name: /only$/i })).not.toBeInTheDocument();
+      const card = await screen.findByTestId('request-card-req-connector');
+      expect(within(card).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
+      await user.click(within(card).getByRole('button', { name: /^Allow$/ }));
+      expect(post).toHaveBeenCalledWith('/network-access/requests/req-connector/decision',
+        expect.objectContaining({ allow: true, scope: 'connector' }));
     });
   });
-
   // ──────────────── UX8: Secondary 'Allow for All My Agents' Link ────────────────
-  describe('UX8: "Allow for all my agents, including new ones" link', () => {
+  describe('UX8: "Allow for all my activity" link', () => {
     it('shows secondary link for owner holding canAllowAllAgents and writes user-scope rule', async () => {
       const user = userEvent.setup();
       const requestsData = createDefaultRequests(
@@ -726,7 +651,6 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             status: 'pending',
             origin: 'container',
             ownerCanApproveOwn: true,
-            ownerCanAllowAllAgents: true,
           },
         ],
         { canApproveOwn: true, canAllowAllAgents: true }
@@ -736,7 +660,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const allAgentsLink = await screen.findByRole('button', {
-        name: 'Allow for all my agents, including new ones',
+        name: 'Allow for all my activity',
       });
       expect(allAgentsLink).toBeVisible();
 
@@ -750,7 +674,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
         })
       );
       expect(
-        await screen.findByText(/All your agents, including ones you create later, can now reach api\.github\.com/)
+        await screen.findByText(/All your activity can now reach api\.github\.com/)
       ).toBeVisible();
     });
 
@@ -779,7 +703,6 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             status: 'pending',
             origin: 'container',
             ownerCanApproveOwn: true,
-            ownerCanAllowAllAgents: true,
           },
         ],
         { canApproveOwn: true, canAllowAllAgents: true }
@@ -790,12 +713,12 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       expect(
         await screen.findByRole('button', {
-          name: "Allow for all of Sam's agents, including new ones",
+          name: "Allow for all of Sam's activity",
         })
       ).toBeVisible();
     });
 
-    it('admin does not infer another user all-agents privilege from the admin viewer privileges', async () => {
+    it('admin can grant the user scope without a separate all-agents privilege', async () => {
       mockViewer.id = 'admin-user';
       mockViewer.displayName = 'Admin';
       mockViewer.role = 'admin';
@@ -826,7 +749,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
       expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
-      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's agents/i })).not.toBeInTheDocument();
+      expect(within(card).getByRole('button', { name: /Allow for all of Sam's activity/i })).toBeVisible();
     });
 
     it('non-admin cannot infer another user all-agents privilege when owner flags are missing', async () => {
@@ -860,7 +783,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
       expect(within(card).getByText(/No permission to decide this request/i)).toBeVisible();
-      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's agents/i })).not.toBeInTheDocument();
+      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's activity/i })).not.toBeInTheDocument();
     });
 
     it('renders temporary probe card without permanent scope options (v7-14)', async () => {
@@ -886,7 +809,6 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
             origin: 'container',
             purpose: 'probe',
             ownerCanApproveOwn: true,
-            ownerCanAllowAllAgents: true,
           },
         ],
         { canApproveOwn: true, canAllowAllAgents: true }
@@ -899,7 +821,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       expect(screen.getByRole('button', { name: 'Allow for this probe' })).toBeVisible();
       expect(screen.getByRole('button', { name: 'Keep blocked' })).toBeVisible();
       expect(
-        screen.queryByRole('button', { name: 'Allow for all my agents, including new ones' })
+        screen.queryByRole('button', { name: 'Allow for all my activity' })
       ).toBeNull();
       expect(screen.queryByRole('button', { name: 'Allow for everyone' })).toBeNull();
     });
@@ -959,123 +881,30 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       ).toBeVisible();
       expect(screen.getByText('Open internet')).toBeVisible();
 
-      // Check paused rule sentence: "Paused: Ravi can no longer allow for all agents" and Paused badge (v7-4)
+      // Paused rules retain their scope and display their status.
       expect(screen.getByText('Paused')).toBeVisible();
-      expect(
-        screen.getByText(/Paused: Ravi can no longer allow for all agents/)
-      ).toBeVisible();
+      expect(screen.getByText("All of Ravi's activity")).toBeVisible();
     });
   });
 
-  // ──────────────── UX10: Per-User Privileges ────────────────
-  describe('UX10: per-user network permissions form', () => {
-    it('secondary link is completely ABSENT from DOM when canAllowAllAgents is false', async () => {
-      const requestsData = createDefaultRequests(
-        [
-          {
-            id: 'req-no-allow-all',
-            userId: 'user-ravi',
-            userDisplayName: 'Ravi',
-            agentId: 'agent-1',
-            agentDisplayName: 'MyBot',
-            systemwide: false,
-            attribution: 'user-agent',
-            destination: 'api.github.com',
-            destKind: 'host',
-            port: 443,
-            actorKind: 'agent',
-            firstSeenUtc: '2026-11-11T10:00:00Z',
-            lastSeenUtc: '2026-11-11T10:00:01Z',
-            attempts: 1,
-            status: 'pending',
-            origin: 'container',
-          },
-        ],
-        { canApproveOwn: true, canAllowAllAgents: false } // canAllowAllAgents is false
-      );
-      setupMockApis({ requests: requestsData });
-
-      renderComponent(<NetworkAccessPage />);
-
-      await screen.findByText(/wants to reach api\.github\.com/);
-      expect(
-        screen.queryByRole('button', { name: /Allow for all my agents/i })
-      ).not.toBeInTheDocument();
-    });
-
-    it('form has the two checkboxes, box 2 disabled until box 1 is checked, unticking shows confirmation with review link', async () => {
+  // The single privilege covers the user's own network scopes.
+  describe('per-user network permission', () => {
+    it('shows one management checkbox and saves its value', async () => {
       const user = userEvent.setup();
       const onSave = vi.fn();
-
-      renderComponent(
-        <UserNetworkPrivilegesForm
-          userId="user-priya"
-          userDisplayName="Priya"
-          userPronoun="her"
-          canApproveOwn={false}
-          canAllowAllAgents={false}
-          isAdminViewer={true}
-          onSave={onSave}
-        />
-      );
-
-      const check1 = screen.getByLabelText(
-        "Can approve their own agents' network requests"
-      );
-      const check2 = screen.getByLabelText(
-        'Can allow a website for all of their agents, including new ones'
-      );
-
-      // Initially both unticked for new user
-      expect(check1).not.toBeChecked();
-      expect(check2).not.toBeChecked();
-      expect(check2).toBeDisabled();
-
-      // Tick Box 1 -> enables Box 2
-      await user.click(check1);
-      expect(check1).toBeChecked();
-      expect(check2).not.toBeDisabled();
-
-      // Tick Box 2
-      await user.click(check2);
-      expect(check2).toBeChecked();
-
-      // Untick Box 2 -> shows confirmation warning
-      await user.click(check2);
-      expect(check2).not.toBeChecked();
-
-      // Check confirmation warning text with correct pronoun "Her" and link
-      expect(
-        await screen.findByText(
-          /This pauses all of Priya's 'all my agents' permissions, including for agents they create later\. Re-ticking restores them\. Her rules for single agents still apply\./
-        )
-      ).toBeVisible();
-      expect(screen.getByRole('link', { name: 'Review them?' })).toHaveAttribute(
-        'href',
-        '/network-access?userId=user-priya'
-      );
+      renderComponent(<UserNetworkPrivilegesForm userId="user-priya" canApproveOwn={false} isAdminViewer onSave={onSave} />);
+      const control = screen.getByRole('checkbox', { name: 'Can manage their own network access' });
+      expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+      await user.click(control);
+      expect(onSave).toHaveBeenCalledWith({ canApproveOwn: true });
     });
 
-    it('NC: non-admin viewer sees read-only text (nc_flipped == true)', () => {
-      renderComponent(
-        <UserNetworkPrivilegesForm
-          userId="user-priya"
-          userDisplayName="Priya"
-          canApproveOwn={false}
-          canAllowAllAgents={false}
-          isAdminViewer={false} // Non-admin
-        />
-      );
-
-      expect(
-        screen.getByText('Your administrator approves network requests for your agents.')
-      ).toBeVisible();
-      expect(
-        screen.queryByLabelText("Can approve their own agents' network requests")
-      ).not.toBeInTheDocument();
+    it('shows the current permission read-only to a non-admin', () => {
+      renderComponent(<UserNetworkPrivilegesForm userId="user-priya" canApproveOwn={false} isAdminViewer={false} />);
+      expect(screen.getByText('Your administrator manages your network access.')).toBeVisible();
+      expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     });
   });
-
   // ──────────────── UX11: Emergency Brake ────────────────
   describe('UX11: emergency brake controls and global banner', () => {
     it('shows confirmation when pause button is clicked, and banner renders with Resume for affected user', async () => {

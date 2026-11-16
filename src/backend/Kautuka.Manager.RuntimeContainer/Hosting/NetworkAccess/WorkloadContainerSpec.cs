@@ -327,27 +327,15 @@ public sealed record WorkloadContainerSpec
 
         if (Egress is "normal")
         {
-            if (Systemwide)
+            if (Kind == "connector")
             {
-                if (string.IsNullOrWhiteSpace(ConnectorId))
-                {
-                    throw new ArgumentException("Systemwide connector requires a connectorId.", nameof(ConnectorId));
-                }
+                if (string.IsNullOrWhiteSpace(UserId) || string.IsNullOrWhiteSpace(ConnectorId))
+                    throw new ArgumentException("Connector workloads require a userId and connectorId.", nameof(ConnectorId));
             }
-            else if (Kind is "connector" or "agent-sandbox")
+            else if (Kind == "agent-sandbox")
             {
-                if (string.IsNullOrWhiteSpace(UserId))
-                {
-                    throw new ArgumentException("Ordinary workload requires a userId.", nameof(UserId));
-                }
-
-                if (!string.Equals(Purpose, "probe", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (string.IsNullOrWhiteSpace(AgentId))
-                    {
-                        throw new ArgumentException("Ordinary non-probe workload requires an agentId.", nameof(AgentId));
-                    }
-                }
+                if (string.IsNullOrWhiteSpace(UserId) || string.IsNullOrWhiteSpace(AgentId))
+                    throw new ArgumentException("Agent sandboxes require a userId and agentId.", nameof(AgentId));
             }
         }
     }

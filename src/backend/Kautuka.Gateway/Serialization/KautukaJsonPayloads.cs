@@ -455,6 +455,8 @@ internal sealed class GatewayUserPasswordUpdateRequest
 
 internal sealed class GatewayConnectorUpsertRequest
 {
+    public Dictionary<string, string>? DiscoveryEnv { get; init; }
+
     public string? Scope { get; init; }
 
     public string? Name { get; init; }
@@ -567,6 +569,9 @@ internal sealed class GatewayConnectorTestRequest
     public string? Id { get; init; }
 
     public string? UserId { get; set; }
+
+    [JsonIgnore]
+    public bool SaveDiscovery { get; set; }
 
     [JsonIgnore]
     public RemoteMcpRequestContext? RemoteContext { get; init; }

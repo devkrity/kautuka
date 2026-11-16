@@ -166,7 +166,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             RegisterAgent(registry, "10.247.0.22", "user-b", "b1");
             registry.Register(new RegistryEntry(
                 "10.247.0.23",
-                null,
+                "user-a",
                 null,
                 "c-sys",
                 "connector",
@@ -174,7 +174,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "isolated",
                 true,
                 "normal",
-                "none",
+                "user",
                 null,
                 DateTimeOffset.UtcNow));
             registry.Register(new RegistryEntry(
@@ -225,7 +225,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             });
             Assert.Equal(StatusCode.PermissionDenied, exCrossUser.StatusCode);
 
-            // 2. Non-admin calling DecideRequest on connector-system request -> PermissionDenied
+            // 2. Non-admin cannot decide a request at platform scope.
             RpcException exSysReq = await Assert.ThrowsAsync<RpcException>(async () =>
             {
                 _ = await svc.DecideRequest(new NetworkAccessDecideRequest
@@ -233,13 +233,13 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     Actor = userA,
                     RequestId = reqSys.RequestId!,
                     Allow = true,
-                    Scope = "connector-system",
+                    Scope = "system",
                     ExpectedRevision = 0,
                 }, ctx);
             });
             Assert.Equal(StatusCode.PermissionDenied, exSysReq.StatusCode);
 
-            // 3. Non-admin calling SetRule with scopeKind = connector-system -> PermissionDenied
+            // 3. The former connector-system scope is not accepted.
             RpcException exSetSys = await Assert.ThrowsAsync<RpcException>(async () =>
             {
                 _ = await svc.SetRule(new NetworkAccessSetRuleRequest
@@ -254,7 +254,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     ExpectedRevision = 0,
                 }, ctx);
             });
-            Assert.Equal(StatusCode.PermissionDenied, exSetSys.StatusCode);
+            Assert.Equal(StatusCode.InvalidArgument, exSetSys.StatusCode);
 
             // 4. Non-admin calling SetRule with allowLan = true -> PermissionDenied
             RpcException exSetLan = await Assert.ThrowsAsync<RpcException>(async () =>
@@ -329,7 +329,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 RequestId = reqSys.RequestId!,
                 Allow = true,
-                Scope = "connector-system",
+                Scope = "system",
                 ExpectedRevision = twinOwn.Revision,
             }, ctx);
             Assert.Equal(2, twinSys.Revision);
@@ -557,22 +557,17 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.41", "93.184.216.34", 443, "step-b.example.com")).Allowed);
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.42", "93.184.216.34", 443, "step-b.example.com")).Allowed);
 
-            // User A tries scope = "user" while canAllowAllAgents == false -> PermissionDenied (privilege_required)
+            // The single management privilege permits User A to approve at user scope.
             NetworkAccessDecisionResult reqA1UserTry = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.0.41", "93.184.216.34", 443, "step-b-user.example.com"));
-            RpcException exUserScopeDenied = await Assert.ThrowsAsync<RpcException>(async () =>
+            NetworkAccessDecideResponse userApproveAllAgents = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
-                _ = await svc.DecideRequest(new NetworkAccessDecideRequest
-                {
-                    Actor = userA,
-                    RequestId = reqA1UserTry.RequestId!,
-                    Allow = true,
-                    Scope = "user",
-                    ExpectedRevision = userApproveAgent.Revision,
-                }, ctx);
-            });
-            Assert.Equal(StatusCode.PermissionDenied, exUserScopeDenied.StatusCode);
-            Assert.Contains("privilege_required", exUserScopeDenied.Status.Detail, StringComparison.Ordinal);
+                Actor = userA,
+                RequestId = reqA1UserTry.RequestId!,
+                Allow = true,
+                Scope = "user",
+                ExpectedRevision = userApproveAgent.Revision,
+            }, ctx);
 
             // User A tries DecideRequest on User B's request -> PermissionDenied
             RpcException exCrossUserB = await Assert.ThrowsAsync<RpcException>(async () =>
@@ -583,7 +578,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     RequestId = reqB1.RequestId!,
                     Allow = true,
                     Scope = "agent",
-                    ExpectedRevision = userApproveAgent.Revision,
+                    ExpectedRevision = userApproveAllAgents.Revision,
                 }, ctx);
             });
             Assert.Equal(StatusCode.PermissionDenied, exCrossUserB.StatusCode);
@@ -597,14 +592,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 CanAllowAllAgents = true,
             }, ctx);
 
-            NetworkAccessDecideResponse userApproveAllAgents = await svc.DecideRequest(new NetworkAccessDecideRequest
-            {
-                Actor = userA,
-                RequestId = reqA1UserTry.RequestId!,
-                Allow = true,
-                Scope = "user",
-                ExpectedRevision = userApproveAgent.Revision,
-            }, ctx);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.41", "93.184.216.34", 443, "step-b-user.example.com")).Allowed);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.42", "93.184.216.34", 443, "step-b-user.example.com")).Allowed);
 
@@ -684,7 +671,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Assert.False(reopened.ListRules(new NetworkAccessActor("admin-new", IsAdmin: true)).Rules.Single(r => r.Rule.Destination == "admin-default.example.com").Paused);
             }
 
-            // Negative control (.NC): demoting admin-new clears their ON flags, pauses user-scope rules, and denies agent-2.
+            // An administrator-created rule remains active after demotion.
             NetworkAccessUserPrivilegesMessage demoted = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
@@ -695,9 +682,9 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             }, ctx);
             Assert.False(demoted.CanApproveOwn);
             Assert.False(demoted.CanAllowAllAgents);
-            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
+            Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
             NetworkAccessListRulesResponse afterDemoteRules = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx);
-            Assert.True(afterDemoteRules.Rules.Single(r => r.Destination == "admin-default.example.com").Paused);
+            Assert.False(afterDemoteRules.Rules.Single(r => r.Destination == "admin-default.example.com").Paused);
 
             // Also verify an admin can read its default without creating an implicit persisted record.
             NetworkAccessUserPrivilegesMessage adminDefaultPrivs = await svc.GetUserPrivileges(new NetworkAccessGetUserPrivilegesRequest
@@ -798,33 +785,32 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             // Verify a2 reaches example.com:443 via R before privilege revocation
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.52", "93.184.216.34", 443, "example.com")).Allowed);
 
-            // Admin unticks canAllowAllAgents for User A
+            // Admin revokes User A's NAC management privilege.
             _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
                 UserId = "user-a",
-                CanApproveOwn = true,
+                CanApproveOwn = false,
                 CanAllowAllAgents = false,
             }, ctx);
 
-            // 1. Immediately, a2 is denied on example.com:443 (no_rule) and records a pending request,
-            // while a1's agent-scope rule Ra and connector c-iso's admin any-public rule Rc remain active!
+            // User-created rules pause and no longer allow requests.
             NetworkAccessDecisionResult a2AfterRevoke = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.0.52", "93.184.216.34", 443, "example.com"));
             Assert.False(a2AfterRevoke.Allowed);
             Assert.Equal("no_rule", a2AfterRevoke.Reason);
             Assert.NotNull(a2AfterRevoke.RequestId);
 
-            Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.51", "93.184.216.34", 443, "agent.example.com")).Allowed);
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.51", "93.184.216.34", 443, "agent.example.com")).Allowed);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.53", "93.184.216.34", 443, null)).Allowed);
 
-            // 2. ListRules returns R with Paused = true, while Ra and Rc have Paused = false
+            // User-created rules show that they are paused.
             NetworkAccessListRulesResponse rulesUserA = await svc.ListRules(new NetworkAccessListRulesRequest
             {
                 Actor = userA,
             }, ctx);
             Assert.Contains(rulesUserA.Rules, r => r.Id == ruleR.Rule.Id && r.Paused);
-            Assert.Contains(rulesUserA.Rules, r => r.Id == ruleRa.Rule.Id && !r.Paused);
+            Assert.Contains(rulesUserA.Rules, r => r.Id == ruleRa.Rule.Id && r.Paused);
             Assert.Contains(rulesUserA.Rules, r => r.Id == ruleRc.Rule.Id && !r.Paused);
 
             // 3. User A calling SetRule(scopeKind = user) is rejected with privilege_required
@@ -1243,7 +1229,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
 
 
     [Fact]
-    public void C22_WorkloadRegistry_ContainerWithoutAgentOrProbeLabel_GetsDenyAll_WithNegativeControl()
+    public void C22_WorkloadRegistry_UserConnectorWithoutAgentRemainsDefaultDeny_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
         try
@@ -1252,7 +1238,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             var registry = new WorkloadRegistry();
             var controller = new NacController(store, registry);
 
-            // Container with user, no agentId, and no purpose="probe" (when not systemwide/system::) gets deny-all (v7-26)
+            // A connector can have a user and connector identity without an agent.
             registry.Register(new RegistryEntry(
                 "10.247.1.100",
                 "user-x",
@@ -1270,12 +1256,13 @@ public sealed class C11_To_C21_ControllerIntegrationTests
 
             RegistryEntry? reg = registry.FindByIp("10.247.1.100");
             Assert.NotNull(reg);
-            Assert.Equal("deny-all", reg.Egress);
+            Assert.Equal("normal", reg.Egress);
 
             NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.100", "93.184.216.34", 443, "example.com"));
             Assert.False(decision.Allowed);
-            Assert.Equal("deny_all", decision.Reason);
+            Assert.Equal("no_rule", decision.Reason);
+            Assert.NotNull(decision.RequestId);
 
             // v7-26.NC: Container WITH Purpose="probe" receives normal egress and is not forced to deny-all
             registry.Register(new RegistryEntry(
@@ -1640,7 +1627,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.Equal(StatusCode.InvalidArgument, exSpoofSandbox.StatusCode);
             Assert.Contains("scope_not_enforceable", exSpoofSandbox.Status.Detail, StringComparison.Ordinal);
 
-            // 2. Connector with Attribution="none" recorded request history: caller spoofing Attribution="user" is rejected.
+            // A user rule cannot override a workload's hard deny-all identity.
             registry.Register(new RegistryEntry(
                 "10.247.1.71",
                 null,
@@ -1650,13 +1637,11 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "conn-unattributed",
                 "isolated",
                 true,
-                "normal",
+                "deny-all",
                 "none",
                 null,
                 DateTimeOffset.UtcNow));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.71", "93.184.216.34", 443, "unattr.example.com"));
-            registry.Deregister("10.247.1.71", "ctr-unattr");
-
             RpcException exSpoofUnattr = await Assert.ThrowsAsync<RpcException>(async () =>
             {
                 _ = await svc.SetRule(new NetworkAccessSetRuleRequest
@@ -1676,6 +1661,8 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             });
             Assert.Equal(StatusCode.InvalidArgument, exSpoofUnattr.StatusCode);
             Assert.Contains("scope_not_enforceable", exSpoofUnattr.Status.Detail, StringComparison.Ordinal);
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.71", "93.184.216.34", 443, "unattr.example.com")).Allowed);
+            registry.Deregister("10.247.1.71", "ctr-unattr");
 
             // Negative control (.NC): genuine per-user isolated connector in registry succeeds even if caller omits ExecContext/Attribution.
             registry.Register(new RegistryEntry(
@@ -1772,24 +1759,20 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             RegisterAgent(registry, "10.247.1.80", "user-a", "a1");
             registry.Register(new RegistryEntry(
                 "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
-            registry.Register(new RegistryEntry(
-                "10.247.1.82", null, null, "ctr-sys-none", "connector", "conn-sys-none", "isolated", true, "normal", "none", null, DateTimeOffset.UtcNow));
 
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-block.example.com"));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-allow.example.com"));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.81", "93.184.216.34", 443, "sys-user-deny.example.com"));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.81", "93.184.216.34", 443, "sys-allow-empty.example.com"));
-            _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.82", "93.184.216.34", 443, "sys-none-deny.example.com"));
 
             NetworkAccessListRequestsResponse list = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = admin }, ctx);
             string idOrdBlock = list.Requests.Single(r => r.Destination == "ord-block.example.com").Id;
             string idOrdAllow = list.Requests.Single(r => r.Destination == "ord-allow.example.com").Id;
             string idSysUserDeny = list.Requests.Single(r => r.Destination == "sys-user-deny.example.com").Id;
             string idSysAllowEmpty = list.Requests.Single(r => r.Destination == "sys-allow-empty.example.com").Id;
-            string idSysNoneDeny = list.Requests.Single(r => r.Destination == "sys-none-deny.example.com").Id;
             long rev = list.Revision;
 
-            // 1. Ordinary agent "Keep blocked" (Allow=false) ALWAYS forces scope="agent" even when caller passes Scope="user".
+            // An explicitly chosen user-scope block is respected.
             NetworkAccessDecideResponse ordBlockRes = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
                 Actor = userA,
@@ -1798,7 +1781,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Scope = "user",
                 ExpectedRevision = rev,
             }, ctx);
-            Assert.Equal("agent", ordBlockRes.Rule.ScopeKind);
+            Assert.Equal("user", ordBlockRes.Rule.ScopeKind);
             rev = ordBlockRes.Revision;
 
             // 2. Ordinary agent Allow with empty Scope defaults to "agent".
@@ -1813,7 +1796,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.Equal("agent", ordAllowRes.Rule.ScopeKind);
             rev = ordAllowRes.Revision;
 
-            // 3. Systemwide user-attributed deny with empty Scope defaults to "user".
+            // A user-attributed connector without an agent defaults to user+connector.
             NetworkAccessDecideResponse sysUserDenyRes = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
                 Actor = admin,
@@ -1823,44 +1806,20 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 ExpectedRevision = rev,
             }, ctx);
             Assert.Equal("user", sysUserDenyRes.Rule.ScopeKind);
+            Assert.Equal("conn-sys-user", sysUserDenyRes.Rule.ConnectorId);
             rev = sysUserDenyRes.Revision;
 
-            // 4. Systemwide non-attributed deny with empty Scope defaults to "connector-system".
-            NetworkAccessDecideResponse sysNoneDenyRes = await svc.DecideRequest(new NetworkAccessDecideRequest
+            // Connector availability does not affect the default NAC scope.
+            NetworkAccessDecideResponse sysAllowExplicit = await svc.DecideRequest(new NetworkAccessDecideRequest
             {
-                Actor = admin,
-                RequestId = idSysNoneDeny,
-                Allow = false,
+                Actor = userA,
+                RequestId = idSysAllowEmpty,
+                Allow = true,
                 Scope = string.Empty,
                 ExpectedRevision = rev,
             }, ctx);
-            Assert.Equal("connector-system", sysNoneDenyRes.Rule.ScopeKind);
-            rev = sysNoneDenyRes.Revision;
-
-            // 5. Negative control (.NC): Systemwide allow with empty Scope rejects (scope_required), whereas explicit Scope succeeds.
-            RpcException exScopeReq = await Assert.ThrowsAsync<RpcException>(async () =>
-            {
-                _ = await svc.DecideRequest(new NetworkAccessDecideRequest
-                {
-                    Actor = admin,
-                    RequestId = idSysAllowEmpty,
-                    Allow = true,
-                    Scope = string.Empty,
-                    ExpectedRevision = rev,
-                }, ctx);
-            });
-            Assert.Equal(StatusCode.InvalidArgument, exScopeReq.StatusCode);
-            Assert.Contains("scope_required", exScopeReq.Status.Detail, StringComparison.Ordinal);
-
-            NetworkAccessDecideResponse sysAllowExplicit = await svc.DecideRequest(new NetworkAccessDecideRequest
-            {
-                Actor = admin,
-                RequestId = idSysAllowEmpty,
-                Allow = true,
-                Scope = "connector-system",
-                ExpectedRevision = rev,
-            }, ctx);
-            Assert.Equal("connector-system", sysAllowExplicit.Rule.ScopeKind);
+            Assert.Equal("user", sysAllowExplicit.Rule.ScopeKind);
+            Assert.Equal("conn-sys-user", sysAllowExplicit.Rule.ConnectorId);
         }
         finally
         {

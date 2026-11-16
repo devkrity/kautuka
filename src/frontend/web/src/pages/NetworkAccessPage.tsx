@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useCurrentUser } from '@/features/auth';
 import {
+  RuleScopeEditor,
   useNetworkRequests,
   useNetworkRules,
   useNetworkActivity,
@@ -46,6 +47,7 @@ export function NetworkAccessPage() {
   const [activeTab, setActiveTab] = React.useState<ViewTab>(tabParam);
   const [search, setSearch] = React.useState('');
   const [generalError, setGeneralError] = React.useState<string | null>(null);
+  const [editingRule, setEditingRule] = React.useState<NetworkAccessRuleDto | null>(null);
 
   // Open Internet dialog state
   const [openInternetTarget, setOpenInternetTarget] = React.useState<{
@@ -74,7 +76,6 @@ export function NetworkAccessPage() {
   const requests = requestsQuery.data?.requests ?? [];
   const privileges = requestsQuery.data?.privileges ?? {
     canApproveOwn: false,
-    canAllowAllAgents: false,
   };
   const brake = requestsQuery.data?.brake;
 
@@ -429,8 +430,18 @@ export function NetworkAccessPage() {
             expectedRevision={revision}
             currentUser={currentUser}
             onDeleteRule={handleDeleteRule}
+            onEditRule={setEditingRule}
+            canManageOwn={privileges.canApproveOwn}
             onBlockSeedRule={isAdmin ? handleBlockSeedRule : undefined}
           />
+          {editingRule && currentUser?.id && (
+            <RuleScopeEditor rule={editingRule} userId={currentUser.id} isAdmin={Boolean(isAdmin)} expectedRevision={revision}
+              onCancel={() => setEditingRule(null)} onSave={async (updated) => {
+                await ruleMutation.mutateAsync(updated);
+                setEditingRule(null);
+                await rulesQuery.refetch();
+              }} />
+          )}
         </section>
       )}
 
@@ -484,7 +495,6 @@ export function NetworkAccessPage() {
             userId={currentUser?.id}
             userDisplayName={currentUser?.displayName || 'Administrator'}
             canApproveOwn={privileges.canApproveOwn}
-            canAllowAllAgents={privileges.canAllowAllAgents}
             isAdminViewer={true}
           />
         </section>

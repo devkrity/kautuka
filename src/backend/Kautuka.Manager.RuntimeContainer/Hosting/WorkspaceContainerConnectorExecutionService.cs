@@ -339,7 +339,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         WorkspaceMcpContainerConnectorDefinition connector,
         int timeoutSeconds,
         CancellationToken cancellationToken,
-        string? userId = null)
+        string? userId = null,
+        bool saveDiscovery = false)
     {
         ArgumentNullException.ThrowIfNull(connector);
 
@@ -370,7 +371,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "probe-start");
 
-            transportLaunch = await CreateTransportAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
+            transportLaunch = await CreateTransportCoreAsync(effectiveConnector, requireEnabled: false, workspaceContext: probeContext, isProbe: true, saveDiscovery: saveDiscovery, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = true;
             var tools = await ListMcpToolsAsync(transportLaunch, ClientOptionsFor(effectiveConnector.McpProtocolVersion), cancellationToken).ConfigureAwait(false);
@@ -728,13 +729,26 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             : BuildContainerName(connectorId, executionContext, workspaceContext);
     }
 
-    private async Task<TransportLaunch> CreateTransportAsync(
+    private Task<TransportLaunch> CreateTransportAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         bool requireEnabled,
         bool allowInternalSystemConnector = false,
         ContainerContext? workspaceContext = null,
         WorkspaceMcpExecutionContext executionContext = WorkspaceMcpExecutionContext.Unspecified,
         bool isProbe = false,
+        WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
+        CancellationToken cancellationToken = default)
+        => CreateTransportCoreAsync(connector, requireEnabled, allowInternalSystemConnector, workspaceContext,
+            executionContext, isProbe, false, authoritativeSnapshot, cancellationToken);
+
+    private async Task<TransportLaunch> CreateTransportCoreAsync(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        bool requireEnabled,
+        bool allowInternalSystemConnector = false,
+        ContainerContext? workspaceContext = null,
+        WorkspaceMcpExecutionContext executionContext = WorkspaceMcpExecutionContext.Unspecified,
+        bool isProbe = false,
+        bool saveDiscovery = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
         CancellationToken cancellationToken = default)
     {
@@ -759,7 +773,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ConnectorContainerSpecBuilder.ConnectorIdentity launchIdentity = ConnectorContainerSpecBuilder.ResolveIdentity(
             connector,
             workspaceContext,
-            isProbe ? "probe" : null);
+            isProbe && !saveDiscovery ? "probe" : null);
         string? launchUserId = string.IsNullOrWhiteSpace(launchIdentity.UserId) ? null : launchIdentity.UserId;
         workloadLaunchGate?.EnsureLaunchAllowed(launchUserId);
         NetworkAccess.IWorkloadLaunchLease launchLease = workloadLaunchGate is null
@@ -825,7 +839,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
                     connector,
                     workspaceContext,
-                    isProbe ? "probe" : null);
+                    isProbe && !saveDiscovery ? "probe" : null);
                 string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
                     .AllocateNextIp(workloadRegistry);
                 ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
@@ -850,7 +864,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                         attribution,
                         compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                         DateTimeOffset.UtcNow,
-                        isProbe ? "probe" : null));
+                        isProbe && !saveDiscovery ? "probe" : null));
                 }
 
                 ephemeralWorkload = new EphemeralWorkload(containerName, allocatedIp, compatProfile);
@@ -862,12 +876,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     persistent: false,
                     allocatedIp: allocatedIp,
                     isBraked: isBraked,
-                    purpose: isProbe ? "probe" : null,
+                    purpose: isProbe && !saveDiscovery ? "probe" : null,
                     compatProfile: compatProfile);
             }
             else
             {
-                await EnsureConnectorContainerRunningAsync(
+                await EnsureConnectorContainerRunningCoreAsync(
                     connector,
                     runtimeKey,
                     containerName,
@@ -875,6 +889,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     ResolveMountedWorkspace(effectiveExecutionContext, workspaceContext),
                     cancellationToken,
                     isProbe: isProbe,
+                    saveDiscovery: saveDiscovery,
                     identityContext: workspaceContext,
                     authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
                 arguments = ConnectorContainerSpecBuilder.BuildExec(connector, containerName, ResolveExecWorkingDirectory(connector));
@@ -1144,6 +1159,20 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool isProbe = false,
         ContainerContext? identityContext = null,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null)
+        => await EnsureConnectorContainerRunningCoreAsync(connector, runtimeKey, containerName, executionContext,
+            workspaceContext, cancellationToken, isProbe, false, identityContext, authoritativeSnapshot).ConfigureAwait(false);
+
+    private async Task EnsureConnectorContainerRunningCoreAsync(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string runtimeKey,
+        string containerName,
+        WorkspaceMcpExecutionContext executionContext,
+        ContainerContext? workspaceContext,
+        CancellationToken cancellationToken,
+        bool isProbe = false,
+        bool saveDiscovery = false,
+        ContainerContext? identityContext = null,
+        WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null)
     {
         await using var connectorLease = (await connectorLocks
             .AcquireAsync(runtimeKey, cancellationToken)
@@ -1151,7 +1180,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
             connector,
             identityContext ?? workspaceContext,
-            isProbe ? "probe" : null);
+            isProbe && !saveDiscovery ? "probe" : null);
         ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
         connector = connector with { Image = imageResolution.Image };
         NetworkAccess.ImageCompatProfile? compatProfile = imageResolution.Profile;
@@ -1229,7 +1258,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 attribution,
                 compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                 DateTimeOffset.UtcNow,
-                isProbe ? "probe" : null));
+                isProbe && !saveDiscovery ? "probe" : null));
         }
 
         var runArgs = BuildConnectorWorkloadRunArguments(
@@ -1240,7 +1269,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             persistent: true,
             allocatedIp: allocatedIp,
             isBraked: isBraked,
-            purpose: isProbe ? "probe" : null,
+            purpose: isProbe && !saveDiscovery ? "probe" : null,
             compatProfile: compatProfile);
 
         PodmanCommandResult result = await podmanCommandRunner

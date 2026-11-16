@@ -70,15 +70,10 @@ function useDirectUserPrivileges(userId: string, role: string) {
 function UserNetworkPrivilegesSummary({ userId, role }: { userId: string; role: string }) {
   const [privs] = useDirectUserPrivileges(userId, role);
   const canApprove = privs?.canApproveOwn ?? (role === 'admin');
-  const canAllowAll = privs?.canAllowAllAgents ?? (role === 'admin');
   return (
     <p>
       Network access:{' '}
-      {canApprove
-        ? canAllowAll
-          ? 'Can approve own & all agents'
-          : 'Can approve own agents'
-        : 'Admin approval required'}
+      {canApprove ? 'Can manage own network access' : 'Admin approval required'}
     </p>
   );
 }
@@ -86,7 +81,7 @@ function UserNetworkPrivilegesSummary({ userId, role }: { userId: string; role: 
 function UserNetworkPrivilegesSection({ user, disabled }: { user: UserSettingsEntry; disabled?: boolean }) {
   const [privs, setPrivs] = useDirectUserPrivileges(user.id, user.role);
 
-  const handleSave = async (next: { canApproveOwn: boolean; canAllowAllAgents: boolean }) => {
+  const handleSave = async (next: { canApproveOwn: boolean }) => {
     const response = await apiClient.put<UserNetworkPrivilegesDto>(
       `/network-access/users/${encodeURIComponent(user.id)}/privileges`,
       next
@@ -102,7 +97,6 @@ function UserNetworkPrivilegesSection({ user, disabled }: { user: UserSettingsEn
         userId={user.id}
         userDisplayName={user.username}
         canApproveOwn={privs?.canApproveOwn ?? (user.role === 'admin')}
-        canAllowAllAgents={privs?.canAllowAllAgents ?? (user.role === 'admin')}
         isAdminViewer={true}
         onSave={handleSave}
         disabled={disabled}

@@ -13,9 +13,6 @@ export function getRuleScopeSentence(rule: NetworkAccessRuleDto): string {
   if (rule.destKind === 'any-public') {
     return `${user}'s ${connector} can reach any public website`;
   }
-  if (rule.paused) {
-    return `Paused: ${user} can no longer allow for all agents`;
-  }
   if (rule.scopeKind === 'agent') {
     return `${user}'s ${agent}`;
   }
@@ -23,10 +20,7 @@ export function getRuleScopeSentence(rule: NetworkAccessRuleDto): string {
     if (rule.connectorDisplayName || rule.connectorId) {
       return `Only ${user}, using ${connector}`;
     }
-    return `All of ${user}'s agents, including new ones`;
-  }
-  if (rule.scopeKind === 'connector-system') {
-    return `Everyone using ${connector}`;
+    return `All of ${user}'s activity`;
   }
   if (rule.scopeKind === 'system') {
     return 'Everyone (systemwide)';
@@ -39,6 +33,8 @@ interface RulesListProps {
   expectedRevision: number;
   currentUser?: { id?: string; displayName?: string | null; role?: string };
   onDeleteRule: (ruleId: string, expectedRevision: number) => Promise<unknown>;
+  onEditRule?: (rule: NetworkAccessRuleDto) => void;
+  canManageOwn?: boolean;
   onBlockSeedRule?: (rule: NetworkAccessRuleDto) => Promise<unknown>;
   disabled?: boolean;
 }
@@ -48,6 +44,8 @@ export function RulesList({
   expectedRevision,
   currentUser,
   onDeleteRule,
+  onEditRule,
+  canManageOwn = false,
   onBlockSeedRule,
   disabled = false,
 }: RulesListProps) {
@@ -103,9 +101,7 @@ export function RulesList({
             </span>
 
             {rule.paused && (
-              <Badge variant="outline" className="text-xs">
-                Paused
-              </Badge>
+              <Badge variant="outline" className="text-xs">Paused</Badge>
             )}
 
             {rule.openInternetBadge && (
@@ -131,18 +127,10 @@ export function RulesList({
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {rule.paused ? (
-            // Paused rule: Remove button only (no Keep/Enable control)
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={disabled || submittingRuleId === rule.id}
-              onClick={() => void handleDelete(rule.id)}
-            >
-              Remove
-            </Button>
-          ) : isSeed ? (
+          {!isSeed && onEditRule && (isAdmin || (canManageOwn && rule.userId === currentUser?.id)) && (
+            <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onEditRule(rule)}>Edit</Button>
+          )}
+          {isSeed ? (
             // Built in (seed) rules cannot be deleted; can only be blocked by admin
             isAdmin && rule.allowed && onBlockSeedRule && (
               <Button
@@ -155,7 +143,7 @@ export function RulesList({
                 Block
               </Button>
             )
-          ) : (
+          ) : (isAdmin || (canManageOwn && rule.userId === currentUser?.id)) ? (
             // Normal rule: Remove button
             <Button
               type="button"
@@ -166,7 +154,7 @@ export function RulesList({
             >
               Remove
             </Button>
-          )}
+          ) : null}
         </div>
       </article>
     );

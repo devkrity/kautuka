@@ -49,8 +49,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             var privCache = new Dictionary<string, UserPrivilegesSummaryDto>(StringComparer.Ordinal)
             {
                 [user.Id] = new UserPrivilegesSummaryDto(
-                    response.Privileges.CanApproveOwn,
-                    response.Privileges.CanAllowAllAgents),
+                    response.Privileges.CanApproveOwn),
             };
 
             var dtos = new List<NetworkAccessRequestDto>(response.Requests.Count);
@@ -72,8 +71,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
 
             var summaryPrivs = new UserPrivilegesSummaryDto(
-                response.Privileges.CanApproveOwn,
-                response.Privileges.CanAllowAllAgents);
+                response.Privileges.CanApproveOwn);
 
             NetworkAccessUserBrakeMessage? userBrake = response.Brake.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
             var brakeDto = new NetworkAccessBrakeDto(
@@ -119,13 +117,11 @@ internal static partial class GatewayRuntimeEndpointMappings
 
             bool isAdmin = GatewayOwnershipAccess.IsAdmin(user);
 
+            if (string.Equals(decision.Scope, "connector-system", StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new GatewayErrorResponse("connector-system scope is no longer supported."));
+
             if (!isAdmin)
             {
-                if (string.Equals(decision.Scope, "connector-system", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Results.Json(new GatewayErrorResponse("connector-system scope requires administrator privileges."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
-                }
-
                 if (decision.AllowLan == true)
                 {
                     return Results.Json(new GatewayErrorResponse("allowLan requires administrator privileges."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
@@ -138,7 +134,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Actor = actor,
                 RequestId = id,
                 Allow = decision.Allow,
-                Scope = decision.Scope ?? "agent",
+                Scope = decision.Scope ?? string.Empty,
                 AllowLan = decision.AllowLan ?? false,
                 ExpectedRevision = decision.ExpectedRevision,
             };
@@ -255,9 +251,12 @@ internal static partial class GatewayRuntimeEndpointMappings
             bool isSystemScope = string.Equals(dto.ScopeKind, "system", StringComparison.OrdinalIgnoreCase);
             bool isConnectorSystemScope = string.Equals(dto.ScopeKind, "connector-system", StringComparison.OrdinalIgnoreCase);
 
+            if (isConnectorSystemScope)
+                return Results.BadRequest(new GatewayErrorResponse("connector-system scope is no longer supported."));
+
             if (!isAdmin)
             {
-                if (isSystemScope || isConnectorSystemScope)
+                if (isSystemScope)
                 {
                     return Results.Json(new GatewayErrorResponse($"{dto.ScopeKind} scope requires administrator privileges."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
                 }
@@ -278,7 +277,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 }
             }
 
-            string targetUserId = (isSystemScope || isConnectorSystemScope)
+            string targetUserId = isSystemScope
                 ? string.Empty
                 : (isAdmin ? (dto.UserId ?? user.Id) : user.Id);
             var setRuleRequest = new NetworkAccessSetRuleRequest
@@ -294,6 +293,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Allowed = dto.Allowed,
                 AllowLan = dto.AllowLan ?? false,
                 ExpectedRevision = dto.ExpectedRevision,
+                ReplaceRuleId = dto.ReplaceRuleId ?? string.Empty,
             };
 
             try
@@ -468,7 +468,6 @@ internal static partial class GatewayRuntimeEndpointMappings
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,
                 CanApproveOwn: response.CanApproveOwn,
-                CanAllowAllAgents: response.CanAllowAllAgents,
                 SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
                 SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
 
@@ -506,7 +505,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true },
                 UserId = userId,
                 CanApproveOwn = dto.CanApproveOwn,
-                CanAllowAllAgents = dto.CanAllowAllAgents,
+                CanAllowAllAgents = false,
                 TargetIsAdmin = targetIsAdmin,
             };
 
@@ -515,7 +514,6 @@ internal static partial class GatewayRuntimeEndpointMappings
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,
                 CanApproveOwn: response.CanApproveOwn,
-                CanAllowAllAgents: response.CanAllowAllAgents,
                 SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
                 SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
 
@@ -861,11 +859,11 @@ internal static partial class GatewayRuntimeEndpointMappings
                             TargetIsAdmin = ownerIsAdmin,
                         },
                         cancellationToken).ConfigureAwait(false);
-                    ownerPrivs = new UserPrivilegesSummaryDto(p.CanApproveOwn, p.CanAllowAllAgents);
+                    ownerPrivs = new UserPrivilegesSummaryDto(p.CanApproveOwn);
                 }
                 catch (Exception ex) when (ex is RpcException or NotSupportedException or InvalidOperationException)
                 {
-                    ownerPrivs = new UserPrivilegesSummaryDto(ownerIsAdmin, ownerIsAdmin);
+                    ownerPrivs = new UserPrivilegesSummaryDto(ownerIsAdmin);
                 }
 
                 privCache?.TryAdd(req.UserId, ownerPrivs);
@@ -873,10 +871,7 @@ internal static partial class GatewayRuntimeEndpointMappings
         }
 
         bool canApproveOwn = ownerPrivs?.CanApproveOwn ?? false;
-        bool canAllowAllAgents = ownerPrivs?.CanAllowAllAgents ?? false;
-        bool isUserProbe = string.Equals(req.Purpose, "probe", StringComparison.OrdinalIgnoreCase) && req.Attribution == "user";
-        bool isSystemwide = (req.Systemwide && req.Attribution != "user-agent" && !isUserProbe) || req.Attribution is "none" || req.ActorKind is "first-party";
-        bool waitingForAdmin = req.WaitingForAdmin || isSystemwide || !canApproveOwn;
+        bool waitingForAdmin = req.WaitingForAdmin || string.IsNullOrWhiteSpace(req.UserId) || req.UserId == "system" || !canApproveOwn;
 
         return new NetworkAccessRequestDto(
             Id: req.Id,
@@ -901,8 +896,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             Purpose: string.IsNullOrWhiteSpace(req.Purpose) ? null : req.Purpose,
             CompatibilityMode: req.CompatibilityMode,
             WaitingForAdmin: waitingForAdmin,
-            OwnerCanApproveOwn: canApproveOwn,
-            OwnerCanAllowAllAgents: canAllowAllAgents);
+            OwnerCanApproveOwn: canApproveOwn);
     }
 
     private static string FormatRuleSummaryText(
@@ -928,8 +922,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             "agent" => $"{user}'s {agent} {action} {dest}",
             "user" => !string.IsNullOrWhiteSpace(rule.ConnectorId)
                 ? $"Only {user}, using {connector} {action} {dest}"
-                : $"All of {user}'s agents, including new ones, {action} {dest}",
-            "connector-system" => $"Everyone using {connector} {action} {dest}",
+                : $"All of {user}'s activity {action} {dest}",
             "system" => $"Everyone (systemwide) {action} {dest}",
             _ => $"{dest} ({rule.ScopeKind})"
         };

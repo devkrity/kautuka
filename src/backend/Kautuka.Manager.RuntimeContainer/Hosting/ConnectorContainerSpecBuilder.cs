@@ -31,6 +31,7 @@ internal static class ConnectorContainerSpecBuilder
         string? purpose)
     {
         ArgumentNullException.ThrowIfNull(connector);
+        _ = purpose; // Purpose does not change the user or agent identity.
         string userId = workspaceContext?.UserId ?? string.Empty;
         string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
             ? (workspaceContext?.AgentId ?? workspaceContext?.ScopeId ?? string.Empty)
@@ -50,11 +51,6 @@ internal static class ConnectorContainerSpecBuilder
         if (string.IsNullOrWhiteSpace(userId))
         {
             throw new InvalidOperationException("A user identity is required before starting a connector workload.");
-        }
-
-        if (!systemwide && string.IsNullOrWhiteSpace(agentId) && !string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
         }
 
         return new ConnectorIdentity(userId, agentId, systemwide, "normal", "connector");

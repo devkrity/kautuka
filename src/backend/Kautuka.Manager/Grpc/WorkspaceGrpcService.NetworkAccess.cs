@@ -209,7 +209,8 @@ public sealed partial class WorkspaceGrpcService
                     request.AllowLan,
                     execContext,
                     attribution),
-                request.ExpectedRevision);
+                request.ExpectedRevision,
+                string.IsNullOrWhiteSpace(request.ReplaceRuleId) ? null : request.ReplaceRuleId);
 
             return new NetworkAccessSetRuleResponse
             {
@@ -276,10 +277,7 @@ public sealed partial class WorkspaceGrpcService
 
             if (hasStandaloneIsolated)
             {
-                WorkspaceMcpContainerConnectorDefinition desired = desiredMatches[0];
-                string attribution = string.Equals(desired.CatalogScope, "system", StringComparison.OrdinalIgnoreCase)
-                    ? "user"
-                    : string.IsNullOrWhiteSpace(userId) ? "none" : string.IsNullOrWhiteSpace(agentId) ? "user" : "user-agent";
+                string attribution = string.IsNullOrWhiteSpace(userId) ? "none" : string.IsNullOrWhiteSpace(agentId) ? "user" : "user-agent";
                 return ("isolated", attribution);
             }
         }
@@ -288,7 +286,7 @@ public sealed partial class WorkspaceGrpcService
         bool recordedUnattributed = Nac.PolicyStore.GetRawStateSnapshot().Requests.Any(req =>
             string.Equals(req.ConnectorId, trimmedConnectorId, StringComparison.Ordinal)
             && string.Equals(req.Attribution, "none", StringComparison.Ordinal)
-            && (string.IsNullOrWhiteSpace(userId) || req.Systemwide || string.Equals(req.UserId, userId, StringComparison.Ordinal)));
+            && (string.IsNullOrWhiteSpace(userId) || string.Equals(req.UserId, userId, StringComparison.Ordinal)));
         if (recordedUnattributed)
         {
             return (null, "none");

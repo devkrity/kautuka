@@ -164,9 +164,9 @@ public sealed class ProviderSettingsEndpointTests
                     .Select(static view => view.Request)
                     .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
                 Assert.NotNull(pending);
-                Assert.True(pending.Systemwide);
-                Assert.Null(pending.AgentId);
-                Assert.Equal("user", pending.Attribution);
+                Assert.False(pending.Systemwide);
+                Assert.Equal("gateway", pending.AgentId);
+                Assert.Equal("user-agent", pending.Attribution);
                 Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
                 await policyStore.FlushPendingWritesAsync();
             }

@@ -111,7 +111,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           <Badge variant="muted">{scopeBadge}</Badge>
           {connector.toolCount != null ? (
             <Badge variant="info">{connector.toolCount} tools</Badge>
-          ) : null}
+          ) : !isHttp ? <Badge variant="attention">Tools not discovered</Badge> : null}
           {connector.requiresCredentialReentry ? (
             <Badge variant="attention">Key needs to be entered again</Badge>
           ) : null}
@@ -121,6 +121,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       description={connector.description}
       meta={
         <>
+          {!isHttp && connector.toolCount == null ? (
+            <p className="mt-1 text-sm text-muted-foreground">Test the connection to discover tools. If network approval is needed, check Network Access.</p>
+          ) : null}
           {connector.requiresCredentialReentry ? (
             <p role="alert" className="mt-1 text-sm text-destructive">
               {canManage

@@ -26,7 +26,29 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceGrpcServiceTests
 {
     [Fact]
-    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch()
+    public void SaveDiscoveryOnlyReportsRecentPendingRequestForSameUserAndConnector()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "save-discovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new Kautuka.NetworkAccessController.NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            DateTimeOffset started = DateTimeOffset.UtcNow;
+            store.RecordOrUpdatePendingRequest("alice", null, "alice::web", false, "user", "host", "example.com", 443, "connector", "container", observedAtUtc: started.AddSeconds(1));
+            var requests = store.GetRawStateSnapshot().Requests;
+            Assert.True(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "web", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "bob", "web", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "other", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "web", started.AddSeconds(2)));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest([requests[0] with { AgentId = "secretary" }], "alice", "web", started));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch(bool saveDiscovery)
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "workspace-grpc-probe-identity-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stateDirectory);
@@ -65,7 +87,8 @@ public sealed class WorkspaceGrpcServiceTests
         var service = new WorkspaceGrpcService(
             null!, new WorkspaceDesiredStateStore(), readiness, new WorkspaceExecTracker(),
             new StubRuntimeHealthProbe(true), connectorExecution, null!, null!,
-            NullLogger<WorkspaceGrpcService>.Instance);
+            NullLogger<WorkspaceGrpcService>.Instance,
+            networkAccessController: new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, new Kautuka.NetworkAccessController.WorkloadRegistry()));
 
         try
         {
@@ -76,13 +99,17 @@ public sealed class WorkspaceGrpcServiceTests
                     Image = "localhost/kautuka-test-probe:latest",
                     TimeoutSeconds = 15,
                     UserId = "test-user-identity",
+                    SaveDiscovery = saveDiscovery,
                 },
                 TestServerCallContext.Instance);
 
             Assert.False(response.Ok);
             string launchArguments = await File.ReadAllTextAsync(capturedArgumentsPath, TestContext.Current.CancellationToken);
             Assert.Contains("io.kautuka.user=test-user-identity", launchArguments, StringComparison.Ordinal);
-            Assert.Contains("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
+            if (saveDiscovery)
+                Assert.DoesNotContain("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
+            else
+                Assert.Contains("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
             Assert.DoesNotContain("A user identity is required before starting a connector workload.", response.Message, StringComparison.Ordinal);
         }
         finally

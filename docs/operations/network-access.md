@@ -119,7 +119,7 @@ The package proxy runs at `10.247.0.3` on the workload network. Package clients 
      - Drops link-local and cloud metadata addresses (`meta_drop` for `169.254.0.0/16` and Azure `168.63.129.16`).
      - Drops outbound UDP (`udp_drop`).
      - Permits outbound TCP to `10.247.0.2:15001` and DNS to `10.247.0.2:53`. Package traffic follows the Envoy path; the proxy listener accepts connections from the egress pod and is not directly accessible to ordinary workloads.
-   - Manager allocates a distinct workload IP before launch. Connector ownership comes from the workspace user and agent context; missing identity or address fails the start instead of falling back to a shared system identity or a fixed IP. Internal system connectors remain `deny-all` whether invoked without a user or through an agent. Catalogue scope determines systemwide connector availability; an agent invocation uses the invoking user and agent for network decisions, as with other connectors. The agent ID used for policy is separate from the workspace ID used for filesystem paths.
+   - Manager allocates a distinct workload IP before launch. Normal connectors require a user identity and use the agent identity when invoked by an agent; save-time discovery has no agent. Missing user identity or address fails the start instead of falling back to a shared system identity or a fixed IP. Internal system connectors remain `deny-all` whether invoked without a user or through an agent. Catalogue scope determines systemwide connector availability; an agent invocation uses the invoking user and agent for network decisions, as with other connectors. The agent ID used for policy is separate from the workspace ID used for filesystem paths.
 4. **Host Services Application-Layer Enforcement**:
    - `Gateway` and `ChannelHost` outbound HTTP and WebSocket clients fail closed (`FailClosedNetworkAccessChecker` / `checker_missing`) when constructed without an explicit `INetworkAccessChecker` or `NetworkAccessWebSocketChecker`. Non-ChannelHost callers must carry an explicit `NetworkAccessContext` user identity (never defaulting missing users to `"system"`), failing closed (`unknown_source`) when unattributed and enforcing per-user brakes across OIDC link, OAuth, AI provider discovery/probes, and catalog downloads. Denials surface directly into agent runs via Narad Protocol without opening approval cards for automated system seeds.
 5. **Policy State Durability (`NetworkAccessPolicyStore`)**:
@@ -132,31 +132,14 @@ The package proxy runs at `10.247.0.3` on the workload network. Package clients 
 ## 2. User & Approval Workflows `[Implementation status varies; see status note above]`
 
 ### 2.1 Approval Cards
-When an agent or connector attempts an outbound connection to an unapproved destination:
-1. Envoy or Gateway blocks the connection and registers a pending access request in `NetworkAccessController`.
-2. A single approval card appears in the **Network Approvals** section of the Kautuka Web UI.
-3. The card clearly states:
-   - **Who/What**: "{User}'s {Agent} ({Connector}) wants to reach {destination}:{port}".
-   - **Attempts**: "First tried {time}, tried {n} times."
-   - **Action Buttons**:
-     - **Allow**: Grants an active rule scoped specifically to `(userId, agentId, destination, port)`. Agent-scoped rules apply to all tools and connectors executed by that agent; rule records do not store a connector ID.
-     - **Keep blocked**: Rejects the request.
-     - **Allow for all my agents, including new ones**: (Visible only if the request's owner possesses `canApproveOwn` and `canAllowAllAgents` privileges). Writes a `user`-scope rule `(userId, destination, port)` covering all existing and future agents owned by this user for this destination.
-4. **Connector Probes (`v7-14`)**:
-   - Probe containers (`io.kautuka.purpose=probe`) receive a temporary, **in-memory only** allow or block scoped strictly to `(probe container, user, connector, destination, port)`.
-   - Probe approvals never write or modify persistent `user+agent`, `user+connector`, or `connector-system` rules and are cleared when the probe operation completes, independently of container deregistration. Subsequent runtime containers ask normally and write standard persistent rules.
-   - Connector probes go to the invoking user if they hold `canApproveOwn` (otherwise an administrator), regardless of whether the connector is available systemwide. Probe approvals remain temporary.
-   - A probe container can have at most 64 temporary approval cards. Further distinct destinations are denied without creating a card. Persisted legacy requests marked as probes cannot be approved into permanent rules.
 
-### 2.2 User Privileges
-Administrators manage per-user network privileges under User Settings:
-- `canApproveOwn` (Default: **OFF** for standard users, **ON** for administrators):
-  When enabled, the user can approve or deny network requests originating from their own agents. When disabled, requests escalate to administrators with a notice ("Waiting for an administrator to approve").
-- `canAllowAllAgents` (Default: **OFF** for standard users, **ON** for administrators):
-  Allows the user to create `user`-scope rules applying across all their agents. Unticking this privilege pauses all `user`-scope rules created by that user without deleting them; re-ticking restores them.
-- **Role-Change & Card Synchronization**:
-  Gateway persists initial admin and invited-user privileges synchronously into Manager (`SetUserPrivileges`) on account creation and role transitions (promotion enables both flags; demotion clears both flags and pauses existing `user`-scope rules). Approval cards and rule views read the stored Manager record rather than inferring flags from role alone.
+Unapproved network connections produce requests for the requesting user and agent or connector. A user with permission to manage their own network access can approve or block their requests; an administrator can decide requests for other users. A rule can apply to the platform, a user, a user and agent, or a user and connector. Only administrators can create platform rules. Explicit blocks win across all applicable scopes. See [Network access matching](network-access-matching.md) for the matching rules and examples.
 
+A connector save performs discovery with the signing-in user's identity and no agent. Disabling an existing connector skips discovery. When discovery creates a network approval request, the connector can be saved with its tool list still unknown. After approval, Test connection can retry discovery. Test connection itself still uses a temporary probe; its temporary decisions end with the probe.
+
+### 2.2 User Network Permission
+
+Administrators can set one permission: whether a user can manage their own network access. When disabled, their requests require administrator approval and rules they created are paused until the permission is restored. Administrator-created rules remain active. The old separate all-agents permission is not used by matching or approvals. Pre-release NAC rules and saved privilege records are reset when the new policy version is first loaded; brakes and user accounts are preserved.
 ### 2.3 Administrator Grants
 - **Open Internet Grant (`any-public`)**:
   Administrators can grant open internet access to isolated containerized connectors (`scopeKind = user`, `destKind = any-public`, `port = 0`). This allows public internet egress while non-public IPv4 ranges (`NonPublicV4`) remain strictly enforced by kernel boundary rejection. Manager derives execution context and attribution from its workload registry, desired-state snapshot, and recorded request history; it does not trust caller-supplied context flags. If Manager cannot establish an enforceable context for a connector, it rejects an `any-public` rule with `scope_not_enforceable`.

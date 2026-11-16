@@ -179,7 +179,7 @@ export const ConnectorsPage: React.FC = () => {
     }
 
     saveMutation.mutate(
-      { connectorId: d.id, data: buildSavePayload(d) },
+      { connectorId: d.id, data: { ...buildSavePayload(d), ...(d.transport === 'http' ? {} : { discoveryEnv: nonEmpty }) } },
       {
         onSuccess: () => {
           setModalTarget(null);

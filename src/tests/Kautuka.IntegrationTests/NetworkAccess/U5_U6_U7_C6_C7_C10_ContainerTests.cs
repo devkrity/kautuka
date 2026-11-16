@@ -56,7 +56,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         };
         Assert.Throws<ArgumentException>(() => specWithProxyEnv.Render());
 
-        // 3. Non-probe connector without AgentId rejected under normal egress (v7-26)
+        // 3. User-attributed connectors can run without an agent, but require a user.
         var specMissingAgent = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
         {
             UserId = "user-1",
@@ -67,7 +67,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             StartupGateOpen = true,
             IsBraked = false,
         };
-        Assert.Throws<ArgumentException>(() => specMissingAgent.Render());
+        Assert.NotEmpty(specMissingAgent.Render());
+        Assert.Throws<ArgumentException>(() => (specMissingAgent with { UserId = "" }).Render());
 
         // 4. Closed startup gate blocks rendering
         var specGateClosed = new WorkloadContainerSpec("test-workload", pinnedImage, "10.247.1.10")
@@ -104,6 +105,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            ConnectorId = "connector-1",
             AllowedMountRoots = [mountRoot],
             StartupGateOpen = true,
             IsBraked = false,
@@ -142,6 +144,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             UserId = "user-1",
             AgentId = "agent-1",
+            ConnectorId = "connector-1",
             StartupGateOpen = true,
             IsBraked = false,
             Persistent = false,

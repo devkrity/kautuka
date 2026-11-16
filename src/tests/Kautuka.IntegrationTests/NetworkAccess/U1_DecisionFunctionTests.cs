@@ -341,7 +341,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
         controller.PolicyStore.SetRule(
             admin,
-            new RuleWriteSpec("connector-system", null, null, "markitdown", "allowed.test", "host", 443, Allowed: true),
+            new RuleWriteSpec("system", null, null, null, "allowed.test", "host", 443, Allowed: true),
             controller.PolicyStore.Revision);
 
         NetworkAccessDecisionResult parserRes = controller.EvaluateContainerConnection("10.247.1.20", "198.18.250.250", 443, isTls: true, sni: "allowed.test");
@@ -430,137 +430,24 @@ public sealed class U1_DecisionFunctionTests : IDisposable
     }
 
     [Fact]
-    public void U1_ScopeResolutionMatrix_OrdinaryAndSystemwideConnectors_WithNegativeControl()
+    public void U1_ScopeResolutionMatrix_UsesUserAgentAndConnectorRules_WithNegativeControl()
     {
         NacController controller = CreateController(out _);
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-
-        // Grant user-x both privileges so user-scope rules are active
-        controller.PolicyStore.SetUserPrivileges(admin, "user-x", canApproveOwn: true, canAllowAllAgents: true);
-
-        RegisterOrdinaryAgent(controller, "10.247.1.31", "user-x", "a1");
-        RegisterOrdinaryAgent(controller, "10.247.1.32", "user-x", "a2");
-        RegisterOrdinaryAgent(controller, "10.247.1.33", "user-y", "b1");
-
-        // Systemwide connector with attribution = user (for user-x and user-y)
-        controller.Registry.Register(new RegistryEntry(
-            "10.247.1.41",
-            UserId: "user-x",
-            AgentId: null,
-            ContainerId: "ctr-sys-x",
-            Kind: "connector",
-            ConnectorId: "conn-sys",
-            ExecContext: "isolated",
-            Systemwide: true,
-            Egress: "normal",
-            Attribution: "user",
-            CompatProfile: null,
-            DateTimeOffset.UtcNow));
-        controller.Registry.Register(new RegistryEntry(
-            "10.247.1.42",
-            UserId: "user-y",
-            AgentId: null,
-            ContainerId: "ctr-sys-y",
-            Kind: "connector",
-            ConnectorId: "conn-sys",
-            ExecContext: "isolated",
-            Systemwide: true,
-            Egress: "normal",
-            Attribution: "user",
-            CompatProfile: null,
-            DateTimeOffset.UtcNow));
-
-        // Shared systemwide connector with attribution = none
-        controller.Registry.Register(new RegistryEntry(
-            "10.247.1.43",
-            UserId: null,
-            AgentId: null,
-            ContainerId: "ctr-sys-shared",
-            Kind: "connector",
-            ConnectorId: "conn-sys",
-            ExecContext: "isolated",
-            Systemwide: true,
-            Egress: "normal",
-            Attribution: "none",
-            CompatProfile: null,
-            DateTimeOffset.UtcNow));
-
-        // 1. Agent rule for (user-x, a1) allows a1, NOT a2, and NEVER applies to systemwide connector
-        (_, NetworkAccessRuleView a1Rule) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("agent", "user-x", "a1", null, "host1.test", "host", 443, Allowed: true),
-            controller.PolicyStore.Revision);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.31", "198.18.250.250", 443, true, "host1.test").Allowed);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.32", "198.18.250.250", 443, true, "host1.test").Allowed);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.41", "198.18.250.250", 443, true, "host1.test").Allowed);
-
-        // 2. User rule for user-x (no connector) allows a1, a2, and a3 registered later; never user-y's b1; never systemwide connector
-        (_, NetworkAccessRuleView xUserRule) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("user", "user-x", null, null, "host2.test", "host", 443, Allowed: true),
-            controller.PolicyStore.Revision);
-        RegisterOrdinaryAgent(controller, "10.247.1.34", "user-x", "a3");
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.31", "198.18.250.250", 443, true, "host2.test").Allowed);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.32", "198.18.250.250", 443, true, "host2.test").Allowed);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.34", "198.18.250.250", 443, true, "host2.test").Allowed);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.33", "198.18.250.250", 443, true, "host2.test").Allowed);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.41", "198.18.250.250", 443, true, "host2.test").Allowed);
-
-        // 3. Agent block for (user-x, a1) beats user-x's user allow
-        (_, NetworkAccessRuleView a1Block) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("agent", "user-x", "a1", null, "host2.test", "host", 443, Allowed: false),
-            controller.PolicyStore.Revision);
-        NetworkAccessDecisionResult a1BlockedRes = controller.EvaluateContainerConnection("10.247.1.31", "198.18.250.250", 443, true, "host2.test");
-        Assert.False(a1BlockedRes.Allowed);
-        Assert.Equal("blocked", a1BlockedRes.Reason);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.32", "198.18.250.250", 443, true, "host2.test").Allowed);
-
-        // Negative control (.NC): delete a1 block -> a1 allowed again; delete user rule -> a2 and a3 denied
-        controller.PolicyStore.DeleteRule(admin, a1Block.Rule.Id, controller.PolicyStore.Revision);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.31", "198.18.250.250", 443, true, "host2.test").Allowed);
-        controller.PolicyStore.DeleteRule(admin, xUserRule.Rule.Id, controller.PolicyStore.Revision);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.32", "198.18.250.250", 443, true, "host2.test").Allowed);
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.34", "198.18.250.250", 443, true, "host2.test").Allowed);
-
-        // 4. Systemwide connector precedence: user (userId, connectorId) beats connector-system in BOTH directions,
-        //    and attribution = none ignores user (userId, connectorId) rules!
-        controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("connector-system", null, null, "conn-sys", "sys.test", "host", 443, Allowed: false),
-            controller.PolicyStore.Revision);
-        (_, NetworkAccessRuleView userSysAllow) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("user", "user-x", null, "conn-sys", "sys.test", "host", 443, Allowed: true),
-            controller.PolicyStore.Revision);
-
-        // user-x's attributed systemwide instance is allowed (user allow beats connector-system block)
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.41", "198.18.250.250", 443, true, "sys.test").Allowed);
-        // user-y's attributed instance is blocked by connector-system
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.42", "198.18.250.250", 443, true, "sys.test").Allowed);
-        // shared unattributed instance (10.247.1.43) ignores user-x's rule and sees connector-system block
-        Assert.False(controller.EvaluateContainerConnection("10.247.1.43", "198.18.250.250", 443, true, "sys.test").Allowed);
-
-        // Flip: connector-system allow + user-x block -> user-x blocked, user-y and shared allowed!
-        controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("connector-system", null, null, "conn-sys", "sys.test", "host", 443, Allowed: true),
-            controller.PolicyStore.Revision);
-        controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("user", "user-x", null, "conn-sys", "sys.test", "host", 443, Allowed: false),
-            controller.PolicyStore.Revision);
-
+        controller.Registry.Register(new RegistryEntry("10.247.1.40", "user-x", "a1", "ctr-x", "connector", "conn", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        controller.Registry.Register(new RegistryEntry("10.247.1.41", "user-y", "a1", "ctr-y", "connector", "conn", "isolated", true, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        (_, NetworkAccessRuleView connectorRule) = controller.PolicyStore.SetRule(admin,
+            new RuleWriteSpec("user", "user-x", null, "conn", "sys.test", "host", 443, Allowed: true), controller.PolicyStore.Revision);
+        Assert.True(controller.EvaluateContainerConnection("10.247.1.40", "198.18.250.250", 443, true, "sys.test").Allowed);
         Assert.False(controller.EvaluateContainerConnection("10.247.1.41", "198.18.250.250", 443, true, "sys.test").Allowed);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.42", "198.18.250.250", 443, true, "sys.test").Allowed);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.43", "198.18.250.250", 443, true, "sys.test").Allowed);
-
-        // Negative control (.NC): remove user-x block -> user-x inherits connector-system allow
-        controller.PolicyStore.DeleteRule(admin, userSysAllow.Rule.Id, controller.PolicyStore.Revision);
-        Assert.True(controller.EvaluateContainerConnection("10.247.1.41", "198.18.250.250", 443, true, "sys.test").Allowed);
-        _ = a1Rule;
+        (_, NetworkAccessRuleView platformBlock) = controller.PolicyStore.SetRule(admin,
+            new RuleWriteSpec("system", null, null, null, "sys.test", "host", 443, Allowed: false), controller.PolicyStore.Revision);
+        Assert.False(controller.EvaluateContainerConnection("10.247.1.40", "198.18.250.250", 443, true, "sys.test").Allowed);
+        controller.PolicyStore.DeleteRule(admin, platformBlock.Rule.Id, controller.PolicyStore.Revision);
+        Assert.True(controller.EvaluateContainerConnection("10.247.1.40", "198.18.250.250", 443, true, "sys.test").Allowed);
+        controller.PolicyStore.DeleteRule(admin, connectorRule.Rule.Id, controller.PolicyStore.Revision);
+        Assert.False(controller.EvaluateContainerConnection("10.247.1.40", "198.18.250.250", 443, true, "sys.test").Allowed);
     }
-
     [Fact]
     public void V7_40_SystemwideConnectorInstancesKeepPerUserGrantDecisions_WithNegativeControl()
     {

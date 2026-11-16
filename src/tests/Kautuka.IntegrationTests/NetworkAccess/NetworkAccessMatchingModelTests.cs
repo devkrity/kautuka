@@ -1,0 +1,287 @@
+using Kautuka.NetworkAccessController;
+
+using System.Text.Json;
+
+namespace Kautuka.IntegrationTests.NetworkAccess;
+
+public sealed class NetworkAccessMatchingModelTests
+{
+    [Fact]
+    public void RevokingManagementPausesOwnRulesAcrossScopesAndRegrantRestoresThem()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-pause-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var admin = new NetworkAccessActor("admin", true);
+            var alice = new NetworkAccessActor("alice", false);
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            store.SetUserPrivileges(admin, "alice", true, false, false);
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "user.example", "host", 443, true), store.Revision);
+            store.SetRule(alice, new RuleWriteSpec("agent", "alice", "secretary", null, "agent.example", "host", 443, true), store.Revision);
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "connector.example", "host", 443, true), store.Revision);
+            store.SetRule(new NetworkAccessActor("alice", true), new RuleWriteSpec("user", "alice", null, null, "admin.example", "host", 443, true), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "admin-block.example", "host", 443, true), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("user", "alice", null, null, "admin-block.example", "host", 443, false), store.Revision);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            string[] destinations = ["user.example", "agent.example", "connector.example"];
+            bool Allowed(string host) => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, host, true)).Allowed;
+            Assert.All(destinations, host => Assert.True(Allowed(host)));
+
+            store.SetUserPrivileges(admin, "alice", false, false, false);
+            Assert.All(destinations, host => Assert.False(Allowed(host)));
+            Assert.True(Allowed("admin.example"));
+            Assert.False(Allowed("admin-block.example"));
+            Assert.All(store.ListRules(admin).Rules.Where(view => view.Rule.UserId == "alice" && !view.Rule.Destination.StartsWith("admin", StringComparison.Ordinal)), view => Assert.True(view.Paused));
+            Assert.False(store.ListRules(admin).Rules.Single(view => view.Rule.Destination == "admin.example").Paused);
+            using (var reopened = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json")))
+            {
+                Assert.True(reopened.ListRules(admin).Rules.Single(view => view.Rule.Destination == "user.example").Paused);
+                Assert.False(reopened.ListRules(admin).Rules.Single(view => view.Rule.Destination == "admin.example").Paused);
+            }
+
+            store.SetUserPrivileges(admin, "alice", true, false, false);
+            Assert.All(destinations, host => Assert.True(Allowed(host)));
+            Assert.All(store.ListRules(admin).Rules.Where(view => view.Rule.UserId == "alice"), view => Assert.False(view.Paused));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void CatalogueAvailabilityDoesNotChangeNetworkRequestIdentity()
+    {
+        string shared = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", true, "container", "host", "example.com", 443);
+        string personal = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", false, "container", "host", "example.com", 443);
+        Assert.Equal(shared, personal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UserConnectorRuleAppliesToAgentRegardlessOfCatalogueScope(bool systemwide)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-matching-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetRule(admin, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, true), store.Revision);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", systemwide, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+
+            Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
+            registry.Register(new RegistryEntry("10.247.1.11", "bob", "secretary", "bob-container", "connector", "bob::web", "isolated", systemwide, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.11", "93.184.216.34", 443, "example.com", true)).Allowed);
+
+            store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, false), store.Revision);
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void OwnerCanCreateOwnConnectorRuleWithoutAdministrator()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-owner-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var alice = new NetworkAccessActor("alice", false);
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "alice::web", "example.com", "host", 443, true), store.Revision));
+            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            (_, NetworkAccessRuleView connectorRule) = store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "alice::web", "example.com", "host", 443, true), store.Revision);
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "other.example", "host", 443, true), store.Revision);
+            store.SetRule(alice, new RuleWriteSpec("agent", "alice", "secretary", null, "third.example", "host", 443, true), store.Revision);
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, new RuleWriteSpec("user", "bob", null, "bob::web", "example.com", "host", 443, true), store.Revision));
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, true), store.Revision));
+            store.DeleteRule(alice, connectorRule.Rule.Id, store.Revision);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void ExplicitBlockWinsAcrossPlatformAndAgent(bool platformAllow, bool agentAllow)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-block-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, platformAllow), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, agentAllow), store.Revision);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void DiscoveryWithoutAgentRequiresAndUsesUserConnectorRule()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-discovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult Check() => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
+            NetworkAccessDecisionResult denied = Check();
+            Assert.False(denied.Allowed);
+            Assert.Equal("no_rule", denied.Reason);
+            Assert.NotNull(denied.RequestId);
+            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            Assert.True(registry.Deregister("10.247.1.10", "container"));
+            Assert.Contains(store.ListRequests(new NetworkAccessActor("alice", false)).Requests, item => item.Request.Id == denied.RequestId);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+            DecideRequestResult approval = store.DecideRequest(new NetworkAccessActor("alice", false), denied.RequestId!, true, "connector", store.Revision);
+            Assert.Equal("alice::web", approval.Rule?.ConnectorId);
+            Assert.True(Check().Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void UserAllowAppliesWithoutLegacyAllAgentsPrivilegeButConnectorBlockWins()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-user-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            var alice = new NetworkAccessActor("alice", false);
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "example.com", "host", 443, true), store.Revision);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult Check() => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
+            Assert.True(Check().Allowed);
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, false), store.Revision);
+            Assert.False(Check().Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void ApprovalDoesNotResolveRequestWhileAnotherApplicableRuleBlocks()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-pending-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult pending = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, false), store.Revision);
+            DecideRequestResult decision = store.DecideRequest(admin, pending.RequestId!, true, "agent", store.Revision);
+            Assert.Equal("pending", decision.Request.Status);
+            Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void PlatformAllowCannotOverrideSystemServiceBlock()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-system-block-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry());
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, true), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "example.com", "host", 443, false), store.Revision);
+            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("system", "channelhost", null, false, "example.com", 443, null, null)).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void ExplicitPlatformPackageProxyAllowStillUsesPackageProxyCluster()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-package-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "198.18.250.249", "ip", 20101, true), store.Revision);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult result = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "198.18.250.249", 20101, null, false));
+            Assert.True(result.Allowed, result.Reason);
+            Assert.Equal("pkgs_proxy", result.Cluster);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void EditingRuleScopeReplacesOldRuleAtomically()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-edit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var admin = new NetworkAccessActor("admin", true);
+            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            var alice = new NetworkAccessActor("alice", false);
+            (_, NetworkAccessRuleView oldRule) = store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, true), store.Revision);
+            long before = store.Revision;
+            store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "example.com", "host", 443, true), before, oldRule.Rule.Id);
+            NetworkAccessPolicyState state = store.GetRawStateSnapshot();
+            Assert.Equal(before + 1, state.Revision);
+            NetworkAccessRule rule = Assert.Single(state.Rules);
+            Assert.Null(rule.ConnectorId);
+            store.SetUserPrivileges(admin, "bob", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new NetworkAccessActor("bob", false), new RuleWriteSpec("user", "bob", null, null, "example.com", "host", 443, true), store.Revision, rule.Id));
+            Assert.Equal(rule.Id, Assert.Single(store.GetRawStateSnapshot().Rules).Id);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void OldRulesAndPrivilegesAreResetOnceWithoutResettingBrakes()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-reset-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string path = Path.Combine(root, "policy.json");
+            var oldRule = new NetworkAccessRule("old", "connector-system", null, null, "web", "example.com", "host", 443, true, false, "admin", DateTimeOffset.UtcNow);
+            var privilege = new UserPrivileges("alice", true, false, "admin", DateTimeOffset.UtcNow);
+            var brake = new BrakeState(true, "admin", DateTimeOffset.UtcNow, []);
+            var oldState = new NetworkAccessPolicyState(1, 5, [oldRule], [], [privilege], brake);
+            File.WriteAllText(path, JsonSerializer.Serialize(oldState, JsonSerializerOptions.Web));
+            using (var store = new NetworkAccessPolicyStore(path))
+            {
+                NetworkAccessPolicyState state = store.GetRawStateSnapshot();
+                Assert.Empty(state.Rules);
+                Assert.Empty(state.UserPrivileges);
+                Assert.True(state.Brake.System);
+                store.SetRule(new NetworkAccessActor("admin", true), new RuleWriteSpec("system", null, null, null, "new.example", "host", 443, true), store.Revision);
+            }
+            using var reopened = new NetworkAccessPolicyStore(path);
+            Assert.Single(reopened.GetRawStateSnapshot().Rules);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+}

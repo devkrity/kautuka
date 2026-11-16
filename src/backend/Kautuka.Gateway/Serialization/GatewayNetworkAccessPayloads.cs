@@ -25,12 +25,9 @@ internal sealed record NetworkAccessRequestDto(
     string? Purpose = null,
     bool? CompatibilityMode = null,
     bool? WaitingForAdmin = null,
-    bool? OwnerCanApproveOwn = null,
-    bool? OwnerCanAllowAllAgents = null);
+    bool? OwnerCanApproveOwn = null);
 
-internal sealed record UserPrivilegesSummaryDto(
-    bool CanApproveOwn,
-    bool CanAllowAllAgents);
+internal sealed record UserPrivilegesSummaryDto(bool CanApproveOwn);
 
 internal sealed record NetworkAccessBrakeDto(
     bool UserPaused,
@@ -93,7 +90,8 @@ internal sealed record CreateOrUpdateRuleDto(
     int Port,
     bool Allowed,
     bool? AllowLan,
-    long ExpectedRevision);
+    long ExpectedRevision,
+    string? ReplaceRuleId = null);
 
 internal sealed record NetworkAccessActivityDto(
     string TimestampUtc,
@@ -117,13 +115,10 @@ internal sealed record NetworkActivityResponseDto(
 internal sealed record UserNetworkPrivilegesDto(
     string UserId,
     bool CanApproveOwn,
-    bool CanAllowAllAgents,
     string? SetBy = null,
     string? SetAtUtc = null);
 
-internal sealed record UpdateUserNetworkPrivilegesDto(
-    bool CanApproveOwn,
-    bool CanAllowAllAgents);
+internal sealed record UpdateUserNetworkPrivilegesDto(bool CanApproveOwn);
 
 internal sealed record UpdateUserBrakeDto(
     string? UserId,

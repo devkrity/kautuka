@@ -20,7 +20,8 @@ public sealed record NetworkAccessRule(
     bool AllowLan,
     string DecidedBy,
     DateTimeOffset DecidedAtUtc,
-    string Source = "user")
+    string Source = "user",
+    bool DecidedByAdmin = false)
 {
     public static string ComputeId(
         string scopeKind,
@@ -69,8 +70,11 @@ public sealed record NetworkAccessRequest(
         string destKind,
         string destination,
         int port)
-        => NetworkAccessIdGenerator.ComputeBase32Id(
-            $"{actorKind}|{attribution}|{userId ?? string.Empty}|{agentId ?? string.Empty}|{connectorId ?? string.Empty}|{(systemwide ? "1" : "0")}|{origin}|{destKind}|{destination}|{port.ToString(CultureInfo.InvariantCulture)}");
+    {
+        _ = systemwide; // Retained for wire compatibility; catalogue availability is not NAC identity.
+        return NetworkAccessIdGenerator.ComputeBase32Id(
+            $"{actorKind}|{attribution}|{userId ?? string.Empty}|{agentId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port.ToString(CultureInfo.InvariantCulture)}");
+    }
 }
 
 public sealed record NetworkAccessRequestView(

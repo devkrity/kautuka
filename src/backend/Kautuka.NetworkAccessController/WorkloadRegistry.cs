@@ -415,11 +415,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         string egress = entry.Egress;
         string attribution = entry.Attribution;
 
-        if (entry.ContainerId.StartsWith("system::", StringComparison.Ordinal)
-            || (!entry.Systemwide
-                && string.IsNullOrEmpty(agentId)
-                && entry.Kind != "builder"
-                && !string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase)))
+        if (entry.ContainerId.StartsWith("system::", StringComparison.Ordinal))
         {
             egress = "deny-all";
             attribution = "none";
@@ -428,71 +424,22 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         if (egress is "deny-all" or "proxy-only")
         {
             if (attribution != "none")
-            {
                 throw new ArgumentException("deny-all and proxy-only workloads must have attribution = 'none'.", nameof(entry));
-            }
         }
-        else if (entry.Systemwide)
+        else if (attribution == "user-agent")
         {
-            if (string.IsNullOrEmpty(connectorId))
-            {
-                throw new ArgumentException("Systemwide connector requires a connectorId.", nameof(entry));
-            }
-
-            if (attribution == "user-agent")
-            {
-                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId))
-                {
-                    throw new ArgumentException("Agent-attributed connector requires both userId and agentId.", nameof(entry));
-                }
-            }
-            else if (attribution == "user")
-            {
-                if (string.IsNullOrEmpty(userId))
-                {
-                    throw new ArgumentException("Systemwide connector with attribution = 'user' requires a userId.", nameof(entry));
-                }
-
-                if (!string.IsNullOrEmpty(agentId))
-                {
-                    throw new ArgumentException("Systemwide connector entry cannot carry an agentId.", nameof(entry));
-                }
-            }
-            else if (attribution == "none")
-            {
-                if (!string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
-                {
-                    throw new ArgumentException("Shared systemwide connector with attribution = 'none' cannot carry userId or agentId.", nameof(entry));
-                }
-            }
-            else
-            {
-                throw new ArgumentException("Systemwide connector cannot have attribution = 'user-agent'.", nameof(entry));
-            }
+            if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId))
+                throw new ArgumentException("Agent-attributed workload requires both userId and agentId.", nameof(entry));
+        }
+        else if (attribution == "user")
+        {
+            if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(connectorId) || !string.IsNullOrEmpty(agentId))
+                throw new ArgumentException("User-attributed connector requires userId and connectorId without agentId.", nameof(entry));
         }
         else
         {
-            if (attribution == "user-agent")
-            {
-                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(agentId))
-                {
-                    throw new ArgumentException("Ordinary container requires both userId and agentId.", nameof(entry));
-                }
-            }
-            else if (attribution == "user")
-            {
-                // Connector probe running under requesting user's identity (A1)
-                if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(connectorId))
-                {
-                    throw new ArgumentException("User-attributed connector probe requires both userId and connectorId.", nameof(entry));
-                }
-            }
-            else
-            {
-                throw new ArgumentException("Normal egress container must be attributed to a user or user+agent.", nameof(entry));
-            }
+            throw new ArgumentException("Normal egress container must be attributed to a user or user+agent.", nameof(entry));
         }
-
         return entry with
         {
             Ip = normalizedIp,

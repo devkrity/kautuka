@@ -97,33 +97,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             aliceToken);
         Assert.Equal("agent", ownAgentAllowed.RootElement.GetProperty("rule").GetProperty("scopeKind").GetString());
 
-        // Negative control: canApproveOwn alone does not authorize a user-scope rule.
-        long revisionBeforeUserScopeAttempt = fixture.PolicyStore.Revision;
-        string[] rulesBeforeUserScopeAttempt = fixture.PolicyStore.ListRules(adminActor).Rules
-            .Select(view => view.Rule.Id)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        using (HttpResponseMessage userScopeDenied = await fixture.SendRawJsonAsync(
-            HttpMethod.Post,
-            $"/api/network-access/requests/{aliceAllAgentsRequest.RequestId}/decision",
-            new { allow = true, scope = "user", expectedRevision = fixture.PolicyStore.Revision },
-            aliceToken))
-        {
-            Assert.Equal(HttpStatusCode.Forbidden, userScopeDenied.StatusCode);
-        }
-        Assert.Equal(revisionBeforeUserScopeAttempt, fixture.PolicyStore.Revision);
-        Assert.Equal(rulesBeforeUserScopeAttempt, fixture.PolicyStore.ListRules(adminActor).Rules
-            .Select(view => view.Rule.Id)
-            .Order(StringComparer.Ordinal));
-        NetworkAccessRequestView allAgentsRequestAfterDeniedAttempt = fixture.PolicyStore.ListRequests(adminActor).Requests
-            .Single(view => view.Request.Id == aliceAllAgentsRequest.RequestId);
-        Assert.Equal("pending", allAgentsRequestAfterDeniedAttempt.Request.Status);
-
-        _ = await fixture.SendJsonAsync(
-            HttpMethod.Put,
-            $"/api/network-access/users/{aliceId}/privileges",
-            new { canApproveOwn = true, canAllowAllAgents = true },
-            adminToken);
+        // The single management privilege authorizes Alice's user-scope rule.
         using JsonDocument allAgentsAllowed = await fixture.SendJsonAsync(
             HttpMethod.Post,
             $"/api/network-access/requests/{aliceAllAgentsRequest.RequestId}/decision",

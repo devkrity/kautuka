@@ -78,7 +78,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 
         using JsonDocument privAfterPromote = await fixture.SendGetAsync($"/api/network-access/users/{aliceId}/privileges", adminToken);
         Assert.True(privAfterPromote.RootElement.GetProperty("canApproveOwn").GetBoolean());
-        Assert.True(privAfterPromote.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+        Assert.False(privAfterPromote.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
         using JsonDocument createdRule = await fixture.SendJsonAsync(
             HttpMethod.Put,
@@ -98,7 +98,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.True(fixture.Controller.EvaluateContainerConnection(
             new ContainerConnectionInput("10.247.1.20", "93.184.216.34", 443, "promoted.example.com")).Allowed);
 
-        // Negative control (.NC): Demoting Alice to standard user clears ON flags, pauses user-scope rules, and denies egress.
+        // Demotion removes Alice's management privilege but leaves the administrator-created rule active.
         using JsonDocument demoteDoc = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/settings/users/{aliceId}/role",
@@ -110,15 +110,15 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 
         using JsonDocument privAfterDemote = await fixture.SendGetAsync($"/api/network-access/users/{aliceId}/privileges", adminToken);
         Assert.False(privAfterDemote.RootElement.GetProperty("canApproveOwn").GetBoolean());
-        Assert.False(privAfterDemote.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+        Assert.False(privAfterDemote.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
-        Assert.False(fixture.Controller.EvaluateContainerConnection(
+        Assert.True(fixture.Controller.EvaluateContainerConnection(
             new ContainerConnectionInput("10.247.1.20", "93.184.216.34", 443, "promoted.example.com")).Allowed);
 
         using JsonDocument rulesAfterDemote = await fixture.SendGetAsync($"/api/network-access/rules?userId={aliceId}", adminToken);
         JsonElement demotedRule = rulesAfterDemote.RootElement.GetProperty("rules").EnumerateArray()
             .Single(r => r.GetProperty("destination").GetString() == "promoted.example.com");
-        Assert.True(demotedRule.GetProperty("paused").GetBoolean());
+        Assert.False(demotedRule.GetProperty("paused").GetBoolean());
     }
 
     private static void AssertPersistedPrivileges(GatewayNacFixture fixture, string userId, bool expected)
@@ -146,10 +146,10 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         using JsonDocument putPriv = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/network-access/users/{bobId}/privileges",
-            new { canApproveOwn = true, canAllowAllAgents = true },
+            new { canApproveOwn = true },
             adminToken);
         Assert.True(putPriv.RootElement.GetProperty("canApproveOwn").GetBoolean());
-        Assert.True(putPriv.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+        Assert.False(putPriv.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
         fixture.Registry.Register(new RegistryEntry(
             "10.247.1.30", bobId, "bob-agent", "ctr-bob-1", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
@@ -165,7 +165,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.All(cards, card =>
         {
             Assert.True(card.GetProperty("ownerCanApproveOwn").GetBoolean());
-            Assert.True(card.GetProperty("ownerCanAllowAllAgents").GetBoolean());
+            Assert.False(card.TryGetProperty("ownerCanAllowAllAgents", out _));
         });
 
         string req1Id = cards.Single(c => c.GetProperty("destination").GetString() == "card1.example.com").GetProperty("id").GetString()!;
@@ -179,21 +179,21 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         JsonElement decidedReq1 = decideDoc1.RootElement.GetProperty("request");
         Assert.True(decidedReq1.GetProperty("ownerCanApproveOwn").GetBoolean());
-        Assert.True(decidedReq1.GetProperty("ownerCanAllowAllAgents").GetBoolean());
+        Assert.False(decidedReq1.TryGetProperty("ownerCanAllowAllAgents", out _));
         long revAfterDecide1 = decideDoc1.RootElement.GetProperty("revision").GetInt64();
 
         // Negative control (.NC): updating stored privileges to (true, false) flips OwnerCanAllowAllAgents to false on both GET and decision DTOs.
         _ = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/network-access/users/{bobId}/privileges",
-            new { canApproveOwn = true, canAllowAllAgents = false },
+            new { canApproveOwn = true },
             adminToken);
 
         using JsonDocument listAfterRevoke = await fixture.SendGetAsync("/api/network-access/requests", adminToken);
         JsonElement card2 = listAfterRevoke.RootElement.GetProperty("requests").EnumerateArray()
             .Single(c => c.GetProperty("id").GetString() == req2Id);
         Assert.True(card2.GetProperty("ownerCanApproveOwn").GetBoolean());
-        Assert.False(card2.GetProperty("ownerCanAllowAllAgents").GetBoolean());
+        Assert.False(card2.TryGetProperty("ownerCanAllowAllAgents", out _));
 
         using JsonDocument decideDoc2 = await fixture.SendJsonAsync(
             HttpMethod.Post,
@@ -202,7 +202,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
         JsonElement decidedReq2 = decideDoc2.RootElement.GetProperty("request");
         Assert.True(decidedReq2.GetProperty("ownerCanApproveOwn").GetBoolean());
-        Assert.False(decidedReq2.GetProperty("ownerCanAllowAllAgents").GetBoolean());
+        Assert.False(decidedReq2.TryGetProperty("ownerCanAllowAllAgents", out _));
     }
 
     [Fact]
@@ -256,18 +256,18 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         using JsonDocument aliceSet = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/network-access/users/{aliceId}/privileges",
-            new { canApproveOwn = true, canAllowAllAgents = false },
+            new { canApproveOwn = true },
             adminToken);
         Assert.True(aliceSet.RootElement.GetProperty("canApproveOwn").GetBoolean());
-        Assert.False(aliceSet.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+        Assert.False(aliceSet.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
         using JsonDocument bobSet = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/network-access/users/{bobId}/privileges",
-            new { canApproveOwn = false, canAllowAllAgents = false },
+            new { canApproveOwn = false },
             adminToken);
         Assert.False(bobSet.RootElement.GetProperty("canApproveOwn").GetBoolean());
-        Assert.False(bobSet.RootElement.GetProperty("canAllowAllAgents").GetBoolean());
+        Assert.False(bobSet.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
         // Simulate an older Gateway user without a corresponding NAC record, then restart against the reopened store.
         JsonNode policy = JsonNode.Parse(await File.ReadAllTextAsync(fixture.PolicyStorePath, TestContext.Current.CancellationToken))!;

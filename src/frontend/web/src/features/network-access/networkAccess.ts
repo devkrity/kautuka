@@ -25,12 +25,10 @@ export interface NetworkAccessRequestDto {
   compatibilityMode?: boolean;
   waitingForAdmin?: boolean;
   ownerCanApproveOwn?: boolean;
-  ownerCanAllowAllAgents?: boolean;
 }
 
 export interface UserPrivilegesSummaryDto {
   canApproveOwn: boolean;
-  canAllowAllAgents: boolean;
 }
 
 export interface NetworkAccessBrakeDto {
@@ -50,7 +48,7 @@ export interface NetworkRequestsResponseDto {
 
 export interface NetworkAccessRuleDto {
   id: string;
-  scopeKind: 'agent' | 'user' | 'connector-system' | 'system';
+  scopeKind: 'agent' | 'user' | 'system';
   userId?: string;
   userDisplayName?: string;
   agentId?: string;
@@ -77,7 +75,7 @@ export interface NetworkRulesResponseDto {
 
 export interface RequestDecisionDto {
   allow: boolean;
-  scope?: 'agent' | 'user' | 'connector-system';
+  scope?: 'agent' | 'user' | 'connector' | 'system';
   allowLan?: boolean;
   expectedRevision: number;
 }
@@ -89,7 +87,7 @@ export interface RequestDecisionResponseDto {
 }
 
 export interface CreateOrUpdateRuleDto {
-  scopeKind: 'agent' | 'user' | 'connector-system' | 'system';
+  scopeKind: 'agent' | 'user' | 'system';
   userId?: string;
   agentId?: string;
   connectorId?: string;
@@ -99,6 +97,7 @@ export interface CreateOrUpdateRuleDto {
   allowed: boolean;
   allowLan?: boolean;
   expectedRevision: number;
+  replaceRuleId?: string;
 }
 
 export interface ProviderNetworkTarget {
@@ -216,14 +215,12 @@ export interface NetworkActivityResponseDto {
 export interface UserNetworkPrivilegesDto {
   userId: string;
   canApproveOwn: boolean;
-  canAllowAllAgents: boolean;
   setBy?: string;
   setAtUtc?: string;
 }
 
 export interface UpdateUserNetworkPrivilegesDto {
   canApproveOwn: boolean;
-  canAllowAllAgents: boolean;
 }
 
 export interface UpdateUserBrakeDto {

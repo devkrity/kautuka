@@ -228,7 +228,7 @@ internal static class GatewayConnectorEndpointMappings
                 .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector, user.Id), ct)
                 .ConfigureAwait(false);
 
-            if (!validation.Success)
+            if (!validation.Success && !validation.NetworkApprovalRequired)
             {
                 return Results.Json(
                     new GatewayConnectorMcpbImportResponse(
@@ -248,11 +248,15 @@ internal static class GatewayConnectorEndpointMappings
                 scope,
                 ownerUserId,
                 ct).ConfigureAwait(false);
+            if (validation.NetworkApprovalRequired)
+                saved = await catalog.SaveMcpServerDiscoveryAsync(inspection.ServerId, null, null, ct).ConfigureAwait(false);
 
             return Results.Json(
                 new GatewayConnectorMcpbImportResponse(
                     hasExisting ? "updated" : "created",
-                    hasExisting ? "Connector updated from MCPB bundle." : "Connector created from MCPB bundle.",
+                    validation.NetworkApprovalRequired
+                        ? "Connector saved. Tool discovery needs network approval; approve the request and test the connection again."
+                        : hasExisting ? "Connector updated from MCPB bundle." : "Connector created from MCPB bundle.",
                     inspection.ServerId,
                     inspection.ManifestVersion,
                     inspection.ServerType,
@@ -316,7 +320,7 @@ internal static class GatewayConnectorEndpointMappings
                 : Results.Json(new GatewayErrorResponse("Connector not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
         });
 
-        app.MapPost("/api/connectors/{serverId}", async (string serverId, IGatewayCatalogStore catalog, ConnectorAuthCatalog connectorAuth, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        app.MapPost("/api/connectors/{serverId}", async (string serverId, IGatewayCatalogStore catalog, ConnectorAuthCatalog connectorAuth, IMcpConnectorTestService testService, CredentialResolverService credentialResolver, ConnectorOAuthService connectorOAuth, KautukaDatabase database, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             if (!auth.TryAuthorize(context, out GatewayUser? user) || user is null)
                 return Results.Unauthorized();
@@ -376,10 +380,26 @@ internal static class GatewayConnectorEndpointMappings
             string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, request.Scope);
             string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
 
+            McpConnectorTestResult? discovery = null;
+            bool disablingExisting = hasExisting && existing!.Enabled && request.Enabled == false;
+            if (!disablingExisting && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
+            {
+                GatewayConnectorTestRequest candidate = BuildImportValidationRequest(serverId, request, user.Id);
+                candidate = await MergeResolvedCredentialsAsync(candidate, user, existing, credentialResolver, connectorOAuth, ct).ConfigureAwait(false);
+                candidate.UserId = user.Id;
+                candidate.SaveDiscovery = true;
+                discovery = await testService.TestAsync(candidate, ct).ConfigureAwait(false);
+                if (!discovery.Success && !discovery.NetworkApprovalRequired)
+                    return Results.Json(new GatewayErrorResponse(discovery.Message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                request = BuildActivatedImportRequest(request, discovery);
+            }
+
             GatewayMcpServer saved;
             try
             {
                 saved = await catalog.SaveMcpServerAsync(serverId, request, scope, ownerUserId, ct).ConfigureAwait(false);
+                if (discovery?.NetworkApprovalRequired == true)
+                    saved = await catalog.SaveMcpServerDiscoveryAsync(serverId, null, null, ct).ConfigureAwait(false);
             }
             catch (InvalidOperationException ex)
             {
@@ -670,14 +690,23 @@ internal static class GatewayConnectorEndpointMappings
         {
             Id = serverId,
             UserId = userId,
+            SaveDiscovery = true,
             Transport = connector.Transport ?? "container",
+            LocalCommand = connector.LocalCommand,
+            LocalArgs = connector.LocalArgs,
             ContainerImage = connector.ContainerImage,
             ContainerCommand = connector.ContainerCommand,
             ContainerArgs = connector.ContainerArgs,
+            ContainerSidecarName = connector.ContainerSidecarName,
             BundlePath = connector.BundlePath,
             ServerType = connector.ServerType,
             ReadinessTimeoutSeconds = connector.ReadinessTimeoutSeconds,
             JitCooldownSeconds = connector.JitCooldownSeconds,
+            McpProtocolVersion = connector.McpProtocolVersion,
+            EnvKeys = connector.EnvKeys,
+            TestEnv = connector.DiscoveryEnv is null ? null : connector.DiscoveryEnv
+                .Where(pair => connector.EnvKeys?.Contains(pair.Key, StringComparer.Ordinal) == true)
+                .ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.Ordinal),
         };
 
     private static GatewayConnectorUpsertRequest BuildActivatedImportRequest(
@@ -702,14 +731,16 @@ internal static class GatewayConnectorEndpointMappings
             ServerType = connector.ServerType,
             RuntimeArtifactType = connector.RuntimeArtifactType,
             RuntimeArtifactSourceDigest = connector.RuntimeArtifactSourceDigest,
-            RuntimeArtifactBuildStatus = "ready",
+            RuntimeArtifactBuildStatus = connector.RuntimeArtifactType is null ? connector.RuntimeArtifactBuildStatus : "ready",
             ReadinessTimeoutSeconds = connector.ReadinessTimeoutSeconds,
             JitCooldownSeconds = connector.JitCooldownSeconds,
             HealthcheckUrl = connector.HealthcheckUrl,
             HealthcheckIntervalMilliseconds = connector.HealthcheckIntervalMilliseconds,
+            McpProtocolVersion = connector.McpProtocolVersion,
             EnvKeys = connector.EnvKeys,
             Credentials = connector.Credentials,
             HttpHeaders = connector.HttpHeaders,
+            ConfirmLegacyAuthReplacement = connector.ConfirmLegacyAuthReplacement,
             Enabled = connector.Enabled,
             ToolCount = validation.ToolCount,
             ToolNames = validation.ToolNames?.ToArray(),

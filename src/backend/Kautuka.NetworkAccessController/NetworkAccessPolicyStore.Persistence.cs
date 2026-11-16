@@ -295,16 +295,16 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         }
         catch (FileNotFoundException)
         {
-            return state = new NetworkAccessPolicyState(1, 0, [], [], [], BrakeState.Empty);
+            return state = new NetworkAccessPolicyState(2, 0, [], [], [], BrakeState.Empty);
         }
         catch (DirectoryNotFoundException)
         {
-            return state = new NetworkAccessPolicyState(1, 0, [], [], [], BrakeState.Empty);
+            return state = new NetworkAccessPolicyState(2, 0, [], [], [], BrakeState.Empty);
         }
 
         if (bytes.Length == 0)
         {
-            return state = new NetworkAccessPolicyState(1, 0, [], [], [], BrakeState.Empty);
+            return state = new NetworkAccessPolicyState(2, 0, [], [], [], BrakeState.Empty);
         }
 
         try
@@ -312,6 +312,14 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             NetworkAccessPolicyState loaded = JsonSerializer.Deserialize(bytes, NetworkAccessJsonContext.Default.NetworkAccessPolicyState)
                 ?? throw new InvalidDataException($"Corrupt state file: deserialization returned null for {path}.");
 
+            if (loaded.SchemaVersion == 1)
+            {
+                NetworkAccessPolicyState reset = loaded with { SchemaVersion = 2, Revision = checked(loaded.Revision + 1), Rules = [], UserPrivileges = [] };
+                SaveSync(reset);
+                return reset;
+            }
+            if (loaded.SchemaVersion != 2)
+                throw new InvalidDataException($"Unsupported network policy schema version {loaded.SchemaVersion}.");
             return state = loaded;
         }
         catch (JsonException ex)

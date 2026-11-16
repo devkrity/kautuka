@@ -605,7 +605,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             }
 
                             bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
-                            bool isProbe = string.Equals(purpose, "probe", StringComparison.OrdinalIgnoreCase);
 
                             // Find IP on kautuka-workload
                             string ip = string.Empty;
@@ -629,7 +628,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
                             if (isValid && kind is "connector" or "agent-sandbox")
                             {
-                                if (!systemwide && !isProbe && string.IsNullOrWhiteSpace(user)
+                                if (string.IsNullOrWhiteSpace(user)
                                     && egress is not ("deny-all" or "proxy-only"))
                                 {
                                     isValid = false;
@@ -650,30 +649,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                     // Ignore cleanup failure
                                 }
                                 continue;
-                            }
-
-                            string attribution;
-                            if (egress is "deny-all" or "proxy-only")
-                            {
-                                attribution = "none";
-                            }
-                            else if (systemwide)
-                            {
-                                attribution = string.IsNullOrWhiteSpace(user) ? "none" : (string.IsNullOrWhiteSpace(agent) ? "user" : "user-agent");
-                            }
-                            else if (isProbe)
-                            {
-                                attribution = "user";
-                            }
-                            else if (string.IsNullOrWhiteSpace(agent))
-                            {
-                                // v7-26: Non-probe container missing agentId cannot have normal egress
-                                egress = "deny-all";
-                                attribution = "none";
-                            }
-                            else
-                            {
-                                attribution = "user-agent";
                             }
 
                             var entry = new RegistryEntry(

@@ -488,10 +488,14 @@ public sealed partial class WorkspaceGrpcService(
         await this.WaitForReadyAsync(context.CancellationToken).ConfigureAwait(false);
 
         WorkspaceMcpContainerConnectorDefinition probeConnector = WorkspaceGrpcContractMapper.FromProbe(request);
+        DateTimeOffset discoveryStarted = DateTimeOffset.UtcNow;
 
         (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage) = await this.connectorExecutionService
-            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken, request.UserId)
+            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken, request.UserId, request.SaveDiscovery)
             .ConfigureAwait(false);
+
+        bool approvalRequired = request.SaveDiscovery && !ok && !string.IsNullOrWhiteSpace(request.UserId)
+            && HasRecentDiscoveryRequest(Nac.PolicyStore.GetRawStateSnapshot().Requests, request.UserId, request.ConnectorId, discoveryStarted);
 
         var response = new WorkspaceMcpProbeResponse
         {
@@ -499,6 +503,7 @@ public sealed partial class WorkspaceGrpcService(
             Message = ok ? $"Connector '{request.ConnectorId}' is available." : failureMessage ?? $"Connector '{request.ConnectorId}' is unavailable.",
             ToolCount = tools.Count,
             Outcome = ok ? WorkspaceOperationOutcome.Succeeded : WorkspaceOperationOutcome.Failed,
+            NetworkApprovalRequired = approvalRequired,
         };
         response.Tools.AddRange(tools.Select(static t => new WorkspaceMcpToolMessage
         {
@@ -506,6 +511,20 @@ public sealed partial class WorkspaceGrpcService(
             Description = t.Description ?? string.Empty
         }));
         return response;
+    }
+
+    internal static bool HasRecentDiscoveryRequest(
+        IReadOnlyList<Kautuka.NetworkAccessController.NetworkAccessRequest> requests,
+        string userId,
+        string scopedConnectorId,
+        DateTimeOffset started)
+    {
+        string prefix = userId + "::";
+        string connectorId = scopedConnectorId.StartsWith(prefix, StringComparison.Ordinal)
+            ? scopedConnectorId[prefix.Length..] : scopedConnectorId;
+        return requests.Any(pending => pending.Status == "pending" && pending.UserId == userId
+            && string.IsNullOrWhiteSpace(pending.AgentId) && pending.LastSeenUtc >= started
+            && (pending.ConnectorId == connectorId || pending.ConnectorId == prefix + connectorId));
     }
 
     public override async Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerTools(WorkspaceMcpContainerCallRequest request, ServerCallContext context)

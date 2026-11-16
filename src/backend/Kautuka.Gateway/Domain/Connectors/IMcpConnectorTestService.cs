@@ -6,7 +6,8 @@ internal sealed record McpConnectorTestResult(
     int? ToolCount = null,
     string? PackageChecked = null,
     IReadOnlyList<string>? ToolNames = null,
-    IReadOnlyDictionary<string, string?>? ToolDescriptions = null);
+    IReadOnlyDictionary<string, string?>? ToolDescriptions = null,
+    bool NetworkApprovalRequired = false);
 
 internal interface IMcpConnectorTestService
 {

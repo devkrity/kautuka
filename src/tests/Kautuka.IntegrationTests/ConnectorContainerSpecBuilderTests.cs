@@ -10,15 +10,18 @@ namespace Kautuka.IntegrationTests;
 public sealed class ConnectorContainerSpecBuilderTests
 {
     [Fact]
-    public void ResolveIdentityRequiresOwnerAndAgentForRuntimeConnector()
+    public void ResolveIdentityRequiresOwnerButAllowsDiscoveryWithoutAgent()
     {
         WorkspaceMcpContainerConnectorDefinition connector = CreateConnector();
         Assert.Throws<InvalidOperationException>(() =>
             ConnectorContainerSpecBuilder.ResolveIdentity(connector, null, purpose: null));
 
         ContainerContext userOnly = CreateWorkspaceContext() with { ScopeType = "user", ScopeId = "user-alpha" };
-        Assert.Throws<InvalidOperationException>(() =>
-            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userOnly, purpose: null));
+        ConnectorContainerSpecBuilder.ConnectorIdentity discovery =
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userOnly, purpose: null);
+        Assert.Equal("user-alpha", discovery.UserId);
+        Assert.True(string.IsNullOrEmpty(discovery.AgentId));
+        Assert.Equal("normal", discovery.Egress);
 
         ConnectorContainerSpecBuilder.ConnectorIdentity identity =
             ConnectorContainerSpecBuilder.ResolveIdentity(connector, CreateWorkspaceContext(), purpose: null);

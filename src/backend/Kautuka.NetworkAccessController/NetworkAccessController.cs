@@ -242,7 +242,7 @@ public sealed class NetworkAccessController
         if (isPackageProxyService && HasPackageServiceExplicitDeny(state, entry, destKind, normalizedDestination, destinationPort))
         {
             policyStore.IncrementBlockedRequestAttemptInMemory(
-                entry.UserId, entry.AgentId, entry.ConnectorId, entry.Systemwide,
+                entry.UserId, entry.AgentId, entry.ConnectorId, false,
                 destKind, normalizedDestination, destinationPort);
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
         }
@@ -257,6 +257,10 @@ public sealed class NetworkAccessController
         }
 
         bool isProbe = string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase);
+
+        // An explicit block always wins, including over a temporary probe allowance.
+        if (ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort).Kind == ScopeMatchKind.BlockedByRule)
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
 
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
         if (isProbe && policyStore.TryEvaluateTemporaryProbeDecision(
@@ -295,7 +299,7 @@ public sealed class NetworkAccessController
                     entry.UserId,
                     entry.AgentId,
                     entry.ConnectorId,
-                    entry.Systemwide,
+                    false,
                     destKind,
                     normalizedDestination,
                     destinationPort);
@@ -322,7 +326,7 @@ public sealed class NetworkAccessController
                         entry.UserId,
                         entry.AgentId,
                         entry.ConnectorId,
-                        entry.Systemwide,
+                        false,
                         entry.Attribution,
                         destKind,
                         normalizedDestination,
@@ -344,7 +348,7 @@ public sealed class NetworkAccessController
                     entry.UserId,
                     entry.AgentId,
                     entry.ConnectorId,
-                    entry.Systemwide,
+                    false,
                     entry.Attribution,
                     destKind,
                     normalizedDestination,
@@ -382,7 +386,7 @@ public sealed class NetworkAccessController
         string userId = input.UserId.Trim();
         string agentId = string.IsNullOrWhiteSpace(input.AgentId) ? "gateway" : input.AgentId.Trim();
         string? connectorId = string.IsNullOrWhiteSpace(input.ConnectorId) ? null : input.ConnectorId.Trim();
-        bool attributedAgent = connectorId is not null && !string.IsNullOrWhiteSpace(input.AgentId);
+        bool userConnectorWithoutAgent = connectorId is not null && string.IsNullOrWhiteSpace(input.AgentId);
         string origin = string.IsNullOrWhiteSpace(input.Origin) ? "gateway" : input.Origin.Trim();
 
         // 0. Emergency Brake check FIRST
@@ -427,7 +431,19 @@ public sealed class NetworkAccessController
         // System actor check (Gateway / ChannelHost system traffic, seeded providers & channels)
         if (string.Equals(userId, "system", StringComparison.Ordinal))
         {
+            IReadOnlyList<NetworkAccessRule> platformRules = NetworkAccessRuleMatcher.FindApplicable(
+                state, null, null, null, destKind, normalizedDestination, input.Port);
+            if (platformRules.Any(static rule => !rule.Allowed))
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port);
+            if (explicitSystemRule is { Allowed: false })
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
+                && (platformRules.Any(static rule => rule.Allowed) || explicitSystemRule is { Allowed: true })
+                && !platformRules.Any(static rule => rule.Allowed && rule.AllowLan) && explicitSystemRule is not { Allowed: true, AllowLan: true })
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
+            if (platformRules.Any(static rule => rule.Allowed))
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
             if (explicitSystemRule is not null)
             {
                 if (explicitSystemRule.Allowed)
@@ -473,14 +489,14 @@ public sealed class NetworkAccessController
         var syntheticEntry = new RegistryEntry(
             Ip: "127.0.0.1",
             UserId: userId,
-            AgentId: input.Systemwide && !attributedAgent ? null : agentId,
+            AgentId: userConnectorWithoutAgent ? null : agentId,
             ContainerId: origin,
-            Kind: input.Systemwide || !string.IsNullOrEmpty(connectorId) ? "connector" : "agent-sandbox",
+            Kind: !string.IsNullOrEmpty(connectorId) ? "connector" : "agent-sandbox",
             ConnectorId: connectorId,
             ExecContext: "app",
-            Systemwide: input.Systemwide,
+            Systemwide: false,
             Egress: "normal",
-            Attribution: input.Systemwide && !attributedAgent ? "user" : "user-agent",
+            Attribution: userConnectorWithoutAgent ? "user" : "user-agent",
             CompatProfile: null,
             RegisteredUtc: now);
 
@@ -496,9 +512,9 @@ public sealed class NetworkAccessController
             case ScopeMatchKind.BlockedByRule:
                 policyStore.IncrementBlockedRequestAttemptInMemory(
                     userId,
-                    input.Systemwide && !attributedAgent ? null : agentId,
+                    userConnectorWithoutAgent ? null : agentId,
                     connectorId,
-                    input.Systemwide,
+                    false,
                     destKind,
                     normalizedDestination,
                     input.Port);
@@ -543,14 +559,14 @@ public sealed class NetworkAccessController
 
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     userId,
-                    input.Systemwide && !attributedAgent ? null : agentId,
+                    userConnectorWithoutAgent ? null : agentId,
                     connectorId,
-                    input.Systemwide,
-                    attribution: input.Systemwide && !attributedAgent ? "user" : "user-agent",
+                    false,
+                    attribution: userConnectorWithoutAgent ? "user" : "user-agent",
                     destKind,
                     normalizedDestination,
                     input.Port,
-                    actorKind: input.Systemwide && attributedAgent ? "connector" : "first-party",
+                    actorKind: connectorId is not null ? "connector" : "first-party",
                     origin,
                     input.Purpose,
                     compatProfile: null,
@@ -566,35 +582,10 @@ public sealed class NetworkAccessController
         }
     }
 
-    private bool HasPackageServiceExplicitDeny(
-        NetworkAccessPolicyState state,
-        RegistryEntry entry,
-        string destKind,
-        string destination,
-        int port)
-    {
-        IReadOnlyList<NetworkAccessRule> rules = state.Rules;
-        if (FindExactRule(rules, "system", null, null, null, destKind, destination, port) is { Allowed: false })
-        {
-            return true;
-        }
-
-        if (entry.Attribution == "user-agent")
-        {
-            if (FindExactRule(rules, "agent", entry.UserId, entry.AgentId, null, destKind, destination, port) is { Allowed: false }) return true;
-            if (!string.IsNullOrEmpty(entry.UserId) && policyStore.HasBothPrivileges(entry.UserId)
-                && FindExactRule(rules, "user", entry.UserId, null, null, destKind, destination, port) is { Allowed: false }) return true;
-        }
-
-        if (entry.Attribution == "user"
-            && FindExactRule(rules, "user", entry.UserId, null, entry.ConnectorId, destKind, destination, port) is { Allowed: false }) return true;
-
-        if (!string.IsNullOrEmpty(entry.ConnectorId)
-            && FindExactRule(rules, "connector-system", null, null, entry.ConnectorId, destKind, destination, port) is { Allowed: false }) return true;
-
-        return false;
-    }
-
+    private static bool HasPackageServiceExplicitDeny(
+        NetworkAccessPolicyState state, RegistryEntry entry, string destKind, string destination, int port)
+        => NetworkAccessRuleMatcher.FindApplicable(state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)
+            .Any(static rule => !rule.Allowed);
     private ScopeMatchOutcome ResolvePackageServiceDefault(
         NetworkAccessPolicyState state,
         string destKind,
@@ -619,243 +610,38 @@ public sealed class NetworkAccessController
         string destination,
         int port)
     {
-        if (entry.Attribution == "user-agent")
+        IReadOnlyList<NetworkAccessRule> applicable = NetworkAccessRuleMatcher.FindApplicable(
+            state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port,
+            allowAnyPublic: entry.ExecContext is "isolated" or "isolated-with-agent-files");
+        if (applicable.Any(static rule => !rule.Allowed))
+            return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+
+        NetworkAccessRule? allowed = applicable.FirstOrDefault(static rule => rule.Allowed && rule.AllowLan)
+            ?? applicable.FirstOrDefault(static rule => rule.Allowed);
+        if (allowed is not null)
         {
-            if (string.Equals(entry.UserId, "system", StringComparison.Ordinal)
-                && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)
-                && FindExactRule(state.Rules, "system", null, null, null, destKind, destination, port) is { Allowed: false })
-            {
-                return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-
-            // (a) Exact agent (userId, agentId) rule first
-            NetworkAccessRule? agentRule = FindExactRule(
-                state.Rules,
-                scopeKind: "agent",
-                userId: entry.UserId,
-                agentId: entry.AgentId,
-                connectorId: null,
-                destKind,
-                destination,
-                port);
-            if (agentRule is not null)
-            {
-                return agentRule.Allowed
-                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_agent", agentRule.AllowLan, OpenInternetBadge: false)
-                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-
-            if (string.Equals(entry.UserId, "system", StringComparison.Ordinal)
-                && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal))
-            {
-                NetworkAccessRule? explicitSystemRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "system",
-                    userId: null,
-                    agentId: null,
-                    connectorId: null,
-                    destKind,
-                    destination,
-                    port);
-                if (explicitSystemRule is not null)
-                {
-                    if (!explicitSystemRule.Allowed)
-                    {
-                        return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-                    }
-
-                    if (destKind == "ip"
-                        && NetworkAddressClassifier.IsNonPublicV4(destination)
-                        && !explicitSystemRule.AllowLan)
-                    {
-                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
-                    }
-
-                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_system", explicitSystemRule.AllowLan, OpenInternetBadge: false);
-                }
-
-                NetworkAccessRule? anyPublicRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "agent",
-                    userId: "system",
-                    agentId: "package-proxy",
-                    connectorId: null,
-                    destKind: "any-public",
-                    destination: string.Empty,
-                    port: 0)
-                    ?? policyStore.SeedRules.FirstOrDefault(rule =>
-                        string.Equals(rule.ScopeKind, "agent", StringComparison.Ordinal)
-                        && string.Equals(rule.UserId, "system", StringComparison.Ordinal)
-                        && string.Equals(rule.AgentId, "package-proxy", StringComparison.Ordinal)
-                        && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal)
-                        && rule.Allowed);
-                if (anyPublicRule is { Allowed: true })
-                {
-                    if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination))
-                    {
-                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
-                    }
-
-                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "seed", AllowLan: false, OpenInternetBadge: true);
-                }
-            }
-
-            // (b) Exact user (userId, connectorId == null) rule — active ONLY while user holds both flags!
-            if (!string.IsNullOrEmpty(entry.UserId) && policyStore.HasBothPrivileges(entry.UserId))
-            {
-                NetworkAccessRule? userRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "user",
-                    userId: entry.UserId,
-                    agentId: null,
-                    connectorId: null,
-                    destKind,
-                    destination,
-                    port);
-                if (userRule is not null)
-                {
-                    return userRule.Allowed
-                        ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_user", userRule.AllowLan, OpenInternetBadge: false)
-                        : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-                }
-            }
-
-            // Preserve existing connector-specific rules after the ordinary agent and user scopes.
-            if (entry.Systemwide && !string.IsNullOrEmpty(entry.ConnectorId))
-            {
-                ScopeMatchOutcome legacy = ResolveContainerScopeRule(state, entry with { AgentId = null, Attribution = "user" }, destKind, destination, port);
-                if (legacy.Kind != ScopeMatchKind.NoMatch) return legacy;
-            }
-
-            // (c) Dedicated connector container: check admin any-public rule for (userId, connectorId)
-            if (!string.IsNullOrEmpty(entry.UserId)
-                && !string.IsNullOrEmpty(entry.ConnectorId)
-                && entry.ExecContext is "isolated" or "isolated-with-agent-files")
-            {
-                NetworkAccessRule? anyPublicRule = FindAnyPublicRule(state.Rules, entry.UserId, entry.ConnectorId);
-                if (anyPublicRule is { Allowed: true })
-                {
-                    if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination))
-                    {
-                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
-                    }
-
-                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "any_public", AllowLan: false, OpenInternetBadge: true);
-                }
-            }
-
-            return new ScopeMatchOutcome(ScopeMatchKind.NoMatch, "no_rule", false, false);
+            if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination) && !allowed.AllowLan
+                && !IsPackageProxyService(destKind, destination, port))
+                return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
+            string reason = allowed.DestKind == "any-public" ? "any_public"
+                : allowed.ScopeKind == "user" && allowed.ConnectorId is not null ? "rule_user_connector"
+                : "rule_" + allowed.ScopeKind;
+            return new ScopeMatchOutcome(ScopeMatchKind.Allowed, reason, allowed.AllowLan,
+                OpenInternetBadge: allowed.DestKind == "any-public");
         }
 
-        if (entry.Attribution == "user")
+        if (entry.UserId == "system" && entry.AgentId == "package-proxy"
+            && policyStore.SeedRules.Any(static rule => rule.ScopeKind == "agent"
+                && rule.UserId == "system" && rule.AgentId == "package-proxy"
+                && rule.DestKind == "any-public" && rule.Allowed))
         {
-            // Systemwide connector per-user instance OR user-attributed connector probe
-            // (a) user (userId, connectorId) exact rule first
-            NetworkAccessRule? userConnectorRule = FindExactRule(
-                state.Rules,
-                scopeKind: "user",
-                userId: entry.UserId,
-                agentId: null,
-                connectorId: entry.ConnectorId,
-                destKind,
-                destination,
-                port);
-            if (userConnectorRule is not null)
-            {
-                return userConnectorRule.Allowed
-                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_user_connector", userConnectorRule.AllowLan, OpenInternetBadge: false)
-                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-
-            // (a2) user (userId, connectorId) any-public rule
-            if (!string.IsNullOrEmpty(entry.UserId) && !string.IsNullOrEmpty(entry.ConnectorId))
-            {
-                NetworkAccessRule? anyPublicRule = FindAnyPublicRule(state.Rules, entry.UserId, entry.ConnectorId);
-                if (anyPublicRule is { Allowed: true })
-                {
-                    if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination))
-                    {
-                        return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
-                    }
-
-                    return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "any_public", AllowLan: false, OpenInternetBadge: true);
-                }
-            }
-
-            // (b) connector-system (connectorId) rule
-            NetworkAccessRule? systemConnectorRule = FindExactRule(
-                state.Rules,
-                scopeKind: "connector-system",
-                userId: null,
-                agentId: null,
-                connectorId: entry.ConnectorId,
-                destKind,
-                destination,
-                port);
-            if (systemConnectorRule is not null)
-            {
-                return systemConnectorRule.Allowed
-                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_connector_system", systemConnectorRule.AllowLan, OpenInternetBadge: false)
-                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-
-            return new ScopeMatchOutcome(ScopeMatchKind.NoMatch, "no_rule", false, false);
-        }
-
-        if (entry.Systemwide && entry.Attribution == "none")
-        {
-            // Shared systemwide connector with no user attribution: only connector-system applies
-            NetworkAccessRule? systemConnectorRule = FindExactRule(
-                state.Rules,
-                scopeKind: "connector-system",
-                userId: null,
-                agentId: null,
-                connectorId: entry.ConnectorId,
-                destKind,
-                destination,
-                port);
-            if (systemConnectorRule is not null)
-            {
-                return systemConnectorRule.Allowed
-                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_connector_system", systemConnectorRule.AllowLan, OpenInternetBadge: false)
-                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-        }
-
-        // The package cache is a Manager-owned system service. Its exact system rule
-        // supplies the default allow; a systemwide explicit deny overrides the seed.
-        if (IsPackageProxyService(destKind, destination, port))
-        {
-            NetworkAccessRule? systemRule = FindExactRule(
-                state.Rules,
-                scopeKind: "system",
-                userId: null,
-                agentId: null,
-                connectorId: null,
-                destKind,
-                destination,
-                port);
-            if (systemRule is not null)
-            {
-                return systemRule.Allowed
-                    ? new ScopeMatchOutcome(ScopeMatchKind.Allowed, "rule_system", systemRule.AllowLan, OpenInternetBadge: false)
-                    : new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);
-            }
-
-            NetworkAccessRule? seedRule = policyStore.SeedRules.FirstOrDefault(rule =>
-                string.Equals(rule.ScopeKind, "system", StringComparison.Ordinal)
-                && string.Equals(rule.DestKind, destKind, StringComparison.Ordinal)
-                && string.Equals(rule.Destination, destination, StringComparison.Ordinal)
-                && rule.Port == port);
-            if (seedRule is not null && seedRule.Allowed)
-            {
-                return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "seed", seedRule.AllowLan, OpenInternetBadge: false);
-            }
+            if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(destination))
+                return new ScopeMatchOutcome(ScopeMatchKind.DeniedNotPublic, "not_public", false, false);
+            return new ScopeMatchOutcome(ScopeMatchKind.Allowed, "seed", false, true);
         }
 
         return new ScopeMatchOutcome(ScopeMatchKind.NoMatch, "no_rule", false, false);
     }
-
     private static NetworkAccessRule? FindExactRule(
         IReadOnlyList<NetworkAccessRule> rules,
         string scopeKind,

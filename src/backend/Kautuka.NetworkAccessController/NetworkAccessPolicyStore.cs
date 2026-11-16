@@ -221,7 +221,7 @@ public sealed partial class NetworkAccessPolicyStore
                     continue;
                 }
 
-                bool waitingForAdmin = !actor.IsAdmin && ((req.Systemwide && req.Attribution != "user-agent") || !callerPrivs.CanApproveOwn);
+                bool waitingForAdmin = !actor.IsAdmin && (string.IsNullOrWhiteSpace(req.UserId) || req.UserId == "system" || !callerPrivs.CanApproveOwn);
                 views.Add(new NetworkAccessRequestView(
                     req,
                     WaitingForAdmin: waitingForAdmin,
@@ -236,7 +236,7 @@ public sealed partial class NetworkAccessPolicyStore
                     continue;
                 }
 
-                bool waitingForAdmin = !actor.IsAdmin && !callerPrivs.CanApproveOwn;
+                bool waitingForAdmin = !actor.IsAdmin && (string.IsNullOrWhiteSpace(req.UserId) || req.UserId == "system" || !callerPrivs.CanApproveOwn);
                 views.Add(new NetworkAccessRequestView(
                     req,
                     WaitingForAdmin: waitingForAdmin,
@@ -278,7 +278,7 @@ public sealed partial class NetworkAccessPolicyStore
                     continue;
                 }
 
-                bool paused = IsRulePausedUnsafe(current, rule);
+                bool paused = NetworkAccessRuleMatcher.IsPaused(current, rule);
                 bool openInternet = rule.Allowed && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal);
                 views.Add(new NetworkAccessRuleView(rule, paused, openInternet));
             }
@@ -313,7 +313,6 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyAuthorizer.ResolvedDecisionTarget resolved = NetworkAccessPolicyAuthorizer.AuthorizeAndResolveDecideRequest(
                 actor,
                 request,
-                allow,
                 scope,
                 (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
             string effectiveScope = resolved.EffectiveScope;
@@ -357,7 +356,8 @@ public sealed partial class NetworkAccessPolicyStore
                 allow && allowLan && actor.IsAdmin,
                 actor.UserId,
                 now,
-                Source: "user");
+                Source: "user",
+                DecidedByAdmin: actor.IsAdmin);
 
             NetworkAccessRule[] nextRules =
             [
@@ -379,7 +379,11 @@ public sealed partial class NetworkAccessPolicyStore
             {
                 if (string.Equals(item.Id, request.Id, StringComparison.Ordinal))
                 {
-                    updatedTargetRequest = item with { Status = newStatus, LastSeenUtc = now };
+                    updatedTargetRequest = item with
+                    {
+                        Status = allow && !EvaluatesToAllow(currentWithNewRule, item) ? "pending" : newStatus,
+                        LastSeenUtc = now,
+                    };
                     nextRequests.Add(updatedTargetRequest);
                 }
                 else if (item.Status == "pending" && ShouldResolveMatchingPendingRequest(currentWithNewRule, item))
@@ -405,7 +409,7 @@ public sealed partial class NetworkAccessPolicyStore
                 nextRevision,
                 rule,
                 updatedTargetRequest!,
-                Paused: IsRulePausedUnsafe(state!, rule),
+                Paused: NetworkAccessRuleMatcher.IsPaused(state!, rule),
                 OpenInternetBadge: rule.Allowed && rule.DestKind == "any-public");
         }
     }
@@ -413,7 +417,8 @@ public sealed partial class NetworkAccessPolicyStore
     public (long Revision, NetworkAccessRuleView Rule) SetRule(
         NetworkAccessActor actor,
         RuleWriteSpec spec,
-        long expectedRevision)
+        long expectedRevision,
+        string? replaceRuleId = null)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentNullException.ThrowIfNull(spec);
@@ -421,10 +426,17 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            if (!string.IsNullOrWhiteSpace(replaceRuleId))
+            {
+                NetworkAccessRule replaced = current.Rules.FirstOrDefault(rule => string.Equals(rule.Id, replaceRuleId, StringComparison.Ordinal))
+                    ?? throw new KeyNotFoundException("Rule to replace was not found.");
+                NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, replaced,
+                    (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
+            }
             NetworkAccessPolicyAuthorizer.NormalizedRuleTarget normalized = NetworkAccessPolicyAuthorizer.AuthorizeSetRule(
                 actor,
                 spec,
-                (uid, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, uid, isTargetAdmin));
+                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
             string scopeKind = normalized.ScopeKind;
             string? userId = normalized.UserId;
             string? agentId = normalized.AgentId;
@@ -467,11 +479,13 @@ public sealed partial class NetworkAccessPolicyStore
                 spec.Allowed && spec.AllowLan && actor.IsAdmin,
                 actor.UserId,
                 now,
-                Source: "user");
+                Source: "user",
+                DecidedByAdmin: actor.IsAdmin);
 
             NetworkAccessRule[] nextRules =
             [
-                .. current.Rules.Where(r => !string.Equals(r.Id, ruleId, StringComparison.Ordinal)),
+                .. current.Rules.Where(r => !string.Equals(r.Id, ruleId, StringComparison.Ordinal)
+                    && !string.Equals(r.Id, replaceRuleId, StringComparison.Ordinal)),
                 rule,
             ];
             if (nextRules.Length > MaxRules)
@@ -498,7 +512,7 @@ public sealed partial class NetworkAccessPolicyStore
 
             var view = new NetworkAccessRuleView(
                 rule,
-                Paused: IsRulePausedUnsafe(state!, rule),
+                Paused: NetworkAccessRuleMatcher.IsPaused(state!, rule),
                 OpenInternetBadge: rule.Allowed && rule.DestKind == "any-public");
             return (nextRevision, view);
         }
@@ -523,7 +537,8 @@ public sealed partial class NetworkAccessPolicyStore
                 throw new KeyNotFoundException("Rule not found.");
             }
 
-            NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, existing);
+            NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, existing,
+                (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
 
             if (current.Revision != expectedRevision)
             {
@@ -554,6 +569,7 @@ public sealed partial class NetworkAccessPolicyStore
         string destination,
         int port)
     {
+        _ = systemwide;
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
@@ -567,8 +583,7 @@ public sealed partial class NetworkAccessPolicyStore
                     && req.Port == port
                     && string.Equals(req.UserId, userId, StringComparison.Ordinal)
                     && string.Equals(req.AgentId, agentId, StringComparison.Ordinal)
-                    && string.Equals(req.ConnectorId, connectorId, StringComparison.Ordinal)
-                    && req.Systemwide == systemwide)
+                    && string.Equals(req.ConnectorId, connectorId, StringComparison.Ordinal))
                 {
                     long nextAttempts = req.Attempts == long.MaxValue ? long.MaxValue : req.Attempts + 1;
                     updated.Add(req with { Attempts = nextAttempts, LastSeenUtc = now });
@@ -699,204 +714,14 @@ public sealed partial class NetworkAccessPolicyStore
 
     private static bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
     {
-        if (req.Systemwide && req.Attribution != "user-agent")
-        {
-            if (req.Attribution == "none")
-            {
-                NetworkAccessRule? sysRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "connector-system",
-                    userId: null,
-                    agentId: null,
-                    connectorId: req.ConnectorId,
-                    req.DestKind,
-                    req.Destination,
-                    req.Port);
-                return sysRule is { Allowed: true };
-            }
-
-            if (req.Attribution == "user")
-            {
-                NetworkAccessRule? userRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "user",
-                    userId: req.UserId,
-                    agentId: null,
-                    connectorId: req.ConnectorId,
-                    req.DestKind,
-                    req.Destination,
-                    req.Port);
-                if (userRule is not null)
-                {
-                    return userRule.Allowed;
-                }
-
-                NetworkAccessRule? anyPublic = FindAnyPublicRule(state.Rules, req.UserId, req.ConnectorId);
-                if (anyPublic is { Allowed: true })
-                {
-                    if (req.DestKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(req.Destination))
-                    {
-                        return false;
-                    }
-                    return true;
-                }
-
-                NetworkAccessRule? sysRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "connector-system",
-                    userId: null,
-                    agentId: null,
-                    connectorId: req.ConnectorId,
-                    req.DestKind,
-                    req.Destination,
-                    req.Port);
-                return sysRule is { Allowed: true };
-            }
-
-            return false;
-        }
-
-        if (string.Equals(req.UserId, "system", StringComparison.Ordinal))
-        {
-            NetworkAccessRule? sysRule = state.Rules.FirstOrDefault(r =>
-                r.ScopeKind == "agent"
-                && r.UserId == "system"
-                && (string.IsNullOrEmpty(req.AgentId) || r.AgentId == req.AgentId)
-                && string.Equals(r.DestKind, req.DestKind, StringComparison.Ordinal)
-                && string.Equals(r.Destination, req.Destination, StringComparison.Ordinal)
-                && r.Port == req.Port);
-            return sysRule is { Allowed: true };
-        }
-
-        if (req.Attribution == "user" && string.IsNullOrEmpty(req.AgentId) && !string.IsNullOrEmpty(req.ConnectorId))
-        {
-            NetworkAccessRule? userRule = FindExactRule(
-                state.Rules,
-                scopeKind: "user",
-                userId: req.UserId,
-                agentId: null,
-                connectorId: req.ConnectorId,
-                req.DestKind,
-                req.Destination,
-                req.Port);
-            if (userRule is not null)
-            {
-                return userRule.Allowed;
-            }
-
-            NetworkAccessRule? anyPublic = FindAnyPublicRule(state.Rules, req.UserId, req.ConnectorId);
-            if (anyPublic is { Allowed: true })
-            {
-                if (req.DestKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(req.Destination))
-                {
-                    return false;
-                }
-                return true;
-            }
-
-            NetworkAccessRule? sysRule = FindExactRule(
-                state.Rules,
-                scopeKind: "connector-system",
-                userId: null,
-                agentId: null,
-                connectorId: req.ConnectorId,
-                req.DestKind,
-                req.Destination,
-                req.Port);
-            return sysRule is { Allowed: true };
-        }
-
-        // Ordinary agent request:
-        NetworkAccessRule? agentRule = FindExactRule(
-            state.Rules,
-            scopeKind: "agent",
-            userId: req.UserId,
-            agentId: req.AgentId,
-            connectorId: null,
-            req.DestKind,
-            req.Destination,
-            req.Port);
-        if (agentRule is not null)
-        {
-            return agentRule.Allowed;
-        }
-
-        if (!string.IsNullOrEmpty(req.UserId) && HasBothPrivilegesUnsafe(state, req.UserId))
-        {
-            NetworkAccessRule? userRule = FindExactRule(
-                state.Rules,
-                scopeKind: "user",
-                userId: req.UserId,
-                agentId: null,
-                connectorId: null,
-                req.DestKind,
-                req.Destination,
-                req.Port);
-            if (userRule is not null)
-            {
-                return userRule.Allowed;
-            }
-        }
-
-        if (req.Systemwide && req.Attribution == "user-agent")
-        {
-            return EvaluatesToAllow(state, req with { Attribution = "user", AgentId = null });
-        }
-
-        if (!string.IsNullOrEmpty(req.UserId) && !string.IsNullOrEmpty(req.ConnectorId))
-        {
-            NetworkAccessRule? anyPublic = FindAnyPublicRule(state.Rules, req.UserId, req.ConnectorId);
-            if (anyPublic is { Allowed: true })
-            {
-                if (req.DestKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(req.Destination))
-                {
-                    return false;
-                }
-                return true;
-            }
-        }
-
-        return false;
+        IReadOnlyList<NetworkAccessRule> matches = NetworkAccessRuleMatcher.FindApplicable(
+            state, req.UserId, req.AgentId, req.ConnectorId, req.DestKind, req.Destination, req.Port,
+            allowAnyPublic: req.Origin == "container" && req.ConnectorId is not null);
+        return !matches.Any(static rule => !rule.Allowed)
+            && matches.Any(rule => rule.Allowed && (req.DestKind != "ip"
+                || !NetworkAddressClassifier.IsNonPublicV4(req.Destination) || rule.AllowLan
+                || (req.Destination == NetworkAddressClassifier.PackageProxyServiceAddress && req.Port == NetworkAddressClassifier.PackageProxyServicePort)));
     }
-
-    private static NetworkAccessRule? FindExactRule(
-        IEnumerable<NetworkAccessRule> rules,
-        string scopeKind,
-        string? userId,
-        string? agentId,
-        string? connectorId,
-        string destKind,
-        string destination,
-        int port)
-    {
-        return rules.FirstOrDefault(r =>
-            string.Equals(r.ScopeKind, scopeKind, StringComparison.Ordinal)
-            && string.Equals(r.UserId, userId, StringComparison.Ordinal)
-            && string.Equals(r.AgentId, agentId, StringComparison.Ordinal)
-            && string.Equals(r.ConnectorId, connectorId, StringComparison.Ordinal)
-            && string.Equals(r.DestKind, destKind, StringComparison.Ordinal)
-            && string.Equals(r.Destination, destination, StringComparison.Ordinal)
-            && r.Port == port);
-    }
-
-    private static NetworkAccessRule? FindAnyPublicRule(
-        IEnumerable<NetworkAccessRule> rules,
-        string? userId,
-        string? connectorId)
-    {
-        return rules.FirstOrDefault(r =>
-            string.Equals(r.ScopeKind, "user", StringComparison.Ordinal)
-            && string.Equals(r.UserId, userId, StringComparison.Ordinal)
-            && string.Equals(r.ConnectorId, connectorId, StringComparison.Ordinal)
-            && string.Equals(r.DestKind, "any-public", StringComparison.Ordinal));
-    }
-
-    private static bool HasBothPrivilegesUnsafe(NetworkAccessPolicyState state, string userId)
-    {
-        UserPrivileges? privs = state.UserPrivileges.FirstOrDefault(p => string.Equals(p.UserId, userId, StringComparison.Ordinal));
-        return privs is not null && privs.CanApproveOwn && privs.CanAllowAllAgents;
-    }
-
     private UserPrivileges ResolveUserPrivilegesUnsafe(
         ref NetworkAccessPolicyState current,
         string userId,
@@ -926,18 +751,6 @@ public sealed partial class NetworkAccessPolicyStore
             CanAllowAllAgents: false,
             SetBy: "system",
             SetAtUtc: DateTimeOffset.UnixEpoch);
-    }
-
-    private bool IsRulePausedUnsafe(NetworkAccessPolicyState current, NetworkAccessRule rule)
-    {
-        if (rule.ScopeKind == "user" && string.IsNullOrEmpty(rule.ConnectorId) && !string.IsNullOrEmpty(rule.UserId))
-        {
-            NetworkAccessPolicyState snapshot = current;
-            UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref snapshot, rule.UserId, isTargetAdmin: false);
-            return !(privs.CanApproveOwn && privs.CanAllowAllAgents);
-        }
-
-        return false;
     }
 
     public bool TryEvaluateTemporaryProbeDecision(
@@ -997,7 +810,7 @@ public sealed partial class NetworkAccessPolicyStore
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
         DateTimeOffset now = observedAtUtc ?? DateTimeOffset.UtcNow;
         string id = NetworkAccessIdGenerator.ComputeBase32Id(
-            $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{(systemwide ? "1" : "0")}|{origin}|{destKind}|{destination}|{port}");
+            $"probe|{containerId}|{attribution}|{userId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port}");
 
         lock (gate)
         {

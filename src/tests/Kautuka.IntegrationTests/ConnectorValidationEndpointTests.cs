@@ -1409,7 +1409,14 @@ public sealed class ConnectorValidationEndpointTests
     [Fact]
     public async Task ConnectorSaveNormalizesLocalTransportToContainer()
     {
-        await using var fixture = await ConnectorApiFixture.CreateAsync();
+        var manager = new FakeManagerGrpcService(
+            containerProbeResponse: new WorkspaceMcpProbeResponse
+            {
+                Ok = true,
+                ToolCount = 1,
+                Tools = { new WorkspaceMcpToolMessage { Name = "list_allowed_directories" } },
+            });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
         string accessToken = await fixture.LoginAsBootstrapAdminAsync();
 
         using JsonDocument saved = await fixture.SendJsonAsync(
@@ -1428,7 +1435,8 @@ public sealed class ConnectorValidationEndpointTests
                     "/workspace/documents",
                 },
                 enabled = true,
-                envKeys = Array.Empty<string>(),
+                envKeys = new[] { "API_TOKEN" },
+                discoveryEnv = new { API_TOKEN = "test-value" },
             },
             accessToken).ConfigureAwait(true);
 
@@ -1436,6 +1444,80 @@ public sealed class ConnectorValidationEndpointTests
         Assert.Equal(McpCommandTransportMapper.UvImage, saved.RootElement.GetProperty("containerImage").GetString());
         Assert.Equal("npx", saved.RootElement.GetProperty("containerCommand").GetString());
         Assert.Equal("@modelcontextprotocol/server-filesystem", saved.RootElement.GetProperty("containerArgs")[1].GetString());
+        WorkspaceMcpContainerProbeRequest probe = Assert.Single(manager.ContainerProbeRequests, request => request.ConnectorId == "filesystem");
+        Assert.Equal(fixture.AdminUserId(), probe.UserId);
+        Assert.Contains(probe.Environment, pair => pair.Key == "API_TOKEN" && pair.Value == "test-value");
+        Assert.Equal("list_allowed_directories", saved.RootElement.GetProperty("toolNames")[0].GetString());
+        Assert.DoesNotContain("test-value", saved.RootElement.GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConnectorSaveSucceedsWhenDiscoveryNeedsNetworkApproval()
+    {
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        {
+            Ok = false,
+            Message = "Network approval needed.",
+            NetworkApprovalRequired = true,
+        });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/web-pending", new
+        {
+            name = "Web pending",
+            transport = "container",
+            containerImage = "test-image",
+            containerCommand = "server",
+            enabled = true,
+        }, token).ConfigureAwait(true);
+        WorkspaceMcpContainerProbeRequest probe = Assert.Single(manager.ContainerProbeRequests, request => request.ConnectorId == "web-pending");
+        Assert.True(probe.SaveDiscovery);
+        Assert.Equal(fixture.AdminUserId(), probe.UserId);
+        Assert.Equal(JsonValueKind.Null, saved.RootElement.GetProperty("toolCount").ValueKind);
+    }
+
+    [Fact]
+    public async Task DisablingExistingConnectorDoesNotRunDiscovery()
+    {
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse { Ok = true, ToolCount = 1, Tools = { new WorkspaceMcpToolMessage { Name = "web_fetch" } } });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/disable-test", new
+        {
+            name = "Disable test",
+            transport = "container",
+            containerImage = "test-image",
+            containerCommand = "server",
+            enabled = true,
+        }, token).ConfigureAwait(true);
+        manager.ProbeResponse = new WorkspaceMcpProbeResponse { Ok = false, Message = "offline" };
+        using JsonDocument disabled = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/disable-test", new
+        {
+            name = "Disable test",
+            transport = "container",
+            containerImage = "test-image",
+            containerCommand = "server",
+            enabled = false,
+        }, token).ConfigureAwait(true);
+        Assert.False(disabled.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.Equal("web_fetch", disabled.RootElement.GetProperty("toolNames")[0].GetString());
+        Assert.Single(manager.ContainerProbeRequests, request => request.ConnectorId == "disable-test");
+    }
+
+    [Fact]
+    public async Task ConnectorSaveRejectsDiscoveryFailureWithoutNetworkApproval()
+    {
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse { Ok = false, Message = "Connector failed to start." });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/connectors/broken")
+        {
+            Content = JsonContent.Create(new { name = "Broken", transport = "container", containerImage = "test-image", containerCommand = "server", enabled = true }, options: jsonOptions),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using HttpResponseMessage response = await fixture.Client.SendAsync(request, TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("Connector failed to start", await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken).ConfigureAwait(true), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2049,6 +2131,7 @@ public sealed class ConnectorValidationEndpointTests
         WorkspaceMcpProbeResponse? containerProbeResponse = null) : IManagerGrpcService
     {
         public ConcurrentQueue<WorkspaceMcpContainerProbeRequest> ContainerProbeRequests { get; } = new();
+        public WorkspaceMcpProbeResponse? ProbeResponse { get; set; } = containerProbeResponse;
 
         public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new WorkspaceBoolResponse { Ok = true });
@@ -2086,7 +2169,7 @@ public sealed class ConnectorValidationEndpointTests
         public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
         {
             ContainerProbeRequests.Enqueue(request);
-            return Task.FromResult(containerProbeResponse ?? new WorkspaceMcpProbeResponse
+            return Task.FromResult(ProbeResponse ?? new WorkspaceMcpProbeResponse
             {
                 Ok = true,
                 ToolCount = 0,

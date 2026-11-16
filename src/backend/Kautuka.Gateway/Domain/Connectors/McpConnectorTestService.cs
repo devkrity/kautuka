@@ -120,6 +120,7 @@ internal sealed class McpConnectorTestService(
                 ServerType = string.IsNullOrWhiteSpace(request.ServerType) ? string.Empty : request.ServerType.Trim(),
                 McpProtocolVersion = string.IsNullOrWhiteSpace(request.McpProtocolVersion) ? string.Empty : request.McpProtocolVersion.Trim(),
                 UserId = request.UserId ?? string.Empty,
+                SaveDiscovery = request.SaveDiscovery,
             };
             probeRequest.Args.AddRange(args);
             probeRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
@@ -127,7 +128,7 @@ internal sealed class McpConnectorTestService(
             WorkspaceMcpProbeResponse response = await workspaceGrpcService.ProbeMcpContainerAsync(probeRequest, cancellationToken: ct).ConfigureAwait(false);
             if (!response.Ok)
             {
-                return new McpConnectorTestResult(false, response.Message);
+                return new McpConnectorTestResult(false, response.Message, NetworkApprovalRequired: response.NetworkApprovalRequired);
             }
 
             IReadOnlyList<string> toolNames = response.Tools.Select(static t => t.Name).ToList();
@@ -186,6 +187,7 @@ internal sealed class McpConnectorTestService(
                 Command = mapped.ContainerCommand,
                 TimeoutSeconds = ClampProbeTimeoutSeconds(request.ReadinessTimeoutSeconds),
                 UserId = request.UserId ?? string.Empty,
+                SaveDiscovery = request.SaveDiscovery,
             };
             probRequest.Args.AddRange(mapped.ContainerArgs);
             probRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
@@ -196,7 +198,7 @@ internal sealed class McpConnectorTestService(
                 string failureMessage = package is not null
                     ? $"Package '{package}' container probe failed: {response.Message}"
                     : $"Container probe failed: {response.Message}";
-                return new McpConnectorTestResult(false, failureMessage, PackageChecked: package);
+                return new McpConnectorTestResult(false, failureMessage, PackageChecked: package, NetworkApprovalRequired: response.NetworkApprovalRequired);
             }
 
             IReadOnlyList<string> toolNames = response.Tools.Select(static t => t.Name).ToList();

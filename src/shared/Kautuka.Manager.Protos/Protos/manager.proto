@@ -241,6 +241,7 @@ message WorkspaceMcpProbeResponse {
   int32                         tool_count = 3;
   repeated WorkspaceMcpToolMessage tools   = 4;
   WorkspaceOperationOutcome outcome = 5;
+  bool network_approval_required = 6;
 }
 
 message WorkspaceContextMessage {
@@ -332,6 +333,7 @@ message WorkspaceMcpContainerProbeRequest {
   string server_type = 9;
   string mcp_protocol_version = 10;
   string user_id = 11;
+  bool save_discovery = 12;
 }
 
 message WorkspaceMcpContainerCallRequest {
@@ -521,6 +523,7 @@ message NetworkAccessSetRuleRequest {
   int64 expected_revision = 11;
   string exec_context = 12;
   string attribution = 13;
+  string replace_rule_id = 14;
 }
 
 message NetworkAccessSetRuleResponse {

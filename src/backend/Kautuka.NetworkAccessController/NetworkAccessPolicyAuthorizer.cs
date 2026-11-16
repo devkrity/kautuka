@@ -123,12 +123,6 @@ internal static class NetworkAccessPolicyAuthorizer
             return true;
         }
 
-        if (req.Systemwide && req.Attribution != "user-agent"
-            && !(string.Equals(req.Purpose, "probe", StringComparison.OrdinalIgnoreCase) && req.Attribution == "user"))
-        {
-            return false;
-        }
-
         return !string.IsNullOrWhiteSpace(req.UserId)
             && req.UserId != "system"
             && string.Equals(req.UserId, actor.UserId, StringComparison.Ordinal);
@@ -157,14 +151,9 @@ internal static class NetworkAccessPolicyAuthorizer
             throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's probe request.");
         }
 
-        if (!actor.IsAdmin)
-        {
-            UserPrivileges ownerPrivs = resolvePrivileges(request.UserId, false);
-            if (!ownerPrivs.CanApproveOwn)
-            {
-                throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
-            }
-        }
+        if (!actor.IsAdmin && !resolvePrivileges(request.UserId, false).CanApproveOwn)
+            throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User cannot manage their own network access.");
+
     }
 
     internal static bool CanViewRule(NetworkAccessActor actor, NetworkAccessRule rule, string? normalizedFilter)
@@ -180,141 +169,40 @@ internal static class NetworkAccessPolicyAuthorizer
     internal static ResolvedDecisionTarget AuthorizeAndResolveDecideRequest(
         NetworkAccessActor actor,
         NetworkAccessRequest request,
-        bool allow,
         string? scope,
         ResolvePrivilegesCallback resolvePrivileges)
     {
         if (string.Equals(request.Purpose, "probe", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new UnauthorizedAccessException("PermissionDenied: Probe requests require temporary in-memory authorization and cannot be decided from persisted records.");
-        }
-
-        if (request.Systemwide && request.Attribution != "user-agent")
-        {
-            if (!actor.IsAdmin)
-            {
-                throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a systemwide connector request.");
-            }
-
-            if (allow && string.IsNullOrWhiteSpace(scope))
-            {
-                throw new ArgumentException("scope_required: Systemwide allow decisions require an explicit scope.", nameof(scope));
-            }
-
-            string effectiveScope = string.IsNullOrWhiteSpace(scope)
-                ? (request.Attribution == "user" && !allow ? "user" : "connector-system")
-                : scope.Trim();
-
-            if (effectiveScope == "user")
-            {
-                if (request.Attribution == "none" || string.IsNullOrWhiteSpace(request.UserId))
-                {
-                    throw new ArgumentException("scope_not_enforceable: Cannot grant user-scoped rule on a shared unattributed systemwide connector.", nameof(scope));
-                }
-
-                return new(effectiveScope, request.UserId, null, request.ConnectorId);
-            }
-
-            if (effectiveScope == "connector-system")
-            {
-                return new(effectiveScope, null, null, request.ConnectorId);
-            }
-
-            throw new ArgumentException($"scope_not_allowed: Scope '{effectiveScope}' is not valid for a systemwide connector request.", nameof(scope));
-        }
+            throw new UnauthorizedAccessException("PermissionDenied: Probe requests require temporary authorization.");
 
         if (string.Equals(request.UserId, "system", StringComparison.Ordinal))
         {
             if (!actor.IsAdmin)
-            {
                 throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may decide a system request.");
-            }
-
-            string effectiveScope = string.IsNullOrWhiteSpace(scope) ? "agent" : scope.Trim();
-            if (effectiveScope != "agent")
-            {
-                throw new ArgumentException("scope_not_allowed: System requests only support 'agent' scope.", nameof(scope));
-            }
-
-            return new(effectiveScope, "system", string.IsNullOrWhiteSpace(request.AgentId) ? "system" : request.AgentId, null);
+            return new("system", null, null, null);
         }
 
-        if (request.Attribution == "user" && string.IsNullOrWhiteSpace(request.AgentId) && !string.IsNullOrWhiteSpace(request.ConnectorId))
-        {
-            // User-attributed connector probe request (A1)
-            if (string.IsNullOrWhiteSpace(request.UserId))
-            {
-                throw new InvalidOperationException("User-attributed request is missing userId.");
-            }
-
-            if (!actor.IsAdmin && !string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal))
-            {
-                throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's request.");
-            }
-
-            UserPrivileges ownerPrivs = resolvePrivileges(request.UserId, actor.IsAdmin && string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal));
-            if (!actor.IsAdmin && !ownerPrivs.CanApproveOwn)
-            {
-                throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
-            }
-
-            string effectiveScope = string.IsNullOrWhiteSpace(scope) ? "user" : scope.Trim();
-            if (effectiveScope is not ("user" or "connector-system"))
-            {
-                throw new ArgumentException($"scope_not_allowed: Scope '{effectiveScope}' is not valid for a connector probe request.", nameof(scope));
-            }
-
-            if (effectiveScope == "connector-system" && !actor.IsAdmin)
-            {
-                throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may grant connector-system scope.");
-            }
-
-            return new(effectiveScope, effectiveScope == "user" ? request.UserId : null, null, request.ConnectorId);
-        }
-
-        // Ordinary user + agent request
-        if (string.IsNullOrWhiteSpace(request.UserId) || string.IsNullOrWhiteSpace(request.AgentId))
-        {
-            throw new InvalidOperationException("Ordinary agent request is missing userId or agentId.");
-        }
-
+        if (string.IsNullOrWhiteSpace(request.UserId))
+            throw new InvalidOperationException("Network request is missing userId.");
         if (!actor.IsAdmin && !string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal))
-        {
             throw new UnauthorizedAccessException("PermissionDenied: Cannot decide another user's request.");
-        }
+        if (!actor.IsAdmin && !resolvePrivileges(request.UserId, false).CanApproveOwn)
+            throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User cannot manage their own network access.");
 
-        // For ordinary request "Keep blocked" (allow == false), ALWAYS force scope = "agent".
-        string ordScope = !allow
-            ? "agent"
-            : (string.IsNullOrWhiteSpace(scope) ? "agent" : scope.Trim());
-
-        if (ordScope is not ("agent" or "user"))
+        string target = string.IsNullOrWhiteSpace(scope)
+            ? (!string.IsNullOrWhiteSpace(request.AgentId) ? "agent" : !string.IsNullOrWhiteSpace(request.ConnectorId) ? "connector" : "user")
+            : scope.Trim();
+        if (target == "system" && !actor.IsAdmin)
+            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may create a platform rule.");
+        return target switch
         {
-            throw new ArgumentException($"scope_not_allowed: Scope '{ordScope}' is not allowed for an ordinary agent request.", nameof(scope));
-        }
-
-        UserPrivileges ordPrivs = resolvePrivileges(
-            request.UserId,
-            actor.IsAdmin && string.Equals(actor.UserId, request.UserId, StringComparison.Ordinal));
-
-        if (!actor.IsAdmin && !ordPrivs.CanApproveOwn)
-        {
-            throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User does not hold canApproveOwn privilege.");
-        }
-
-        if (ordScope == "user")
-        {
-            if (!(ordPrivs.CanApproveOwn && ordPrivs.CanAllowAllAgents))
-            {
-                throw new UnauthorizedAccessException("privilege_required: User must hold both canApproveOwn and canAllowAllAgents for user-scope rules.");
-            }
-
-            return new(ordScope, request.UserId, null, null);
-        }
-
-        return new(ordScope, request.UserId, request.AgentId, null);
+            "agent" when !string.IsNullOrWhiteSpace(request.AgentId) => new("agent", request.UserId, request.AgentId, null),
+            "connector" when !string.IsNullOrWhiteSpace(request.ConnectorId) => new("user", request.UserId, null, request.ConnectorId),
+            "user" => new("user", request.UserId, null, null),
+            "system" when actor.IsAdmin => new("system", null, null, null),
+            _ => throw new ArgumentException($"scope_not_allowed: Scope '{target}' is not valid for this request.", nameof(scope)),
+        };
     }
-
     internal static NormalizedRuleTarget AuthorizeSetRule(
         NetworkAccessActor actor,
         RuleWriteSpec spec,
@@ -324,6 +212,14 @@ internal static class NetworkAccessPolicyAuthorizer
         string? userId = NormalizeOptional(spec.UserId);
         string? agentId = NormalizeOptional(spec.AgentId);
         string? connectorId = NormalizeOptional(spec.ConnectorId);
+
+        if (!actor.IsAdmin && (scopeKind is "agent" or "user"))
+        {
+            if (!string.Equals(actor.UserId, userId, StringComparison.Ordinal))
+                throw new UnauthorizedAccessException("PermissionDenied: Cannot manage another user's network rule.");
+            if (!resolvePrivileges(actor.UserId, false).CanApproveOwn)
+                throw new UnauthorizedAccessException("privilege_required: PermissionDenied: User cannot manage their own network access.");
+        }
 
         switch (scopeKind)
         {
@@ -345,19 +241,8 @@ internal static class NetworkAccessPolicyAuthorizer
                         throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write system rules.");
                     }
                 }
-                else if (!actor.IsAdmin)
-                {
-                    if (!string.Equals(actor.UserId, userId, StringComparison.Ordinal))
-                    {
-                        throw new UnauthorizedAccessException("PermissionDenied: Cannot write rules for another user.");
-                    }
-
-                    UserPrivileges privs = resolvePrivileges(userId, false);
-                    if (!privs.CanApproveOwn)
-                    {
-                        throw new UnauthorizedAccessException("PermissionDenied: User does not hold canApproveOwn privilege.");
-                    }
-                }
+                else if (!actor.IsAdmin && !string.Equals(actor.UserId, userId, StringComparison.Ordinal))
+                    throw new UnauthorizedAccessException("PermissionDenied: Cannot write rules for another user.");
 
                 break;
 
@@ -366,6 +251,9 @@ internal static class NetworkAccessPolicyAuthorizer
                 {
                     throw new ArgumentException("scope_not_allowed: 'user' scope requires userId and no agentId.", nameof(spec));
                 }
+
+                if (!actor.IsAdmin && !string.Equals(actor.UserId, userId, StringComparison.Ordinal))
+                    throw new UnauthorizedAccessException("PermissionDenied: Cannot write rules for another user.");
 
                 if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
                 {
@@ -386,52 +274,15 @@ internal static class NetworkAccessPolicyAuthorizer
                 }
                 else if (!string.IsNullOrEmpty(connectorId))
                 {
-                    if (!actor.IsAdmin)
-                    {
-                        throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write user-scoped connector rules.");
-                    }
-
                     if (spec.Attribution == "none")
                     {
                         throw new ArgumentException("scope_not_enforceable: User-scoped rule cannot be enforced on a shared unattributed connector.", nameof(spec));
                     }
                 }
-                else
-                {
-                    // User scope without connectorId ('all my agents')
-                    if (!actor.IsAdmin && !string.Equals(actor.UserId, userId, StringComparison.Ordinal))
-                    {
-                        throw new UnauthorizedAccessException("PermissionDenied: Cannot write user-scope rules for another user.");
-                    }
-
-                    UserPrivileges ownerPrivs = resolvePrivileges(
-                        userId,
-                        actor.IsAdmin && string.Equals(actor.UserId, userId, StringComparison.Ordinal));
-                    if (!(ownerPrivs.CanApproveOwn && ownerPrivs.CanAllowAllAgents))
-                    {
-                        throw new UnauthorizedAccessException("privilege_required: Target user must hold both canApproveOwn and canAllowAllAgents.");
-                    }
-                }
-
                 break;
 
             case "connector-system":
-                if (!actor.IsAdmin)
-                {
-                    throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may write connector-system rules.");
-                }
-
-                if (string.IsNullOrEmpty(connectorId) || !string.IsNullOrEmpty(userId) || !string.IsNullOrEmpty(agentId))
-                {
-                    throw new ArgumentException("scope_not_allowed: 'connector-system' scope requires connectorId only.", nameof(spec));
-                }
-
-                if (string.Equals(spec.DestKind, "any-public", StringComparison.Ordinal))
-                {
-                    throw new ArgumentException("scope_not_allowed: any-public rules are only supported at 'user' scope with a connectorId.", nameof(spec));
-                }
-
-                break;
+                throw new ArgumentException("scope_not_allowed: connector-system rules are no longer supported.", nameof(spec));
 
             case "system":
                 if (!actor.IsAdmin)
@@ -458,7 +309,7 @@ internal static class NetworkAccessPolicyAuthorizer
         return new(scopeKind, userId, agentId, connectorId);
     }
 
-    internal static void AuthorizeDeleteRule(NetworkAccessActor actor, NetworkAccessRule existing)
+    internal static void AuthorizeDeleteRule(NetworkAccessActor actor, NetworkAccessRule existing, ResolvePrivilegesCallback resolvePrivileges)
     {
         if (string.Equals(existing.Source, "seed", StringComparison.Ordinal))
         {
@@ -469,7 +320,7 @@ internal static class NetworkAccessPolicyAuthorizer
         {
             if (!string.Equals(existing.UserId, actor.UserId, StringComparison.Ordinal)
                 || existing.ScopeKind is not ("agent" or "user")
-                || !string.IsNullOrEmpty(existing.ConnectorId))
+                || !resolvePrivileges(actor.UserId, false).CanApproveOwn)
             {
                 throw new UnauthorizedAccessException("PermissionDenied: Cannot delete this rule.");
             }
