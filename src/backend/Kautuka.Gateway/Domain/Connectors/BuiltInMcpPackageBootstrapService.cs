@@ -6,7 +6,6 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
     IWebHostEnvironment environment,
     IGatewayCatalogStore catalog,
     IMcpbPackageService mcpbPackageService,
-    IMcpConnectorTestService mcpConnectorTestService,
     ILogger<BuiltInMcpPackageBootstrapService> logger,
     Func<bool>? maintenanceActive = null,
     TimeSpan? retryDelay = null,
@@ -42,23 +41,9 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
         Message = "Built-in MCP bootstrap completed. connectorId={ConnectorId}")]
     private static partial void LogBootstrapCompleted(ILogger logger, string connectorId);
 
-    [LoggerMessage(EventId = 7205, Level = LogLevel.Information,
-        Message = "Built-in MCP metadata refresh start. connectorId={ConnectorId} bundleChanged={BundleChanged} metadataMissing={MetadataMissing}")]
-    private static partial void LogMetadataRefreshStart(ILogger logger, string connectorId, bool bundleChanged, bool metadataMissing);
-
-    [LoggerMessage(EventId = 7206, Level = LogLevel.Information,
-        Message = "Built-in MCP metadata refresh completed. connectorId={ConnectorId} toolCount={ToolCount}")]
-    private static partial void LogMetadataRefreshCompleted(ILogger logger, string connectorId, int? toolCount);
-
-    [LoggerMessage(EventId = 7207, Level = LogLevel.Warning,
-        Message = "Built-in MCP metadata refresh failed. connectorId={ConnectorId} message={Message}")]
-    private static partial void LogMetadataRefreshFailed(ILogger logger, string connectorId, string message);
-
     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
-        // Connector inspection can start containers and probe external runtimes. Keep it
-        // out of Generic Host's synchronous startup path so Gateway binds its API socket
-        // before first-run connector setup begins.
+        // Keep bundle registration out of Generic Host's synchronous startup path.
         await Task.Yield();
 
         // The post-commit worker restart happens before the admission fence is
@@ -112,21 +97,10 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
 
             bool hasExisting = catalog.TryGetMcpServer(connectorId, out GatewayMcpServer? existing) && existing is not null;
             bool keepEnabled = hasExisting ? existing!.Enabled : true;
-            bool bundleChanged = hasExisting
-                && !string.Equals(existing!.BundlePath, inspection.Connector.BundlePath, StringComparison.Ordinal);
-            bool metadataMissing = !hasExisting
-                || existing!.ToolCount is null
-                || existing.ToolNames is not { Count: > 0 };
-
-            GatewayMcpServer saved = await catalog.SaveSystemMcpServerAsync(
+            await catalog.SaveSystemMcpServerAsync(
                 connectorId,
                 CreateRequest(inspection, keepEnabled, connectorId),
                 cancellationToken).ConfigureAwait(false);
-
-            if (bundleChanged || metadataMissing)
-            {
-                await RefreshMetadataAsync(saved, bundleChanged, metadataMissing, cancellationToken).ConfigureAwait(false);
-            }
 
             LogBootstrapCompleted(logger, connectorId);
             return true;
@@ -232,42 +206,8 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             HealthcheckUrl = inspection.Connector.HealthcheckUrl,
             HealthcheckIntervalMilliseconds = inspection.Connector.HealthcheckIntervalMilliseconds,
             EnvKeys = inspection.Connector.EnvKeys,
+            ToolCount = inspection.Connector.ToolCount,
+            ToolNames = inspection.Connector.ToolNames,
             Enabled = enabled,
         };
-
-    private async Task RefreshMetadataAsync(GatewayMcpServer server, bool bundleChanged, bool metadataMissing, CancellationToken cancellationToken)
-    {
-        LogMetadataRefreshStart(logger, server.Id, bundleChanged, metadataMissing);
-
-        McpConnectorTestResult result = await mcpConnectorTestService.TestAsync(
-            new GatewayConnectorTestRequest
-            {
-                Id = server.Id,
-                Transport = server.Transport,
-                HttpUrl = server.HttpUrl,
-                ContainerImage = server.ContainerImage,
-                ContainerCommand = server.ContainerCommand,
-                ContainerArgs = [.. server.ContainerArgs],
-                ContainerSidecarName = server.ContainerSidecarName,
-                BundlePath = server.BundlePath,
-                ServerType = server.ServerType,
-                ReadinessTimeoutSeconds = server.ReadinessTimeoutSeconds,
-                EnvKeys = server.EnvKeys is { Count: > 0 } ? [.. server.EnvKeys] : null,
-            },
-            cancellationToken).ConfigureAwait(false);
-
-        if (!result.Success)
-        {
-            LogMetadataRefreshFailed(logger, server.Id, result.Message);
-            return;
-        }
-
-        GatewayMcpServer refreshed = await catalog.SaveMcpServerDiscoveryAsync(
-            server.Id,
-            result.ToolCount,
-            result.ToolNames,
-            cancellationToken).ConfigureAwait(false);
-
-        LogMetadataRefreshCompleted(logger, refreshed.Id, refreshed.ToolCount);
-    }
 }

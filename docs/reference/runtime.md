@@ -27,6 +27,7 @@ If a connector test times out while its MCPB image is being built, the build con
 
 MCPB import validation runs with the identity of the user importing the connector.
 MCPB inspection reads any tool names declared in the bundle manifest; the bundled Web Tools manifest includes its tool name.
+Built-in bundle registration uses supplied tool metadata and does not run userless connector discovery at startup.
 
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.
 
