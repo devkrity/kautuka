@@ -1275,7 +1275,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("label=type:kautuka_envoy.process", enabled);
         Assert.Contains("label=level:s0:c123,c456", EgressTopologyManager.BuildEnvoyCreateArgs(
             envoy, "sockets", "admin", useDevelopmentSelinuxDomain: true, podSelinuxLevel: "s0:c123,c456"));
-        Assert.Throws<ArgumentException>(() => EgressTopologyManager.BuildEnvoyCreateArgs(
+        Assert.Throws<ArgumentNullException>(() => EgressTopologyManager.BuildEnvoyCreateArgs(
             envoy, "sockets", "admin", useDevelopmentSelinuxDomain: true));
 
         IReadOnlyList<string> ordinary = EgressTopologyManager.BuildEnvoyCreateArgs(envoy, "sockets", "admin");
