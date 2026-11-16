@@ -10,6 +10,9 @@
   },
   "homepage": "https://github.com/devkrity/kautuka",
   "documentation": "https://github.com/devkrity/kautuka/tree/main/mcps/kautuka-web-tools",
+  "tools": [
+    { "name": "kautuka_web_fetch", "description": "Fetch web evidence from an HTTP or HTTPS URL." }
+  ],
   "compatibility": {
     "platforms": ["darwin", "linux", "win32"],
     "runtimes": {
