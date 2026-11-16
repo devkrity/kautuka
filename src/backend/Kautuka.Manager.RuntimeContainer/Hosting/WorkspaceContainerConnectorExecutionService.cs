@@ -1229,6 +1229,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         cancellationToken = launchCancellation.Token;
         bool isBraked = workloadLaunchGate?.IsBraked(launchUserId) ?? true;
 
+        if (workloadRegistry is not null && postStartVerifier is null)
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' cannot be authorized because post-start verification is unavailable.");
+        }
+
         if (inspection.Exists)
         {
             if (!await RemoveConnectorContainerAsync(containerName, inspection, cancellationToken).ConfigureAwait(false))
@@ -1243,9 +1248,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             ? "none"
             : (isProbe || string.IsNullOrWhiteSpace(identity.AgentId) ? "user" : "user-agent");
 
-        if (workloadRegistry is not null)
-        {
-            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+        var desiredIdentity = new Kautuka.NetworkAccessController.RegistryEntry(
                 allocatedIp,
                 string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId,
                 string.IsNullOrWhiteSpace(identity.AgentId) ? null : identity.AgentId,
@@ -1258,7 +1261,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 attribution,
                 compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                 DateTimeOffset.UtcNow,
-                isProbe && !saveDiscovery ? "probe" : null));
+                isProbe && !saveDiscovery ? "probe" : null);
+
+        if (workloadRegistry is not null
+            && !workloadRegistry.TryRegisterQuarantined(desiredIdentity with { Egress = "deny-all", Attribution = "none" }))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' workload address is already registered.");
         }
 
         var runArgs = BuildConnectorWorkloadRunArguments(
@@ -1291,16 +1299,36 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 result));
         }
 
+        bool hasCreatedId = PodmanContainerIdentity.TryReadCanonicalLaunchOutput(result.StdOut, out string createdId);
+        if (workloadRegistry is not null
+            && (!hasCreatedId || !workloadRegistry.UpdateContainerId(allocatedIp, containerName, createdId)))
+        {
+            throw new InvalidOperationException($"Connector '{connector.ConnectorId}' started without a confirmed container identity; it remains quarantined.");
+        }
+
         if (postStartVerifier is not null)
         {
             // The verifier owns failure cleanup and retains a deny-all identity when force-removal
             // is unconfirmed. A second unchecked rm/deregister here could erase that quarantine.
-            await postStartVerifier.VerifyWorkloadAsync(
-                containerName,
+            NetworkAccess.WorkloadVerificationResult verified = await postStartVerifier.VerifyWorkloadAsync(
+                hasCreatedId ? createdId : containerName,
                 allocatedIp,
                 compatProfile,
                 workloadRegistry,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (workloadRegistry is not null)
+            {
+                Kautuka.NetworkAccessController.RegistryEntry? quarantined = workloadRegistry.FindByIp(allocatedIp);
+                cancellationToken.ThrowIfCancellationRequested();
+                workloadLaunchGate?.EnsureLaunchAllowed(identity.UserId);
+                if (quarantined is null
+                    || verified.CanonicalContainerId is not { Length: > 0 } verifiedId
+                    || !string.Equals(quarantined.ContainerId, verifiedId, StringComparison.Ordinal)
+                    || !workloadRegistry.TryPromoteVerified(quarantined, desiredIdentity with { ContainerId = verifiedId }))
+                {
+                    throw new InvalidOperationException($"Connector '{connector.ConnectorId}' registry identity changed before verification could be promoted.");
+                }
+            }
         }
 
         trackedConnectorContainers[runtimeKey] = containerName;

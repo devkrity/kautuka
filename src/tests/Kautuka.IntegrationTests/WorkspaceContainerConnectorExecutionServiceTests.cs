@@ -287,6 +287,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         try
         {
             const string imageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             var registry = new WorkloadRegistry();
             var calls = new List<string[]>();
             var pidIps = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -323,7 +324,6 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     RegistryEntry entry = Assert.Single(registry.GetAll());
                     int pid = Interlocked.Increment(ref nextPid);
                     pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
-                    const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
                     string inspect = "[{\"Id\":\"" + containerId + "\",\"Image\":\"" + imageId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"0:0\"},\"State\":{\"Pid\":" + pid + ",\"Status\":\"running\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                     return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
                 }
@@ -336,6 +336,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 if (args[0] == "run")
                 {
                     runStarted = true;
+                    return Task.FromResult(new PodmanCommandResult(0, containerId, string.Empty, ProcessTerminationReason.Completed));
                 }
                 else if (args[0] == "unshare")
                 {
@@ -549,6 +550,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
                 addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
                 workloadRegistry: registry,
+                postStartVerifier: new WorkloadPostStartVerifier(runner),
                 workloadLaunchGate: gate);
             var connector = new WorkspaceMcpContainerConnectorDefinition(
                 "launch-gate-test",
@@ -1489,7 +1491,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     [Fact]
     public async Task AgentFileConnectorReusesMatchingFingerprintAndRecreatesWhenAgentChanges()
     {
-        const string hostWorkspace = "/tmp/nac-v7-fingerprint-workspace";
+        string hostWorkspace = Path.Combine(Path.GetTempPath(), "nac-v7-fingerprint-workspace");
         const string containerName = "kautuka-mcp-user-alpha-agent-alpha-shared-files";
         var commands = new List<string[]>();
         bool containerExists = false;
@@ -1504,12 +1506,13 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             commands.Add([.. args]);
             return Task.FromResult(args[0] switch
             {
-                "inspect" when containerExists && args.Count > 1 && args[1] == containerName => Success(inspectJson!),
+                "inspect" when containerExists && args.Count > 1 && (args[1] == containerName || args[1] == latestContainerId) => Success(inspectJson!),
                 "inspect" => new PodmanCommandResult(125, "", "missing", ProcessTerminationReason.NonZeroExit),
                 "container" => new PodmanCommandResult(1, "", "missing", ProcessTerminationReason.NonZeroExit),
                 "image" => Success("sha256:current"),
                 "run" => Start(args),
                 "rm" => Remove(),
+                "unshare" or "machine" => Success(args.Contains("cat", StringComparer.Ordinal) ? "1" : BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", latestWorkloadIp!, StringComparison.Ordinal)),
                 _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
             });
         });
@@ -1520,11 +1523,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             containerExists = true;
             latestContainerId = new string('0', 63) + (++launchCount).ToString("x", System.Globalization.CultureInfo.InvariantCulture);
             latestWorkloadIp = registry.GetAll().Single(entry => string.Equals(entry.ContainerId, containerName, StringComparison.Ordinal)).Ip;
-            inspectJson = ConnectorInspectJson(hostWorkspace, startedFingerprint, desiredVersion: 7, latestContainerId, latestWorkloadIp);
+            string activeWorkspace = launchCount == 1 ? hostWorkspace : hostWorkspace + "-beta";
+            inspectJson = ConnectorInspectJson(activeWorkspace, startedFingerprint, desiredVersion: 7, latestContainerId, latestWorkloadIp);
             Assert.True(PodmanContainerIdentity.TryRead(inspectJson, out string parsedId, out string parsedIp));
             Assert.Equal(latestContainerId, parsedId);
             Assert.Equal(latestWorkloadIp, parsedIp);
-            return Success(containerName);
+            return Success(latestContainerId);
         }
         PodmanCommandResult Remove()
         {
@@ -1538,14 +1542,15 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         {
             var desiredState = new WorkspaceDesiredStateStore();
             ContainerContext agentAlpha = FingerprintContext("agent-alpha", hostWorkspace);
+            ContainerContext agentBeta = FingerprintContext("agent-beta", hostWorkspace + "-beta");
             _ = desiredState.ApplyDesiredState(
                 7,
                 WorkspaceDesiredStateSyncReason.Bootstrap,
                 new ManagerRuntimeSettings(
-                    new ManagerWorkspaceDefinition { BaseRoot = "/tmp" },
+                    new ManagerWorkspaceDefinition { BaseRoot = Path.GetTempPath() },
                     new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
-                [agentAlpha],
+                [agentAlpha, agentBeta],
                 [],
                 []);
             await using var service = new WorkspaceContainerConnectorExecutionService(
@@ -1556,6 +1561,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
                 new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
                 registry,
+                postStartVerifier: new WorkloadPostStartVerifier(runner, desiredState),
                 workloadLaunchGate: TestOpenWorkloadLaunchGate);
             var connector = new WorkspaceMcpContainerConnectorDefinition(
                 "user-alpha::shared",
@@ -1581,23 +1587,9 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     context,
                     null,
                 ])!).ConfigureAwait(false);
-            void MarkLatestLaunchVerifiedForFixture()
-            {
-                RegistryEntry provisional = registry.FindByIp(latestWorkloadIp!)!;
-                Assert.NotNull(provisional);
-                Assert.Equal(containerName, provisional.ContainerId);
-                Assert.True(registry.UpdateContainerId(provisional.Ip, provisional.ContainerId, latestContainerId!));
-                RegistryEntry registered = registry.FindByIp(provisional.Ip)!;
-                Assert.True(registry.TryQuarantine(registered.Ip, latestContainerId!));
-                RegistryEntry quarantined = registry.FindByIp(registered.Ip)!;
-                RegistryEntry desired = quarantined with { Egress = registered.Egress, Attribution = registered.Attribution };
-                Assert.True(registry.TryPromoteVerified(quarantined, desired));
-                Assert.True(registry.IsVerified(registered.Ip, latestContainerId!));
-            }
-
             await EnsureAsync(agentAlpha);
             string alphaContainerId = latestContainerId!;
-            MarkLatestLaunchVerifiedForFixture();
+            Assert.True(registry.IsVerified(latestWorkloadIp!, alphaContainerId));
             int runCount = commands.Count(static command => command[0] == "run");
             await EnsureAsync(agentAlpha);
 
@@ -1609,12 +1601,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Equal(runCount, commands.Count(static command => command[0] == "run"));
             Assert.DoesNotContain(commands, static command => command[0] == "rm");
 
-            ContainerContext agentBeta = FingerprintContext("agent-beta", hostWorkspace);
             await EnsureAsync(agentBeta);
             Assert.Equal(runCount + 1, commands.Count(static command => command[0] == "run"));
             Assert.Contains(commands, static command => command[0] == "rm");
             Assert.NotEqual(startedFingerprint, connector.SpecFingerprint);
-            MarkLatestLaunchVerifiedForFixture();
+            Assert.True(registry.IsVerified(latestWorkloadIp!, latestContainerId!));
             RegistryEntry betaEntry = Assert.Single(registry.GetAll());
             Assert.Equal("agent-beta", betaEntry.AgentId);
             Assert.Equal(latestContainerId, betaEntry.ContainerId);
@@ -1629,7 +1620,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     [Fact]
     public async Task V7_39_ReconcileInspectsTheDesiredAgentFileContainer_WithNegativeControl()
     {
-        const string workspaceRoot = "/tmp/nac-v7-reconcile-agent-files";
+        string workspaceRoot = Path.Combine(Path.GetTempPath(), "nac-v7-reconcile-agent-files");
         const string connectorId = "user-alpha::shared-reconcile";
         var workspace = FingerprintContext("agent-alpha", Path.Combine(workspaceRoot, "users", "user-alpha", "agents", "agent-alpha"));
         var sourceConnector = new WorkspaceMcpContainerConnectorDefinition(
@@ -1668,7 +1659,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
-            if (args[0] == "inspect" && args.Count > 1 && args[1] == containerName && containerExists)
+            if (args[0] == "inspect" && args.Count > 1 && (args[1] == containerName || args[1] == containerId) && containerExists)
             {
                 return Task.FromResult(Success(inspectJson!));
             }
@@ -1697,7 +1688,13 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 string workloadIp = Assert.Single(registry.GetAll()).Ip;
                 inspectJson = ConnectorInspectJson(workspace.HostWorkspacePath, fingerprint, desiredVersion: 1, containerId, workloadIp);
                 containerExists = true;
-                return Task.FromResult(Success(containerName));
+                return Task.FromResult(Success(containerId));
+            }
+
+            if (args[0] is "unshare" or "machine")
+            {
+                string workloadIp = Assert.Single(registry.GetAll()).Ip;
+                return Task.FromResult(Success(args.Contains("cat", StringComparer.Ordinal) ? "1" : BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", workloadIp, StringComparison.Ordinal)));
             }
 
             if (args[0] == "rm")
@@ -1716,6 +1713,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(allocatorDirectory, "ip-cursor.json")),
             workloadRegistry: registry,
+            postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
             workloadLaunchGate: TestOpenWorkloadLaunchGate);
         Assert.Contains(containerName, service.DesiredIsolatedContainerNames([connector]), StringComparer.OrdinalIgnoreCase);
 
@@ -2419,10 +2417,13 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             {
                 Id = containerId,
                 Image = "sha256:current",
+                EffectiveCaps = Array.Empty<string>(),
+                BoundingCaps = Array.Empty<string>(),
                 NetworkSettings = new { Networks = new Dictionary<string, object> { ["kautuka-workload"] = new { IPAddress = workloadIp } } },
-                State = new { Status = "running" },
+                State = new { Status = "running", Pid = 4242 },
                 Config = new
                 {
+                    User = "65532:65532",
                     Env = new[] { "PATH=/usr/bin", "HOME=/tmp", "NPM_CONFIG_CACHE=/tmp/.npm", "PIP_CACHE_DIR=/tmp/.pip", "UV_CACHE_DIR=/tmp/.uv" },
                     Labels = new Dictionary<string, string>
                     {
@@ -2430,7 +2431,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                         ["kautuka.spec-fingerprint"] = fingerprint,
                     },
                 },
-                Mounts = new[] { new { Type = "bind", Source = hostPath, Destination = "/workspace", RW = false } },
+                Mounts = new[] { new { Type = "bind", Source = OperatingSystem.IsWindows() ? Path.GetFullPath(hostPath) : hostPath, Destination = "/workspace", RW = false } },
                 HostConfig = new
                 {
                     NetworkMode = "bridge",
@@ -2444,6 +2445,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     ReadonlyRootfs = true,
                     PidsLimit = 128,
                     SecurityOpt = new[] { "no-new-privileges", "label=disable" },
+                    Sysctls = new Dictionary<string, string> { ["net.ipv6.conf.all.disable_ipv6"] = "1" },
                     Tmpfs = new Dictionary<string, string> { ["/tmp"] = "rw,noexec,nosuid,nodev,size=64m" },
                 },
             },
