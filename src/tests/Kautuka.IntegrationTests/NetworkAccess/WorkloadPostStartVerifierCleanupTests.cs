@@ -264,7 +264,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
             PodmanCommandResult StartContainer()
             {
                 started = true;
-                return new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed);
+                return new PodmanCommandResult(0, CanonicalContainerId, string.Empty, ProcessTerminationReason.Completed);
             }
 
             var service = new WorkspaceContainerConnectorExecutionService(
