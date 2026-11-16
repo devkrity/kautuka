@@ -8,7 +8,7 @@ namespace Kautuka.NetworkAccessController;
 /// </summary>
 public sealed class NetworkAccessController
 {
-    private sealed record ProviderTestGrant(string UserId, string Host, int Port, bool AllowLan);
+    private sealed record ProviderTestGrant(string UserId, string Host, int Port, bool AllowLan, DateTimeOffset ExpiresAt);
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ProviderTestGrant> providerTests = new(StringComparer.Ordinal);
 
     public string BeginProviderTest(NetworkAccessActor actor, string host, int port, bool allowLan)
@@ -20,8 +20,14 @@ public sealed class NetworkAccessController
         if (!NetworkDestinationNormalizer.TryNormalizeIpv4(host, out normalized, out _)
             && !NetworkDestinationNormalizer.TryNormalizeHostname(host, out normalized, out _))
             throw new ArgumentException("Invalid provider host.", nameof(host));
+        DateTimeOffset now = timeProvider.GetUtcNow();
+        foreach (var entry in providerTests)
+        {
+            if (entry.Value.ExpiresAt <= now)
+                providerTests.TryRemove(entry.Key, out _);
+        }
         string token = Guid.NewGuid().ToString("N");
-        providerTests[token] = new(actor.UserId, normalized, port, allowLan);
+        providerTests[token] = new(actor.UserId, normalized, port, allowLan, now.AddSeconds(30));
         return token;
     }
 
@@ -43,6 +49,7 @@ public sealed class NetworkAccessController
     private readonly NetworkAccessAuditRing auditRing;
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
     private readonly Func<bool>? isPackageProxyReady;
+    private readonly TimeProvider timeProvider;
 
     private long checks;
     private long allowed;
@@ -56,7 +63,8 @@ public sealed class NetworkAccessController
         IWorkloadRegistry registry,
         NetworkAccessAuditRing? auditRing = null,
         Func<bool>? isContainerAuthorizationGateOpen = null,
-        Func<bool>? isPackageProxyReady = null)
+        Func<bool>? isPackageProxyReady = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
@@ -65,6 +73,7 @@ public sealed class NetworkAccessController
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
         this.isPackageProxyReady = isPackageProxyReady;
+        this.timeProvider = timeProvider ?? TimeProvider.System;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -525,6 +534,7 @@ public sealed class NetworkAccessController
 
                 if (input.Purpose == "provider-test" && input.CorrelationId is { Length: > 0 } token
                     && providerTests.TryGetValue(token, out ProviderTestGrant? grant)
+                    && grant.ExpiresAt > timeProvider.GetUtcNow()
                     && grant.UserId == userId && grant.Host == normalizedDestination && grant.Port == input.Port
                     && (destKind != "ip" || !NetworkAddressClassifier.IsNonPublicV4(normalizedDestination) || grant.AllowLan))
                 {
