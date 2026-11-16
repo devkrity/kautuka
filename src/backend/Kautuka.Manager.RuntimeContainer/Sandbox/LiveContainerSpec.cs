@@ -77,7 +77,7 @@ internal static class LiveContainerSpec
         if (!string.IsNullOrWhiteSpace(expected.CurrentImageId))
         {
             string imageId = container.TryGetProperty("Image", out JsonElement image) ? image.GetString() ?? string.Empty : string.Empty;
-            if (!string.Equals(imageId, expected.CurrentImageId, StringComparison.Ordinal))
+            if (!ImageIdsMatch(imageId, expected.CurrentImageId))
             {
                 return "its image is not the image that tag points at now";
             }
@@ -150,6 +150,19 @@ internal static class LiveContainerSpec
         }
 
         return null;
+    }
+
+    private static bool ImageIdsMatch(string actual, string expected)
+    {
+        if (string.Equals(actual, expected, StringComparison.Ordinal)) return true;
+        ReadOnlySpan<char> actualHex = actual.AsSpan();
+        ReadOnlySpan<char> expectedHex = expected.AsSpan();
+        if (actualHex.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) actualHex = actualHex[7..];
+        if (expectedHex.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) expectedHex = expectedHex[7..];
+        return actualHex.Length == 64 && expectedHex.Length == 64
+            && actualHex.ToString().All(Uri.IsHexDigit)
+            && expectedHex.ToString().All(Uri.IsHexDigit)
+            && actualHex.Equals(expectedHex, StringComparison.OrdinalIgnoreCase);
     }
 
     internal static string? DescribeSidecarDrift(

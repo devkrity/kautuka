@@ -9,6 +9,15 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class LiveContainerSpecTests
 {
+    [Fact]
+    public void ConnectorImageIdAcceptsPodmanBareSha256AndRejectsAnotherImage()
+    {
+        string imageId = new('a', 64);
+        LiveContainerExpectation expected = LiveContainerSpec.ForConnector(Sandbox(), ["TOKEN=secret"], "sha256:" + imageId);
+        Assert.Null(LiveContainerSpec.DescribeDrift(Inspect(imageId: imageId, mount: "/tmp/kautuka/alpha:/workspace:ro", pidsLimit: 128), expected));
+        Assert.Equal("its image is not the image that tag points at now",
+            LiveContainerSpec.DescribeDrift(Inspect(imageId: new string('b', 64), mount: "/tmp/kautuka/alpha:/workspace:ro", pidsLimit: 128), expected));
+    }
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
