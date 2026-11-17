@@ -1348,7 +1348,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             if (workloadRegistry is not null)
             {
-                workloadRegistry.Deregister(allocatedIp, containerName);
+                try
+                {
+                    if (await PodmanContainerInspector.ReadAsync(podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false) is null)
+                        workloadRegistry.Deregister(allocatedIp, containerName);
+                }
+                catch (ContainerInspectionUnavailableException ex)
+                {
+                    logger.LogWarning(ex, "Could not confirm whether failed connector start '{ContainerName}' created a container; retaining deny-all.", containerName);
+                }
             }
             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure(
                 $"Start container connector '{connector.ConnectorId}'",

@@ -586,8 +586,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         }
     }
 
-    [Fact]
-    public async Task V7_45_BrakedProbeIsRefusedBeforePodman_AndOtherUserReachesRun_WithNegativeControl()
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task V7_45_BrakedProbeIsRefusedBeforePodman_AndOtherUserReachesRun_WithNegativeControl(bool confirmAbsent, bool timedOut)
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-launch-gate-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stateDirectory);
@@ -596,6 +600,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             policyStore.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "user", "blocked-user", on: true);
             var commands = new List<string[]>();
+            bool runAttempted = false;
             var runner = new PodmanCommandRunner((args, _) =>
             {
                 commands.Add([.. args]);
@@ -606,7 +611,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 }
                 if (args[0] == "run")
                 {
-                    return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic start failure", ProcessTerminationReason.NonZeroExit));
+                    runAttempted = true;
+                    return Task.FromResult(new PodmanCommandResult(timedOut ? 124 : 125, string.Empty, "synthetic start failure", timedOut ? ProcessTerminationReason.TimedOut : ProcessTerminationReason.NonZeroExit));
                 }
 
                 if (args[0] == "inspect")
@@ -616,6 +622,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
 
                 if (args[0] == "container" && args.Count > 1 && args[1] == "exists")
                 {
+                    if (runAttempted && !confirmAbsent)
+                        return Task.FromResult(new PodmanCommandResult(125, string.Empty, "inspection unavailable", ProcessTerminationReason.NonZeroExit));
                     return Task.FromResult(new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit));
                 }
 
@@ -659,7 +667,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Contains("io.kautuka.user=other-user", run, StringComparer.Ordinal);
             Assert.DoesNotContain(run, static argument => argument.StartsWith("io.kautuka.agent=", StringComparison.Ordinal));
             Assert.Contains("io.kautuka.purpose=probe", run, StringComparer.Ordinal);
-            Assert.Empty(registry.GetAll());
+            if (confirmAbsent) Assert.Empty(registry.GetAll());
+            else Assert.Equal("deny-all", Assert.Single(registry.GetAll()).Egress);
         }
         finally
         {
