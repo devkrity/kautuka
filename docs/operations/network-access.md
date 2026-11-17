@@ -18,7 +18,7 @@ Hosted catalogue connector discovery runs as the installing user and saves the v
 If discovery needs network approval, the connector is saved without tool definitions; approve the request and use Test connection to finish discovery.
 Connector tests use the authenticated caller's identity; a user ID in the submitted test payload is ignored.
 The rule and compatibility APIs reject missing required fields with a bad-request response.
-If Manager cannot confirm a privilege update, the API returns unavailable and asks the administrator to refresh before retrying; a timeout alone does not establish whether the update was applied.
+If Manager cannot load privileges, the API returns unavailable. If it cannot confirm an update, it asks the administrator to refresh before retrying; a timeout alone does not establish whether the update was applied.
 Connector catalogue availability is not added to workload labels, used to reconstruct a workload's network identity, or sent in remote MCP network checks. Shared credential lookup remains separate.
 Connector desired-state fingerprints include the image compatibility relaxations as well as the image digest, so a changed profile is visible to reconciliation.
 

@@ -463,7 +463,15 @@ internal static partial class GatewayRuntimeEndpointMappings
                 TargetIsAdmin = targetIsAdmin,
             };
 
-            NetworkAccessUserPrivilegesMessage response = await managerService.GetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
+            NetworkAccessUserPrivilegesMessage response;
+            try
+            {
+                response = await managerService.GetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load network access privileges. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,

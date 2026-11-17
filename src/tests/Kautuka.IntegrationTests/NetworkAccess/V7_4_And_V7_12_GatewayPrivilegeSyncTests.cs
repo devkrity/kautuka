@@ -584,7 +584,9 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             => Wrap(grpc.SetRule(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CallOptions options)
-            => Wrap(grpc.GetUserPrivileges(request, ctx));
+            => failPrivilegeSync()
+                ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage"))
+                : Wrap(grpc.GetUserPrivileges(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CallOptions options)
             => failPrivilegeSync()
