@@ -520,10 +520,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
         var continuationOrchestrator = new CapturingContinuationOrchestrator();
         GatewayToolApprovalRequest[] fetches =
         [
-            CreatePackedFetchApproval("req-a", "call-a", "approved"),
-            CreatePackedFetchApproval("req-b", "call-b", "approved"),
-            CreatePackedFetchApproval("req-c", "call-c", "approved"),
-            CreatePackedFetchApproval("req-d", "call-d", "approved"),
+            CreatePackedFetchApproval("req-a", "call-a", "approved") with { McpServerId = "connector-a" },
+            CreatePackedFetchApproval("req-b", "call-b", "approved") with { McpServerId = "connector-b" },
+            CreatePackedFetchApproval("req-c", "call-c", "approved") with { McpServerId = "connector-c" },
+            CreatePackedFetchApproval("req-d", "call-d", "approved") with { McpServerId = "connector-d" },
         ];
         var approvalStore = new FakeApprovalStore(fetches);
         RunWaitState waitState = CreatePackedApprovalWaitState("req-a", "req-b", "req-c", "req-d");
@@ -558,6 +558,13 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             _ = await publisher.WaitForCompletedAsync().ConfigureAwait(true);
             Assert.Equal(4, packedInvoker.InvokeCount);
             Assert.True(packedInvoker.MaxInFlight >= 4, $"expected 4 overlapping invokes, max in-flight was {packedInvoker.MaxInFlight}");
+            Assert.Equal(new[] { "connector-a", "connector-b", "connector-c", "connector-d" },
+                packedInvoker.NetworkScopes.Select(scope => scope?.ConnectorId).Order(StringComparer.Ordinal));
+            Assert.All(packedInvoker.NetworkScopes, scope =>
+            {
+                Assert.Equal("user-1", scope?.UserId);
+                Assert.Equal("agent-caller-1", scope?.AgentId);
+            });
             Assert.True(RunClockEnvelope.TryReadPackedToolResults(
                 runWaitStateStore.GetByWaitId(waitState.WaitId)?.BehaviorJson,
                 out IReadOnlyDictionary<string, PackedToolResult> results));
@@ -2338,6 +2345,8 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
         public int InvokeCount => invokeCount;
 
+        public System.Collections.Concurrent.ConcurrentBag<NetworkAccessScope?> NetworkScopes { get; } = [];
+
         public async ValueTask<string> InvokeAsync(
             string agentId,
             string sessionId,
@@ -2346,6 +2355,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             string? argumentsJson,
             CancellationToken cancellationToken)
         {
+            NetworkScopes.Add(NetworkAccessContext.Current);
             Interlocked.Increment(ref invokeCount);
             lock (gate)
             {
