@@ -1124,7 +1124,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
                 string rules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", inspectedIp, StringComparison.Ordinal);
                 return Task.FromResult(new PodmanCommandResult(0, rules, ""));
             }
-            if (command[0] == "rm") removed.Add(command[2]);
+            if (command[0] == "rm") removed.Add(command[^1]);
             return Task.FromResult(new PodmanCommandResult(0, "", ""));
         });
         var registry = new WorkloadRegistry();

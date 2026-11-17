@@ -318,9 +318,8 @@ public sealed class WorkloadPostStartVerifier
             stopwatch.Stop();
             long exposureMs = stopwatch.ElapsedMilliseconds;
 
-            // Quarantine before awaiting cleanup so the identity loses any normal grant in the
-            // current process while kill/rm are in flight. Startup label-based reauthorization is
-            // a separate gap; this in-memory quarantine does not survive Manager restart.
+            // Quarantine before awaiting cleanup so the identity loses any normal grant while
+            // kill/rm are in flight. The desired-state store also persists the quarantine when available.
             bool quarantined = false;
             string? quarantineFailure = null;
             try
@@ -353,7 +352,7 @@ public sealed class WorkloadPostStartVerifier
                 try
                 {
                     PodmanCommandResult removeResult = await podmanRunner
-                        .RunAsync(["rm", "-f", canonicalContainerId], 5, CancellationToken.None)
+                        .RunAsync(["rm", "-f", "--time", "1", canonicalContainerId], 5, CancellationToken.None)
                         .ConfigureAwait(false);
                     removed = removeResult.ExitCode == 0;
                 }

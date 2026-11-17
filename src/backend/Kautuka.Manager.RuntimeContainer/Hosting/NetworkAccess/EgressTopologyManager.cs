@@ -642,7 +642,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 logger.LogWarning("Killing unlabelled/invalid workload container '{ContainerId}'.", cid);
                                 try
                                 {
-                                    await podmanRunner.RunAsync(["rm", "-f", cid], 5, cancellationToken).ConfigureAwait(false);
+                                    await podmanRunner.RunAsync(["rm", "-f", "--time", "1", cid], 5, cancellationToken).ConfigureAwait(false);
                                 }
                                 catch
                                 {
@@ -678,7 +678,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 {
                                     try
                                     {
-                                        await podmanRunner.RunAsync(["rm", "-f", inspectedContainerId], 5, cancellationToken).ConfigureAwait(false);
+                                        await podmanRunner.RunAsync(["rm", "-f", "--time", "1", inspectedContainerId], 5, cancellationToken).ConfigureAwait(false);
                                     }
                                     catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
                                     {
@@ -714,7 +714,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                     }
                                     try
                                     {
-                                        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", immutableId], 5, cancellationToken).ConfigureAwait(false);
+                                        PodmanCommandResult removed = await podmanRunner.RunAsync(["rm", "-f", "--time", "1", immutableId], 5, cancellationToken).ConfigureAwait(false);
                                         if (removed.ExitCode != 0) cleanupFailure = new InvalidOperationException($"podman rm failed for restored workload '{immutableId}' (rc {removed.ExitCode}): {removed.StdErr}");
                                     }
                                     catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
@@ -2804,7 +2804,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 }
                 try
                 {
-                    PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", quarantinedId], 5, cancellationToken).ConfigureAwait(false);
+                    PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", "--time", "1", quarantinedId], 5, cancellationToken).ConfigureAwait(false);
                     if (removal.ExitCode != 0)
                     {
                         logger.LogCritical("Persistently quarantined workload {ContainerId} survived removal (rc {ExitCode}); closing launch admission for retry.", quarantinedId, removal.ExitCode);
@@ -2848,7 +2848,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     try
                     {
-                        PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", liveCid], 5, cancellationToken).ConfigureAwait(false);
+                        PodmanCommandResult removal = await podmanRunner.RunAsync(["rm", "-f", "--time", "1", liveCid], 5, cancellationToken).ConfigureAwait(false);
                         if (removal.ExitCode == 0)
                         {
                             registry.Deregister(entry.Ip, entry.ContainerId);
@@ -2902,7 +2902,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         logger.LogError(persistenceException, "Could not persist quarantine for workload {ContainerId}; continuing fail-closed cleanup.", canonicalId);
                     }
                     PodmanCommandResult? removal = null;
-                    try { removal = await podmanRunner.RunAsync(["rm", "-f", canonicalId], 5, cancellationToken).ConfigureAwait(false); }
+                    try { removal = await podmanRunner.RunAsync(["rm", "-f", "--time", "1", canonicalId], 5, cancellationToken).ConfigureAwait(false); }
                     catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
                     {
                         logger.LogError(cleanupException, "Could not remove quarantined workload {ContainerId}.", canonicalId);
