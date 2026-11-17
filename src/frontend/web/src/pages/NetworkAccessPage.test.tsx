@@ -295,7 +295,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       renderComponent(<NetworkAccessPage />);
 
-      const allowBtn = await screen.findByRole('button', { name: /^Allow$/ });
+      const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
       const keepBlockedBtn = screen.getByRole('button', { name: /Keep blocked/i });
 
       // Click Allow
@@ -377,12 +377,12 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       // Alice can decide her own agent's request
       expect(await screen.findByText(/Alice's AliceAgent wants to reach alice-dest\.com/)).toBeVisible();
       const aliceCard = screen.getByTestId('request-card-req-alice');
-      expect(within(aliceCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(aliceCard).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).toBeVisible();
 
       // Catalogue availability does not change Alice's authority over her request.
       const systemwideCard = screen.getByTestId('request-card-req-systemwide');
       expect(within(systemwideCard).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
-      expect(within(systemwideCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(systemwideCard).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).toBeVisible();
     });
 
     it('NC: administrator CAN decide the systemwide connector request (nc_flipped == true)', async () => {
@@ -415,7 +415,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const systemwideCard = await screen.findByTestId('request-card-req-systemwide');
-      expect(within(systemwideCard).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(systemwideCard).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).toBeVisible();
       expect(within(systemwideCard).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
     });
 
@@ -452,12 +452,12 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const card = await screen.findByTestId('request-card-req-owner-needs-admin');
-      expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
+      expect(within(card).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).toBeVisible();
       expect(within(card).getByRole('button', { name: /Keep blocked/i })).toBeVisible();
-      expect(within(card).getByRole('button', { name: /Allow for all of Alice's activity/i })).toBeVisible();
+      expect(within(card).getByRole('button', { name: /Allow this site for everything Alice uses/i })).toBeVisible();
       expect(within(card).queryByText(/Waiting for an administrator to approve/i)).not.toBeInTheDocument();
 
-      await user.click(within(card).getByRole('button', { name: /^Allow$/ }));
+      await user.click(within(card).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ }));
       await waitFor(() => {
         expect(post).toHaveBeenCalledWith(
           '/network-access/requests/req-owner-needs-admin/decision',
@@ -499,7 +499,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       const card = await screen.findByTestId('request-card-req-owner-needs-admin');
       expect(within(card).getByText(/Waiting for an administrator to approve/i)).toBeVisible();
-      expect(within(card).queryByRole('button', { name: /^Allow$/ })).not.toBeInTheDocument();
+      expect(within(card).queryByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).not.toBeInTheDocument();
       expect(within(card).queryByRole('button', { name: /Keep blocked/i })).not.toBeInTheDocument();
     });
   });
@@ -535,7 +535,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       renderComponent(<NetworkAccessPage />);
 
-      const allowBtn = await screen.findByRole('button', { name: /^Allow$/ });
+      const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
       await user.click(allowBtn);
 
       expect(
@@ -577,7 +577,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
         await screen.findByText(/Ravi's Researcher \(Web Search\) wants to reach a server at 93\.184\.216\.34:8443/)
       ).toBeVisible();
 
-      const allowBtn = screen.getByRole('button', { name: /^Allow$/ });
+      const allowBtn = screen.getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
       const keepBlockedBtn = screen.getByRole('button', { name: /Keep blocked/i });
       expect(allowBtn).toBeVisible();
       expect(keepBlockedBtn).toBeVisible();
@@ -622,13 +622,13 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
       const card = await screen.findByTestId('request-card-req-connector');
       expect(within(card).queryByRole('button', { name: /Allow for everyone/i })).not.toBeInTheDocument();
-      await user.click(within(card).getByRole('button', { name: /^Allow$/ }));
+      await user.click(within(card).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ }));
       expect(post).toHaveBeenCalledWith('/network-access/requests/req-connector/decision',
         expect.objectContaining({ allow: true, scope: 'connector' }));
     });
   });
   // ──────────────── UX8: Secondary 'Allow for All My Agents' Link ────────────────
-  describe('UX8: "Allow for all my activity" link', () => {
+  describe('UX8: "Allow this site for everything I use" link', () => {
     it('shows secondary link for owner holding canAllowAllAgents and writes user-scope rule', async () => {
       const user = userEvent.setup();
       const requestsData = createDefaultRequests(
@@ -660,7 +660,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const allAgentsLink = await screen.findByRole('button', {
-        name: 'Allow for all my activity',
+        name: 'Allow this site for everything I use',
       });
       expect(allAgentsLink).toBeVisible();
 
@@ -713,7 +713,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       expect(
         await screen.findByRole('button', {
-          name: "Allow for all of Sam's activity",
+          name: "Allow this site for everything Sam uses",
         })
       ).toBeVisible();
     });
@@ -748,8 +748,8 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
-      expect(within(card).getByRole('button', { name: /^Allow$/ })).toBeVisible();
-      expect(within(card).getByRole('button', { name: /Allow for all of Sam's activity/i })).toBeVisible();
+      expect(within(card).getByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).toBeVisible();
+      expect(within(card).getByRole('button', { name: /Allow this site for everything Sam uses/i })).toBeVisible();
     });
 
     it('non-admin cannot infer another user all-agents privilege when owner flags are missing', async () => {
@@ -783,7 +783,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       const card = await screen.findByTestId('request-card-req-owner-privileges-missing');
       expect(within(card).getByText(/No permission to decide this request/i)).toBeVisible();
-      expect(within(card).queryByRole('button', { name: /Allow for all of Sam's activity/i })).not.toBeInTheDocument();
+      expect(within(card).queryByRole('button', { name: /Allow this site for everything Sam uses/i })).not.toBeInTheDocument();
     });
 
     it('renders temporary probe card without permanent scope options (v7-14)', async () => {
@@ -821,7 +821,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       expect(screen.getByRole('button', { name: 'Allow for this probe' })).toBeVisible();
       expect(screen.getByRole('button', { name: 'Keep blocked' })).toBeVisible();
       expect(
-        screen.queryByRole('button', { name: 'Allow for all my activity' })
+        screen.queryByRole('button', { name: 'Allow this site for everything I use' })
       ).toBeNull();
       expect(screen.queryByRole('button', { name: 'Allow for everyone' })).toBeNull();
     });
