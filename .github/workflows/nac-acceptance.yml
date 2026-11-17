@@ -3,11 +3,11 @@ name: Network Access Control Acceptance
 on:
   push:
     branches:
-      - nac-v7
+      - enhancement/network-access-control-v2
       - main
   pull_request:
     branches:
-      - nac-v7
+      - enhancement/network-access-control-v2
       - main
   workflow_dispatch:
 
