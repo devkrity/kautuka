@@ -110,10 +110,12 @@ public sealed class GatewayOnboardingEndpointTests
         Assert.Equal(["markitdown"], catalogStore.ListMcpServers().Select(static server => server.Id).OrderBy(static id => id).ToArray());
     }
 
-    [Fact]
-    public async Task CatalogRecommendationInstallImportsConnectorAsync()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CatalogRecommendationInstallImportsConnectorAsync(bool needsNetworkApproval)
     {
-        var connectorTest = new RecordingMcpConnectorTestService();
+        var connectorTest = new RecordingMcpConnectorTestService { NeedsNetworkApproval = needsNetworkApproval };
         using var temp = new TemporaryGatewayStateDirectory();
         IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
         GatewayState state = CreateState(configuration);
@@ -171,9 +173,18 @@ public sealed class GatewayOnboardingEndpointTests
         Assert.Equal("Kautuka Web Tools", connector!.Name);
         Assert.True(connector.Enabled);
         Assert.Equal("user-1", connectorTest.LastRequest?.UserId);
-        Assert.Equal("sha256:" + new string('a', 64), connector.LocalImageDigest);
-        Assert.Equal(new string('b', 64), connector.LocalArtifactDigest);
-        Assert.Equal("open_page", Assert.Single(connector.LocalToolDefinitions!).Name);
+        Assert.True(connectorTest.LastRequest?.SaveDiscovery);
+        if (needsNetworkApproval)
+        {
+            Assert.True(json?["networkApprovalRequired"]?.GetValue<bool>());
+            Assert.Null(connector.LocalToolDefinitions);
+        }
+        else
+        {
+            Assert.Equal("sha256:" + new string('a', 64), connector.LocalImageDigest);
+            Assert.Equal(new string('b', 64), connector.LocalArtifactDigest);
+            Assert.Equal("open_page", Assert.Single(connector.LocalToolDefinitions!).Name);
+        }
     }
 
     [Fact]
@@ -537,9 +548,11 @@ public sealed class GatewayOnboardingEndpointTests
     private sealed class RecordingMcpConnectorTestService : IMcpConnectorTestService
     {
         public GatewayConnectorTestRequest? LastRequest { get; private set; }
+        public bool NeedsNetworkApproval { get; init; }
         public Task<McpConnectorTestResult> TestAsync(GatewayConnectorTestRequest request, CancellationToken ct)
         {
             LastRequest = request;
+            if (NeedsNetworkApproval) return Task.FromResult(new McpConnectorTestResult(false, "Network approval required.", NetworkApprovalRequired: true));
             return Task.FromResult(new McpConnectorTestResult(
                 true,
                 "Connector validated.",

@@ -99,7 +99,7 @@ internal sealed class GatewayHostedCatalogInstaller(
                 || (!string.IsNullOrWhiteSpace(inspection.Connector.BundlePath) && !IsCanonicalSourceDigest(validation.SourceDigest))))
             throw new InvalidOperationException("Connector tools could not be saved without an immutable image digest.");
 
-        if (!validation.Success)
+        if (!validation.Success && !validation.NetworkApprovalRequired)
         {
             throw new InvalidOperationException(validation.Message);
         }
@@ -111,7 +111,10 @@ internal sealed class GatewayHostedCatalogInstaller(
             ownerUserId,
             cancellationToken).ConfigureAwait(false);
 
-        return new GatewayHostedCatalogInstallResult("connector", inspection.ServerId, hasExisting);
+        if (validation.NetworkApprovalRequired)
+            _ = await catalogStore.SaveMcpServerDiscoveryAsync(inspection.ServerId, null, null, cancellationToken).ConfigureAwait(false);
+
+        return new GatewayHostedCatalogInstallResult("connector", inspection.ServerId, hasExisting, validation.NetworkApprovalRequired);
     }
 
     private async Task<GatewayHostedCatalogInstallResult> InstallSkillAsync(
@@ -295,6 +298,7 @@ internal sealed class GatewayHostedCatalogInstaller(
         {
             Id = serverId,
             UserId = userId,
+            SaveDiscovery = true,
             Transport = connector.Transport ?? "container",
             ContainerImage = connector.ContainerImage,
             ContainerCommand = connector.ContainerCommand,

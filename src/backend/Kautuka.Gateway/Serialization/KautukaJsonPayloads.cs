@@ -164,6 +164,7 @@ internal sealed record GatewayApplianceHealthPayload(
 internal sealed record GatewayToolsResponse(object[] Tools);
 
 internal sealed record GatewaySavedResponse(bool Saved);
+internal sealed record GatewayCatalogInstallResponse(bool Saved, bool NetworkApprovalRequired);
 
 internal sealed record GatewayDeletedResponse(bool Deleted);
 
