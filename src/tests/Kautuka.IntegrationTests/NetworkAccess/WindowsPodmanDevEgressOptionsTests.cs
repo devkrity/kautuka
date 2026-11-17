@@ -57,6 +57,11 @@ public sealed class WindowsPodmanDevEgressOptionsTests
             Assert.Skip("Podman Machine hook configuration is a Windows development path.");
         }
 
+        if (!string.Equals(Environment.GetEnvironmentVariable("KAUTUKA_TEST_PODMAN_MACHINE"), "1", StringComparison.Ordinal))
+        {
+            Assert.Skip("Set KAUTUKA_TEST_PODMAN_MACHINE=1 to run this test against the local Podman Machine.");
+        }
+
         var podman = new PodmanCommandRunner();
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         PodmanCommandResult machineList;
