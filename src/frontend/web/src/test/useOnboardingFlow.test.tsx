@@ -28,9 +28,8 @@ const {
   saveAgentMock: vi.fn(),
 }));
 
-const { checkRuleMock, grantRuleMock } = vi.hoisted(() => ({
+const { checkRuleMock } = vi.hoisted(() => ({
   checkRuleMock: vi.fn(),
-  grantRuleMock: vi.fn(),
 }));
 
 vi.mock('@/features/network-access/networkAccess', () => ({
@@ -45,7 +44,6 @@ vi.mock('@/features/network-access/networkAccess', () => ({
     };
   },
   checkProviderSystemwideRule: checkRuleMock,
-  grantProviderSystemwideRule: grantRuleMock,
 }));
 
 vi.mock('@/features/auth', () => ({
@@ -148,7 +146,6 @@ describe('useOnboardingFlow existing setup detection', () => {
     });
 
     checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
-    grantRuleMock.mockResolvedValue({});
     saveProviderMock.mockResolvedValue({ data: {} });
     probeModelCandidateMock.mockResolvedValue({
       data: {
@@ -331,10 +328,9 @@ describe('useOnboardingFlow existing setup detection', () => {
     expect(result.current.pendingProviderNetworkApproval).toBeNull();
     expect(testProviderMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
-    expect(grantRuleMock).not.toHaveBeenCalled();
   });
 
-  it('v7-37 negative control: no prompt and no grant when the provider address is already allowed', async () => {
+  it('does not prompt when the provider address is already allowed', async () => {
     listAgentsMock.mockResolvedValue({ data: { agents: [] } });
     checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
 
@@ -348,7 +344,6 @@ describe('useOnboardingFlow existing setup detection', () => {
     });
 
     expect(result.current.pendingProviderNetworkApproval).toBeNull();
-    expect(grantRuleMock).not.toHaveBeenCalled();
     expect(testProviderMock).not.toHaveBeenCalled();
   });
 

@@ -4,21 +4,19 @@ import type { PropsWithChildren } from 'react';
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { settingsAdminMock, checkRuleMock, grantRuleMock, resolveTargetMock } = vi.hoisted(() => ({
+const { settingsAdminMock, checkRuleMock, resolveTargetMock } = vi.hoisted(() => ({
   settingsAdminMock: {
     listProviders: vi.fn(),
     listProviderTypes: vi.fn(),
     testProvider: vi.fn(),
   },
   checkRuleMock: vi.fn(),
-  grantRuleMock: vi.fn(),
   resolveTargetMock: vi.fn(),
 }));
 
 vi.mock('@/features/settings', () => ({ settingsAdmin: settingsAdminMock }));
 vi.mock('@/features/network-access/networkAccess', () => ({
   checkProviderSystemwideRule: checkRuleMock,
-  grantProviderSystemwideRule: grantRuleMock,
   resolveProviderNetworkTarget: resolveTargetMock,
 }));
 
@@ -33,7 +31,6 @@ describe('useProvidersTab systemwide provider test approval', () => {
     });
     settingsAdminMock.testProvider.mockResolvedValue({ data: { success: true, message: 'ok' } });
     checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 4 });
-    grantRuleMock.mockResolvedValue(undefined);
     resolveTargetMock.mockReturnValue({ host: 'api.openai.com', port: 443 });
   });
 
@@ -44,7 +41,7 @@ describe('useProvidersTab systemwide provider test approval', () => {
     };
   }
 
-  it('uses temporary test approval without creating a persistent rule', async () => {
+  it('requests a temporary allowance when testing', async () => {
     const { result } = renderHook(() => useProvidersTab(), { wrapper: createWrapper() });
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -66,12 +63,10 @@ describe('useProvidersTab systemwide provider test approval', () => {
       target: { host: 'api.openai.com', port: 443 },
       expectedRevision: 4,
     });
-    expect(grantRuleMock).not.toHaveBeenCalled();
     expect(settingsAdminMock.testProvider).not.toHaveBeenCalled();
 
     await act(async () => result.current.confirmNetworkApprovalAndTest());
 
-    expect(grantRuleMock).not.toHaveBeenCalled();
     expect(settingsAdminMock.testProvider).toHaveBeenCalledTimes(1);
     expect(settingsAdminMock.testProvider).toHaveBeenCalledWith(expect.objectContaining({ allowTemporaryNetworkAccess: true }));
   });
