@@ -242,7 +242,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 KautukaJsonContext.Default.CreateOrUpdateRuleDto,
                 cancellationToken).ConfigureAwait(false);
 
-            if (dto is null)
+            if (dto is null || dto.ScopeKind is null || dto.Destination is null || dto.DestKind is null)
             {
                 return Results.BadRequest(new GatewayErrorResponse("Invalid rule payload."));
             }
@@ -704,7 +704,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 KautukaJsonContext.Default.CreateCompatProfileDto,
                 cancellationToken).ConfigureAwait(false);
 
-            if (dto is null)
+            if (dto is null || dto.Relaxations is null || dto.Relaxations.Any(static relaxation => relaxation is null))
             {
                 return Results.BadRequest(new GatewayErrorResponse("Invalid compat profile payload."));
             }

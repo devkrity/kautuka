@@ -7,6 +7,38 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
+    [Theory]
+    [InlineData("scope")]
+    [InlineData("destination")]
+    [InlineData("kind")]
+    public async Task RulePayloadWithNullRequiredFieldsReturnsBadRequest(string missing)
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using HttpResponseMessage response = await fixture.SendRawJsonAsync(HttpMethod.Put, "/api/network-access/rules", new
+        {
+            scopeKind = missing == "scope" ? null : "system",
+            destination = missing == "destination" ? null : "example.com",
+            destKind = missing == "kind" ? null : "host",
+            port = 443,
+            allowed = true,
+            expectedRevision = fixture.PolicyStore.Revision,
+        }, admin);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CompatibilityPayloadWithoutRelaxationsReturnsBadRequest(bool nullEntry)
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using HttpResponseMessage response = await fixture.SendRawJsonAsync(HttpMethod.Post,
+            "/api/network-access/compat/sha256:" + new string('a', 64), new { reason = "test", relaxations = nullEntry ? new string?[] { null } : null }, admin);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     [Fact]
     public async Task NetworkAccessLimitsSettingsAreAdminOnlyAndPersistThroughManager()
     {

@@ -17,6 +17,7 @@ Approved tool calls resumed by the background dispatcher retain the approving ru
 Hosted catalogue connector discovery runs as the installing user and saves the verified tool definitions and image and bundle digests alongside the connector.
 If discovery needs network approval, the connector is saved without tool definitions; approve the request and use Test connection to finish discovery.
 Connector tests use the authenticated caller's identity; a user ID in the submitted test payload is ignored.
+The rule and compatibility APIs reject missing required fields with a bad-request response.
 Connector catalogue availability is not added to workload labels, used to reconstruct a workload's network identity, or sent in remote MCP network checks. Shared credential lookup remains separate.
 
 Session compaction model calls use the session owner's network identity and, for agent sessions, the session's agent identity.
