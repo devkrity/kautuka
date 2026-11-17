@@ -174,6 +174,11 @@ internal static partial class GatewaySettingsEndpointMappings
                         : StatusCodes.Status400BadRequest);
             }
 
+            if (previousIsAdmin == request.IsAdmin)
+            {
+                return Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse);
+            }
+
             try
             {
                 await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(

@@ -33,6 +33,24 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Fact]
+    public async Task UnchangedRoleDoesNotOverwriteExplicitNetworkPrivilege()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using JsonDocument invited = await fixture.SendJsonAsync(
+            HttpMethod.Post, "/api/settings/users/invite",
+            new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" }, adminToken);
+        string aliceId = invited.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        using JsonDocument granted = await fixture.SendJsonAsync(
+            HttpMethod.Put, $"/api/network-access/users/{aliceId}/privileges", new { canApproveOwn = true }, adminToken);
+
+        using JsonDocument updated = await fixture.SendJsonAsync(
+            HttpMethod.Put, $"/api/settings/users/{aliceId}/role", new { isAdmin = false }, adminToken);
+        Assert.True(updated.RootElement.GetProperty("success").GetBoolean());
+        Assert.True(fixture.PolicyStore.GetUserPrivileges(new NetworkAccessActor("admin", IsAdmin: true), aliceId).CanApproveOwn);
+    }
+
+    [Fact]
     public async Task V7_4_UserCreation_Promotion_Demotion_SyncsPrivilegesAndRules_WithNegativeControl()
     {
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
