@@ -52,6 +52,8 @@ public sealed class DevelopmentNacStartupGuardTests
 
         Assert.False(manager.IsStartupGateOpen);
         Assert.True(manager.IsStartupRetryPending);
+        manager.CloseLaunchAdmission();
+        Assert.False(manager.IsStartupRetryPending);
         await manager.DisposeAsync();
         Directory.Delete(tempDirectory, recursive: true);
     }

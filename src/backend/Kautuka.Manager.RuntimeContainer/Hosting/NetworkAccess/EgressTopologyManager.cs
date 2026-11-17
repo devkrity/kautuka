@@ -231,6 +231,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             admissionCloseVersion++;
             startupInitializationRetryPending = false;
+            startupCanaryRetryPending = false;
             transientRecoveryPending = false;
             change = UpdateStartupGateStateUnderLock(isOpen: false);
         }
@@ -512,6 +513,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             IsStartupGateOpen = false;
             if (startupCanaryRetryPending)
             {
+                if (requireStartupRetryPermission)
+                {
+                    lock (gateLock)
+                    {
+                        if (!startupInitializationRetryPending) startupCanaryRetryPending = false;
+                        startupInitializationRetryPending = false;
+                    }
+                }
                 return;
             }
 

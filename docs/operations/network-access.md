@@ -189,6 +189,7 @@ Active short-lived connectors remain tracked until cleanup, and the orphan sweep
 During workload rules reconciliation, failed inspection or ruleset reads deny the affected workload and are retried; only a successfully read ruleset with a mismatched hash triggers persistent quarantine and removal. A canceled post-start verification denies the identity without recording a permanent quarantine.
 If removal of a quarantined workload fails while admission is open, Manager closes admission, retries cleanup, and revalidates the egress topology before reopening it. An explicit admission closure is not overridden by this recovery.
 After a hosted startup failure, production Manager keeps admission closed and retries initialization. Development Manager still aborts startup when its NAC startup guard fails.
+An explicit admission closure also cancels any deferred startup-canary retry.
 
 Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
 
