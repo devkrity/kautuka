@@ -1985,7 +1985,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         "create",
         "--pod", EgressPodName,
         "--name", "kautuka-egress-dns",
+        "--cap-drop", "ALL",
         "--cap-add", "NET_BIND_SERVICE",
+        "--security-opt", "no-new-privileges",
+        "--read-only",
         "-v", $"{Path.GetFullPath(Path.GetDirectoryName(corefilePath)!)}:/etc/coredns:{GetConfigMountOptions(isWindowsHostNativeDev)}",
         CoreDnsPinnedImage,
         "-conf", "/etc/coredns/Corefile"
@@ -2006,6 +2009,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             "create",
             "--pod", EgressPodName,
             "--name", "kautuka-egress-envoy",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--read-only",
             "-v", $"{Path.GetFullPath(Path.GetDirectoryName(envoyPath)!)}:/etc/kautuka-envoy:{GetConfigMountOptions(isWindowsHostNativeDev)}"
         ];
 

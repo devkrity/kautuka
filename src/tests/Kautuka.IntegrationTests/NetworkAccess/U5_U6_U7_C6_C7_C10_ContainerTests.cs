@@ -1307,6 +1307,25 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.DoesNotContain("label=type:kautuka_envoy.process", ordinary);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DnsAndEnvoyUseHardenedContainerProfiles(bool windows)
+    {
+        IReadOnlyList<string> dns = EgressTopologyManager.BuildCoreDnsCreateArgs(Path.Combine(tempDir, "Corefile"), windows);
+        IReadOnlyList<string> envoy = EgressTopologyManager.BuildEnvoyCreateArgs(
+            Path.Combine(tempDir, "envoy.yaml"), "sockets", "admin", windows,
+            decisionEndpointIp: "172.20.144.1", envoyCertificateDirectory: "certs");
+        foreach (IReadOnlyList<string> args in new[] { dns, envoy })
+        {
+            Assert.Contains("--read-only", args);
+            Assert.Contains(args.Zip(args.Skip(1)), pair => pair.First == "--cap-drop" && pair.Second == "ALL");
+            Assert.Contains(args.Zip(args.Skip(1)), pair => pair.First == "--security-opt" && pair.Second == "no-new-privileges");
+        }
+        Assert.Contains(dns.Zip(dns.Skip(1)), pair => pair.First == "--cap-add" && pair.Second == "NET_BIND_SERVICE");
+        Assert.DoesNotContain("--cap-add", envoy);
+    }
+
     [Fact]
     public void DnsAndEnvoyConfigsUseDedicatedReadOnlyRelabeledDirectoryMounts_WithNegativeControl()
     {
