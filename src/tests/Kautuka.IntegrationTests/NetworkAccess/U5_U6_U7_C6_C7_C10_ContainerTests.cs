@@ -408,6 +408,33 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Equal("address replace 10.248.0.3/24 dev enp0s8", File.ReadAllText(capturePath).Trim());
     }
 
+    [Fact]
+    public async Task FailedHostedStartupRetriesUntilExplicitlyClosed()
+    {
+        int infoCalls = 0;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "info")
+            {
+                infoCalls++;
+                return Task.FromResult(new PodmanCommandResult(125, "", "temporary failure", ProcessTerminationReason.NonZeroExit));
+            }
+            return Task.FromResult(new PodmanCommandResult(0, "[]", "", ProcessTerminationReason.Completed));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "startup-retry-ip.json")), new WorkloadPostStartVerifier(podman), registry, tempDir);
+        await manager.StartAsync(TestContext.Current.CancellationToken);
+        Assert.False(manager.IsStartupGateOpen);
+        Assert.Equal(1, infoCalls);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.Equal(2, infoCalls);
+        Assert.False(manager.IsStartupGateOpen);
+        manager.CloseLaunchAdmission();
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.Equal(2, infoCalls);
+        Assert.False(manager.IsStartupGateOpen);
+    }
+
     [Theory]
     [InlineData("image")]
     [InlineData("same-tag-image-id")]

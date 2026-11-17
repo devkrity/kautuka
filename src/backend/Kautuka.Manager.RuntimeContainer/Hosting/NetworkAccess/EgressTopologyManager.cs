@@ -93,6 +93,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private volatile bool topologyContainmentComplete;
     private volatile bool transientRecoveryPending;
     private volatile bool startupCanaryRetryPending;
+    private volatile bool startupInitializationRetryPending;
+    private long admissionCloseVersion;
     private volatile bool startupCanaryBrakeObserved;
     private bool startupIsWindowsHostNativeDev;
     private string? startupDecisionEndpointIp;
@@ -227,6 +229,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         StartupGateStateChange change;
         lock (gateLock)
         {
+            admissionCloseVersion++;
+            startupInitializationRetryPending = false;
             transientRecoveryPending = false;
             change = UpdateStartupGateStateUnderLock(isOpen: false);
         }
@@ -386,6 +390,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        long closeVersion;
+        lock (gateLock) closeVersion = admissionCloseVersion;
         try
         {
             await InitializeProductionAsync(
@@ -393,10 +399,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 isWindowsHostNativeDev: OperatingSystem.IsWindows(),
                 cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             IsStartupGateOpen = false;
             logger.LogError(ex, "Failed to initialize EgressTopologyManager; closed startup gate.");
+            lock (gateLock)
+            {
+                if (!topologyIncidentLatched && closeVersion == admissionCloseVersion)
+                    startupInitializationRetryPending = true;
+            }
+            if (startupInitializationRetryPending) StartReconcileLoop(registry);
         }
     }
 
@@ -425,12 +441,21 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     /// Ensures networks and allowlist are provisioned, egress pod is live with boundary rules,
     /// registry is rebuilt from container labels, startup canary passes, and reconcile loop starts.
     /// </summary>
-    public async Task InitializeAsync(
+    public Task InitializeAsync(
         IWorkloadRegistry registry,
         bool isWindowsHostNativeDev = false,
         string? decisionEndpointIp = null,
         bool includeLanGrants = false,
         CancellationToken cancellationToken = default)
+        => InitializeCoreAsync(registry, isWindowsHostNativeDev, decisionEndpointIp, includeLanGrants, false, cancellationToken);
+
+    private async Task InitializeCoreAsync(
+        IWorkloadRegistry registry,
+        bool isWindowsHostNativeDev,
+        string? decisionEndpointIp,
+        bool includeLanGrants,
+        bool requireStartupRetryPermission,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(registry);
         startupIsWindowsHostNativeDev = isWindowsHostNativeDev;
@@ -495,7 +520,18 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
 
         startupCanaryRetryPending = false;
-        IsStartupGateOpen = true;
+        if (requireStartupRetryPermission)
+        {
+            StartupGateStateChange gateChange;
+            lock (gateLock)
+            {
+                if (!startupInitializationRetryPending || topologyIncidentLatched) return;
+                startupInitializationRetryPending = false;
+                gateChange = UpdateStartupGateStateUnderLock(isOpen: true);
+            }
+            CompleteStartupGateStateChange(gateChange);
+        }
+        else IsStartupGateOpen = true;
         logger.LogInformation("Startup canary self-test passed; startup gate open.");
 
         // 5. Start 30s reconcile loop
@@ -2556,6 +2592,17 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             CloseLaunchAdmission();
             await ContainWorkloadNetworkMembersAsync(registry, "previous topology incident", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (startupInitializationRetryPending)
+        {
+            try
+            {
+                await InitializeCoreAsync(registry, OperatingSystem.IsWindows(), windowsDecisionEndpointIp, true, true, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) { logger.LogWarning(ex, "NAC startup retry failed; admission remains closed."); }
             return;
         }
 
