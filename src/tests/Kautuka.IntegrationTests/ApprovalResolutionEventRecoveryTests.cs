@@ -2,7 +2,10 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Hitl;
+using Kautuka.Gateway.Domain.Sandbox;
+using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,6 +16,134 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ApprovalResolutionEventRecoveryTests
 {
+    [Fact]
+    public async Task PreflightFailureIsSavedAndSurvivesRestartWithoutClaimingUnknownOutcome()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        var invoker = new PackedApprovedToolInvoker(new EmptyConfigurationProvider(), null!, null!, null!, NullLogger<PackedApprovedToolInvoker>.Instance);
+        int calls = 0;
+        Task<string> Invoke()
+        {
+            calls++;
+            return invoker.InvokePinnedAsync(request.AgentId!, request.SessionId!, request.UserId, request.ToolName,
+                request.ArgumentsJson, null, CancellationToken.None).AsTask();
+        }
+
+        string first = await ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        IGatewayApprovalStore reopened = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        string afterRestart = await ApprovedToolExecution.RunAsync(reopened, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+
+        Assert.Equal(1, calls);
+        Assert.Equal(first, afterRestart);
+        Assert.Contains("was not found", first, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outcome is unknown", afterRestart, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class EmptyConfigurationProvider : IPlatformConfigurationProvider
+    {
+        public PlatformConfiguration GetCurrent() => new();
+    }
+
+    [Fact]
+    public async Task ChangedPinnedDefinitionsReturnSavedPreflightFailureAfterRestart()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        var configuration = new AgentConfigurationProvider(request.AgentId!);
+        var catalog = new AgentToolCatalog([], null!, configuration);
+        var invoker = new PackedApprovedToolInvoker(configuration, new PreflightWorkspace(), catalog, new EmptySkillManifest(), NullLogger<PackedApprovedToolInvoker>.Instance);
+        var snapshot = new EffectiveToolingSnapshot([request.ToolName], "standard", false, Definitions: new AgentToolSurfaceCatalogue(), DefinitionsHash: "changed");
+        int calls = 0;
+        Task<string> Invoke()
+        {
+            calls++;
+            return invoker.InvokePinnedAsync(request.AgentId!, request.SessionId!, request.UserId, request.ToolName,
+                request.ArgumentsJson, snapshot, CancellationToken.None).AsTask();
+        }
+
+        string first = await ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        IGatewayApprovalStore reopened = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        string afterRestart = await ApprovedToolExecution.RunAsync(reopened, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+
+        Assert.Equal(1, calls);
+        Assert.Equal(first, afterRestart);
+        Assert.Contains("saved tool definitions changed", first, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outcome is unknown", afterRestart, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task WorkspacePreflightErrorIsSavedWithoutInvokingTheTool()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        var configuration = new AgentConfigurationProvider(request.AgentId!);
+        var invoker = new PackedApprovedToolInvoker(configuration, new PreflightWorkspace(new IOException("workspace unavailable")), null!, new EmptySkillManifest(), NullLogger<PackedApprovedToolInvoker>.Instance);
+        int calls = 0;
+        Task<string> Invoke()
+        {
+            calls++;
+            return invoker.InvokePinnedAsync(request.AgentId!, request.SessionId!, request.UserId, request.ToolName,
+                request.ArgumentsJson, null, CancellationToken.None).AsTask();
+        }
+
+        string first = await ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        IGatewayApprovalStore reopened = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        string afterRestart = await ApprovedToolExecution.RunAsync(reopened, request.Id, request.AgentId!, request.SessionId!, request.UserId,
+            request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+
+        Assert.Equal(1, calls);
+        Assert.Equal(first, afterRestart);
+        Assert.Contains("workspace unavailable", first, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("outcome is unknown", afterRestart, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task NetworkDenialDuringPreflightRemainsVisibleToTheCaller()
+    {
+        var denial = new NetworkAccessDeniedException("approval required");
+        var invoker = new PackedApprovedToolInvoker(new AgentConfigurationProvider("agent-1"), new PreflightWorkspace(denial), null!, new EmptySkillManifest(), NullLogger<PackedApprovedToolInvoker>.Instance);
+        NetworkAccessDeniedException thrown = await Assert.ThrowsAsync<NetworkAccessDeniedException>(async () =>
+            await invoker.InvokePinnedAsync("agent-1", "session-1", "user-1", "tool-1", "{}", null, CancellationToken.None));
+        Assert.Same(denial, thrown);
+    }
+
+    private sealed class AgentConfigurationProvider(string agentId) : IPlatformConfigurationProvider
+    {
+        public PlatformConfiguration GetCurrent() => new() { Agents = [new AgentDefinition { Id = agentId }] };
+    }
+
+    private sealed class EmptySkillManifest : IEffectiveSkillManifestResolver
+    {
+        public IReadOnlyList<EffectiveSkillManifestEntry> Resolve(PlatformConfiguration configuration, AgentDefinition agentDefinition, string? actingUserId) => [];
+    }
+
+    private sealed class PreflightWorkspace(Exception? failure = null) : IWorkspaceRuntimeTool
+    {
+        public WorkspaceRuntimeContext DescribeAgentWorkspace(string agentId, string? userId = null) => failure is not null
+            ? throw failure
+            : WorkspaceRuntimeContext.Unavailable;
+        public WorkspaceRuntimeContext RebuildAgentWorkspace(string agentId, string? userId = null) => throw new NotSupportedException();
+        public bool DeleteAgentWorkspace(string agentId) => throw new NotSupportedException();
+        public Task<WorkspaceSandboxSession> SpawnAgentSandboxAsync(string agentId, string? userId = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<WorkspaceCommandResult> RunAgentShellAsync(string agentId, string command, string? userId = null, int? timeoutSeconds = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<WorkspaceSandboxSession> InspectAgentSandboxAsync(string agentId, string? userId = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task CloseAgentSandboxAsync(string agentId, string? userId = null, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
     [Fact]
     public async Task ApprovedCallIsNotRepeatedAfterCrashBeforeResultIsSaved()
     {
