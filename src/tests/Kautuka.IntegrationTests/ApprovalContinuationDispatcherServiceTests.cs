@@ -17,6 +17,57 @@ namespace Kautuka.IntegrationTests;
 public sealed class ApprovalContinuationDispatcherServiceTests
 {
     [Fact]
+    public async Task ApprovedToolPublishesStartBeforeTheCallAndFinishAfterItReturns()
+    {
+        var queue = new TestApprovalContinuationQueue();
+        var completion = new CapturingPublisher();
+        var journal = new RecordingToolJournal();
+        var invoker = new BlockingPackedToolInvoker();
+        GatewayToolApprovalRequest approval = CreatePackedFetchApproval("req-boundary", "call-boundary", "approved");
+        var waitStore = new FakeRunWaitStateStore(CreatePackedApprovalWaitState("req-boundary"));
+        using var service = new ApprovalContinuationDispatcherService(queue, new FakeApprovalStore(approval), new CapturingContinuationOrchestrator(), waitStore,
+            new FakeInvocationLinkStore(), completion, NullLogger<ApprovalContinuationDispatcherService>.Instance, invoker, runtimeEventPublisher: journal);
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            await queue.EnqueueAsync(CreateApprovedContinuationWork(approval.Id), CancellationToken.None);
+            await invoker.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Contains(Narad.Contracts.NaradEventTypes.ToolCallStarted, journal.EventTypes);
+            Assert.DoesNotContain(Narad.Contracts.NaradEventTypes.ToolCallFinished, journal.EventTypes);
+            await Task.Delay(150, TestContext.Current.CancellationToken);
+            invoker.Release.TrySetResult();
+            _ = await completion.WaitForCompletedAsync();
+            Assert.Equal([Narad.Contracts.NaradEventTypes.RunResumed, Narad.Contracts.NaradEventTypes.ToolCallStarted, Narad.Contracts.NaradEventTypes.ToolCallFinished], journal.EventTypes);
+            var events = journal.Events.ToArray();
+            Assert.True(DateTimeOffset.Parse(events[2].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) - DateTimeOffset.Parse(events[1].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) >= TimeSpan.FromMilliseconds(100));
+        }
+        finally { invoker.Release.TrySetResult(); await service.StopAsync(CancellationToken.None); }
+    }
+
+    private sealed class BlockingPackedToolInvoker : IPackedApprovedToolInvoker
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<string> InvokeAsync(string agentId, string sessionId, string? userId, string toolName, string? argumentsJson, CancellationToken cancellationToken)
+        {
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return "{}";
+        }
+    }
+
+    private sealed class RecordingToolJournal : IRuntimeEventPublisher
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Narad.Contracts.NaradAuthorityEventDraft> events = new();
+        public IReadOnlyCollection<Narad.Contracts.NaradAuthorityEventDraft> Events => events.ToArray();
+        public IReadOnlyCollection<string> EventTypes => events.Select(static item => item.EventType).ToArray();
+        public ValueTask<Narad.Contracts.NaradPersistedEvent> PublishAsync(Narad.Contracts.NaradAuthorityEventDraft draft, NaradEventContext context, CancellationToken cancellationToken = default)
+        {
+            events.Enqueue(draft);
+            return ValueTask.FromResult(NaradTestEventFactory.FromDraft(draft, context, events.Count, events.Count));
+        }
+    }
+    [Fact]
     public async Task HeartbeatFailureRetriesItsWorkWithoutStoppingDispatcherOrBlockingNextApproval()
     {
         var queue = new TestApprovalContinuationQueue();

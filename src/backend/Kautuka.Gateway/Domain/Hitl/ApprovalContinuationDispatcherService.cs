@@ -22,7 +22,8 @@ internal sealed class ApprovalContinuationDispatcherService(
     ILogger<ApprovalContinuationDispatcherService> logger,
     IPackedApprovedToolInvoker? packedApprovedToolInvoker = null,
     IToolInvocationSettingsResolver? toolInvocationSettingsResolver = null,
-    IRuntimeEventHistoryReader? runtimeEventHistoryReader = null) : BackgroundService
+    IRuntimeEventHistoryReader? runtimeEventHistoryReader = null,
+    IRuntimeEventPublisher? runtimeEventPublisher = null) : BackgroundService
 {
     private readonly string leaseOwner = $"gateway-{Environment.ProcessId}-{Guid.NewGuid():N}";
 
@@ -94,6 +95,10 @@ internal sealed class ApprovalContinuationDispatcherService(
                     }
                     heartbeatTask = MaintainLeaseAsync(lease, waitState?.WaitId, rootRunId,
                         continuationCancellation, heartbeatCancellation.Token);
+                    IReadOnlyList<string> initialPackedIds = PackedToolApproval.ReadPackedRequestIds(waitState, work.RequestId);
+                    bool packReady = waitState is not null && !PackedToolApproval.HasUndecidedHumanSiblings(approvalStore, initialPackedIds, work.RequestId);
+                    if (packReady && !runWaitStateStore.TryClaimExecution(waitState!.WaitId, leaseOwner, TimeSpan.FromMinutes(2)))
+                        throw new InvalidOperationException("The approval wait could not be claimed for execution.");
                     await MaterializeDecidedPackedGapsAsync(
                         waitState,
                         work,
@@ -120,7 +125,7 @@ internal sealed class ApprovalContinuationDispatcherService(
                         continue;
                     }
 
-                    if (waitState is not null
+                    if (waitState is not null && !packReady
                         && !runWaitStateStore.TryClaimExecution(waitState.WaitId, leaseOwner, TimeSpan.FromMinutes(2)))
                     {
                         throw new InvalidOperationException("The approval wait could not be claimed for execution.");
@@ -613,6 +618,10 @@ internal sealed class ApprovalContinuationDispatcherService(
             return;
         }
 
+        NaradEventContext? journalContext = runtimeEventPublisher is null ? null : CreateToolJournalContext(waitState);
+        if (journalContext is not null)
+            await ResumeToolJournalAsync(waitState, triggering.RequestId, journalContext, cancellationToken).ConfigureAwait(false);
+
         ApprovalContinuationDispatcherServiceLog.InvokingPackedIndependentToolsInParallel(
             logger,
             waitState.WaitId,
@@ -622,14 +631,14 @@ internal sealed class ApprovalContinuationDispatcherService(
             .MaxParallelTools ?? 0;
         string[] executed = await PackedToolApproval.InvokeThrottledAsync(
             independentInvokes.Select(item => (Func<CancellationToken, Task<string>>)(ct =>
-                ApprovedToolExecution.RunAsync(approvalStore, item.Row.Id, item.Row.AgentId!, item.Row.SessionId!, item.Row.UserId, item.Row.ToolName, item.Row.ArgumentsJson, () => invoker.InvokePinnedAsync(
+                InvokeJournaledToolAsync(item.Row, journalContext, () => ApprovedToolExecution.RunAsync(approvalStore, item.Row.Id, item.Row.AgentId!, item.Row.SessionId!, item.Row.UserId, item.Row.ToolName, item.Row.ArgumentsJson, () => invoker.InvokePinnedAsync(
                     item.Row.AgentId!,
                     item.Row.SessionId!,
                     item.Row.UserId,
                     item.Row.ToolName,
                     item.Row.ArgumentsJson,
                     ReadPinnedTooling(waitState),
-                    ct, item.Row.McpServerId).AsTask(), ct))).ToList(),
+                    ct, item.Row.McpServerId).AsTask(), ct), ct))).ToList(),
             maxParallel,
             cancellationToken).ConfigureAwait(false);
 
@@ -648,13 +657,58 @@ internal sealed class ApprovalContinuationDispatcherService(
                 continue;
             }
 
-            runWaitStateStore.PutPackedToolResult(wait.WaitId, work.RequestId, executed[index], journaledStart: false);
+            runWaitStateStore.PutPackedToolResult(wait.WaitId, work.RequestId, executed[index], journaledStart: journalContext is not null);
             ApprovalContinuationDispatcherServiceLog.ExecutedPackedToolBeforeModel(
                 logger,
                 work.RequestId,
                 wait.WaitId,
                 row.ToolName);
         }
+    }
+
+    private NaradEventContext CreateToolJournalContext(RunWaitState wait)
+    {
+        string agentId = wait.AgentId ?? throw new InvalidOperationException("The approval wait has no agent identity.");
+        string sessionId = wait.SessionId ?? throw new InvalidOperationException("The approval wait has no session identity.");
+        string runId = wait.RunId ?? throw new InvalidOperationException("The approval wait has no run identity.");
+        AgentToolInvocationLink? parent = invocationLinkStore.GetByChildSessionId(sessionId);
+        return new NaradEventContext(agentId, sessionId, wait.UserId ?? string.Empty, runId, wait.RootRunId ?? runId,
+            wait.ParentRunId, parent?.CallerSessionId, parent?.CallerToolCallId, wait.ContinuationRunId);
+    }
+
+    private async Task ResumeToolJournalAsync(RunWaitState wait, string requestId, NaradEventContext context, CancellationToken cancellationToken)
+    {
+        string waitId = PackedToolApproval.ResolveJournalWaitId(wait, requestId);
+        bool? open = null;
+        if (runtimeEventHistoryReader is not null)
+        {
+            foreach (NaradPersistedEvent item in runtimeEventHistoryReader.ReadRootHistory(context.RootRunId))
+            {
+                if (item.RunId != context.RunId) continue;
+                if (item.EventType is NaradEventTypes.RunPaused or NaradEventTypes.RunResumed)
+                {
+                    string? eventWaitId = NaradPersistedEventReader.String(NaradPersistedEventReader.ParseBody(item), "waitId");
+                    if (eventWaitId == waitId) open = item.EventType == NaradEventTypes.RunPaused;
+                }
+                else if (item.EventType is NaradEventTypes.RunFinished or NaradEventTypes.RunError or NaradEventTypes.RunCancelled)
+                    throw new InvalidOperationException("The run is already terminal.");
+            }
+            if (open is null) throw new InvalidOperationException("The approval has no matching journal pause.");
+        }
+        if (open != false)
+            await runtimeEventPublisher!.PublishWithIdAsync($"approval-resume:{wait.WaitId}", NaradEventTypes.RunResumed, NaradEventBodies.RunResumed(waitId), context, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> InvokeJournaledToolAsync(GatewayToolApprovalRequest approval, NaradEventContext? context, Func<Task<string>> invoke, CancellationToken cancellationToken)
+    {
+        if (context is null) return await invoke().ConfigureAwait(false);
+        var tool = new GatewayChatToolCall(approval.ToolCallId, approval.ToolName, approval.ArgumentsJson, approval.ToolType);
+        await runtimeEventPublisher!.PublishWithIdAsync($"approval-tool-start:{approval.Id}", NaradEventTypes.ToolCallStarted,
+            AgentExecutionNaradToolBodies.ToolCallStarted(tool), context, cancellationToken).ConfigureAwait(false);
+        string result = await invoke().ConfigureAwait(false);
+        await runtimeEventPublisher.PublishWithIdAsync($"approval-tool-finish:{approval.Id}", NaradEventTypes.ToolCallFinished,
+            AgentExecutionNaradToolBodies.ToolCallFinished(approval.ToolCallId, "success", result), context, cancellationToken).ConfigureAwait(false);
+        return result;
     }
 
     private static ApprovalContinuationWork ContinuationWorkForStoredDecision(
