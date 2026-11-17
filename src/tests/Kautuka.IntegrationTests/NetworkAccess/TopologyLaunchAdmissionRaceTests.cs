@@ -43,10 +43,26 @@ public sealed class TopologyLaunchAdmissionRaceTests
             cleanupStarted.TrySetResult();
             BlockUntilReleased(releaseCleanup.Task);
         };
-        var runner = new PodmanCommandRunner((args, _) => Task.FromResult(
-            args.Count > 1 && args[0] == "image" && args[1] == "inspect"
-                ? new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed)
-                : new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit)));
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.Count > 1 && args[0] == "image" && args[1] == "inspect")
+                return Task.FromResult(new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed));
+            if (args[0] == "inspect" && args.Contains("--format", StringComparer.Ordinal))
+                return Task.FromResult(new PodmanCommandResult(0, "true", string.Empty, ProcessTerminationReason.Completed));
+            if (args[0] == "inspect")
+            {
+                RegistryEntry entry = Assert.Single(registry.GetAll());
+                const string id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+                string json = "[{\"Id\":\"" + id + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[\"no-new-privileges\"],\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"State\":{\"Pid\":4242},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
+                return Task.FromResult(new PodmanCommandResult(0, json, string.Empty, ProcessTerminationReason.Completed));
+            }
+            if (args[0] == "unshare")
+            {
+                string output = args.Contains("cat", StringComparer.Ordinal) ? "1" : BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", Assert.Single(registry.GetAll()).Ip, StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, output, string.Empty, ProcessTerminationReason.Completed));
+            }
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit));
+        });
         var connector = new WorkspaceMcpContainerConnectorDefinition(
             "stalled-mcp-cleanup", "localhost/test:latest", string.Empty, [], true, false,
             null, null, [], 30, 600);
@@ -58,6 +74,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
             NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
             addressAllocator: new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
             workloadRegistry: registry,
+            postStartVerifier: new WorkloadPostStartVerifier(runner),
             workloadLaunchGate: new WorkloadLaunchGate(admission, policyStore),
             stdioCommand: "python3",
             stdioArgumentsPrefix: ["-u", "-c", server]);

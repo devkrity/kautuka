@@ -127,7 +127,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
                 workloadType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
-                args: [ContainerId, AllocatedIp, null],
+                args: [ContainerId, AllocatedIp, null, registry.FindByIp(AllocatedIp)],
                 culture: null)!;
             MethodInfo complete = typeof(WorkspaceContainerConnectorExecutionService)
                 .GetMethod("CompleteEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)

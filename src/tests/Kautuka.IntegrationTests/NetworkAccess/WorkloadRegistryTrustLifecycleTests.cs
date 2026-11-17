@@ -1185,7 +1185,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 workloadType,
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
                 binder: null,
-                args: [containerName, ip, null],
+                args: [containerName, ip, null, registry.FindByIp(ip)],
                 culture: null)!;
             workloadType.GetProperty("VerifiedContainerId")!.SetValue(workload, containerId);
             MethodInfo complete = typeof(WorkspaceContainerConnectorExecutionService)

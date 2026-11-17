@@ -503,6 +503,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                     string imageId = "sha256:" + new string('a', 64);
                     return Task.FromResult(new PodmanCommandResult(0, imageId, string.Empty, ProcessTerminationReason.Completed));
                 }
+                if (args[0] == "inspect" && args.Contains("--format", StringComparer.Ordinal))
+                    return Task.FromResult(new PodmanCommandResult(0, "true", string.Empty, ProcessTerminationReason.Completed));
                 if (args[0] == "run")
                 {
                     return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
@@ -738,19 +740,23 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        string server = "import socket,sys,json\ns=socket.create_connection(('127.0.0.1'," + port + "))\ns.sendall(json.dumps(sys.argv[1:]).encode()+b'\\n')\ns.recv(1)\ns.close()\n" +
-            "for line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/call': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'ok'}],'isError':False}}),flush=True)\n";
+        string server = "import socket,sys,json\ns=socket.create_connection(('127.0.0.1'," + port + "))\ns.sendall(json.dumps(sys.argv[1:]).encode()+b'\\n')\ns.recv(1)\n" +
+            "for line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/call':\n  s.sendall(b'call\\n')\n  s.recv(1)\n  s.close()\n  print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'content':[{'type':'text','text':'ok'}],'isError':False}}),flush=True)\n";
         var inspectedNames = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var egressDuringVerification = new System.Collections.Concurrent.ConcurrentBag<string>();
         var launchArguments = new System.Collections.Concurrent.ConcurrentBag<string[]>();
         var pidIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
         int nextPid = 4242;
         var registry = new WorkloadRegistry();
         var runner = new PodmanCommandRunner((args, _) =>
         {
+            if (args[0] == "inspect" && args.Contains("--format", StringComparer.Ordinal))
+                return Task.FromResult(new PodmanCommandResult(0, "true", string.Empty, ProcessTerminationReason.Completed));
             if (args[0] == "inspect")
             {
                 inspectedNames.Add(args[1]);
                 RegistryEntry entry = Assert.Single(registry.GetAll(), item => item.ContainerId == args[1]);
+                egressDuringVerification.Add(entry.Egress);
                 int pid = Interlocked.Increment(ref nextPid);
                 pidIps[pid.ToString(System.Globalization.CultureInfo.InvariantCulture)] = entry.Ip;
                 string canonicalId = new string('0', 56) + Convert.ToHexString(IPAddress.Parse(entry.Ip).GetAddressBytes());
@@ -828,10 +834,22 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 await client.GetStream().WriteAsync(new byte[] { 1 }, timeout.Token);
             }
 
+            foreach (TcpClient client in new[] { clientA, clientB })
+            {
+                byte[] ready = new byte[5];
+                await client.GetStream().ReadExactlyAsync(ready, timeout.Token);
+                Assert.Equal("call\n", System.Text.Encoding.UTF8.GetString(ready));
+            }
+            Assert.All(registry.GetAll(), entry => Assert.Equal("normal", entry.Egress));
+            foreach (TcpClient client in new[] { clientA, clientB })
+                await client.GetStream().WriteAsync(new byte[] { 1 }, timeout.Token);
+
             var results = await calls;
             Assert.All(results, result => Assert.True(result.Ok, result.FailureMessage));
             Assert.Equal(2, inspectedNames.Count);
             Assert.Equal(2, inspectedNames.Distinct(StringComparer.Ordinal).Count());
+            Assert.Equal(2, egressDuringVerification.Count);
+            Assert.All(egressDuringVerification, egress => Assert.Equal("deny-all", egress));
             Assert.Equal(2, launchArguments.Count);
             Assert.All(launchArguments, run =>
             {
@@ -988,6 +1006,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         const string server = "import json,sys\nfor line in sys.stdin:\n r=json.loads(line)\n m=r.get('method')\n i=r.get('id')\n if m=='initialize': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'test','version':'1'}}}),flush=True)\n elif m=='tools/list': print(json.dumps({'jsonrpc':'2.0','id':i,'result':{'tools':[]}}),flush=True)\n";
         var registry = new WorkloadRegistry();
         var commands = new List<string[]>();
+        string? observedEgress = null;
+        string? observedAttribution = null;
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
@@ -1001,9 +1021,16 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
             }
 
+            if (args[0] == "inspect" && args.Contains("--format", StringComparer.Ordinal))
+            {
+                return Task.FromResult(new PodmanCommandResult(0, "true", string.Empty, ProcessTerminationReason.Completed));
+            }
+
             if (args[0] == "inspect")
             {
                 RegistryEntry entry = Assert.Single(registry.GetAll());
+                observedEgress = entry.Egress;
+                observedAttribution = entry.Attribution;
                 const string canonicalId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
                 string inspect = "[{\"Id\":\"" + canonicalId + "\",\"EffectiveCaps\":[],\"BoundingCaps\":[],\"HostConfig\":{\"SecurityOpt\":[],\"Sysctls\":{\"net.ipv6.conf.all.disable_ipv6\":\"1\"},\"Privileged\":false,\"CapAdd\":[],\"CapDrop\":[\"ALL\"],\"ReadonlyRootfs\":true,\"NetworkMode\":\"bridge\",\"Devices\":[]},\"Config\":{\"User\":\"65532:65532\"},\"NetworkSettings\":{\"Networks\":{\"kautuka-workload\":{\"IPAddress\":\"" + entry.Ip + "\"}}},\"Mounts\":[]}]";
                 return Task.FromResult(new PodmanCommandResult(0, inspect, string.Empty, ProcessTerminationReason.Completed));
@@ -1038,6 +1065,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var result = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "user-a");
 
             Assert.False(result.Ok);
+            Assert.Equal("deny-all", observedEgress);
+            Assert.Equal("none", observedAttribution);
             Assert.Contains("WorkloadPostStartVerifier failed", result.FailureMessage, StringComparison.Ordinal);
             Assert.Contains(commands, static args => args[0] == "inspect");
             Assert.Contains(commands, static args => args[0] == "rm" && args[^1] == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
@@ -1074,6 +1103,8 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
+            if (args[0] == "inspect" && args.Contains("--format", StringComparer.Ordinal))
+                return Task.FromResult(new PodmanCommandResult(0, "true", string.Empty, ProcessTerminationReason.Completed));
             if (args[0] == "run")
             {
                 return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
@@ -1178,7 +1209,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             }
             else
             {
-                Assert.Equal(["server/discover", "initialize", "notifications/initialized"], methods);
+                Assert.Empty(methods);
             }
         }
         finally
