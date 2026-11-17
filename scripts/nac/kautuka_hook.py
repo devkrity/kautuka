@@ -763,7 +763,7 @@ def main():
                 sys.exit(1)
 
         dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
-        log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "allow", "workload_rules", rules_sha, annotations)
+        log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "allow", reason, rules_sha, annotations)
         sys.exit(0)
 
     except SystemExit:

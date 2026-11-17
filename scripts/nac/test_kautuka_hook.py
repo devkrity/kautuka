@@ -715,6 +715,29 @@ class TestKautukaHookCanonicalGoldenFixture(unittest.TestCase):
 class TestKautukaHookMainFailClosedPaths(unittest.TestCase):
     """Tests main() fail-closed behavior on hook failures."""
 
+    def test_package_proxy_success_logs_its_actual_ruleset(self):
+        import kautuka_hook
+        digest = "sha256:" + "a" * 64
+        state = {"id": "proxy-cid", "pid": 12345, "annotations": {
+            "io.kautuka.role": "package-proxy", "io.kautuka.image-id": digest}}
+        allowlist = {"proxy-cid": {"role": "pkgs-proxy", "expected_ipv4": ["10.247.0.3"], "image_digest": digest}}
+        ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.0.3"}]}]))
+        success = unittest.mock.Mock(returncode=0, stdout="{}")
+        with unittest.mock.patch("sys.stdin") as stdin, \
+             unittest.mock.patch("kautuka_hook.subprocess.run", side_effect=[ip, success, success]), \
+             unittest.mock.patch("kautuka_hook.read_allowlist_file", return_value=(allowlist, True, None)), \
+             unittest.mock.patch("kautuka_hook.read_owners_file", return_value=({}, True, None)), \
+             unittest.mock.patch("kautuka_hook.write_owners_file"), \
+             unittest.mock.patch("kautuka_hook.canonicalize_nft_json", return_value=("{}", "hash")), \
+             unittest.mock.patch("kautuka_hook.expected_rendered_ruleset_hash", return_value="hash"), \
+             unittest.mock.patch("kautuka_hook.log_hook") as log, \
+             unittest.mock.patch("os.stat"):
+            stdin.read.return_value = json.dumps(state)
+            with self.assertRaises(SystemExit) as exited:
+                kautuka_hook.main()
+            self.assertEqual(exited.exception.code, 0)
+            self.assertEqual(log.call_args.args[7], "package_proxy_rules")
+
     def test_timed_out_hook_subprocess_refuses_launch(self):
         import kautuka_hook
         ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
