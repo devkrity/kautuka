@@ -1,8 +1,5 @@
 import { useCurrentUser } from '@/features/auth';
 import {
-    type ProviderNetworkTarget,
-} from '@/features/network-access/networkAccess';
-import {
     apiError,
     normalizePersonaDefinitions,
     normalizePersonaProfile,
@@ -125,10 +122,6 @@ export function useOnboardingFlow() {
   const [discoveringModels, setDiscoveringModels] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelEntry['capabilities']>(null);
   const [confirmedModelWarningKey, setConfirmedModelWarningKey] = useState<string | null>(null);
-  const [pendingProviderNetworkApproval, setPendingProviderNetworkApproval] = useState<{
-    target: ProviderNetworkTarget;
-    expectedRevision: number;
-  } | null>(null);
   const [personaDefinitions, setPersonaDefinitions] = useState<PersonaDefinitions>({
     styles: [],
     tones: [],
@@ -412,7 +405,7 @@ export function useOnboardingFlow() {
 
       setSaving(true);
       try {
-        await continueSaveAfterNetworkApproval(providerId, providerType, settings, providerModel);
+        await saveProviderAndContinue(providerId, providerType, settings, providerModel);
       } finally {
         setSaving(false);
       }
@@ -422,16 +415,7 @@ export function useOnboardingFlow() {
     }
   };
 
-  const confirmProviderNetworkApprovalAndSave = async () => {
-    setPendingProviderNetworkApproval(null);
-    await saveSetup();
-  };
-
-  const cancelProviderNetworkApproval = () => {
-    setPendingProviderNetworkApproval(null);
-  };
-
-  const continueSaveAfterNetworkApproval = async (
+  const saveProviderAndContinue = async (
     providerId: string,
     providerType: string,
     settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
@@ -611,9 +595,6 @@ export function useOnboardingFlow() {
     providerForm,
     setProviderForm,
     saveSetup,
-    pendingProviderNetworkApproval,
-    confirmProviderNetworkApprovalAndSave,
-    cancelProviderNetworkApproval,
     providerValidation,
     generatedProviderId:
       providerForm.id.trim() ||

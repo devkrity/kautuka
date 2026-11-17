@@ -325,7 +325,6 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(result.current.pendingProviderNetworkApproval).toBeNull();
     expect(testProviderMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
   });
@@ -343,7 +342,6 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(result.current.pendingProviderNetworkApproval).toBeNull();
     expect(testProviderMock).not.toHaveBeenCalled();
   });
 
