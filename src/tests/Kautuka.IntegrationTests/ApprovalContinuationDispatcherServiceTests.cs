@@ -520,10 +520,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
         var continuationOrchestrator = new CapturingContinuationOrchestrator();
         GatewayToolApprovalRequest[] fetches =
         [
-            CreatePackedFetchApproval("req-a", "call-a", "approved") with { McpServerId = "connector-a" },
-            CreatePackedFetchApproval("req-b", "call-b", "approved") with { McpServerId = "connector-b" },
-            CreatePackedFetchApproval("req-c", "call-c", "approved") with { McpServerId = "connector-c" },
-            CreatePackedFetchApproval("req-d", "call-d", "approved") with { McpServerId = "connector-d" },
+            CreatePackedFetchApproval("req-a", "call-a", "approved") with { McpServerId = "connector-a", ArgumentsJson = "{\"id\":\"a\"}" },
+            CreatePackedFetchApproval("req-b", "call-b", "approved") with { McpServerId = "connector-b", ArgumentsJson = "{\"id\":\"b\"}" },
+            CreatePackedFetchApproval("req-c", "call-c", "approved") with { McpServerId = "connector-c", ArgumentsJson = "{\"id\":\"c\"}" },
+            CreatePackedFetchApproval("req-d", "call-d", "approved") with { McpServerId = "connector-d", ArgumentsJson = "{\"id\":\"d\"}" },
         ];
         var approvalStore = new FakeApprovalStore(fetches);
         RunWaitState waitState = CreatePackedApprovalWaitState("req-a", "req-b", "req-c", "req-d");
@@ -558,12 +558,13 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             _ = await publisher.WaitForCompletedAsync().ConfigureAwait(true);
             Assert.Equal(4, packedInvoker.InvokeCount);
             Assert.True(packedInvoker.MaxInFlight >= 4, $"expected 4 overlapping invokes, max in-flight was {packedInvoker.MaxInFlight}");
-            Assert.Equal(new[] { "connector-a", "connector-b", "connector-c", "connector-d" },
-                packedInvoker.NetworkScopes.Select(scope => scope?.ConnectorId).Order(StringComparer.Ordinal));
-            Assert.All(packedInvoker.NetworkScopes, scope =>
+            Assert.Equal(4, packedInvoker.NetworkScopes.Count);
+            Assert.All(packedInvoker.NetworkScopes, invocation =>
             {
-                Assert.Equal("user-1", scope?.UserId);
-                Assert.Equal("agent-caller-1", scope?.AgentId);
+                Assert.Equal("user-1", invocation.Scope?.UserId);
+                Assert.Equal("agent-caller-1", invocation.Scope?.AgentId);
+                Assert.Contains(fetches, approval => approval.ArgumentsJson == invocation.ArgumentsJson
+                    && approval.McpServerId == invocation.Scope?.ConnectorId);
             });
             Assert.True(RunClockEnvelope.TryReadPackedToolResults(
                 runWaitStateStore.GetByWaitId(waitState.WaitId)?.BehaviorJson,
@@ -2345,7 +2346,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
         public int InvokeCount => invokeCount;
 
-        public System.Collections.Concurrent.ConcurrentBag<NetworkAccessScope?> NetworkScopes { get; } = [];
+        public System.Collections.Concurrent.ConcurrentBag<(string? ArgumentsJson, NetworkAccessScope? Scope)> NetworkScopes { get; } = [];
 
         public async ValueTask<string> InvokeAsync(
             string agentId,
@@ -2355,7 +2356,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             string? argumentsJson,
             CancellationToken cancellationToken)
         {
-            NetworkScopes.Add(NetworkAccessContext.Current);
+            NetworkScopes.Add((argumentsJson, NetworkAccessContext.Current));
             Interlocked.Increment(ref invokeCount);
             lock (gate)
             {
