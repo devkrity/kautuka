@@ -7,6 +7,48 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class NetworkAccessMatchingModelTests
 {
     [Fact]
+    public void DocumentedScopeExamplesMatchContainerAndDiscoveryDecisions()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-examples-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(store, registry);
+            var admin = new NetworkAccessActor("admin", true);
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "alice-secretary", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.11", "alice", "researcher", "alice-researcher", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.12", "bob", "secretary", "bob-secretary", "connector", "bob::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            void Add(string scope, string? user, string? agent, string? connector, string host, bool allowed)
+                => store.SetRule(admin, new RuleWriteSpec(scope, user, agent, connector, host, "host", 443, allowed), store.Revision);
+            bool Allowed(string ip, string host) => controller.EvaluateContainerConnection(new ContainerConnectionInput(ip, "93.184.216.34", 443, host, true)).Allowed;
+
+            Add("system", null, null, null, "example1.test", true);
+            Assert.True(Allowed("10.247.1.10", "example1.test"));
+            Assert.True(Allowed("10.247.1.12", "example1.test"));
+            Add("user", "alice", null, null, "example2.test", true);
+            Assert.True(Allowed("10.247.1.11", "example2.test"));
+            Assert.False(Allowed("10.247.1.12", "example2.test"));
+            Add("agent", "alice", "secretary", null, "example3.test", true);
+            Assert.True(Allowed("10.247.1.10", "example3.test"));
+            Assert.False(Allowed("10.247.1.11", "example3.test"));
+            Add("user", "alice", null, "web", "example4.test", true);
+            Assert.True(Allowed("10.247.1.10", "example4.test"));
+            Assert.False(Allowed("10.247.1.12", "example4.test"));
+            Assert.True(controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "", "alice::web", "example4.test", 443, "save-discovery", null)).Allowed);
+            Add("system", null, null, null, "example5.test", true);
+            Add("user", "alice", null, null, "example5.test", false);
+            Assert.False(Allowed("10.247.1.10", "example5.test"));
+            Add("user", "alice", null, "web", "example6.test", true);
+            Add("agent", "alice", "secretary", null, "example6.test", false);
+            Assert.False(Allowed("10.247.1.10", "example6.test"));
+            Assert.True(Allowed("10.247.1.11", "example6.test"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void RevokingManagementPausesOwnRulesAcrossScopesAndRegrantRestoresThem()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-pause-" + Guid.NewGuid().ToString("N"));
