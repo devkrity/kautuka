@@ -581,6 +581,7 @@ internal sealed class GatewayConnectorTestRequest
 
     public string? Id { get; init; }
 
+    [JsonIgnore]
     public string? UserId { get; set; }
 
     [JsonIgnore]

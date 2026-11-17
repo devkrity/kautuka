@@ -34,6 +34,15 @@ namespace Kautuka.IntegrationTests;
 public sealed class ConnectorValidationEndpointTests
 {
     [Fact]
+    public void ConnectorTestRequestDoesNotDeserializeClientUserIdentity()
+    {
+        GatewayConnectorTestRequest? request = JsonSerializer.Deserialize(
+            "{\"userId\":\"spoofed-user\"}", Kautuka.Gateway.Serialization.KautukaJsonContext.Default.GatewayConnectorTestRequest);
+        Assert.NotNull(request);
+        Assert.Null(request.UserId);
+    }
+
+    [Fact]
     public async Task LocalConnectorSavePersistsToolSchemasAndArtifactDigest()
     {
         string digest = "sha256:" + new string('a', 64);
