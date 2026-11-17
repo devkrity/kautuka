@@ -27,6 +27,7 @@ internal static class GatewayConnectorEndpointMappings
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            bool hasCallerEnvironment = request.TestEnv is { Count: > 0 };
             string revisionKey = request.Id ?? string.Empty;
             string initialUserRevision = revisions.Get(revisionKey, user.Id, includeSystem: false);
             string initialCombinedRevision = revisions.Get(revisionKey, user.Id, includeSystem: true);
@@ -131,10 +132,10 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             request.UserId ??= user.Id;
-            if (saved is not null && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
-                request.SaveDiscovery = true;
+            bool maySaveDiscovery = saved is not null && GatewayOwnershipAccess.CanManageConnector(user, saved) && !hasCallerEnvironment;
+            request.SaveDiscovery = maySaveDiscovery && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase);
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
-            if (result.Success && result.ToolDefinitions is not null && saved is not null
+            if (maySaveDiscovery && result.Success && result.ToolDefinitions is not null && saved is not null
                 && string.Equals(saved.Transport, "container", StringComparison.OrdinalIgnoreCase))
             {
                 string? digest = string.IsNullOrWhiteSpace(saved.BundlePath) ? null : result.SourceDigest;

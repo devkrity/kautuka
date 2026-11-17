@@ -175,6 +175,8 @@ When an ephemeral connector's MCP transport closes unexpectedly, Gateway include
 
 During post-start verification, an ephemeral connector with normal egress can reach only the package proxy. Its normal network policy takes effect after verification; explicitly deny-all workloads remain deny-all.
 
+Testing a saved local connector updates its shared tool definitions only when the caller can manage that connector and supplies no custom test environment values. Other authorized users can still test it without changing the shared definitions.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .

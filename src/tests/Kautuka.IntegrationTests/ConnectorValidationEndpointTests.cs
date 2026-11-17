@@ -63,6 +63,28 @@ public sealed class ConnectorValidationEndpointTests
         Assert.Equal("fetch", Assert.Single(fixture.ReadStoredConnector("schema-test").LocalToolDefinitions!).Name);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConnectorTestDoesNotPersistSharedToolsForUnmanagedOrCustomEnvironment(bool customEnvironment)
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        { Ok = false, Message = "Approval needed", NetworkApprovalRequired = true });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/shared-local", new
+        { name = "Shared", transport = "container", containerImage = "example/image@" + digest, containerCommand = "server", enabled = true }, admin);
+        _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new
+        { username = "tool-reader", email = "tool-reader@example.com", password = "Testing1", role = "user" }, admin);
+        string caller = customEnvironment ? admin : await fixture.LoginAsAsync("tool-reader", "Testing1");
+        manager.ProbeResponse = new WorkspaceMcpProbeResponse
+        { Ok = true, ToolCount = 1, Tools = { new WorkspaceMcpToolMessage { Name = "injected", JsonSchema = "{\"type\":\"object\"}" } } };
+        using JsonDocument tested = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/test", new
+        { id = "shared-local", transport = "container", testEnv = customEnvironment ? new Dictionary<string, string> { ["CUSTOM"] = "value" } : null }, caller);
+        Assert.Null(fixture.ReadStoredConnector("shared-local").LocalToolDefinitions);
+    }
+
     [Fact]
     public async Task TestingExistingLocalConnectorPersistsCompleteDefinitions()
     {
