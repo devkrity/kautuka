@@ -5,6 +5,7 @@ using System.Threading.Channels;
 
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Configuration;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
@@ -486,7 +487,10 @@ public sealed class WorkspaceDesiredStateStore
         desiredWorkspaces = persisted.DesiredWorkspaces;
         desiredContainerConnectors = persisted.DesiredContainerConnectors;
         desiredSandboxConnectorBindings = persisted.DesiredSandboxConnectorBindings;
-        quarantinedWorkloadIds.UnionWith(persisted.QuarantinedWorkloadIds ?? []);
+        // Container names can be reused; only an immutable inspected ID can safely
+        // identify the same quarantined workload after a restart.
+        quarantinedWorkloadIds.UnionWith((persisted.QuarantinedWorkloadIds ?? [])
+            .Where(WorkloadPostStartVerifier.IsCanonicalContainerId));
         acceptedPublisherEpoch = persisted.PublisherEpoch;
         acceptedContentHash = persisted.ContentHash;
         acceptedDesiredStateVersion = persisted.AcceptedVersion;

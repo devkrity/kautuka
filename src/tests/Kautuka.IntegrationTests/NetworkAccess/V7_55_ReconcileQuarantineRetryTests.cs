@@ -14,6 +14,43 @@ public sealed class V7_55_ReconcileQuarantineRetryTests
     private const string Ip = "10.247.1.60";
 
     [Fact]
+    public async Task ReusedNameFromOldQuarantineDoesNotRemoveHealthyContainer()
+    {
+        string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        string statePath = Path.Combine(temp, "manager-desired-state.json");
+        const string containerName = "connector-reused-name";
+        var oldStore = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        oldStore.QuarantineWorkload(containerName);
+        var desired = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        var calls = new List<string[]>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            if (args[0] == "ps") return Task.FromResult(new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { new { Id = Cid, State = "running", Names = new[] { containerName } } }), ""));
+            if (args[0] == "inspect") return Task.FromResult(new PodmanCommandResult(0, JsonSerializer.Serialize(new[] { new { Id = Cid, State = new { Pid = 4242 } } }), ""));
+            if (args.Contains("nft", StringComparer.Ordinal))
+            {
+                string rules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl").Replace("{{IP}}", Ip, StringComparison.Ordinal);
+                return Task.FromResult(new PodmanCommandResult(0, rules, ""));
+            }
+            return Task.FromResult(new PodmanCommandResult(0, "", ""));
+        });
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry(Ip, "u1", "a1", containerName, "connector", "c1", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
+        try
+        {
+            typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(manager, true);
+            await InvokeReconcileAsync(manager, registry);
+            Assert.DoesNotContain(calls, call => call[0] == "rm");
+            Assert.Contains(calls, call => call.Contains("nft", StringComparer.Ordinal));
+            Assert.True(registry.TryGetByIp(Ip, out _));
+        }
+        finally { Directory.Delete(temp, recursive: true); }
+    }
+
+    [Fact]
     public async Task RepairedQuarantinedWorkloadRetriesRemovalBeforeRulesCheck()
     {
         string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);

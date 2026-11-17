@@ -337,7 +337,10 @@ public sealed class WorkloadPostStartVerifier
             try
             {
                 quarantined = registry?.TryQuarantine(allocatedIp, registeredId, containerId) == true;
-                desiredStateStore?.QuarantineWorkload(canonicalContainerId ?? containerId);
+                if (canonicalContainerId is not null)
+                {
+                    desiredStateStore?.QuarantineWorkload(canonicalContainerId);
+                }
             }
             catch (Exception quarantineException)
             {

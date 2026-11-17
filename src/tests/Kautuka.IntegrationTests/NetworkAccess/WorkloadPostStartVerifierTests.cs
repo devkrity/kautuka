@@ -19,6 +19,38 @@ public sealed class WorkloadPostStartVerifierTests
     private const string AllocatedIp = "10.247.1.80";
     private const string CanonicalContainerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingImmutableIdDeniesWithoutPersistingReusableName(bool malformedInspectId)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-verifier-name-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string statePath = Path.Combine(root, "state.json");
+        var desired = new WorkspaceDesiredStateStore(statePath, Microsoft.Extensions.Logging.Abstractions.NullLogger<WorkspaceDesiredStateStore>.Instance);
+        var calls = new List<string[]>();
+        var registry = CreateRegistry();
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add([.. args]);
+            return Task.FromResult(malformedInspectId
+                ? Success("[{\"Id\":\"not-a-container-id\"}]")
+                : new PodmanCommandResult(125, "", "inspection failed"));
+        });
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => new WorkloadPostStartVerifier(runner, desired)
+                .VerifyWorkloadAsync(ContainerId, AllocatedIp, registry: registry, cancellationToken: CancellationToken.None));
+
+            Assert.Equal("deny-all", registry.FindByIp(AllocatedIp)?.Egress);
+            Assert.DoesNotContain(calls, call => call[0] is "kill" or "rm");
+            Assert.False(desired.IsWorkloadQuarantined(ContainerId));
+            var reopened = new WorkspaceDesiredStateStore(statePath, Microsoft.Extensions.Logging.Abstractions.NullLogger<WorkspaceDesiredStateStore>.Instance);
+            Assert.False(reopened.IsWorkloadQuarantined(ContainerId));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public async Task CancellationAfterInspectionDeniesWithoutDeletingOrPersistingQuarantine()
     {
