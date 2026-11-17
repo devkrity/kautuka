@@ -1943,6 +1943,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var podman = new PodmanCommandRunner((args, _) =>
         {
             calls.Add(string.Join(" ", args));
+            if (args.SequenceEqual(["ps", "-a", "--format", "json"]))
+            {
+                return Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed));
+            }
             if (args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"]))
             {
                 healthInspectCount++;
@@ -2664,7 +2668,9 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         Assert.False(manager.IsStartupGateOpen);
         Assert.Contains("inspect kautuka-egress-boundary --format json", calls);
-        Assert.DoesNotContain("ps -a --format json", calls);
+        Assert.Contains("ps -a --format json", calls);
+        Assert.Contains("pod rm -f kautuka-egress", calls);
+        Assert.True(calls.IndexOf("ps -a --format json") < calls.IndexOf("pod rm -f kautuka-egress"));
     }
 
     [Fact]

@@ -14,7 +14,7 @@ public sealed class V7_55_ReconcileFailClosedTests
     private const string Ip = "10.247.1.31";
 
     [Fact]
-    public async Task RunningInspectFailureQuarantinesAndRemovesByPsCanonicalId()
+    public async Task RunningInspectFailureDeniesAndRetriesWithoutRemovingWorkload()
     {
         string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
         var calls = new List<string[]>();
@@ -33,9 +33,12 @@ public sealed class V7_55_ReconcileFailClosedTests
         {
             var reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             await ((Task)reconcile.Invoke(manager, new object[] { registry, TestContext.Current.CancellationToken })!);
-            Assert.Contains(calls, call => call[0] == "rm" && call.Contains("-f", StringComparer.Ordinal) && call.Contains(Cid, StringComparer.Ordinal));
-            Assert.False(registry.TryGetByIp(Ip, out _));
-            Assert.True(desired.IsWorkloadQuarantined(Cid));
+            Assert.DoesNotContain(calls, call => call[0] == "rm");
+            Assert.True(registry.TryGetByIp(Ip, out RegistryEntry? denied));
+            Assert.NotNull(denied);
+            Assert.Equal("deny-all", denied.Egress);
+            Assert.Equal("none", denied.Attribution);
+            Assert.False(desired.IsWorkloadQuarantined(Cid));
         }
         finally { Directory.Delete(temp, recursive: true); }
     }
@@ -66,7 +69,7 @@ public sealed class V7_55_ReconcileFailClosedTests
     }
 
     [Fact]
-    public async Task UnidentifiableRunningWorkloadClosesGateWithoutTopologyLatch()
+    public async Task UnidentifiableRunningWorkloadIsDeniedWithoutTopologyLatch()
     {
         const string name = "unverified-workload-name";
         string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(temp);
@@ -86,7 +89,7 @@ public sealed class V7_55_ReconcileFailClosedTests
             typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(manager, true);
             var reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             await ((Task)reconcile.Invoke(manager, new object[] { registry, TestContext.Current.CancellationToken })!);
-            Assert.False(manager.IsStartupGateOpen);
+            Assert.True(manager.IsStartupGateOpen);
             Assert.True(registry.TryGetByIp(Ip, out RegistryEntry? denied));
             Assert.NotNull(denied);
             Assert.Equal("deny-all", denied.Egress);
