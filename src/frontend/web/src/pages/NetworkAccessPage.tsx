@@ -31,7 +31,7 @@ import {
   CompatibilityModeCard,
   CompatibilityModeList,
   OpenInternetGrantDialog,
-  UserNetworkPrivilegesForm,
+  NetworkPrivilegesPanel,
 } from '@/features/network-access';
 
 type ViewTab = 'requests' | 'rules' | 'activity' | 'compatibility' | 'privileges';
@@ -493,12 +493,7 @@ export function NetworkAccessPage() {
           <p className="text-sm text-muted-foreground">
             Configure default network access and approval privileges for users.
           </p>
-          <UserNetworkPrivilegesForm
-            userId={currentUser?.id}
-            userDisplayName={currentUser?.displayName || 'Administrator'}
-            canApproveOwn={privileges.canApproveOwn}
-            isAdminViewer={true}
-          />
+          <NetworkPrivilegesPanel />
         </section>
       )}
 

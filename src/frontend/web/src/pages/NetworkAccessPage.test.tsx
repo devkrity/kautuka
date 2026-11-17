@@ -889,6 +889,25 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
   // The single privilege covers the user's own network scopes.
   describe('per-user network permission', () => {
+    it('lets an administrator select a user and save their network permission', async () => {
+      const user = userEvent.setup();
+      setupMockApis();
+      const previousGet = get.getMockImplementation();
+      get.mockImplementation(async (path: string, config?: { params?: Record<string, unknown> }) => {
+        if (path === '/settings/users') return { data: { users: [{ id: 'user-alice', username: 'alice', displayName: 'Alice', role: 'user', isActive: true }] } };
+        if (path === '/network-access/users/user-alice/privileges') return { data: { userId: 'user-alice', canApproveOwn: false } };
+        return previousGet?.(path, config);
+      });
+      put.mockResolvedValue({ data: { userId: 'user-alice', canApproveOwn: true } });
+      renderComponent(<NetworkAccessPage />, ['/network-access?tab=privileges']);
+      const select = await screen.findByLabelText('User');
+      await screen.findByRole('option', { name: 'Alice' });
+      await user.selectOptions(select, 'user-alice');
+      const checkbox = await screen.findByRole('checkbox', { name: 'Can manage their own network access' });
+      await waitFor(() => expect(checkbox).toBeEnabled());
+      await user.click(checkbox);
+      await waitFor(() => expect(put).toHaveBeenCalledWith('/network-access/users/user-alice/privileges', { canApproveOwn: true }));
+    });
     it('shows one management checkbox and saves its value', async () => {
       const user = userEvent.setup();
       const onSave = vi.fn();
