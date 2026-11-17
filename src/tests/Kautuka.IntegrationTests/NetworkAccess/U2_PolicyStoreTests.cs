@@ -8,6 +8,18 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class U2_PolicyStoreTests : IDisposable
 {
+    [Fact]
+    public void ConfiguredPerUserLimitAlsoAppliesToSingleProbe()
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "probe-configured-limit.json"));
+        store.SetApprovalLimits(new NetworkAccessActor("admin", true), global: 100, perUser: 70);
+        for (int index = 0; index < 70; index++)
+        {
+            Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-a", "alice", null, "web", "user", "host", $"probe-{index}.example", 443, "connector", "container"));
+        }
+        Assert.Null(store.RecordOrUpdatePendingProbeRequest("probe-a", "alice", null, "web", "user", "host", "overflow.example", 443, "connector", "container"));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("{\"schemaVersion\":2}")]

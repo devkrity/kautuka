@@ -865,13 +865,6 @@ public sealed partial class NetworkAccessPolicyStore
                 if (current.Requests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global
                     || current.Requests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
                     return null;
-                int containerRequestCount = probeRequestsById.Values.Count(entry =>
-                    string.Equals(entry.ContainerId, containerId, StringComparison.Ordinal));
-                if (containerRequestCount >= MaxPendingProbeRequestsPerContainer)
-                {
-                    return null;
-                }
-
                 var req = new NetworkAccessRequest(
                     id,
                     userId,

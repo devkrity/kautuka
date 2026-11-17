@@ -11,7 +11,6 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 {
     public const int MaxPendingRequests = 500;
     public const int DefaultMaxPendingRequestsPerUser = 64;
-    public const int MaxPendingProbeRequestsPerContainer = 64;
     public const int MaxRules = 10000;
     private static readonly TimeSpan resolvedRequestRetention = TimeSpan.FromDays(30);
 

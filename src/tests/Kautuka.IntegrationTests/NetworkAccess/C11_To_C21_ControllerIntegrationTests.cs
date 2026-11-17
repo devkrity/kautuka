@@ -1515,12 +1515,12 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
     }
 
     [Fact]
-    public void V7_14_ProbeCardsAreCappedPerContainer_AndOverflowStillDenies_WithNegativeControl()
+    public void V7_14_ProbeCardsRespectDefaultPerUserCap_AndOverflowStillDenies_WithNegativeControl()
     {
         string tempDir = CreateTempDir();
         try
         {
-            const int probeCardLimit = NetworkAccessPolicyStore.MaxPendingProbeRequestsPerContainer;
+            const int probeCardLimit = NetworkAccessPolicyStore.DefaultMaxPendingRequestsPerUser;
             using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
             var registry = new WorkloadRegistry();
             var controller = new NacController(store, registry);
