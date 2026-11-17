@@ -656,7 +656,7 @@ def main():
 
         try:
             cmd = ["nsenter", "-t", str(pid), "-n", "ip", "-j", "-4", "addr", "show"]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=10)
             addr_data = json.loads(res.stdout)
             for iface in addr_data:
                 for a in iface.get("addr_info", []):
@@ -707,14 +707,14 @@ def main():
         rules_sha = hashlib.sha256(rules_text.encode("utf-8")).hexdigest()
 
         apply_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-f", "-"]
-        p = subprocess.run(apply_cmd, input=rules_text, capture_output=True, text=True)
+        p = subprocess.run(apply_cmd, input=rules_text, capture_output=True, text=True, timeout=10)
         if p.returncode != 0:
             dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
             log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)
             sys.exit(1)
 
         verify_cmd = ["nsenter", "-t", str(pid), "-n", "nft", "-j", "list", "table", "inet", "kautuka_workload"]
-        vp = subprocess.run(verify_cmd, capture_output=True, text=True)
+        vp = subprocess.run(verify_cmd, capture_output=True, text=True, timeout=10)
         if vp.returncode != 0:
             dur_ms = (time.perf_counter_ns() - t_start) / 1_000_000.0
             log_hook(ts_ns, dur_ms, cid, pid, ips, inode, "refuse", "apply_failed", rules_sha, annotations)

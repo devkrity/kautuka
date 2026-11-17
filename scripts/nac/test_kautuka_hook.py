@@ -713,10 +713,25 @@ class TestKautukaHookCanonicalGoldenFixture(unittest.TestCase):
 
 
 class TestKautukaHookMainFailClosedPaths(unittest.TestCase):
-    """
-    Tests main() fail-closed behavior on apply, verify, and owners write failures (v7-11).
-    """
+    """Tests main() fail-closed behavior on hook failures."""
 
+    def test_timed_out_hook_subprocess_refuses_launch(self):
+        import kautuka_hook
+        ip = unittest.mock.Mock(returncode=0, stdout=json.dumps([{"addr_info": [{"local": "10.247.1.5"}]}]))
+        applied = unittest.mock.Mock(returncode=0, stdout="")
+        for earlier in ([], [ip], [ip, applied]):
+            with self.subTest(completed=len(earlier)), \
+                 unittest.mock.patch("sys.stdin") as stdin, \
+                 unittest.mock.patch("kautuka_hook.subprocess.run", side_effect=[*earlier, subprocess.TimeoutExpired("nsenter", 10)]), \
+                 unittest.mock.patch("kautuka_hook.read_allowlist_file", return_value=({}, True, None)), \
+                 unittest.mock.patch("kautuka_hook.read_owners_file", return_value=({}, True, None)), \
+                 unittest.mock.patch("kautuka_hook.log_hook") as log, \
+                 unittest.mock.patch("os.stat"):
+                stdin.read.return_value = json.dumps({"id": "c1", "pid": 12345})
+                with self.assertRaises(SystemExit) as exited:
+                    kautuka_hook.main()
+                self.assertEqual(exited.exception.code, 1)
+                self.assertEqual(log.call_args.args[6], "refuse")
     @unittest.mock.patch("sys.exit")
     @unittest.mock.patch("kautuka_hook.subprocess.run")
     @unittest.mock.patch("sys.stdin")
@@ -793,6 +808,9 @@ class TestKautukaHookMainFailClosedPaths(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main()
             mock_exit.assert_called_with(1)
+            self.assertEqual(len(mock_subp.call_args_list), 3)
+            for call in mock_subp.call_args_list:
+                self.assertEqual(call.kwargs.get("timeout"), 10)
 
 
 if __name__ == "__main__":
