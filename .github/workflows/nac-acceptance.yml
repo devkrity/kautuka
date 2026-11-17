@@ -32,6 +32,7 @@ jobs:
 
       - name: Install repository dependencies
         run: |
+          npm install --global corepack@0.35.0
           corepack enable
           corepack prepare pnpm@11.5.2 --activate
           pnpm install --frozen-lockfile
@@ -66,6 +67,7 @@ jobs:
 
       - name: Enable pinned pnpm
         run: |
+          npm install --global corepack@0.35.0
           corepack enable
           corepack prepare pnpm@11.5.2 --activate
 
