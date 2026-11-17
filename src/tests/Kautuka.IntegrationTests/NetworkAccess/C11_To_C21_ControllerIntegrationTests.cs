@@ -1578,7 +1578,6 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                 userId: owner.UserId,
                 agentId: null,
                 connectorId: "connector-probe",
-                systemwide: false,
                 attribution: "user",
                 destKind: "host",
                 destination: "legacy-probe.example",

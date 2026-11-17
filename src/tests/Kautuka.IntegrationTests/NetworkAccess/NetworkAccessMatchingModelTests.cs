@@ -52,8 +52,8 @@ public sealed class NetworkAccessMatchingModelTests
     [Fact]
     public void CatalogueAvailabilityDoesNotChangeNetworkRequestIdentity()
     {
-        string shared = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", true, "container", "host", "example.com", 443);
-        string personal = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", false, "container", "host", "example.com", 443);
+        string shared = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", "container", "host", "example.com", 443);
+        string personal = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", "container", "host", "example.com", 443);
         Assert.Equal(shared, personal);
     }
 

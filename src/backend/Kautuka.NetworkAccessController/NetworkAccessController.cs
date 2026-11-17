@@ -242,8 +242,7 @@ public sealed class NetworkAccessController
         if (isPackageProxyService && HasPackageServiceExplicitDeny(state, entry, destKind, normalizedDestination, destinationPort))
         {
             policyStore.IncrementBlockedRequestAttemptInMemory(
-                entry.UserId, entry.AgentId, entry.ConnectorId, false,
-                destKind, normalizedDestination, destinationPort);
+                entry.UserId, entry.AgentId, entry.ConnectorId, destKind, normalizedDestination, destinationPort);
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
         }
 
@@ -298,7 +297,6 @@ public sealed class NetworkAccessController
                     entry.UserId,
                     entry.AgentId,
                     entry.ConnectorId,
-                    false,
                     destKind,
                     normalizedDestination,
                     destinationPort);
@@ -325,7 +323,6 @@ public sealed class NetworkAccessController
                         entry.UserId,
                         entry.AgentId,
                         entry.ConnectorId,
-                        false,
                         entry.Attribution,
                         destKind,
                         normalizedDestination,
@@ -347,7 +344,6 @@ public sealed class NetworkAccessController
                     entry.UserId,
                     entry.AgentId,
                     entry.ConnectorId,
-                    false,
                     entry.Attribution,
                     destKind,
                     normalizedDestination,
@@ -450,7 +446,7 @@ public sealed class NetworkAccessController
                     return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
                 }
 
-                policyStore.IncrementBlockedRequestAttemptInMemory("system", agentId, null, false, destKind, normalizedDestination, input.Port);
+                policyStore.IncrementBlockedRequestAttemptInMemory("system", agentId, null, destKind, normalizedDestination, input.Port);
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             }
 
@@ -464,7 +460,6 @@ public sealed class NetworkAccessController
                 "system",
                 agentId,
                 connectorId: null,
-                systemwide: false,
                 attribution: "none",
                 destKind,
                 normalizedDestination,
@@ -512,7 +507,6 @@ public sealed class NetworkAccessController
                     userId,
                     userConnectorWithoutAgent ? null : agentId,
                     connectorId,
-                    false,
                     destKind,
                     normalizedDestination,
                     input.Port);
@@ -532,7 +526,6 @@ public sealed class NetworkAccessController
                     userId,
                     userConnectorWithoutAgent ? null : agentId,
                     connectorId,
-                    false,
                     attribution: userConnectorWithoutAgent ? "user" : "user-agent",
                     destKind,
                     normalizedDestination,

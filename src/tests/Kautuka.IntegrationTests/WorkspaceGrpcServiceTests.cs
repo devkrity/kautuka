@@ -34,7 +34,7 @@ public sealed class WorkspaceGrpcServiceTests
         {
             using var store = new Kautuka.NetworkAccessController.NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             DateTimeOffset started = DateTimeOffset.UtcNow;
-            store.RecordOrUpdatePendingRequest("alice", null, "alice::web", false, "user", "host", "example.com", 443, "connector", "container", observedAtUtc: started.AddSeconds(1));
+            store.RecordOrUpdatePendingRequest("alice", null, "alice::web", "user", "host", "example.com", 443, "connector", "container", observedAtUtc: started.AddSeconds(1));
             var requests = store.GetRawStateSnapshot().Requests;
             Assert.True(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "web", started));
             Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "bob", "web", started));

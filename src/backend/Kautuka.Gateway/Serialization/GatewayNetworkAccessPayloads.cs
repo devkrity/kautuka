@@ -11,7 +11,6 @@ internal sealed record NetworkAccessRequestDto(
     string? AgentDisplayName,
     string? ConnectorId,
     string? ConnectorDisplayName,
-    bool Systemwide,
     string Attribution,
     string Destination,
     string DestKind,

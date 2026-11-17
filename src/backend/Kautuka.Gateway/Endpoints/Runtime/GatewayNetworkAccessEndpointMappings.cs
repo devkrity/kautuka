@@ -963,7 +963,6 @@ internal static partial class GatewayRuntimeEndpointMappings
             AgentDisplayName: agentDisplayName,
             ConnectorId: string.IsNullOrWhiteSpace(req.ConnectorId) ? null : req.ConnectorId,
             ConnectorDisplayName: connectorDisplayName,
-            Systemwide: req.Systemwide,
             Attribution: req.Attribution,
             Destination: req.Destination,
             DestKind: req.DestKind,

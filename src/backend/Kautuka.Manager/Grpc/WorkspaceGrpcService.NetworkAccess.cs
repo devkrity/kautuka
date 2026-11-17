@@ -570,7 +570,6 @@ public sealed partial class WorkspaceGrpcService
             UserId = view.Request.UserId ?? string.Empty,
             AgentId = view.Request.AgentId ?? string.Empty,
             ConnectorId = view.Request.ConnectorId ?? string.Empty,
-            Systemwide = view.Request.Systemwide,
             Attribution = view.Request.Attribution,
             Destination = view.Request.Destination,
             DestKind = view.Request.DestKind,

@@ -45,7 +45,6 @@ public sealed record NetworkAccessRequest(
     string? UserId,
     string? AgentId,
     string? ConnectorId,
-    bool Systemwide,
     string Attribution,
     string Destination,
     string DestKind,
@@ -65,13 +64,11 @@ public sealed record NetworkAccessRequest(
         string? userId,
         string? agentId,
         string? connectorId,
-        bool systemwide,
         string origin,
         string destKind,
         string destination,
         int port)
     {
-        _ = systemwide; // Retained for wire compatibility; catalogue availability is not NAC identity.
         return NetworkAccessIdGenerator.ComputeBase32Id(
             $"{actorKind}|{attribution}|{userId ?? string.Empty}|{agentId ?? string.Empty}|{connectorId ?? string.Empty}|{origin}|{destKind}|{destination}|{port.ToString(CultureInfo.InvariantCulture)}");
     }

@@ -24,7 +24,7 @@ If Manager cannot load privileges, the API returns unavailable. If it cannot con
 Brake status and updates likewise report Manager outages; an unconfirmed update requires refreshing the status before retrying.
 Requests, rules, activity, and compatibility lists report unavailable when Manager cannot be reached rather than returning an empty list.
 When Manager cannot confirm a request decision or a rule or compatibility change, the API returns unavailable and asks for a refresh before retrying.
-Connector catalogue availability is not part of workload labels, registry entries, Gateway outbound network identity, or the Manager outbound decision input. Shared credential lookup remains separate.
+Connector catalogue availability is not part of NAC workload labels, registry entries, outbound checks, or approval requests. Shared credential lookup remains separate.
 Gateway and Manager should run the same Kautuka release; mixed-version NAC operation is not supported.
 Connector desired-state fingerprints include the image compatibility relaxations as well as the image digest, so a changed profile is visible to reconciliation.
 

@@ -31,7 +31,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
             """);
         using (var store = new NetworkAccessPolicyStore(path))
         {
-            (string? Id, bool Overflow) Add(string user, string destination) => store.RecordOrUpdatePendingRequest(user, "agent", null, false, "user-agent", "host", destination, 443, "agent", "container");
+            (string? Id, bool Overflow) Add(string user, string destination) => store.RecordOrUpdatePendingRequest(user, "agent", null, "user-agent", "host", destination, 443, "agent", "container");
             Assert.False(Add("alice", "one.example").Overflow);
             Assert.False(Add("alice", "two.example").Overflow);
             Assert.True(Add("alice", "three.example").Overflow);
@@ -39,7 +39,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
             Assert.True(Add("carol", "four.example").Overflow);
         }
         using var reopened = new NetworkAccessPolicyStore(path);
-        Assert.True(reopened.RecordOrUpdatePendingRequest("alice", "agent", null, false, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
+        Assert.True(reopened.RecordOrUpdatePendingRequest("alice", "agent", null, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
     }
 
     [Fact]
@@ -50,11 +50,11 @@ public sealed class U2_PolicyStoreTests : IDisposable
             {"schemaVersion":2,"revision":0,"rules":[],"requests":[],"userPrivileges":[],"brake":{"system":false,"users":[]},"approvalLimits":{"global":3,"perUser":2}}
             """);
         using var store = new NetworkAccessPolicyStore(path);
-        Assert.False(store.RecordOrUpdatePendingRequest("alice", "agent", null, false, "user-agent", "host", "one.example", 443, "agent", "container").Overflow);
-        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-a", "alice", null, "web", false, "user", "host", "two.example", 443, "connector", "container"));
-        Assert.Null(store.RecordOrUpdatePendingProbeRequest("probe-b", "alice", null, "web", false, "user", "host", "three.example", 443, "connector", "container"));
-        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-c", "bob", null, "web", false, "user", "host", "four.example", 443, "connector", "container"));
-        Assert.True(store.RecordOrUpdatePendingRequest("carol", "agent", null, false, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
+        Assert.False(store.RecordOrUpdatePendingRequest("alice", "agent", null, "user-agent", "host", "one.example", 443, "agent", "container").Overflow);
+        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-a", "alice", null, "web", "user", "host", "two.example", 443, "connector", "container"));
+        Assert.Null(store.RecordOrUpdatePendingProbeRequest("probe-b", "alice", null, "web", "user", "host", "three.example", 443, "connector", "container"));
+        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-c", "bob", null, "web", "user", "host", "four.example", 443, "connector", "container"));
+        Assert.True(store.RecordOrUpdatePendingRequest("carol", "agent", null, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
     }
 
     [Fact]
@@ -82,7 +82,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
     public void ProtectedPendingDestinationsCanBeBlockedButNotAllowed(string kind, string destination)
     {
         using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json"));
-        var (id, overflow) = store.RecordOrUpdatePendingRequest("user-a", "agent-a", null, false, "user-agent", kind, destination, 443, "agent", "container");
+        var (id, overflow) = store.RecordOrUpdatePendingRequest("user-a", "agent-a", null, "user-agent", kind, destination, 443, "agent", "container");
         Assert.False(overflow);
         var admin = new NetworkAccessActor("admin", true);
         Assert.Throws<ArgumentException>(() => store.DecideRequest(admin, id!, true, "agent", store.Revision));
@@ -191,7 +191,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
                 "user-1",
                 "agent-1",
                 connectorId: null,
-                systemwide: false,
                 attribution: "user-agent",
                 destKind: "host",
                 destination: "dedupe.example.com",
@@ -217,7 +216,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "second.example.com",
@@ -239,7 +237,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
                 $"fill-user-{i / 64}",
                 "agent-1",
                 connectorId: null,
-                systemwide: false,
                 attribution: "user-agent",
                 destKind: "host",
                 destination: $"host-{i}.example.com",
@@ -254,7 +251,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "overflow.example.com",
@@ -271,7 +267,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "overflow.example.com",
@@ -364,7 +359,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "race1.example.com",
@@ -401,7 +395,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "race2.example.com",
@@ -444,7 +437,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "err1.example.com",
@@ -462,7 +454,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "err2.example.com",
@@ -531,7 +522,6 @@ public sealed class U2_PolicyStoreTests : IDisposable
             "user-1",
             "agent-1",
             connectorId: null,
-            systemwide: false,
             attribution: "user-agent",
             destKind: "host",
             destination: "dispose-retry.example.com",

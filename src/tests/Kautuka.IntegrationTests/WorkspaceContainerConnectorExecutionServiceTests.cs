@@ -352,7 +352,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "probe-policy.json"));
             string probeRequest = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
-                containerId, "probe-user", null, "binary-mcpb-probe", false, "user", "host", "probe.example", 443, "connector", "probe"));
+                containerId, "probe-user", null, "binary-mcpb-probe", "user", "host", "probe.example", 443, "connector", "probe"));
             _ = policyStore.DecideRequest(new NetworkAccessActor("admin", true), probeRequest, true, null, policyStore.Revision);
             Assert.True(policyStore.TryEvaluateTemporaryProbeDecision(containerId, "probe-user", "binary-mcpb-probe", "host", "probe.example", 443, out _, out _));
             var registry = new WorkloadRegistry();
@@ -1886,7 +1886,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 "user", user.UserId, user.UserId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>());
             string containerId = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
             string requestId = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
-                containerId, user.UserId, null, connectorId, systemwide: false, attribution: "user",
+                containerId, user.UserId, null, connectorId, attribution: "user",
                 destKind: "host", destination: "probe.example", port: 443, actorKind: "connector",
                 origin: "probe"));
             _ = policyStore.DecideRequest(admin, requestId, allow: true, scope: null, policyStore.Revision);
@@ -1933,10 +1933,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             string completingContainerId = InvokeBuildContainerName(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext);
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             _ = policyStore.RecordOrUpdatePendingProbeRequest(
-                completingContainerId, userId, null, connectorId, systemwide: false, attribution: "user",
+                completingContainerId, userId, null, connectorId, attribution: "user",
                 destKind: "host", destination: "first.example", port: 443, actorKind: "connector", origin: "probe");
             string overlappingRequestId = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
-                "overlapping-probe-container", userId, null, connectorId, systemwide: false, attribution: "user",
+                "overlapping-probe-container", userId, null, connectorId, attribution: "user",
                 destKind: "host", destination: "second.example", port: 443, actorKind: "connector", origin: "probe"));
 
             var registry = new WorkloadRegistry();

@@ -10,7 +10,6 @@ export interface NetworkAccessRequestDto {
   agentDisplayName?: string;
   connectorId?: string;
   connectorDisplayName?: string;
-  systemwide: boolean;
   attribution: 'user-agent' | 'user' | 'none';
   destination: string;
   destKind: 'host' | 'ip';

@@ -136,6 +136,13 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     public void OutboundDecisionInputDoesNotCarryCatalogueAvailability()
         => Assert.Null(typeof(OutboundCheckInput).GetProperty("Systemwide"));
 
+    [Fact]
+    public void PendingRequestsDoNotCarryCatalogueAvailability()
+    {
+        Assert.Null(typeof(NetworkAccessRequest).GetProperty("Systemwide"));
+        Assert.Null(typeof(NetworkAccessRequestMessage).GetProperty("Systemwide"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

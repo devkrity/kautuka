@@ -436,7 +436,8 @@ message NetworkAccessRequestMessage {
   string user_id = 2;
   string agent_id = 3;
   string connector_id = 4;
-  bool systemwide = 5;
+  reserved 5;
+  reserved "systemwide";
   string attribution = 6;
   string destination = 7;
   string dest_kind = 8;

@@ -18,7 +18,7 @@ describe('network access user scopes', () => {
   it('uses the revision returned by each decision when allowing a group', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'My Assistant',
-      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      attribution: 'user-agent', destination: 'one.example', destKind: 'host',
       port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
     };
@@ -36,7 +36,7 @@ describe('network access user scopes', () => {
   it('stops the group when a decision fails', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'My Assistant',
-      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      attribution: 'user-agent', destination: 'one.example', destKind: 'host',
       port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
     };
@@ -50,7 +50,7 @@ describe('network access user scopes', () => {
   it('does not group requests belonging to different users with the same agent ID', () => {
     const request: NetworkAccessRequestDto = {
       id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'Assistant',
-      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      attribution: 'user-agent', destination: 'one.example', destKind: 'host',
       port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
     };
@@ -61,7 +61,7 @@ describe('network access user scopes', () => {
   it('explains when a system request creates a platform-wide allow or block', () => {
     const request: NetworkAccessRequestDto = {
       id: 'system-request', userId: 'system', agentId: 'gateway',
-      systemwide: false, attribution: 'user-agent', destination: 'example.com', destKind: 'host',
+      attribution: 'user-agent', destination: 'example.com', destKind: 'host',
       port: 443, actorKind: 'first-party', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'gateway',
     };
@@ -75,7 +75,7 @@ describe('network access user scopes', () => {
     const request: NetworkAccessRequestDto = {
       id: 'request-scopes', userId: 'alice', userDisplayName: 'Alice', agentId: 'agent-1',
       agentDisplayName: 'My Assistant', connectorId: 'alice::web', connectorDisplayName: 'Web Tools',
-      systemwide: true, attribution: 'user-agent', destination: 'www.bbc.com', destKind: 'host',
+      attribution: 'user-agent', destination: 'www.bbc.com', destKind: 'host',
       port: 443, actorKind: 'connector', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
     };
@@ -181,8 +181,7 @@ describe('network access user scopes', () => {
 
   it('lets the owner approve their connector without agent context regardless of availability', async () => {
     const request: NetworkAccessRequestDto = {
-      id: 'request-1', userId: 'alice', connectorId: 'web', systemwide: true,
-      attribution: 'user', destination: 'example.com', destKind: 'host', port: 443,
+      id: 'request-1', userId: 'alice', connectorId: 'web', attribution: 'user', destination: 'example.com', destKind: 'host', port: 443,
       actorKind: 'connector', firstSeenUtc: '2026-01-01T00:00:00Z',
       lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
     };

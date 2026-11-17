@@ -593,12 +593,10 @@ public sealed partial class NetworkAccessPolicyStore
         string? userId,
         string? agentId,
         string? connectorId,
-        bool systemwide,
         string destKind,
         string destination,
         int port)
     {
-        _ = systemwide;
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
@@ -635,7 +633,6 @@ public sealed partial class NetworkAccessPolicyStore
         string? userId,
         string? agentId,
         string? connectorId,
-        bool systemwide,
         string attribution,
         string destKind,
         string destination,
@@ -653,7 +650,6 @@ public sealed partial class NetworkAccessPolicyStore
             userId,
             agentId,
             connectorId,
-            systemwide,
             origin,
             destKind,
             destination,
@@ -715,7 +711,6 @@ public sealed partial class NetworkAccessPolicyStore
                 userId,
                 agentId,
                 connectorId,
-                systemwide,
                 attribution,
                 destination,
                 destKind,
@@ -833,7 +828,6 @@ public sealed partial class NetworkAccessPolicyStore
         string? userId,
         string? agentId,
         string? connectorId,
-        bool systemwide,
         string attribution,
         string destKind,
         string destination,
@@ -883,7 +877,6 @@ public sealed partial class NetworkAccessPolicyStore
                     userId,
                     agentId,
                     connectorId,
-                    systemwide,
                     attribution,
                     destination,
                     destKind,
