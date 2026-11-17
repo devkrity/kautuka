@@ -602,7 +602,7 @@ ensure_rootless_podman_ready() {
 
     cat > "$containers_conf_dir/99-kautuka-hooks.conf" <<EOF
 [engine]
-hooks_dir = ["$hooks_dir"]
+hooks_dir = ["$hooks_dir", { append = true }]
 EOF
     chmod 0644 "$containers_conf_dir/99-kautuka-hooks.conf"
     chown "$service_user:$service_group" "$containers_conf_dir/99-kautuka-hooks.conf"

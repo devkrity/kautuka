@@ -49,4 +49,23 @@ if ( install_nac_hook_payload "$temp_root/missing-proxy/scripts/kautuka_hook.py"
 fi
 grep -Fq 'required package proxy ruleset template is missing' "$temp_root/missing-proxy.stderr"
 
+# Exercise the installer with isolated paths and no host service mutations.
+ensure_subid_entry() { :; }
+ensure_rootless_idmap_helpers() { :; }
+ensure_nac_prerequisites() { :; }
+chown() { :; }
+loginctl() { :; }
+validate_linger_enabled() { :; }
+install_user_manager_restart_dropin() { :; }
+systemctl() { :; }
+run_as_service_user() { :; }
+mkdir -p "$temp_root/runtime"
+ensure_rootless_podman_ready "$(id -un)" "$(id -gn)" "$temp_root/home" "$temp_root/runtime"
+python3 - "$temp_root/home/.config/containers/containers.conf.d/99-kautuka-hooks.conf" "$temp_root/home/.config/containers/hooks.d" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as config:
+    hooks = tomllib.load(config)['engine']['hooks_dir']
+assert hooks == [sys.argv[2], {'append': True}], hooks
+PY
+
 echo 'Linux installer NAC hook payload checks passed.'
