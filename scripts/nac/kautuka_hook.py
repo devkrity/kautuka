@@ -414,6 +414,8 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
         return ("refuse", "bad_workload_ip")
 
     # 3. Shared netns check
+    if netns_inode is None:
+        return ("refuse", "missing_netns_inode")
     if netns_inode is not None and owners is not None:
         sinode = str(netns_inode)
         norm_owners = {}

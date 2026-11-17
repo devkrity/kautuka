@@ -22,6 +22,7 @@ Agent runtime construction, including model capability probing, uses the run's u
 Background memory extraction uses the originating session's owner and agent for network checks; a missing session does not gain an identity.
 Catalogue artifact downloads follow redirects with a bounded hop count. Each destination is checked by NAC before the next request is sent.
 Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host.
+The workload hook refuses a managed workload when its network namespace inode cannot be read (`missing_netns_inode`), so it cannot skip the shared-namespace check.
 When approving a group, each decision uses the revision returned by the previous decision; the sequence stops if a decision fails.
 The release image inventory includes archives for the pinned Envoy and CoreDNS images so the release archive scanner includes them. First-boot loading before egress startup still requires separate verification.
 

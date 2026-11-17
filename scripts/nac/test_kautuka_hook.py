@@ -210,6 +210,7 @@ class TestKautukaHookDecideVectors(unittest.TestCase):
             ("V43_shared_netns_same_owner_dict", {"id": "c1", "pid": 123}, ["10.247.1.10"], {}, {"100": {"id": "c1", "pid": 123}}, 100, True, None, True, None, "allow", "workload_rules"),
             ("V44_shared_netns_diff_owner_list", {"id": "c2", "pid": 124}, ["10.247.1.10"], {}, [{"inode": 100, "id": "c1", "pid": 123}], 100, True, None, True, None, "refuse", "shared_netns"),
             ("V45_shared_netns_same_owner_list", {"id": "c1", "pid": 123}, ["10.247.1.10"], {}, [{"inode": 100, "id": "c1", "pid": 123}], 100, True, None, True, None, "allow", "workload_rules"),
+            ("V45a_missing_inode_fails_closed", {"id": "c1", "pid": 123}, ["10.247.1.10"], {}, {}, None, True, None, True, None, "refuse", "missing_netns_inode"),
 
             # 46-48: rogue annotations ignored for exemption
             ("V46_rogue_annotation_infra_workload_ip", {"id": "c1", "pid": 123, "annotations": {"io.kautuka.role": "egress-infra"}}, ["10.247.1.10"], {}, {}, 100, True, None, True, None, "allow", "workload_rules"),
