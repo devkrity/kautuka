@@ -99,6 +99,24 @@ describe('network access user scopes', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ scopeKind: 'user', userId: 'alice', connectorId: undefined, replaceRuleId: 'rule-1', expectedRevision: 4 })));
   });
 
+  it('resets editor choices when switching to another rule', async () => {
+    const rule: NetworkAccessRuleDto = {
+      id: 'rule-one', scopeKind: 'user', userId: 'alice', connectorId: 'web',
+      destination: 'one.example', destKind: 'host', port: 443, allowed: true,
+      allowLan: false, source: 'user', paused: false, summaryText: '', decidedBy: 'alice',
+      decidedAtUtc: '2026-01-01T00:00:00Z', openInternetBadge: false,
+    };
+    const save = vi.fn().mockResolvedValue(undefined);
+    const editor = (value: NetworkAccessRuleDto) => <RuleScopeEditor rule={value} userId="alice" isAdmin={false} expectedRevision={4} onCancel={vi.fn()} onSave={save} />;
+    const { rerender } = render(editor(rule));
+    fireEvent.change(screen.getByLabelText('Decision'), { target: { value: 'block' } });
+    rerender(editor({ ...rule, id: 'rule-two', destination: 'two.example', connectorId: undefined, allowed: true }));
+    expect(screen.getByLabelText('Applies to')).toHaveValue('user');
+    expect(screen.getByLabelText('Decision')).toHaveValue('allow');
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ replaceRuleId: 'rule-two', allowed: true, scopeKind: 'user' })));
+  });
+
   it('lets the owner approve their connector without agent context regardless of availability', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'request-1', userId: 'alice', connectorId: 'web', systemwide: true,

@@ -15,7 +15,11 @@ interface RuleScopeEditorProps {
 
 type Target = 'system' | 'user' | 'agent' | 'connector';
 
-export function RuleScopeEditor({ rule, userId, isAdmin, expectedRevision, onCancel, onSave }: RuleScopeEditorProps) {
+export function RuleScopeEditor(props: RuleScopeEditorProps) {
+  return <RuleScopeEditorForm key={props.rule.id} {...props} />;
+}
+
+function RuleScopeEditorForm({ rule, userId, isAdmin, expectedRevision, onCancel, onSave }: RuleScopeEditorProps) {
   const ownerId = rule.userId || userId;
   const initialTarget: Target = rule.scopeKind === 'system' ? 'system' : rule.scopeKind === 'agent' ? 'agent' : rule.connectorId ? 'connector' : 'user';
   const [target, setTarget] = React.useState<Target>(initialTarget);
