@@ -178,6 +178,7 @@ During post-start verification, an ephemeral connector with normal egress can re
 Testing a saved local connector updates its shared tool definitions only when the caller can manage that connector and supplies no custom test environment values. Other authorized users can still test it without changing the shared definitions.
 
 Runtime connector workloads require both a user and an agent identity. Connector tests and save-time discovery may run without an agent and use the user's connector scope.
+Desired connector reconciliation only considers agent workspaces, rather than treating a user-only workspace as a runtime connector owner.
 
 Connector catalogue availability does not change the network workload fingerprint.
 

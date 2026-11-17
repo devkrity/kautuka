@@ -267,7 +267,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
         var desired = new WorkspaceDesiredStateStore();
         string workspace = Path.Combine(root, "workspace");
         Directory.CreateDirectory(workspace);
-        var workspaceContext = new ContainerContext("user", "user-a", "user-a", workspace, "/workspace", "base", 30, "512m", 1, [], new Dictionary<string, string>());
+        var workspaceContext = new ContainerContext("agent", "agent-a", "user-a", workspace, "/workspace", "base", 30, "512m", 1, [], new Dictionary<string, string>());
         var connector = new WorkspaceMcpContainerConnectorDefinition(
             "builder-race", "localhost/test:latest", "python server.py", [], true, false,
             bundlePath, "python", [new KeyValuePair<string, string>("PIP_INDEX_URL", "http://packages.invalid/simple")], 30, 600);

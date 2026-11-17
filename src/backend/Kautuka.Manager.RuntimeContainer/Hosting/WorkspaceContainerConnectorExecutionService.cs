@@ -66,6 +66,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             foreach (ContainerContext workspace in workspaces)
             {
+                if (!string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 names.Add(BuildContainerName(connector.ConnectorId, WorkspaceMcpExecutionContext.Isolated, workspace));
                 if (string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
                 {
@@ -96,9 +101,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         {
             foreach (ContainerContext workspace in workspaces)
             {
-                WorkspaceMcpExecutionContext[] executionContexts = string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
-                    ? [WorkspaceMcpExecutionContext.Isolated, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles]
-                    : [WorkspaceMcpExecutionContext.Isolated];
+                if (!string.Equals(workspace.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                WorkspaceMcpExecutionContext[] executionContexts = [WorkspaceMcpExecutionContext.Isolated, WorkspaceMcpExecutionContext.IsolatedWithAgentFiles];
                 foreach (WorkspaceMcpExecutionContext executionContext in executionContexts)
                 {
                     string containerName = BuildContainerName(connector.ConnectorId, executionContext, workspace);

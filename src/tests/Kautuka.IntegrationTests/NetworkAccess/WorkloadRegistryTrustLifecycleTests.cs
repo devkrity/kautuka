@@ -596,7 +596,8 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             string workspaceRoot = Path.Combine(root, "workspace");
             Directory.CreateDirectory(workspaceRoot);
             var workspace = new ContainerContext(
-                "user", "user-a", "user-a", workspaceRoot, "/workspace", imageDigest, 30, "512m", 1, [], new Dictionary<string, string>());
+                "agent", "agent-a", "user-a", workspaceRoot, "/workspace", imageDigest, 30, "512m", 1, [], new Dictionary<string, string>());
+            var userWorkspace = workspace with { ScopeType = "user", ScopeId = "user-a", HostWorkspacePath = Path.Combine(root, "user-workspace") };
             WorkspaceMcpContainerConnectorDefinition connector = new(
                 "user-a::shared-service", imageDigest, string.Empty, [], true, false, null, null, [], 30, 600)
             {
@@ -610,7 +611,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                     new ManagerWorkspaceDefinition { BaseRoot = root },
                     new ManagerSandboxRuntimeDefinition { Image = imageDigest, DefaultTimeout = 30 },
                     new WorkspaceTelemetryDefinition()),
-                [workspace],
+                [workspace, userWorkspace],
                 [connector],
                 []);
             WorkspaceMcpContainerConnectorDefinition desiredConnector = Assert.Single(desiredState.Snapshot.DesiredContainerConnectors);
@@ -630,9 +631,11 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 profile);
             string ruleset = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
                 .Replace("{{IP}}", ip, StringComparison.Ordinal);
-            string inspectJson = CreateConnectorInspectJson(containerId, ip, imageDigest, fingerprint, desiredConnector.ConnectorId);
+            string inspectJson = CreateConnectorInspectJson(containerId, ip, imageDigest, fingerprint, desiredConnector.ConnectorId, agentId: "agent-a");
             var runner = new PodmanCommandRunner((args, _) => Task.FromResult(args[0] switch
             {
+                "inspect" when args[1].Contains("-files-", StringComparison.Ordinal) => new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit),
+                "container" when args.Count > 2 && args[1] == "exists" && args[2].Contains("-files-", StringComparison.Ordinal) => new PodmanCommandResult(1, string.Empty, string.Empty, ProcessTerminationReason.NonZeroExit),
                 "inspect" => new PodmanCommandResult(0, inspectJson, string.Empty, ProcessTerminationReason.Completed),
                 "image" => new PodmanCommandResult(0, args.Contains("--format", StringComparer.Ordinal) ? imageDigest : "[{\"Id\":\"" + imageDigest + "\",\"RepoDigests\":[\"example/image@" + imageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed),
                 "machine" when args.Contains("cat", StringComparer.Ordinal) => new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed),
@@ -641,7 +644,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             }));
             var registry = new WorkloadRegistry();
             var quarantined = new RegistryEntry(
-                ip, identity.UserId, null, containerId, "connector", desiredConnector.ConnectorId, "isolated", true,
+                ip, identity.UserId, "agent-a", containerId, "connector", desiredConnector.ConnectorId, "isolated", true,
                 "deny-all", "none", string.Join(',', profile.Relaxations), DateTimeOffset.UtcNow);
             registry.Rebuild([quarantined]);
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
@@ -662,7 +665,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             RegistryEntry recovered = Assert.Single(registry.GetAll());
             Assert.Equal(containerId, recovered.ContainerId);
             Assert.Equal("normal", recovered.Egress);
-            Assert.Equal("user", recovered.Attribution);
+            Assert.Equal("user-agent", recovered.Attribution);
             Assert.True(recovered.Systemwide);
             Assert.Equal("writable-rootfs", recovered.CompatProfile);
             Assert.True(registry.IsVerified(ip, containerId));
