@@ -186,6 +186,7 @@ Linux installation includes both the workload and package-proxy nft ruleset temp
 
 Registry rebuilding happens during topology initialization, not during ordinary workspace supervisor reconciliation. Routine reconciliation preserves verified workload identities.
 Active short-lived connectors remain tracked until cleanup, and the orphan sweep checks current connector activity immediately before removing a candidate.
+During workload rules reconciliation, failed inspection or ruleset reads deny the affected workload and are retried; only a successfully read ruleset with a mismatched hash triggers persistent quarantine and removal. A canceled post-start verification denies the identity without recording a permanent quarantine.
 
 Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
 

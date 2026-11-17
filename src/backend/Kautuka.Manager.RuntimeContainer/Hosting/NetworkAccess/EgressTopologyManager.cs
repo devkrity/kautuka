@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -108,6 +109,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private InfraAllowlistEntry? packageProxyAllowlistEntry;
     private readonly object infraAllowlistLock = new();
     private volatile bool packageProxyStartupReady;
+    private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -2878,9 +2880,17 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         isPackageProxy: isPackageProxy,
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (!string.Equals(canonicalId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, canonicalId);
+                    if (transientWorkloadDenials.TryGetValue(entry.Ip, out RegistryEntry? prior)
+                        && string.Equals(prior.ContainerId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)
+                        && registry.FindByIp(entry.Ip) is RegistryEntry current
+                        && registry.TryPromoteVerified(current, prior with { ContainerId = canonicalId }))
+                    {
+                        transientWorkloadDenials.TryRemove(entry.Ip, out _);
+                    }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (WorkloadRulesetVerificationException ex)
                 {
+                    transientWorkloadDenials.TryRemove(entry.Ip, out _);
                     if (isPackageProxy) packageProxyStartupReady = false;
                     string? canonicalId = ex is WorkloadRulesetVerificationException drift ? drift.CanonicalContainerId : null;
                     canonicalId ??= WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : null;
@@ -2920,6 +2930,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     }
                     if (removal?.ExitCode == 0) registry.Deregister(entry.Ip, entry.ContainerId);
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    if (isPackageProxy) packageProxyStartupReady = false;
+                    if (registry.IsVerified(entry.Ip, entry.ContainerId))
+                        transientWorkloadDenials[entry.Ip] = entry;
+                    registry.TryQuarantine(entry.Ip, entry.ContainerId, liveCid);
+                    logger.LogWarning(ex, "Could not verify workload rules for {ContainerId}; denying traffic and retrying.", entry.ContainerId);
+                }
                 continue;
             }
             if (liveCid is not null)
@@ -2935,6 +2953,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
 
             logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
+            transientWorkloadDenials.TryRemove(entry.Ip, out _);
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
     }

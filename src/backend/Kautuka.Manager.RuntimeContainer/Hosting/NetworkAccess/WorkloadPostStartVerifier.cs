@@ -14,6 +14,13 @@ internal sealed class WorkloadRulesetVerificationException : InvalidOperationExc
     public string CanonicalContainerId { get; } = string.Empty;
 }
 
+internal sealed class WorkloadRulesetMismatchException : InvalidOperationException
+{
+    public WorkloadRulesetMismatchException() { }
+    public WorkloadRulesetMismatchException(string message) : base(message) { }
+    public WorkloadRulesetMismatchException(string message, Exception innerException) : base(message, innerException) { }
+}
+
 public sealed record WorkloadVerificationResult(
     string ContainerId,
     string AllocatedIp,
@@ -313,6 +320,11 @@ public sealed class WorkloadPostStartVerifier
             stopwatch.Stop();
             return new WorkloadVerificationResult(registeredId, allocatedIp, true, stopwatch.ElapsedMilliseconds, CanonicalContainerId: canonicalContainerId);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            registry?.TryQuarantine(allocatedIp, registeredId, containerId);
+            throw;
+        }
         catch (Exception ex)
         {
             stopwatch.Stop();
@@ -603,7 +615,7 @@ public sealed class WorkloadPostStartVerifier
         {
             await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (WorkloadRulesetMismatchException ex)
         {
             throw new WorkloadRulesetVerificationException(canonicalId!, ex);
         }
@@ -684,7 +696,7 @@ public sealed class WorkloadPostStartVerifier
         string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy);
         if (!string.Equals(liveHash, expectedHash, StringComparison.Ordinal))
         {
-            throw new InvalidOperationException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");
+            throw new WorkloadRulesetMismatchException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");
         }
     }
 }

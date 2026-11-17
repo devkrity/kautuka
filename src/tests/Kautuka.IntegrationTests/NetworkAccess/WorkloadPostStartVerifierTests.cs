@@ -20,6 +20,36 @@ public sealed class WorkloadPostStartVerifierTests
     private const string CanonicalContainerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     [Fact]
+    public async Task CancellationAfterInspectionDeniesWithoutDeletingOrPersistingQuarantine()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-verifier-cancel-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var cancellation = new CancellationTokenSource();
+        var calls = new List<string[]>();
+        var registry = CreateRegistry();
+        var desired = new WorkspaceDesiredStateStore(Path.Combine(root, "state.json"), Microsoft.Extensions.Logging.Abstractions.NullLogger<WorkspaceDesiredStateStore>.Instance);
+        var runner = new PodmanCommandRunner(async (args, _) =>
+        {
+            calls.Add([.. args]);
+            if (args[0] == "inspect")
+            {
+                await cancellation.CancelAsync();
+                return Success(Inspect());
+            }
+            return await Task.FromCanceled<PodmanCommandResult>(cancellation.Token);
+        });
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => new WorkloadPostStartVerifier(runner, desired)
+                .VerifyWorkloadAsync(ContainerId, AllocatedIp, registry: registry, cancellationToken: cancellation.Token));
+            Assert.DoesNotContain(calls, call => call[0] is "kill" or "rm");
+            Assert.False(desired.IsWorkloadQuarantined(CanonicalContainerId));
+            Assert.Equal("deny-all", registry.FindByIp(AllocatedIp)?.Egress);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public void PodmanMachineMountPathsMatchOnlyTheirWindowsWorkspaceRoot()
     {
         if (!OperatingSystem.IsWindows())
