@@ -46,6 +46,17 @@ describe('network access user scopes', () => {
     await waitFor(() => expect(onDecide).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Allow all 2' })).toBeEnabled());
   });
+  it('does not group requests belonging to different users with the same agent ID', () => {
+    const request: NetworkAccessRequestDto = {
+      id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'Assistant',
+      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
+    };
+    render(<GroupedPendingCards requests={[request, { ...request, id: 'two', userId: 'bob', destination: 'two.example' }]}
+      currentUser={{ id: 'admin', role: 'admin' }} expectedRevision={4} onDecide={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'Allow all 2' })).not.toBeInTheDocument();
+  });
   it('explains each approval scope without exposing runtime connector IDs', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'request-scopes', userId: 'alice', userDisplayName: 'Alice', agentId: 'agent-1',

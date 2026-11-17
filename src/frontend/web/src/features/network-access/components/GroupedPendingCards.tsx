@@ -58,6 +58,7 @@ export function GroupedPendingCards({
       const existing = result.find(
         (g) =>
           g.requests.length > 0 &&
+          g.requests[0]?.userId === req.userId &&
           g.requests[0]?.agentId === req.agentId &&
           Math.abs(new Date(g.requests[0]?.firstSeenUtc ?? 0).getTime() - reqTime) <= 60000
       );
@@ -66,7 +67,7 @@ export function GroupedPendingCards({
         existing.requests.push(req);
       } else {
         result.push({
-          key: `group-${req.agentId}-${reqTime}`,
+          key: `group-${req.id}`,
           agentDisplayName: req.agentDisplayName,
           requests: [req],
         });
