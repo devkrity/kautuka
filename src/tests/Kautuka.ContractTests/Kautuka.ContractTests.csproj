@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\backend\Kautuka.Gateway\Kautuka.Gateway.csproj" />
+    <ProjectReference Include="..\Kautuka.NetworkAccess.Acceptance\Kautuka.NetworkAccess.Acceptance.csproj" />
     <ProjectReference Include="..\..\installer\Kautuka.Monitor.Core\Kautuka.Monitor.Core.csproj" />
   </ItemGroup>
 

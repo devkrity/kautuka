@@ -121,6 +121,10 @@ public static class AcceptanceHarness
     }
 
     public static IReadOnlyList<AcceptanceObservation> GetAll() => observations.AsReadOnly();
+
+    public static IReadOnlyList<AcceptanceObservation> ProductionObservations(
+        IReadOnlyList<AcceptanceObservation> packageProxy,
+        params AcceptanceObservation[] remaining) => [.. packageProxy, .. remaining];
 }
 
 public static class Program
@@ -131,7 +135,7 @@ public static class Program
         public HttpClient CreateClient(string name) => new();
     }
 
-    private static async Task VerifyManagedPackageProxyPathAsync(
+    private static async Task<IReadOnlyList<AcceptanceObservation>> VerifyManagedPackageProxyPathAsync(
         string repoRoot,
         string tempRoot,
         EgressTopologyManager topology,
@@ -331,24 +335,25 @@ public static class Program
             throw new InvalidOperationException($"Proxy upstream did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredUpstreamFetch)}");
         }
 
+        return [
         AcceptanceHarness.Record(
             "PROD_PACKAGE_PROXY_TWO_HOP_FETCH",
             $"allowed={packageFetch.ExitCode == 0 && !string.IsNullOrWhiteSpace(packageFetch.StdOut)}",
             "allowed=True",
             $"allowed={deniedFetch.ExitCode == 0}",
-            "allowed=False");
+            "allowed=False"),
         AcceptanceHarness.Record(
             "PROD_PACKAGE_PROXY_EXPLICIT_DENY",
             $"blocked={deniedFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredFetch.ExitCode != 0}",
-            "blocked=False");
+            "blocked=False"),
         AcceptanceHarness.Record(
             "PROD_PACKAGE_PROXY_UPSTREAM_DENY",
             $"blocked={deniedUpstreamFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
-            "blocked=False");
+            "blocked=False")];
     }
     private const string UserBrakeDisabledHookObservation =
         "existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True";
@@ -1623,7 +1628,7 @@ public static class Program
             }
             Console.WriteLine("[PROD_STAGE] production topology initialized and canary passed");
 
-            await VerifyManagedPackageProxyPathAsync(repoRoot, tempRoot, topology, controller, registry, podman, verifier, loggerFactory)
+            IReadOnlyList<AcceptanceObservation> packageProxyObservations = await VerifyManagedPackageProxyPathAsync(repoRoot, tempRoot, topology, controller, registry, podman, verifier, loggerFactory)
                 .ConfigureAwait(false);
 
             int egressPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
@@ -2277,15 +2282,14 @@ public static class Program
             await topology.ReconcileOnceAsync(registry, CancellationToken.None).ConfigureAwait(false);
             bool deregisteredAfterRm = !registry.TryGetByIp(wlIp, out _);
 
-            var observations = new List<AcceptanceObservation>
-            {
+            var observations = AcceptanceHarness.ProductionObservations(
+                packageProxyObservations,
                 parserAcceptance,
                 lanAcceptance,
                 noGrantLanAcceptance,
                 AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
                 AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"{stillRegisteredWhileRunning}:{afterReconcileEntry?.ContainerId?.Length == 64}", "True:True", deregisteredAfterRm ? "DEREGISTERED_ON_RM" : "STILL_PRESENT", "DEREGISTERED_ON_RM"),
-                AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED"),
-            };
+                AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED")).ToList();
 
             // Build a fresh production workload for the final DNS negative control. This
             // keeps the rule deletion last while still exercising DNS from a live workload.
