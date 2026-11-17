@@ -68,8 +68,9 @@ public static class AcceptanceHarness
     /// <summary>
     /// Records an acceptance test result adhering strictly to Ground Rule G9 (Section 7.0):
     /// 1. Compares observed values read during execution (never hard-coded literals).
-    /// 2. Asserts negative control (NC) flipped the result.
-    /// 3. Computes ncFlipped directly from observed vs ncObserved — never accepts a caller boolean.
+    /// 2. Checks the negative-control result against its expected observation.
+    /// 3. For structured observations, requires at least one shared field to change.
+    /// A changed observation alone does not prove that a mutation disabled the intended check.
     /// </summary>
     public static AcceptanceObservation Record(
         string testId,
@@ -86,7 +87,7 @@ public static class AcceptanceHarness
 
         bool effectiveNcFlipped =
             string.Equals(ncObservedValue.Trim(), ncExpectedValue.Trim(), StringComparison.Ordinal) &&
-            !string.Equals(ncObservedValue.Trim(), observedValue.Trim(), StringComparison.Ordinal);
+            ObservationsDiffer(observedValue, ncObservedValue);
 
         if (!effectiveNcFlipped)
         {
@@ -121,6 +122,29 @@ public static class AcceptanceHarness
     }
 
     public static IReadOnlyList<AcceptanceObservation> GetAll() => observations.AsReadOnly();
+
+    private static bool ObservationsDiffer(string observed, string negativeControl)
+    {
+        Dictionary<string, string>? left = ParseFields(observed);
+        Dictionary<string, string>? right = ParseFields(negativeControl);
+        if (left is null || right is null)
+            return left is null && right is null && !string.Equals(observed.Trim(), negativeControl.Trim(), StringComparison.Ordinal);
+
+        return left.Any(pair => right.TryGetValue(pair.Key, out string? value)
+            && !string.Equals(pair.Value, value, StringComparison.Ordinal));
+    }
+
+    private static Dictionary<string, string>? ParseFields(string value)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string part in value.Split(':'))
+        {
+            int separator = part.IndexOf('=', StringComparison.Ordinal);
+            if (separator <= 0 || !fields.TryAdd(part[..separator].Trim(), part[(separator + 1)..].Trim()))
+                return null;
+        }
+        return fields;
+    }
 
     public static IReadOnlyList<AcceptanceObservation> ProductionObservations(
         IReadOnlyList<AcceptanceObservation> packageProxy,
@@ -2044,14 +2068,14 @@ public static class Program
                 {
                     _ = policyStore.DecideRequest(admin, parserControlCard.Id, allow: false, scope: "agent", expectedRevision: policyStore.Revision, allowLan: false);
                 }
-                string parserObservation = $"denyAll={internalParserDenied}:kindSystem={string.Equals(internalParserEntry.Kind, "system", StringComparison.Ordinal)}:noApproval={policyStore.ListRequests(admin).Requests.All(view => !string.Equals(view.Request.ConnectorId, internalParserConnector.ConnectorId, StringComparison.Ordinal))}";
-                string parserNcObservation = $"normal={string.Equals(parserControlEntry.Egress, "normal", StringComparison.Ordinal)}:kindConnector={string.Equals(parserControlEntry.Kind, "connector", StringComparison.Ordinal)}:approvalCreated={parserControlApprovalCreated}";
+                string parserObservation = $"egress={internalParserEntry.Egress}:denyAll={internalParserDenied}:kindSystem={string.Equals(internalParserEntry.Kind, "system", StringComparison.Ordinal)}:noApproval={policyStore.ListRequests(admin).Requests.All(view => !string.Equals(view.Request.ConnectorId, internalParserConnector.ConnectorId, StringComparison.Ordinal))}";
+                string parserNcObservation = $"egress={parserControlEntry.Egress}:normal={string.Equals(parserControlEntry.Egress, "normal", StringComparison.Ordinal)}:kindConnector={string.Equals(parserControlEntry.Kind, "connector", StringComparison.Ordinal)}:approvalCreated={parserControlApprovalCreated}";
                 parserAcceptance = AcceptanceHarness.Record(
                     "PROD_E_PARSER",
                     parserObservation,
-                    "denyAll=True:kindSystem=True:noApproval=True",
+                    "egress=deny-all:denyAll=True:kindSystem=True:noApproval=True",
                     parserNcObservation,
-                    "normal=True:kindConnector=True:approvalCreated=True");
+                    "egress=normal:normal=True:kindConnector=True:approvalCreated=True");
             }
             Console.WriteLine("[PROD_STAGE] parser attribution and approval checks completed");
 
@@ -2148,14 +2172,14 @@ public static class Program
                     await Console.Error.WriteLineAsync($"LAN-grant retry failed: {lanAllowedErr}").ConfigureAwait(false);
                 }
             }
-            string lanObservation = $"beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
-            string lanNcObservation = $"beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}";
+            string lanObservation = $"blocked={lanAllowedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}:allowLanRule={lanRule?.AllowLan == true}:lanApprovedPacketDeltaGt0={lanApprovedDelta > 0}:lanMasqueradePacketDeltaGt0={lanMasqueradeDelta > 0}:body={lanBodyReceived}";
+            string lanNcObservation = $"blocked={lanDeniedRc != 0}:beforeApprovalBlocked={lanDeniedRc != 0}:cardCreated={lanCardCreated}";
             AcceptanceObservation lanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_GRANT",
                 lanObservation,
-                "beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
+                "blocked=False:beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
                 lanNcObservation,
-                "beforeApprovalBlocked=True:cardCreated=True");
+                "blocked=True:beforeApprovalBlocked=True:cardCreated=True");
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_NO_GRANT",
                 noGrantLanObservation,
@@ -2381,14 +2405,14 @@ public static class Program
                 int rebindNcFixtureHitsAfter = File.Exists(lanAccessLogPath)
                     ? (await File.ReadAllLinesAsync(lanAccessLogPath).ConfigureAwait(false)).Length
                     : 0;
-                string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:kernelRejectDelta={rebindRejectDelta}";
-                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}:authorizationGateBypassed={Volatile.Read(ref packetPathOnlyGateOverride) == 1}:packetPathOnly=True";
+                string rebindObservation = $"workloadTargetPublic=True:blocked={rebindRc != 0}:privateRejectDeltaZero={rebindRejectDelta == 0}";
+                string rebindNcObservation = $"envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked={rebindNcRc != 0}:privateRejectDeltaZero={rebindNcRejectDelta == 0}:privateRejectDeltaGt0={rebindNcRejectDelta > 0}:lanMasqueradeRulePacketDeltaZero={rebindNcMasqueradeDelta == 0}:fixtureHitsZero={rebindNcFixtureHitsAfter == rebindNcFixtureHitsBefore}:authorizationGateBypassed={Volatile.Read(ref packetPathOnlyGateOverride) == 1}:packetPathOnly=True";
                 rebindAcceptance = AcceptanceHarness.Record(
                     "PROD_E_REBIND",
                     rebindObservation,
-                    "workloadTargetPublic=True:blocked=True:kernelRejectDelta=0",
+                    "workloadTargetPublic=True:blocked=True:privateRejectDeltaZero=True",
                     rebindNcObservation,
-                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGateBypassed=True:packetPathOnly=True");
+                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaZero=False:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGateBypassed=True:packetPathOnly=True");
             }
             finally
             {
@@ -2435,13 +2459,13 @@ public static class Program
             bool dnsRuleRemoved = ExtractNftCommentRuleHandle(dnsCountersAfterNc, "dns_upstream") == 0;
             bool dnsNcBlocked = dnsNcRc != 0;
             long privateRejectDelta = ExtractNftCommentCounterPackets(dnsCountersAfterNc, "private_reject") - privateRejectBefore;
-            string dnsNcObservation = $"ruleRemoved={dnsRuleRemoved}:conntrackCleared={conntrackEntryRemoved}:lookupBlocked={dnsNcBlocked}:privateRejectDelta_gt0={privateRejectDelta > 0}";
+            string dnsNcObservation = $"rule={!dnsRuleRemoved}:ruleRemoved={dnsRuleRemoved}:conntrackCleared={conntrackEntryRemoved}:lookupBlocked={dnsNcBlocked}:privateRejectDelta_gt0={privateRejectDelta > 0}";
             observations.Add(AcceptanceHarness.Record(
                 "PROD_V7_33_DNS_UPSTREAM",
                 $"rule={!string.IsNullOrEmpty(dnsUpstreamLine)}:uniqueLookup=True:delta_gt0={dnsProbeDelta > 0}:body={hasExampleDomain}",
                 "rule=True:uniqueLookup=True:delta_gt0=True:body=True",
                 dnsNcObservation,
-                "ruleRemoved=True:conntrackCleared=True:lookupBlocked=True:privateRejectDelta_gt0=True"));
+                "rule=False:ruleRemoved=True:conntrackCleared=True:lookupBlocked=True:privateRejectDelta_gt0=True"));
 
             var (_, podmanVer, _) = await ExecAsync("podman", ["--version"]).ConfigureAwait(false);
             var (_, kernelVer, _) = await ExecAsync("uname", ["-r"]).ConfigureAwait(false);
