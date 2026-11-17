@@ -329,8 +329,7 @@ internal sealed class SlackSocketModeWorker(
         if (!info.RootElement.TryGetProperty("ok", out JsonElement ok) || !ok.GetBoolean() || !info.RootElement.TryGetProperty("file", out JsonElement file)) yield break;
         string downloadUrl = file.TryGetProperty("url_private_download", out JsonElement download) ? download.GetString() ?? string.Empty : string.Empty;
         if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out Uri? uri) || !SlackFileDownloadPolicy.IsSlackOwnedHttpsUri(uri)) yield break;
-        using HttpRequestMessage downloadRequest = new(HttpMethod.Get, uri); downloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", botToken);
-        using HttpResponseMessage response = await httpClientFactory.CreateClient("slack-api").SendAsync(downloadRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await DownloadSlackFileAsync(uri, botToken, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode(); using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         byte[] buffer = new byte[64 * 1024]; int read; bool first = true;
         while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
@@ -339,6 +338,30 @@ internal sealed class SlackSocketModeWorker(
             first = false;
         }
         yield return new ReadInboundMediaChunk { IsFinal = true };
+    }
+
+    private async Task<HttpResponseMessage> DownloadSlackFileAsync(Uri uri, string botToken, CancellationToken cancellationToken)
+    {
+        string originalHost = uri.IdnHost;
+        HttpClient client = httpClientFactory.CreateClient("slack-api");
+        for (int redirects = 0; ; redirects++)
+        {
+            using HttpRequestMessage request = new(HttpMethod.Get, uri);
+            if (string.Equals(uri.IdnHost, originalHost, StringComparison.OrdinalIgnoreCase))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", botToken);
+            HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
+                return response;
+            if (redirects >= 10)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Too many Slack file redirects.");
+            }
+            Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            response.Dispose();
+            if (next.Scheme != Uri.UriSchemeHttps) throw new HttpRequestException("Slack file redirects require HTTPS.");
+            uri = next;
+        }
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "The supervisor isolates attachment failures so other Slack connections continue.")]

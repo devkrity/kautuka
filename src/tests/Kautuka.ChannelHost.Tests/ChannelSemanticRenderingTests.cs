@@ -5,6 +5,7 @@ using Kautuka.ChannelContracts.Channels;
 using Kautuka.ChannelContracts.Serialization;
 using Kautuka.ChannelHost.Hosting;
 using Kautuka.ChannelHost.Providers.Slack;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 using Microsoft.Extensions.Configuration;
@@ -367,6 +368,67 @@ public sealed class ChannelSemanticRenderingTests
         finally
         {
             ChannelHostSqliteTestCleanup.ReleaseAndDelete(root);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task SlackFileRedirectsRespectNacAndDoNotLeakBotToken(bool allowTarget, bool sameHost)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"kautuka-slack-redirect-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Kautuka:ContainerStateRoot"] = root }).Build();
+            ChannelHostDatabase database = new(configuration); database.EnsureReady();
+            ChannelRuntimeCredentialStore credentials = new();
+            ChannelAttachmentStore attachments = new(database, credentials);
+            _ = attachments.UpsertAttachment(new UpsertAttachmentRequest { AttachmentId = "slack-1", ProviderKey = "slack", ExpectedSchemaVersion = "slack/v1", Settings = { new AttachmentSettingValue { FieldKey = "owner_user_id", StringValue = "owner" } } });
+            credentials.Replace("slack-1", [new RuntimeCredentialValue { FieldKey = "bot_token", SecretValue = "bot-token" }]);
+            using var transport = new SlackRedirectHandler(sameHost);
+            var checker = new SlackRedirectChecker(allowTarget);
+            using var policy = new NetworkAccessCheckHandler(checker, transport);
+            using var factory = new SingleClientFactory(policy);
+            using var ingress = new ChannelIngressStore(database);
+            var worker = new SlackSocketModeWorker(attachments, credentials, ingress, new ChannelOutboundAssetStore(database, configuration), factory, NullLogger<SlackSocketModeWorker>.Instance);
+            async Task ReadAsync() { await foreach (ReadInboundMediaChunk _ in worker.ReadInboundMediaAsync("slack-1", new ReadInboundMediaRequest { MediaId = "F1" }, CancellationToken.None).ConfigureAwait(false)) { } }
+            if (allowTarget) await ReadAsync();
+            else await Assert.ThrowsAsync<NetworkAccessDeniedException>(ReadAsync);
+            Assert.Equal(allowTarget, transport.TargetReached);
+            if (allowTarget) Assert.Equal(sameHost ? "bot-token" : null, transport.TargetToken);
+            Assert.Contains(checker.Hosts, host => host == (sameHost ? "files.slack.com" : "cdn.example"));
+        }
+        finally { ChannelHostSqliteTestCleanup.ReleaseAndDelete(root); }
+    }
+
+    private sealed class SlackRedirectChecker(bool allowTarget) : INetworkAccessChecker
+    {
+        public List<string> Hosts { get; } = [];
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Hosts.Add(target.Host);
+            return Task.FromResult(!allowTarget && target.Host == "cdn.example" ? NetworkAccessCheckResult.CreateDenied("test") : NetworkAccessCheckResult.CreateAllowed("test"));
+        }
+    }
+
+    private sealed class SlackRedirectHandler(bool sameHost) : HttpMessageHandler
+    {
+        public bool TargetReached { get; private set; }
+        public string? TargetToken { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/files.info")
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true,\"file\":{\"name\":\"report.txt\",\"url_private_download\":\"https://files.slack.com/start\"}}") });
+            if (request.RequestUri.AbsolutePath == "/start")
+            {
+                var response = new HttpResponseMessage(System.Net.HttpStatusCode.Redirect);
+                response.Headers.Location = new Uri(sameHost ? "https://files.slack.com/final" : "https://cdn.example/final");
+                return Task.FromResult(response);
+            }
+            TargetReached = true; TargetToken = request.Headers.Authorization?.Parameter;
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
         }
     }
 
