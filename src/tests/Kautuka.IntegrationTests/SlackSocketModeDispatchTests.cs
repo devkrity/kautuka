@@ -195,12 +195,20 @@ public sealed class SlackSocketModeDispatchTests
     [Fact]
     public async Task FailedSocketOpenIsRetriedWithBoundedBackoff()
     {
-        using DispatchFixture fixture = new(paired: true);
+        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(15));
+        List<int> backoffAttempts = [];
+        using DispatchFixture fixture = new(paired: true, retryDelay: attempt =>
+        {
+            backoffAttempts.Add(attempt);
+            if (backoffAttempts.Count == 2)
+                cancellation.Cancel();
+            return TimeSpan.FromMilliseconds(10);
+        });
         fixture.Http.FailFirstConnectionOpen = true;
-        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(3));
         await fixture.WorkerRunConnectionLoopAsync(cancellation.Token);
 
         Assert.InRange(fixture.Http.Requests.Count(request => request.Uri?.AbsolutePath == "/api/apps.connections.open"), 2, int.MaxValue);
+        Assert.Equal([1, 2], backoffAttempts);
         Assert.True(SlackSocketModeWorker.GetConnectionBackoffDelay(100) <= TimeSpan.FromSeconds(60));
     }
 
