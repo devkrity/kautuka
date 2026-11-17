@@ -8,6 +8,30 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Theory]
+    [InlineData("decision")]
+    [InlineData("set-rule")]
+    [InlineData("delete-rule")]
+    [InlineData("set-compat")]
+    [InlineData("delete-compat")]
+    public async Task NetworkAccessWritesReportUnconfirmedManagerOutage(string operation)
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        fixture.FailPrivilegeSync = true;
+        string digest = "sha256:" + new string('a', 64);
+        (HttpMethod Method, string Path, object Body) target = operation switch
+        {
+            "decision" => (HttpMethod.Post, "/api/network-access/requests/request-id/decision", new { allow = true, scope = "user", expectedRevision = 0 }),
+            "set-rule" => (HttpMethod.Put, "/api/network-access/rules", new { scopeKind = "system", destination = "example.com", destKind = "host", port = 443, allowed = true, expectedRevision = 0 }),
+            "delete-rule" => (HttpMethod.Delete, "/api/network-access/rules/rule-id?expectedRevision=0", new { }),
+            "set-compat" => (HttpMethod.Post, "/api/network-access/compat/" + digest, new { relaxations = new[] { "writable-rootfs" } }),
+            _ => (HttpMethod.Delete, "/api/network-access/compat/" + digest, new { }),
+        };
+        using HttpResponseMessage response = await fixture.SendRawJsonAsync(target.Method, target.Path, target.Body, admin);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Theory]
     [InlineData("requests")]
     [InlineData("rules")]
     [InlineData("activity")]

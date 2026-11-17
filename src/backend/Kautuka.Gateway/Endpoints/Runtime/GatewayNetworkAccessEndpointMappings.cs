@@ -185,6 +185,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             {
                 return Results.Json(new GatewayErrorResponse(ex.Status.Detail), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
             }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the decision. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // 3. GET /api/network-access/rules?userId=
@@ -325,6 +329,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             {
                 return Results.Json(new GatewayErrorResponse(ex.Status.Detail), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the rule change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // 5. DELETE /api/network-access/rules/{id}?expectedRevision=
@@ -372,6 +380,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             catch (RpcException ex) when (ex.StatusCode == StatusCode.NotFound)
             {
                 return Results.Json(new GatewayErrorResponse(ex.Status.Detail), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the rule change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
         });
 
@@ -776,7 +788,12 @@ internal static partial class GatewayRuntimeEndpointMappings
             };
             request.Relaxations.AddRange(dto.Relaxations);
 
-            ImageCompatProfileMessage response = await managerService.Client.SetImageCompatibilityAsync(request, cancellationToken: cancellationToken);
+            ImageCompatProfileMessage response;
+            try { response = await managerService.Client.SetImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the compatibility change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var result = new ImageCompatProfileDto(
                 ImageDigest: response.ImageDigest,
@@ -810,7 +827,11 @@ internal static partial class GatewayRuntimeEndpointMappings
                 ImageDigest = imageDigest,
             };
 
-            await managerService.Client.DeleteImageCompatibilityAsync(request, cancellationToken: cancellationToken);
+            try { await managerService.Client.DeleteImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the compatibility change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
             return Results.NoContent();
         });
     }

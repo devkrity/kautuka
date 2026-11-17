@@ -575,7 +575,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListRequests(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessDecideResponse> DecideRequestAsync(NetworkAccessDecideRequest request, CallOptions options)
-            => Wrap(grpc.DecideRequest(request, ctx));
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.DecideRequest(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessListRulesResponse> ListRulesAsync(NetworkAccessListRulesRequest request, CallOptions options)
             => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListRules(request, ctx));
@@ -597,7 +597,16 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
                 : Wrap(grpc.SetBrake(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessSetRuleResponse> SetRuleAsync(NetworkAccessSetRuleRequest request, CallOptions options)
-            => Wrap(grpc.SetRule(request, ctx));
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.SetRule(request, ctx));
+
+        public override AsyncUnaryCall<NetworkAccessDeleteRuleResponse> DeleteRuleAsync(NetworkAccessDeleteRuleRequest request, CallOptions options)
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.DeleteRule(request, ctx));
+
+        public override AsyncUnaryCall<ImageCompatProfileMessage> SetImageCompatibilityAsync(ImageCompatSetProfileRequest request, CallOptions options)
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.SetImageCompatibility(request, ctx));
+
+        public override AsyncUnaryCall<WorkspaceBoolResponse> DeleteImageCompatibilityAsync(ImageCompatDeleteProfileRequest request, CallOptions options)
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.DeleteImageCompatibility(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CallOptions options)
             => failPrivilegeSync()
