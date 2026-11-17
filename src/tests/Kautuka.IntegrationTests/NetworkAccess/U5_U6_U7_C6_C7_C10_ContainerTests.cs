@@ -1941,7 +1941,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var podman = new PodmanCommandRunner((args, _) =>
         {
             calls.Add(string.Join(" ", args));
-            if (args.SequenceEqual(["ps", "-a", "--format", "json"]))
+            if (args.SequenceEqual(["ps", "-a", "--format", "json"]) || args.SequenceEqual(["ps", "-a", "--no-trunc", "--format", "json"]))
             {
                 return Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed));
             }
@@ -1995,7 +1995,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
 
         Assert.False(manager.IsStartupGateOpen);
-        Assert.Equal(["ps -a --format json"], calls);
+        Assert.Equal(["ps -a --no-trunc --format json"], calls);
     }
 
     [Fact]
@@ -2037,7 +2037,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         int callCount = calls.Count;
         await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
         Assert.Equal(callCount + 1, calls.Count);
-        Assert.Equal("ps -a --format json", calls[^1]);
+        Assert.Equal("ps -a --no-trunc --format json", calls[^1]);
     }
 
     [Fact]
@@ -2080,9 +2080,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task V7_54_ReconcileRecreatesPodAndReopensGateAfterTransientRulesetReadFailure(bool testQuarantineRetry)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task V7_54_ReconcileRecreatesPodAndReopensGateAfterTransientRulesetReadFailure(bool testQuarantineRetry, bool testListingRetry)
     {
         const string healthy = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra-id\",\"Containers\":["
             + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
@@ -2099,6 +2100,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         int liveRulesetReadFailuresRemaining = 1;
         int podRemovals = 0;
         int podStarts = 0;
+        bool failNextListing = false;
         const string quarantinedId = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         bool cleanupPhase = false;
         bool quarantineSurvives = true;
@@ -2124,6 +2126,11 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             string call = string.Join(" ", args);
             calls.Add(call);
+            if (args[0] == "ps" && failNextListing)
+            {
+                failNextListing = false;
+                return Task.FromResult(new PodmanCommandResult(125, "", "temporary listing failure", ProcessTerminationReason.NonZeroExit));
+            }
             if (cleanupPhase && args[0] == "ps")
                 return Task.FromResult(new PodmanCommandResult(0, quarantineSurvives ? "[{\"Id\":\"" + quarantinedId + "\",\"State\":\"running\"}]" : "[]", string.Empty, ProcessTerminationReason.Completed));
             if (cleanupPhase && args[0] == "rm" && args[^1] == quarantinedId)
@@ -2278,6 +2285,20 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains(calls, call => call.StartsWith("pod create ", StringComparison.Ordinal));
         Assert.Contains("pod start kautuka-egress", calls);
 
+        if (testListingRetry)
+        {
+            failNextListing = true;
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.False(manager.IsStartupGateOpen);
+            Assert.False((bool)typeof(EgressTopologyManager)
+                .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(manager)!);
+            releaseSecondRecoveryPodStart.TrySetResult();
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.True(manager.IsStartupGateOpen);
+            return;
+        }
+
         if (testQuarantineRetry)
         {
             desiredState.QuarantineWorkload(quarantinedId);
@@ -2305,7 +2326,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         int callsAfterExplicitClose = calls.Count;
         await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
         Assert.Equal(callsAfterExplicitClose + 1, calls.Count);
-        Assert.Equal("ps -a --format json", calls[^1]);
+        Assert.Equal("ps -a --no-trunc --format json", calls[^1]);
     }
 
     [Fact]
@@ -2666,9 +2687,9 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         Assert.False(manager.IsStartupGateOpen);
         Assert.Contains("inspect kautuka-egress-boundary --format json", calls);
-        Assert.Contains("ps -a --format json", calls);
+        Assert.Contains("ps -a --no-trunc --format json", calls);
         Assert.Contains("pod rm -f kautuka-egress", calls);
-        Assert.True(calls.IndexOf("ps -a --format json") < calls.IndexOf("pod rm -f kautuka-egress"));
+        Assert.True(calls.IndexOf("ps -a --no-trunc --format json") < calls.IndexOf("pod rm -f kautuka-egress"));
     }
 
     [Fact]
@@ -2735,7 +2756,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             .GetValue(manager)!);
         Assert.Contains("unshare nsenter -t 4242 -n nft -j list table ip kautuka_egress", calls);
         Assert.Contains("stop -t 2 hash-drift-container", calls);
-        Assert.DoesNotContain("ps -a --format json", calls);
+        Assert.DoesNotContain("ps -a --no-trunc --format json", calls);
     }
 
     [Fact]

@@ -89,6 +89,27 @@ public sealed class WorkspaceDesiredStateStore
         lock (sync) return quarantinedWorkloadIds.Contains(containerId.Trim());
     }
 
+    internal void ForgetQuarantinedWorkloads(IEnumerable<string> containerIds)
+    {
+        ArgumentNullException.ThrowIfNull(containerIds);
+        lock (sync)
+        {
+            var removed = new List<string>();
+            foreach (string containerId in containerIds)
+            {
+                if (quarantinedWorkloadIds.Remove(containerId)) removed.Add(containerId);
+            }
+
+            if (removed.Count == 0) return;
+            try { PersistState(); }
+            catch
+            {
+                quarantinedWorkloadIds.UnionWith(removed);
+                throw;
+            }
+        }
+    }
+
     public IReadOnlyList<string> QuarantinedWorkloadIds
     {
         get { lock (sync) return [.. quarantinedWorkloadIds]; }

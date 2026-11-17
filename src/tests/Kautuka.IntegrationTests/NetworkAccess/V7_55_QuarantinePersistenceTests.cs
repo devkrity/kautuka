@@ -40,6 +40,8 @@ public sealed class V7_55_QuarantinePersistenceTests
         {
             const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             Assert.ThrowsAny<IOException>(() => store.QuarantineWorkload(containerId));
+            Assert.ThrowsAny<IOException>(() => store.ForgetQuarantinedWorkloads([containerId]));
+            Assert.True(store.IsWorkloadQuarantined(containerId));
             File.Delete(blocker);
             store.QuarantineWorkload(containerId);
             var reopened = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);

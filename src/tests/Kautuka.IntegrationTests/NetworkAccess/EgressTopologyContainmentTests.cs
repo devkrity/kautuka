@@ -15,6 +15,7 @@ public sealed class EgressTopologyContainmentTests
     [InlineData("{}")]
     [InlineData("[{\"State\":\"running\"}]")]
     [InlineData("[{\"Id\":\"\",\"State\":\"running\"}]")]
+    [InlineData("[{\"Id\":\"truncated\",\"State\":\"running\"}]")]
     public async Task IncompletePodmanSnapshotDoesNotDeregisterRunningWorkload(string snapshot)
     {
         string root = Path.Combine(Path.GetTempPath(), $"nac-incomplete-ps-{Guid.NewGuid():N}");
@@ -25,7 +26,7 @@ public sealed class EgressTopologyContainmentTests
             registry.Register(new RegistryEntry("10.247.1.41", "alice", "agent", "running-container", "agent-sandbox", null,
                 "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
-                0, args.SequenceEqual(["ps", "-a", "--format", "json"]) ? snapshot : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+                0, args.SequenceEqual(["ps", "-a", "--no-trunc", "--format", "json"]) ? snapshot : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
             await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
                 new WorkloadPostStartVerifier(podman), registry, root);
             MethodInfo method = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -47,7 +48,7 @@ public sealed class EgressTopologyContainmentTests
             registry.Register(new RegistryEntry("10.247.1.41", "alice", "agent", "running-container", "agent-sandbox", null,
                 "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
-                0, args.SequenceEqual(["ps", "-a", "--format", "json"]) ? "[]" : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+                0, args.SequenceEqual(["ps", "-a", "--no-trunc", "--format", "json"]) ? "[]" : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
             await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
                 new WorkloadPostStartVerifier(podman), registry, root);
             MethodInfo method = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;

@@ -14,6 +14,76 @@ public sealed class V7_55_ReconcileQuarantineRetryTests
     private const string Ip = "10.247.1.60";
 
     [Fact]
+    public async Task AbsentQuarantinedContainerIsForgottenAfterValidPodmanSnapshot()
+    {
+        string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        string statePath = Path.Combine(temp, "manager-desired-state.json");
+        var desired = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        desired.QuarantineWorkload(Cid);
+        var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, "[]", "")));
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
+        try
+        {
+            await InvokeReconcileAsync(manager, registry);
+            Assert.False(desired.IsWorkloadQuarantined(Cid));
+            var reopened = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+            Assert.False(reopened.IsWorkloadQuarantined(Cid));
+        }
+        finally { Directory.Delete(temp, recursive: true); }
+    }
+
+    [Fact]
+    public async Task QuarantineAddedDuringPodmanSnapshotIsNotForgotten()
+    {
+        string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        string statePath = Path.Combine(temp, "manager-desired-state.json");
+        var desired = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "ps") desired.QuarantineWorkload(Cid);
+            return Task.FromResult(new PodmanCommandResult(0, "[]", ""));
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
+        try
+        {
+            await InvokeReconcileAsync(manager, registry);
+            Assert.True(desired.IsWorkloadQuarantined(Cid));
+            var reopened = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+            Assert.True(reopened.IsWorkloadQuarantined(Cid));
+        }
+        finally { Directory.Delete(temp, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(0, "")]
+    [InlineData(0, "not-json")]
+    [InlineData(0, "[{}]")]
+    [InlineData(0, "[{\"Id\":\"truncated\"}]")]
+    [InlineData(125, "[]")]
+    public async Task InvalidPodmanSnapshotKeepsQuarantine(int exitCode, string snapshot)
+    {
+        string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        string statePath = Path.Combine(temp, "manager-desired-state.json");
+        var desired = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+        desired.QuarantineWorkload(Cid);
+        var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(exitCode, snapshot, "")));
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
+        try
+        {
+            await InvokeReconcileAsync(manager, registry);
+            var reopened = new WorkspaceDesiredStateStore(statePath, NullLogger<WorkspaceDesiredStateStore>.Instance);
+            Assert.True(reopened.IsWorkloadQuarantined(Cid));
+        }
+        finally { Directory.Delete(temp, recursive: true); }
+    }
+
+    [Fact]
     public async Task ReusedNameFromOldQuarantineDoesNotRemoveHealthyContainer()
     {
         string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));

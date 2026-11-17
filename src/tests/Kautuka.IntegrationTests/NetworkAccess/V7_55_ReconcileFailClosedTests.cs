@@ -10,6 +10,34 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class V7_55_ReconcileFailClosedTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedPodmanListingClosesGateWithoutLatching(bool throws)
+    {
+        string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry(Ip, "u1", "a1", Cid, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        var podman = new PodmanCommandRunner((_, _) => throws
+            ? throw new IOException("Podman unavailable")
+            : Task.FromResult(new PodmanCommandResult(124, "", "timeout")));
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman), registry, temp);
+        try
+        {
+            typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(manager, true);
+            var reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            bool completed = await (Task<bool>)reconcile.Invoke(manager, [registry, TestContext.Current.CancellationToken])!;
+            Assert.False(completed);
+            Assert.False(manager.IsStartupGateOpen);
+            var recovery = typeof(EgressTopologyManager).GetField("transientRecoveryPending", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            Assert.True((bool)recovery.GetValue(manager)!);
+            Assert.NotNull(registry.FindByIp(Ip));
+            var incident = typeof(EgressTopologyManager).GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            Assert.False((bool)incident.GetValue(manager)!);
+        }
+        finally { Directory.Delete(temp, recursive: true); }
+    }
     private const string Cid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string Ip = "10.247.1.31";
 
@@ -89,11 +117,10 @@ public sealed class V7_55_ReconcileFailClosedTests
             typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(manager, true);
             var reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             await ((Task)reconcile.Invoke(manager, new object[] { registry, TestContext.Current.CancellationToken })!);
-            Assert.True(manager.IsStartupGateOpen);
+            Assert.False(manager.IsStartupGateOpen);
             Assert.True(registry.TryGetByIp(Ip, out RegistryEntry? denied));
             Assert.NotNull(denied);
-            Assert.Equal("deny-all", denied.Egress);
-            Assert.Equal("none", denied.Attribution);
+            Assert.Equal("normal", denied.Egress);
             var incident = typeof(EgressTopologyManager).GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             Assert.NotNull(incident);
             Assert.False((bool)incident.GetValue(manager)!);

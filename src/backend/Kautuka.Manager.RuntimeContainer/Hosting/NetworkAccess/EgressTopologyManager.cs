@@ -2803,14 +2803,33 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private async Task<bool> ReconcileWorkloadRegistryAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
-        // Compare running containers to registry.
-        PodmanCommandResult psResult = await podmanRunner
-            .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
-            .ConfigureAwait(false);
+        bool RejectInvalidSnapshot()
+        {
+            CloseForQuarantineCleanupRetry();
+            return false;
+        }
+
+        // Only consider quarantines recorded before the snapshot. A workload may
+        // be created and quarantined while Podman is producing the listing.
+        IReadOnlyList<string> quarantineBeforeSnapshot = desiredStateStore?.QuarantinedWorkloadIds ?? [];
+        // Compare running containers to registry using full immutable IDs.
+        PodmanCommandResult psResult;
+        try
+        {
+            psResult = await podmanRunner
+                .RunAsync(["ps", "-a", "--no-trunc", "--format", "json"], 30, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not list workload containers; closing the gate for retry.");
+            return RejectInvalidSnapshot();
+        }
 
         if (psResult.ExitCode != 0)
         {
-            return false;
+            return RejectInvalidSnapshot();
         }
 
         bool cleanupComplete = true;
@@ -2827,10 +2846,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     foreach (JsonElement container in doc.RootElement.EnumerateArray())
                     {
-                        string? cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() : null;
-                        if (string.IsNullOrWhiteSpace(cid))
+                        string cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() ?? string.Empty : string.Empty;
+                        if (!WorkloadPostStartVerifier.IsCanonicalContainerId(cid))
                         {
-                            return false;
+                            return RejectInvalidSnapshot();
                         }
 
                         liveCids.Add(cid);
@@ -2861,17 +2880,26 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         }
                     }
                 }
-                else return false;
+                else return RejectInvalidSnapshot();
             }
             catch
             {
-                return false;
+                return RejectInvalidSnapshot();
             }
         }
-        else return false;
+        else return RejectInvalidSnapshot();
 
         if (desiredStateStore is not null)
         {
+            try
+            {
+                desiredStateStore.ForgetQuarantinedWorkloads(quarantineBeforeSnapshot
+                    .Where(id => WorkloadPostStartVerifier.IsCanonicalContainerId(id) && !liveCids.Contains(id)));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Could not remove stale workload quarantine entries; they remain eligible for retry.");
+            }
             HashSet<string> registeredContainerIds = registry.GetAll().Select(static entry => entry.ContainerId).ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (string quarantinedId in desiredStateStore.QuarantinedWorkloadIds)
             {
