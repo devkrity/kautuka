@@ -17,6 +17,15 @@ public sealed partial class WorkspaceGrpcService
     private NacController Nac => networkAccessController
         ?? throw new RpcException(new Status(StatusCode.Unavailable, "Network access controller is not available."));
 
+    public override Task<NetworkAccessApprovalLimitsMessage> GetApprovalLimits(NetworkAccessActorMessage request, ServerCallContext context)
+        => ExecuteNacRpc(() => ToLimitsMessage(Nac.PolicyStore.GetApprovalLimits(ToActor(request))));
+
+    public override Task<NetworkAccessApprovalLimitsMessage> SetApprovalLimits(NetworkAccessSetApprovalLimitsRequest request, ServerCallContext context)
+        => ExecuteNacRpc(() => ToLimitsMessage(Nac.PolicyStore.SetApprovalLimits(ToActor(request.Actor), request.Global, request.PerUser)));
+
+    private static NetworkAccessApprovalLimitsMessage ToLimitsMessage(NetworkAccessApprovalLimits limits)
+        => new() { Global = limits.Global, PerUser = limits.PerUser };
+
     public override Task<NetworkAccessProviderTestResponse> BeginProviderTest(NetworkAccessProviderTestRequest request, ServerCallContext context)
         => ExecuteNacRpc(() => new NetworkAccessProviderTestResponse
         {

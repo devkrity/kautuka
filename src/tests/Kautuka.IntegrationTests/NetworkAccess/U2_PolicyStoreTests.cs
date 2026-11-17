@@ -8,6 +8,58 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class U2_PolicyStoreTests : IDisposable
 {
+    [Fact]
+    public void ConfiguredPendingLimitsProtectOtherUsersAndSurviveRestart()
+    {
+        string path = Path.Combine(tempDir, "limits.json");
+        File.WriteAllText(path, """
+            {"schemaVersion":2,"revision":0,"rules":[],"requests":[],"userPrivileges":[],"brake":{"system":false,"users":[]},"approvalLimits":{"global":3,"perUser":2}}
+            """);
+        using (var store = new NetworkAccessPolicyStore(path))
+        {
+            (string? Id, bool Overflow) Add(string user, string destination) => store.RecordOrUpdatePendingRequest(user, "agent", null, false, "user-agent", "host", destination, 443, "agent", "container");
+            Assert.False(Add("alice", "one.example").Overflow);
+            Assert.False(Add("alice", "two.example").Overflow);
+            Assert.True(Add("alice", "three.example").Overflow);
+            Assert.False(Add("bob", "three.example").Overflow);
+            Assert.True(Add("carol", "four.example").Overflow);
+        }
+        using var reopened = new NetworkAccessPolicyStore(path);
+        Assert.True(reopened.RecordOrUpdatePendingRequest("alice", "agent", null, false, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
+    }
+
+    [Fact]
+    public void ProbeAndOrdinaryRequestsShareConfiguredPendingLimits()
+    {
+        string path = Path.Combine(tempDir, "mixed-limits.json");
+        File.WriteAllText(path, """
+            {"schemaVersion":2,"revision":0,"rules":[],"requests":[],"userPrivileges":[],"brake":{"system":false,"users":[]},"approvalLimits":{"global":3,"perUser":2}}
+            """);
+        using var store = new NetworkAccessPolicyStore(path);
+        Assert.False(store.RecordOrUpdatePendingRequest("alice", "agent", null, false, "user-agent", "host", "one.example", 443, "agent", "container").Overflow);
+        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-a", "alice", null, "web", false, "user", "host", "two.example", 443, "connector", "container"));
+        Assert.Null(store.RecordOrUpdatePendingProbeRequest("probe-b", "alice", null, "web", false, "user", "host", "three.example", 443, "connector", "container"));
+        Assert.NotNull(store.RecordOrUpdatePendingProbeRequest("probe-c", "bob", null, "web", false, "user", "host", "four.example", 443, "connector", "container"));
+        Assert.True(store.RecordOrUpdatePendingRequest("carol", "agent", null, false, "user-agent", "host", "five.example", 443, "agent", "container").Overflow);
+    }
+
+    [Fact]
+    public void PendingLimitsCanOnlyBeChangedByAnAdministrator()
+    {
+        string path = Path.Combine(tempDir, "settings", "state.json");
+        var admin = new NetworkAccessActor("admin", true);
+        var member = new NetworkAccessActor("alice", false);
+        using (var store = new NetworkAccessPolicyStore(path))
+        {
+            Assert.Equal(new NetworkAccessApprovalLimits(500, 64), store.GetApprovalLimits(admin));
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetApprovalLimits(member, 3, 2));
+            Assert.Throws<ArgumentException>(() => store.SetApprovalLimits(admin, 2, 3));
+            Assert.Equal(new NetworkAccessApprovalLimits(3, 2), store.SetApprovalLimits(admin, 3, 2));
+        }
+        using var reopened = new NetworkAccessPolicyStore(path);
+        Assert.Equal(new NetworkAccessApprovalLimits(3, 2), reopened.GetApprovalLimits(admin));
+    }
+
     [Theory]
     [InlineData("ip", "100.64.0.1")]
     [InlineData("ip", "192.168.1.5")]
@@ -170,7 +222,7 @@ public sealed class U2_PolicyStoreTests : IDisposable
         for (int i = 2; i < NetworkAccessPolicyStore.MaxPendingRequests; i++)
         {
             (_, bool overflow) = store.RecordOrUpdatePendingRequest(
-                "user-1",
+                $"fill-user-{i / 64}",
                 "agent-1",
                 connectorId: null,
                 systemwide: false,

@@ -8,6 +8,7 @@ using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Domain.Workflows;
 using Kautuka.Gateway.Endpoints.Runtime;
+using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Connectors;
 
 using Microsoft.Extensions.AI;
@@ -15,6 +16,7 @@ using Microsoft.Extensions.AI;
 namespace Kautuka.Gateway.Serialization;
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(NetworkAccessApprovalLimitsDto))]
 [JsonSerializable(typeof(GatewaySlackPairingStatusResponse))]
 [JsonSerializable(typeof(ExecutionQuarantineItem))]
 [JsonSerializable(typeof(ExecutionQuarantineItem[]))]

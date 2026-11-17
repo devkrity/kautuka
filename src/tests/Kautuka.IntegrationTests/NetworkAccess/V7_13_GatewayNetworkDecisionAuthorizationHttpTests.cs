@@ -8,6 +8,23 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Fact]
+    public async Task NetworkAccessLimitsSettingsAreAdminOnlyAndPersistThroughManager()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using JsonDocument defaults = await fixture.SendGetAsync("/api/settings/system/network-access", admin);
+        Assert.Equal(500, defaults.RootElement.GetProperty("global").GetInt32());
+        Assert.Equal(64, defaults.RootElement.GetProperty("perUser").GetInt32());
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Put, "/api/settings/system/network-access", new { global = 100, perUser = 10 }, admin);
+        Assert.Equal(100, saved.RootElement.GetProperty("global").GetInt32());
+        Assert.Equal(new NetworkAccessApprovalLimits(100, 10), fixture.PolicyStore.GetApprovalLimits(new NetworkAccessActor("admin", true)));
+        using JsonDocument invite = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" }, admin);
+        string alice = await LoginAsync(fixture, "alice");
+        using HttpResponseMessage denied = await fixture.SendRawJsonAsync(HttpMethod.Put, "/api/settings/system/network-access", new { global = 200, perUser = 20 }, alice);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        Assert.Equal(new NetworkAccessApprovalLimits(100, 10), fixture.PolicyStore.GetApprovalLimits(new NetworkAccessActor("admin", true)));
+    }
+    [Fact]
     public async Task RequestsResolveUserScopedConnectorToCatalogueName()
     {
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();

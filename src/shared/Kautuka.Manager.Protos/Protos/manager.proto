@@ -34,6 +34,8 @@ service ManagerService {
   rpc SetUserPrivileges   (NetworkAccessSetUserPrivilegesRequest) returns (NetworkAccessUserPrivilegesMessage);
   rpc GetBrake            (NetworkAccessGetBrakeRequest)      returns (NetworkAccessBrakeMessage);
   rpc SetBrake            (NetworkAccessSetBrakeRequest)      returns (NetworkAccessBrakeMessage);
+  rpc GetApprovalLimits   (NetworkAccessActorMessage)         returns (NetworkAccessApprovalLimitsMessage);
+  rpc SetApprovalLimits   (NetworkAccessSetApprovalLimitsRequest) returns (NetworkAccessApprovalLimitsMessage);
   rpc GetNetworkAccessStatus (WorkspacePingRequest)           returns (NetworkAccessStatusResponse);
   rpc GetImageCompatibility (NetworkAccessActorMessage)       returns (ImageCompatStateResponse);
   rpc SetImageCompatibility (ImageCompatSetProfileRequest)    returns (ImageCompatProfileMessage);
@@ -384,6 +386,17 @@ message WorkspaceMcpContainerCallResponse {
 }
 
 // Network Access Control (NAC v7) messages
+message NetworkAccessApprovalLimitsMessage {
+  int32 global = 1;
+  int32 per_user = 2;
+}
+
+message NetworkAccessSetApprovalLimitsRequest {
+  NetworkAccessActorMessage actor = 1;
+  int32 global = 2;
+  int32 per_user = 3;
+}
+
 message NetworkAccessActorMessage {
   string user_id = 1;
   bool is_admin = 2;

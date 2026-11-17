@@ -547,6 +547,12 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
     {
         private static readonly TestServerCallContext ctx = new();
 
+        public override AsyncUnaryCall<NetworkAccessApprovalLimitsMessage> GetApprovalLimitsAsync(NetworkAccessActorMessage request, CallOptions options)
+            => Wrap(grpc.GetApprovalLimits(request, ctx));
+
+        public override AsyncUnaryCall<NetworkAccessApprovalLimitsMessage> SetApprovalLimitsAsync(NetworkAccessSetApprovalLimitsRequest request, CallOptions options)
+            => Wrap(grpc.SetApprovalLimits(request, ctx));
+
         public override AsyncUnaryCall<NetworkAccessListRequestsResponse> ListRequestsAsync(NetworkAccessListRequestsRequest request, CallOptions options)
             => Wrap(grpc.ListRequests(request, ctx));
 

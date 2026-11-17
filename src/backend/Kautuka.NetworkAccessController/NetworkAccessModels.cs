@@ -113,13 +113,16 @@ public sealed record BrakeState(
             : Users.FirstOrDefault(u => string.Equals(u.UserId, userId, StringComparison.Ordinal));
 }
 
+public sealed record NetworkAccessApprovalLimits(int Global, int PerUser);
+
 public sealed record NetworkAccessPolicyState(
     int SchemaVersion,
     long Revision,
     IReadOnlyList<NetworkAccessRule> Rules,
     IReadOnlyList<NetworkAccessRequest> Requests,
     IReadOnlyList<UserPrivileges> UserPrivileges,
-    BrakeState Brake);
+    BrakeState Brake,
+    NetworkAccessApprovalLimits? ApprovalLimits = null);
 
 public sealed record RuleWriteSpec(
     string ScopeKind,

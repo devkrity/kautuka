@@ -2,6 +2,35 @@ namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore
 {
+    public NetworkAccessApprovalLimits GetApprovalLimits(NetworkAccessActor actor)
+    {
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("PermissionDenied: Administrator privileges are required.");
+        lock (gate) return ResolveApprovalLimits(Load());
+    }
+
+    public NetworkAccessApprovalLimits SetApprovalLimits(NetworkAccessActor actor, int global, int perUser)
+    {
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("PermissionDenied: Administrator privileges are required.");
+        if (global < 1 || perUser < 1 || perUser > global) throw new ArgumentException("Pending request limits must be positive, and the per-user limit cannot exceed the global limit.");
+        var limits = new NetworkAccessApprovalLimits(global, perUser);
+        lock (gate)
+        {
+            NetworkAccessPolicyState current = Load();
+            SaveSync(current with { ApprovalLimits = limits, Revision = checked(current.Revision + 1) });
+        }
+        return limits;
+    }
+
+    private static NetworkAccessApprovalLimits ResolveApprovalLimits(NetworkAccessPolicyState current)
+    {
+        NetworkAccessApprovalLimits limits = current.ApprovalLimits ?? new(MaxPendingRequests, DefaultMaxPendingRequestsPerUser);
+        if (limits.Global < 1 || limits.PerUser < 1 || limits.PerUser > limits.Global)
+            throw new InvalidDataException("Network access pending request limits are invalid.");
+        return limits;
+    }
+
     private sealed record TemporaryProbeGrant(
         string ContainerId,
         string? UserId,
@@ -656,7 +685,14 @@ public sealed partial class NetworkAccessPolicyStore
                 .Where(r => !string.Equals(r.Id, id, StringComparison.Ordinal) && (r.Status == "pending" || r.LastSeenUtc >= cutoff))
                 .ToList();
 
-            if (activeRequests.Count >= MaxPendingRequests)
+            NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
+            int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
+            int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+            if (activeRequests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser
+                || activeRequests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global)
+                return (null, Overflow: true);
+
+            while (activeRequests.Count + pendingProbes >= limits.Global)
             {
                 NetworkAccessRequest? oldestResolved = activeRequests
                     .Where(static r => r.Status != "pending")
@@ -829,6 +865,12 @@ public sealed partial class NetworkAccessPolicyStore
             }
             else
             {
+                NetworkAccessApprovalLimits limits = ResolveApprovalLimits(current);
+                int pendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending");
+                int userPendingProbes = probeRequestsById.Values.Count(entry => entry.Request.Status == "pending" && string.Equals(entry.Request.UserId, userId, StringComparison.Ordinal));
+                if (current.Requests.Count(r => r.Status == "pending") + pendingProbes >= limits.Global
+                    || current.Requests.Count(r => r.Status == "pending" && string.Equals(r.UserId, userId, StringComparison.Ordinal)) + userPendingProbes >= limits.PerUser)
+                    return null;
                 int containerRequestCount = probeRequestsById.Values.Count(entry =>
                     string.Equals(entry.ContainerId, containerId, StringComparison.Ordinal));
                 if (containerRequestCount >= MaxPendingProbeRequestsPerContainer)
