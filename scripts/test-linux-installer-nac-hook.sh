@@ -10,11 +10,13 @@ KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 source "$repo_root/scripts/kautuka
 mkdir -p "$temp_root/payload/scripts" "$temp_root/hooks"
 printf '%s\n' '#!/usr/bin/env python3' 'print("hook")' > "$temp_root/payload/scripts/kautuka_hook.py"
 printf '%s\n' '{"nftables":[]}' > "$temp_root/payload/scripts/kautuka_workload.nft.json.tmpl"
+printf '%s\n' '{"nftables":["package-proxy"]}' > "$temp_root/payload/scripts/kautuka_package_proxy.nft.json.tmpl"
 install_nac_hook_payload \
   "$temp_root/payload/scripts/kautuka_hook.py" \
   "$temp_root/hooks/kautuka_hook.py"
 cmp -s "$temp_root/payload/scripts/kautuka_hook.py" "$temp_root/hooks/kautuka_hook.py"
 cmp -s "$temp_root/payload/scripts/kautuka_workload.nft.json.tmpl" "$temp_root/hooks/kautuka_workload.nft.json.tmpl"
+cmp -s "$temp_root/payload/scripts/kautuka_package_proxy.nft.json.tmpl" "$temp_root/hooks/kautuka_package_proxy.nft.json.tmpl"
 [[ -x "$temp_root/hooks/kautuka_hook.py" ]]
 [[ ! -x "$temp_root/hooks/kautuka_workload.nft.json.tmpl" ]]
 
@@ -37,5 +39,14 @@ if ( install_nac_hook_payload \
   exit 1
 fi
 grep -Fq 'required network access ruleset template is missing' "$template_missing_output"
+
+mkdir -p "$temp_root/missing-proxy/scripts"
+cp "$temp_root/payload/scripts/kautuka_hook.py" "$temp_root/missing-proxy/scripts/"
+cp "$temp_root/payload/scripts/kautuka_workload.nft.json.tmpl" "$temp_root/missing-proxy/scripts/"
+if ( install_nac_hook_payload "$temp_root/missing-proxy/scripts/kautuka_hook.py" "$temp_root/hooks/kautuka_hook.py" ) 2>"$temp_root/missing-proxy.stderr"; then
+  echo 'installer accepted a NAC hook without its package proxy template' >&2
+  exit 1
+fi
+grep -Fq 'required package proxy ruleset template is missing' "$temp_root/missing-proxy.stderr"
 
 echo 'Linux installer NAC hook payload checks passed.'

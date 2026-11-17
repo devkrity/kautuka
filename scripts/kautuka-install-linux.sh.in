@@ -318,6 +318,10 @@ install_nac_hook_payload() {
     local ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_workload.nft.json.tmpl"
     [[ -f "$ruleset_source" ]] || fail "required network access ruleset template is missing: $ruleset_source"
     install -m 0644 -- "$ruleset_source" "$ruleset_destination"
+    local proxy_ruleset_source="${hook_source%kautuka_hook.py}kautuka_package_proxy.nft.json.tmpl"
+    local proxy_ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_package_proxy.nft.json.tmpl"
+    [[ -f "$proxy_ruleset_source" ]] || fail "required package proxy ruleset template is missing: $proxy_ruleset_source"
+    install -m 0644 -- "$proxy_ruleset_source" "$proxy_ruleset_destination"
 }
 
 require_root() {
@@ -2859,6 +2863,7 @@ PY
     install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
     chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
     chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"

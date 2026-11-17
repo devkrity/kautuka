@@ -182,6 +182,8 @@ Desired connector reconciliation only considers agent workspaces, rather than tr
 
 Connector catalogue availability does not change the network workload fingerprint.
 
+Linux installation includes both the workload and package-proxy nft ruleset templates alongside the OCI hook.
+
 Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
 
 Inspect the latest hook decisions:
