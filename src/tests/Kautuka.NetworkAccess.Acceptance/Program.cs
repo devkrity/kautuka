@@ -69,7 +69,7 @@ public static class AcceptanceHarness
     /// Records an acceptance test result adhering strictly to Ground Rule G9 (Section 7.0):
     /// 1. Compares observed values read during execution (never hard-coded literals).
     /// 2. Checks the negative-control result against its expected observation.
-    /// 3. For structured observations, requires the specified shared field to change.
+    /// 3. Requires structured observations and the specified shared field to change.
     /// A changed observation alone does not prove that a mutation disabled the intended check.
     /// </summary>
     public static AcceptanceObservation Record(
@@ -129,7 +129,7 @@ public static class AcceptanceHarness
         Dictionary<string, string>? left = ParseFields(observed);
         Dictionary<string, string>? right = ParseFields(negativeControl);
         if (left is null || right is null)
-            return comparisonField is null && left is null && right is null && !string.Equals(observed.Trim(), negativeControl.Trim(), StringComparison.Ordinal);
+            return false;
 
         return comparisonField is not null && left.TryGetValue(comparisonField, out string? original)
             && right.TryGetValue(comparisonField, out string? control)
@@ -389,7 +389,7 @@ public static class Program
         Console.WriteLine("Kautuka NAC v7 Acceptance Suite");
         Console.WriteLine("Enforcing Ground Rule G9: observed values and computed negative-control flips only.");
 
-        var badNc = AcceptanceHarness.Record("SELFTEST_BAD_NC", "42", "42", "42", "0");
+        var badNc = AcceptanceHarness.Record("SELFTEST_BAD_NC", "value=42", "value=42", "value=42", "value=0", comparisonField: "value");
         if (badNc.Outcome != "FAIL (cannot fail: NC did not flip)")
         {
             await Console.Error.WriteLineAsync("CRITICAL: Harness self-test failed to reject invalid NC!").ConfigureAwait(false);
@@ -804,7 +804,7 @@ public static class Program
             // NC: Deny rule -> Envoy denies connection (non-zero curl / empty body)
             rev = policyStore.SetRule(admin, new RuleWriteSpec("agent", "u1", "a1", null, "allowed.example.test", "host", 443, Allowed: false, AllowLan: false), expectedRevision: rev).Revision;
             string ncAllowBody = await ExecInContainerExpectFailAsync(workloadName, ["curl", "-sS", "--max-time", "4", "-k", "https://allowed.example.test/"]).ConfigureAwait(false);
-            liveResults.Add(AcceptanceHarness.Record("E_ENVOY_ALLOW_V7_1", allowBody.Trim(), "kautuka-envoy-allow-ok", ncAllowBody, "BLOCKED"));
+            liveResults.Add(AcceptanceHarness.Record("E_ENVOY_ALLOW_V7_1", $"bodyMatches={string.Equals(allowBody.Trim(), "kautuka-envoy-allow-ok", StringComparison.Ordinal)}", "bodyMatches=True", $"bodyMatches={string.Equals(ncAllowBody, "kautuka-envoy-allow-ok", StringComparison.Ordinal)}:blocked={string.Equals(ncAllowBody, "BLOCKED", StringComparison.Ordinal)}", "bodyMatches=False:blocked=True", comparisonField: "bodyMatches"));
             Console.WriteLine($"[E_ENVOY_ALLOW_V7_1] {liveResults[^1].Outcome} (allow='{allowBody.Trim()}', nc='{ncAllowBody}')");
 
             // -----------------------------------------------------------------
@@ -821,7 +821,7 @@ public static class Program
             string ncRebindBody = await ExecInContainerExpectFailAsync(workloadName, ["curl", "-sS", "--max-time", "5", "-k", "https://rebind.example.test/"]).ConfigureAwait(false);
             int hitsAfterLan = CountLines(lanCount);
             string ncObservedRebind = hitsAfterLan > hitsAfterRebind ? "ALLOWED_LAN" : ncRebindBody;
-            liveResults.Add(AcceptanceHarness.Record("E_REBIND", observedRebind, "BLOCKED:hits=0", ncObservedRebind, "ALLOWED_LAN"));
+            liveResults.Add(AcceptanceHarness.Record("E_REBIND", $"fixtureHit={hitsAfterRebind > hitsBeforeRebind}:blocked={string.Equals(rebindBlocked, "BLOCKED", StringComparison.Ordinal)}", "fixtureHit=False:blocked=True", $"fixtureHit={hitsAfterLan > hitsAfterRebind}:allowed={string.Equals(ncObservedRebind, "ALLOWED_LAN", StringComparison.Ordinal)}", "fixtureHit=True:allowed=True", comparisonField: "fixtureHit"));
             Console.WriteLine($"[E_REBIND] {liveResults[^1].Outcome} (publicRebind='{observedRebind}', lanNc='{ncObservedRebind}' hits={hitsAfterLan - hitsAfterRebind})");
 
             // -----------------------------------------------------------------
@@ -848,7 +848,7 @@ public static class Program
             policyStore.SetBrake(admin, "user", "u1", on: false);
             bool brakeReleasedByAdmin = !policyStore.GetBrake(nonAdminUser).IsUserBraked("u1");
             string ncBrakeObserved = brakeReleasedByAdmin ? "UNLOCKED_BY_ADMIN" : "STILL_LOCKED";
-            liveResults.Add(AcceptanceHarness.Record("E_BRAKE_LOCK_V7_5", brakeObserved, "True:True:True", ncBrakeObserved, "UNLOCKED_BY_ADMIN"));
+            liveResults.Add(AcceptanceHarness.Record("E_BRAKE_LOCK_V7_5", $"active={brakeStillActive}:userBypassFailed={userBypassFailed}:stopped={stoppedWhileLocked}", "active=True:userBypassFailed=True:stopped=True", $"active={!brakeReleasedByAdmin}", "active=False", comparisonField: "active"));
             Console.WriteLine($"[E_BRAKE_LOCK_V7_5] {liveResults[^1].Outcome} (locked='{brakeObserved}', adminNc='{ncBrakeObserved}')");
 
             // -----------------------------------------------------------------
@@ -871,7 +871,7 @@ public static class Program
             string tamperedNftJson = await RunNsenterNftListAsync(pid2).ConfigureAwait(false);
             string hashTampered = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(tamperedNftJson, WorkloadRulesetRenderer.RequiredWorkloadComments, wl2Ip);
             string ncHashMatch = string.Equals(hashTampered, hashExpected, StringComparison.Ordinal) ? "MATCH" : "TAMPER_DETECTED";
-            liveResults.Add(AcceptanceHarness.Record("C6_LIVE_MF6_HASH", cleanHashMatch, "MATCH", ncHashMatch, "TAMPER_DETECTED"));
+            liveResults.Add(AcceptanceHarness.Record("C6_LIVE_MF6_HASH", $"matches={string.Equals(cleanHashMatch, "MATCH", StringComparison.Ordinal)}", "matches=True", $"matches={string.Equals(ncHashMatch, "MATCH", StringComparison.Ordinal)}", "matches=False", comparisonField: "matches"));
             Console.WriteLine($"[C6_LIVE_MF6_HASH] {liveResults[^1].Outcome} (clean='{cleanHashMatch}', nc='{ncHashMatch}')");
 
             // -----------------------------------------------------------------
@@ -879,7 +879,7 @@ public static class Program
             // -----------------------------------------------------------------
             string dnsReply = await ExecInContainerAsync(workload2Name, ["python3", "-c", "import socket; print(socket.gethostbyname('allowed.example.test'))"]).ConfigureAwait(false);
             string ncDnsReply = await ExecInContainerAsync(upstreamPubName, ["python3", "-c", "import socket,struct; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); q=b'\\xab\\xcd\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07allowed\\x07example\\x04test\\x00\\x00\\x01\\x00\\x01'; s.sendto(q,('203.0.113.53',5353)); r,_=s.recvfrom(512); print('.'.join(str(b) for b in r[-4:]))"]).ConfigureAwait(false);
-            liveResults.Add(AcceptanceHarness.Record("E_DNS_SINKHOLE", dnsReply.Trim(), "198.18.250.250", ncDnsReply.Trim(), "203.0.113.10"));
+            liveResults.Add(AcceptanceHarness.Record("E_DNS_SINKHOLE", $"address={dnsReply.Trim()}", "address=198.18.250.250", $"address={ncDnsReply.Trim()}", "address=203.0.113.10", comparisonField: "address"));
             Console.WriteLine($"[E_DNS_SINKHOLE] {liveResults[^1].Outcome} (workloadDns='{dnsReply.Trim()}', upstreamDnsNc='{ncDnsReply.Trim()}')");
 
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
@@ -2203,7 +2203,6 @@ public static class Program
 
             // Production flow Step A: Denied request -> Envoy asks Manager -> pending card created!
             var (denyRc, denyOut, denyErr) = await ExecAsync("podman", ["exec", wlName, "curl", "-v", "--max-time", "8", "https://example.com/"]).ConfigureAwait(false);
-            string deniedOutput = denyRc == 0 ? $"ALLOWED:{denyOut.Trim()}" : "BLOCKED";
             await policyStore.FlushPendingWritesAsync().ConfigureAwait(false);
 
             NetworkAccessRequest? card = policyStore.ListRequests(admin).Requests
@@ -2245,6 +2244,8 @@ public static class Program
                     ["exec", wlName, "curl", "-v", "--max-time", "12", "https://example.com/"])
                     .ConfigureAwait(false);
             }
+            bool hasExampleDomain = allowOut.Contains("Example Domain", StringComparison.OrdinalIgnoreCase);
+            string allowedObs = $"connected={allowRc == 0}:card={card.Destination}:port={card.Port}:rule={allowedRule.Destination}:body={hasExampleDomain}";
             if (allowRc != 0)
             {
                 var (_, envoyInspect, envoyInspectErr) = await ExecAsync("podman", ["inspect", "kautuka-egress-envoy", "--format", "{{json .State}}|{{json .HostConfig.Binds}}|{{json .Mounts}}"]).ConfigureAwait(false);
@@ -2268,11 +2269,6 @@ public static class Program
                 string nftAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
                 throw new InvalidOperationException($"Retry after Allow failed after {allowAttempts} requests (rc {allowRc}): {allowErr}\nunique DNS probe {dnsProbeHostName} conntrack={conntrackDnsClearSummary} countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}\nadmin stats rc={adminStatsRc}: {adminStats}{adminStatsErr}\negress pod route rc={routeRc}: {routeOut}{routeErr}\npod state: {podInspect}{podInspectErr}\nenvoy state/mounts: {envoyInspect}{envoyInspectErr}\nenvoyLogs:\n{envLogs}{envLogErr}\ndnsLogs:\n{dnsLogs}{dnsLogErr}\nnft:\n{nftAfter}");
             }
-            string allowedBody = allowOut;
-            bool hasExampleDomain = allowedBody.Contains("Example Domain", StringComparison.OrdinalIgnoreCase);
-
-            string allowedObs = $"ALLOWED:card={card.Destination}:{card.Port}:rule={allowedRule.Destination}:body={hasExampleDomain}";
-
             // Run real tampering negative control for v7-29 verifier (C6)
             string wl2Workspace = Path.Combine(workspaceRoot, "users", "u1", "agents", "a2");
             var wl2Context = wlContext with { ScopeId = "a2", HostWorkspacePath = wl2Workspace };
@@ -2313,9 +2309,9 @@ public static class Program
                 parserAcceptance,
                 lanAcceptance,
                 noGrantLanAcceptance,
-                AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "ALLOWED:card=example.com:443:rule=example.com:body=True", deniedOutput, "BLOCKED"),
-                AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"{stillRegisteredWhileRunning}:{afterReconcileEntry?.ContainerId?.Length == 64}", "True:True", deregisteredAfterRm ? "DEREGISTERED_ON_RM" : "STILL_PRESENT", "DEREGISTERED_ON_RM"),
-                AcceptanceHarness.Record("PROD_V7_29_VERIFIER", verResult.Passed.ToString(), "True", verifierCaughtTamper ? "TAMPER_CAUGHT_AND_KILLED" : "TAMPER_MISSED", "TAMPER_CAUGHT_AND_KILLED")).ToList();
+                AcceptanceHarness.Record("PROD_CARD_AND_RULE", allowedObs, "connected=True:card=example.com:port=443:rule=example.com:body=True", $"connected={denyRc == 0}", "connected=False", comparisonField: "connected"),
+                AcceptanceHarness.Record("PROD_V7_28_RECONCILE", $"registered={stillRegisteredWhileRunning}:canonical={afterReconcileEntry?.ContainerId?.Length == 64}", "registered=True:canonical=True", $"registered={!deregisteredAfterRm}", "registered=False", comparisonField: "registered"),
+                AcceptanceHarness.Record("PROD_V7_29_VERIFIER", $"passed={verResult.Passed}", "passed=True", $"passed={!verifierCaughtTamper}", "passed=False", comparisonField: "passed")).ToList();
 
             // Build a fresh production workload for the final DNS negative control. This
             // keeps the rule deletion last while still exercising DNS from a live workload.

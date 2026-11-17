@@ -47,6 +47,13 @@ public class AcceptanceReportTests
     }
 
     [Fact]
+    public void FreeFormLabelsCannotProveANegativeControlFlip()
+    {
+        var result = AcceptanceHarness.Record("labels", "True", "True", "TAMPER_CAUGHT", "TAMPER_CAUGHT");
+        Assert.False(result.NcFlipped);
+    }
+
+    [Fact]
     public void ProductionResultsIncludePackageProxyFailures()
     {
         var proxy = new AcceptanceObservation("proxy", "bad", "good", "bad", "bad", false, "FAIL", DateTimeOffset.UtcNow);
