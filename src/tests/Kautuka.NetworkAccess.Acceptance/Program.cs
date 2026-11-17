@@ -69,7 +69,7 @@ public static class AcceptanceHarness
     /// Records an acceptance test result adhering strictly to Ground Rule G9 (Section 7.0):
     /// 1. Compares observed values read during execution (never hard-coded literals).
     /// 2. Checks the negative-control result against its expected observation.
-    /// 3. For structured observations, requires at least one shared field to change.
+    /// 3. For structured observations, requires the specified shared field to change.
     /// A changed observation alone does not prove that a mutation disabled the intended check.
     /// </summary>
     public static AcceptanceObservation Record(
@@ -77,7 +77,8 @@ public static class AcceptanceHarness
         string observedValue,
         string expectedValue,
         string ncObservedValue,
-        string ncExpectedValue)
+        string ncExpectedValue,
+        string? comparisonField = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(testId);
         ArgumentException.ThrowIfNullOrWhiteSpace(observedValue);
@@ -87,7 +88,7 @@ public static class AcceptanceHarness
 
         bool effectiveNcFlipped =
             string.Equals(ncObservedValue.Trim(), ncExpectedValue.Trim(), StringComparison.Ordinal) &&
-            ObservationsDiffer(observedValue, ncObservedValue);
+            ObservationsDiffer(observedValue, ncObservedValue, comparisonField);
 
         if (!effectiveNcFlipped)
         {
@@ -123,15 +124,16 @@ public static class AcceptanceHarness
 
     public static IReadOnlyList<AcceptanceObservation> GetAll() => observations.AsReadOnly();
 
-    private static bool ObservationsDiffer(string observed, string negativeControl)
+    private static bool ObservationsDiffer(string observed, string negativeControl, string? comparisonField)
     {
         Dictionary<string, string>? left = ParseFields(observed);
         Dictionary<string, string>? right = ParseFields(negativeControl);
         if (left is null || right is null)
-            return left is null && right is null && !string.Equals(observed.Trim(), negativeControl.Trim(), StringComparison.Ordinal);
+            return comparisonField is null && left is null && right is null && !string.Equals(observed.Trim(), negativeControl.Trim(), StringComparison.Ordinal);
 
-        return left.Any(pair => right.TryGetValue(pair.Key, out string? value)
-            && !string.Equals(pair.Value, value, StringComparison.Ordinal));
+        return comparisonField is not null && left.TryGetValue(comparisonField, out string? original)
+            && right.TryGetValue(comparisonField, out string? control)
+            && !string.Equals(original, control, StringComparison.Ordinal);
     }
 
     private static Dictionary<string, string>? ParseFields(string value)
@@ -365,19 +367,19 @@ public static class Program
             $"allowed={packageFetch.ExitCode == 0 && !string.IsNullOrWhiteSpace(packageFetch.StdOut)}",
             "allowed=True",
             $"allowed={deniedFetch.ExitCode == 0}",
-            "allowed=False"),
+            "allowed=False", comparisonField: "allowed"),
         AcceptanceHarness.Record(
             "PROD_PACKAGE_PROXY_EXPLICIT_DENY",
             $"blocked={deniedFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredFetch.ExitCode != 0}",
-            "blocked=False"),
+            "blocked=False", comparisonField: "blocked"),
         AcceptanceHarness.Record(
             "PROD_PACKAGE_PROXY_UPSTREAM_DENY",
             $"blocked={deniedUpstreamFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
-            "blocked=False")];
+            "blocked=False", comparisonField: "blocked")];
     }
     private const string UserBrakeDisabledHookObservation =
         "existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True";
@@ -1320,7 +1322,7 @@ public static class Program
                 $"existingStopped={brakedExistingStopped}:otherUserRunning={otherUserStillRunning}:newLaunchRejected={newLaunchRejectedByBrake}:releaseLaunchRunning={restoredLaunchRunning}:responseContainsUser={responseContainsUser}",
                 "existingStopped=True:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True",
                 ncObservedValue,
-                UserBrakeDisabledHookObservation));
+                UserBrakeDisabledHookObservation, comparisonField: "existingStopped"));
             Console.WriteLine("[PROD_STAGE] production user-brake stop, scope, launch refusal, and release checks completed");
         }
         finally
@@ -2075,7 +2077,7 @@ public static class Program
                     parserObservation,
                     "egress=deny-all:denyAll=True:kindSystem=True:noApproval=True",
                     parserNcObservation,
-                    "egress=normal:normal=True:kindConnector=True:approvalCreated=True");
+                    "egress=normal:normal=True:kindConnector=True:approvalCreated=True", comparisonField: "egress");
             }
             Console.WriteLine("[PROD_STAGE] parser attribution and approval checks completed");
 
@@ -2179,13 +2181,13 @@ public static class Program
                 lanObservation,
                 "blocked=False:beforeApprovalBlocked=True:cardCreated=True:allowLanRule=True:lanApprovedPacketDeltaGt0=True:lanMasqueradePacketDeltaGt0=True:body=True",
                 lanNcObservation,
-                "blocked=True:beforeApprovalBlocked=True:cardCreated=True");
+                "blocked=True:beforeApprovalBlocked=True:cardCreated=True", comparisonField: "blocked");
             AcceptanceObservation noGrantLanAcceptance = AcceptanceHarness.Record(
                 "PROD_LAN_NO_GRANT",
                 noGrantLanObservation,
                 "blocked=True:privateRejectPacketDeltaZero=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True",
                 $"blocked={lanAllowedRc != 0}:lanMasqueradeRulePacketDeltaZero={lanMasqueradeDelta == 0}:fixtureHitsZero={lanFixtureHitsAfterApproval == 0}",
-                "blocked=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False");
+                "blocked=False:lanMasqueradeRulePacketDeltaZero=False:fixtureHitsZero=False", comparisonField: "blocked");
             Console.WriteLine($"[PROD_LAN_NO_GRANT] {noGrantLanAcceptance.Outcome} ({noGrantLanAcceptance.ObservedValue}; nc={noGrantLanAcceptance.NcObservedValue})");
             Console.WriteLine("[PROD_STAGE] approved LAN traffic check completed");
 
@@ -2412,7 +2414,7 @@ public static class Program
                     rebindObservation,
                     "workloadTargetPublic=True:blocked=True:privateRejectDeltaZero=True",
                     rebindNcObservation,
-                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaZero=False:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGateBypassed=True:packetPathOnly=True");
+                    "envoyPrivateFilterRemoved=True:allowLanGrant=False:blocked=True:privateRejectDeltaZero=False:privateRejectDeltaGt0=True:lanMasqueradeRulePacketDeltaZero=True:fixtureHitsZero=True:authorizationGateBypassed=True:packetPathOnly=True", comparisonField: "privateRejectDeltaZero");
             }
             finally
             {
@@ -2465,7 +2467,7 @@ public static class Program
                 $"rule={!string.IsNullOrEmpty(dnsUpstreamLine)}:uniqueLookup=True:delta_gt0={dnsProbeDelta > 0}:body={hasExampleDomain}",
                 "rule=True:uniqueLookup=True:delta_gt0=True:body=True",
                 dnsNcObservation,
-                "rule=False:ruleRemoved=True:conntrackCleared=True:lookupBlocked=True:privateRejectDelta_gt0=True"));
+                "rule=False:ruleRemoved=True:conntrackCleared=True:lookupBlocked=True:privateRejectDelta_gt0=True", comparisonField: "rule"));
 
             var (_, podmanVer, _) = await ExecAsync("podman", ["--version"]).ConfigureAwait(false);
             var (_, kernelVer, _) = await ExecAsync("uname", ["-r"]).ConfigureAwait(false);
