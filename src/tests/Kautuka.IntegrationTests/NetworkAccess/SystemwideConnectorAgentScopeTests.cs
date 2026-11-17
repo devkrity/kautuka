@@ -1,4 +1,5 @@
 using Kautuka.NetworkAccessController;
+using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
@@ -7,6 +8,18 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class SystemwideConnectorAgentScopeTests
 {
+    [Fact]
+    public void CatalogueAvailabilityDoesNotChangeNetworkWorkloadFingerprint()
+    {
+        var connector = new WorkspaceMcpContainerConnectorDefinition("alice::mail", "image", "command", [], true, false, null, null, [], 30, 600) { CatalogScope = "user" };
+        var workspace = new ContainerContext("agent", "agent-a", "alice", "/tmp/a", "/workspace", "image", 1, "512m", 30, [], new Dictionary<string, string>());
+        var systemConnector = connector with { CatalogScope = "system" };
+        var userIdentity = ConnectorContainerSpecBuilder.ResolveIdentity(connector, workspace, null);
+        var systemIdentity = ConnectorContainerSpecBuilder.ResolveIdentity(systemConnector, workspace, null);
+        Assert.Equal(ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(connector, userIdentity, WorkspaceMcpExecutionContext.Isolated),
+            ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(systemConnector, systemIdentity, WorkspaceMcpExecutionContext.Isolated));
+    }
+
     [Fact]
     public void RuntimeConnectorRequiresAgentButDiscoveryAndProbeDoNot()
     {

@@ -179,6 +179,8 @@ Testing a saved local connector updates its shared tool definitions only when th
 
 Runtime connector workloads require both a user and an agent identity. Connector tests and save-time discovery may run without an agent and use the user's connector scope.
 
+Connector catalogue availability does not change the network workload fingerprint.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .

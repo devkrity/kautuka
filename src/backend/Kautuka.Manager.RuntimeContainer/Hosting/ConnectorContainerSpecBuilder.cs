@@ -245,7 +245,6 @@ internal static class ConnectorContainerSpecBuilder
         string? agentId = null,
         string? execContext = null,
         string? kind = null,
-        bool systemwide = false,
         string? egress = null,
         string? compat = null)
     {
@@ -256,7 +255,6 @@ internal static class ConnectorContainerSpecBuilder
         Append(builder, connector.Command);
         Append(builder, connector.Enabled ? "1" : "0");
         Append(builder, connector.IsInternalSystemConnector ? "1" : "0");
-        Append(builder, connector.CatalogScope);
         Append(builder, connector.BundlePath ?? string.Empty);
         Append(builder, connector.ServerType ?? string.Empty);
         Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));
@@ -267,7 +265,6 @@ internal static class ConnectorContainerSpecBuilder
         Append(builder, connector.ConnectorId);
         Append(builder, execContext ?? "isolated");
         Append(builder, kind ?? "connector");
-        Append(builder, systemwide ? "true" : "false");
         Append(builder, egress ?? "normal");
         Append(builder, compat ?? string.Empty);
         foreach (string argument in connector.Args)
@@ -303,7 +300,6 @@ internal static class ConnectorContainerSpecBuilder
             identity.AgentId,
             execContext,
             identity.Kind,
-            identity.Systemwide,
             identity.Egress,
             compatProfile?.ImageDigest);
     }
