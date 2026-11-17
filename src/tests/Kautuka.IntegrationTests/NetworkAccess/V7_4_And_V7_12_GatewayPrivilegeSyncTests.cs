@@ -580,6 +580,16 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         public override AsyncUnaryCall<NetworkAccessListRulesResponse> ListRulesAsync(NetworkAccessListRulesRequest request, CallOptions options)
             => Wrap(grpc.ListRules(request, ctx));
 
+        public override AsyncUnaryCall<NetworkAccessBrakeMessage> GetBrakeAsync(NetworkAccessGetBrakeRequest request, CallOptions options)
+            => failPrivilegeSync()
+                ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage"))
+                : Wrap(grpc.GetBrake(request, ctx));
+
+        public override AsyncUnaryCall<NetworkAccessBrakeMessage> SetBrakeAsync(NetworkAccessSetBrakeRequest request, CallOptions options)
+            => failPrivilegeSync()
+                ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage"))
+                : Wrap(grpc.SetBrake(request, ctx));
+
         public override AsyncUnaryCall<NetworkAccessSetRuleResponse> SetRuleAsync(NetworkAccessSetRuleRequest request, CallOptions options)
             => Wrap(grpc.SetRule(request, ctx));
 

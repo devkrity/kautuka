@@ -7,6 +7,21 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
+    [Theory]
+    [InlineData("read")]
+    [InlineData("user")]
+    [InlineData("system")]
+    public async Task BrakeEndpointsReportManagerOutageAsUnavailable(string action)
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        fixture.FailPrivilegeSync = true;
+        HttpMethod method = action == "read" ? HttpMethod.Get : HttpMethod.Put;
+        string path = action == "system" ? "/api/network-access/brake/system" : "/api/network-access/brake";
+        using HttpResponseMessage response = await fixture.SendRawJsonAsync(method, path, new { on = true }, admin);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
     [Fact]
     public async Task PrivilegeReadReportsManagerOutageAsUnavailable()
     {

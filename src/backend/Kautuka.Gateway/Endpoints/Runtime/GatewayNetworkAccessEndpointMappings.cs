@@ -555,7 +555,15 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = isAdmin },
             };
 
-            NetworkAccessBrakeMessage response = await managerService.Client.GetBrakeAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessBrakeMessage response;
+            try
+            {
+                response = await managerService.Client.GetBrakeAsync(request, cancellationToken: cancellationToken);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load network pause status. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             NetworkAccessUserBrakeMessage? userBrake = response.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
             var result = new NetworkAccessBrakeDto(
@@ -623,6 +631,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             {
                 return Results.Json(new GatewayErrorResponse(ex.Status.Detail), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status403Forbidden);
             }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the network pause change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // 11. PUT /api/network-access/brake/system
@@ -654,7 +666,15 @@ internal static partial class GatewayRuntimeEndpointMappings
                 On = dto.On,
             };
 
-            NetworkAccessBrakeMessage response = await managerService.Client.SetBrakeAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessBrakeMessage response;
+            try
+            {
+                response = await managerService.Client.SetBrakeAsync(request, cancellationToken: cancellationToken);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the network pause change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
             NetworkAccessUserBrakeMessage? userBrake = response.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
             var result = new NetworkAccessBrakeDto(
                 UserPaused: userBrake is not null,
