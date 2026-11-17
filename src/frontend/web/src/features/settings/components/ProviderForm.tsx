@@ -331,6 +331,13 @@ export const ProviderForm: React.FC<{
           </div>
         )}
 
+        <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm">
+          <p>Saving allows everyone using Kautuka to connect to this provider, unless another network block applies.</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            A local address may give access to a service on this device or your local network. Check that you trust the address before saving.
+          </p>
+        </div>
+
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onCancel}>
             {cancelLabel}
