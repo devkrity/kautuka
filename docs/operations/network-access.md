@@ -19,6 +19,7 @@ If discovery needs network approval, the connector is saved without tool definit
 Connector tests use the authenticated caller's identity; a user ID in the submitted test payload is ignored.
 The rule and compatibility APIs reject missing required fields with a bad-request response.
 Connector catalogue availability is not added to workload labels, used to reconstruct a workload's network identity, or sent in remote MCP network checks. Shared credential lookup remains separate.
+Connector desired-state fingerprints include the image compatibility relaxations as well as the image digest, so a changed profile is visible to reconciliation.
 
 Session compaction model calls use the session owner's network identity and, for agent sessions, the session's agent identity.
 Agent runtime construction, including model capability probing, uses the run's user and agent identity for network checks.

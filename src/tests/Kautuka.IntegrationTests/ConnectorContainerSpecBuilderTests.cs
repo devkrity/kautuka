@@ -2,6 +2,7 @@ using System.Reflection;
 
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 using Kautuka.NetworkAccessController;
 
@@ -9,6 +10,24 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ConnectorContainerSpecBuilderTests
 {
+    [Fact]
+    public void ConnectorFingerprintChangesWhenImageCompatibilityRelaxationsChange()
+    {
+        WorkspaceMcpContainerConnectorDefinition connector = CreateConnector();
+        ContainerContext context = CreateWorkspaceContext();
+        var identity = ConnectorContainerSpecBuilder.ResolveIdentity(connector, context, purpose: null);
+        var profile = new ImageCompatProfile("sha256:" + new string('a', 64), null, null,
+            [ImageCompatibilityStore.WritableRootfs, ImageCompatibilityStore.FileOwnershipCaps], "admin", DateTimeOffset.UtcNow, null);
+        var stricter = profile with { Relaxations = [ImageCompatibilityStore.FileOwnershipCaps] };
+        var reordered = profile with { Relaxations = [ImageCompatibilityStore.FileOwnershipCaps, ImageCompatibilityStore.WritableRootfs] };
+        string original = ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(connector, identity, WorkspaceMcpExecutionContext.Isolated, profile);
+        Assert.NotEqual(original, ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(connector, identity, WorkspaceMcpExecutionContext.Isolated, stricter));
+        Assert.Equal(original, ConnectorContainerSpecBuilder.ComputeWorkloadFingerprint(connector, identity, WorkspaceMcpExecutionContext.Isolated, reordered));
+        List<string> args = ConnectorContainerSpecBuilder.BuildRun(connector, "test", WorkspaceMcpExecutionContext.Isolated, context,
+            persistent: true, allocatedIp: "10.247.1.30", isBraked: false, compatProfile: profile);
+        Assert.Contains($"kautuka.spec-fingerprint={original}", args);
+    }
+
     [Fact]
     public void ResolveIdentityRequiresOwnerButAllowsDiscoveryWithoutAgent()
     {

@@ -296,7 +296,9 @@ internal static class ConnectorContainerSpecBuilder
             execContext,
             identity.Kind,
             identity.Egress,
-            compatProfile?.ImageDigest);
+            compatProfile is null
+                ? null
+                : $"{compatProfile.ImageDigest}:{string.Join(',', compatProfile.Relaxations.Order(StringComparer.Ordinal))}");
     }
 
     internal static void EnsureHostProcessArguments(IReadOnlyList<string> arguments)
