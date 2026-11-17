@@ -350,7 +350,11 @@ internal sealed partial class AgentChatService
 
             bool isContinuationResume = approvalResponse is not null
                 || continuationRequest?.Enabled == true;
-            AgentRuntimeResult runtimeResult = await runtimeFactory.BuildAsync(agentId, sessionId, userId, stageTransitionId, memoryFacts, isContinuationResume, string.Equals(runTrigger, "workflow_test", StringComparison.Ordinal), continuationRequest?.SessionStateJson, continuationRequest?.EffectiveBehaviorJson, ct).ConfigureAwait(false);
+            AgentRuntimeResult runtimeResult;
+            using (NetworkAccessContext.BeginScope(userId: userId, agentId: agentId, purpose: "agent-run", service: "ai-model"))
+            {
+                runtimeResult = await runtimeFactory.BuildAsync(agentId, sessionId, userId, stageTransitionId, memoryFacts, isContinuationResume, string.Equals(runTrigger, "workflow_test", StringComparison.Ordinal), continuationRequest?.SessionStateJson, continuationRequest?.EffectiveBehaviorJson, ct).ConfigureAwait(false);
+            }
             RestoreRunActivity();
             if (!runtimeResult.IsSuccess)
             {

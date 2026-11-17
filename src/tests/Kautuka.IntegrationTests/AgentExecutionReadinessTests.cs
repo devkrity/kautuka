@@ -274,6 +274,8 @@ public sealed class AgentExecutionReadinessTests
             ct: TestContext.Current.CancellationToken)).ConfigureAwait(true);
 
         NaradPersistedEvent runError = Assert.Single(events, static item => item.EventType == NaradEventTypes.RunError);
+        Assert.Equal("user-alpha", runtimeFactory.BuildNetworkScope?.UserId);
+        Assert.Equal("agent-007", runtimeFactory.BuildNetworkScope?.AgentId);
         JsonElement body = NaradPersistedEventReader.ParseBody(runError);
         Assert.Equal("network_access_required", body.GetProperty("code").GetString());
         Assert.Equal("api.custom-ai-models.com", body.GetProperty("destination").GetString());
@@ -400,6 +402,7 @@ public sealed class AgentExecutionReadinessTests
 
     private sealed class DeniedProviderRuntimeFactory(NetworkAccessDeniedException denial) : IAgentRuntimeFactory
     {
+        public NetworkAccessScope? BuildNetworkScope { get; private set; }
         public async ValueTask<AgentRuntimeResult> BuildAsync(
             string agentId,
             string sessionId,
@@ -412,6 +415,7 @@ public sealed class AgentExecutionReadinessTests
             string? effectiveBehaviorOverrideJson,
             CancellationToken ct)
         {
+            BuildNetworkScope = NetworkAccessContext.Current;
             var chatClient = new DeniedProviderChatClient(denial);
             AIAgent agent = chatClient.AsAIAgent(new ChatClientAgentOptions { Id = agentId });
             AgentSession session = await agent.CreateSessionAsync(ct).ConfigureAwait(false);
