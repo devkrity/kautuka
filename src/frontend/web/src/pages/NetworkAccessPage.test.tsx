@@ -181,6 +181,19 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
     setupMockApis();
   });
 
+  it('shows a load error and disables brake controls when request state is unavailable', async () => {
+    setupMockApis();
+    const previousGet = get.getMockImplementation();
+    get.mockImplementation(async (path: string, config?: { params?: Record<string, unknown> }) => {
+      if (path.includes('/network-access/requests')) throw createMockAxiosError(503, 'Unavailable');
+      return previousGet?.(path, config);
+    });
+    renderComponent(<NetworkAccessPage />);
+    expect(await screen.findByText(/could not load network requests/i)).toBeVisible();
+    expect(screen.queryByText('No pending network requests.')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Pause all network access for my agents' })).toBeDisabled();
+  });
+
   // ──────────────── UX1: Attempt Deduplication ────────────────
   describe('UX1: attempt deduplication', () => {
     it('three attempts to the same destination produce exactly one card with attempts == 3', async () => {

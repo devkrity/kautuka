@@ -261,6 +261,7 @@ export function NetworkAccessPage() {
           <div className="flex flex-wrap items-center gap-2">
             <EmergencyBrakeControls
               brake={brake}
+              disabled={!requestsQuery.data || requestsQuery.isError}
               currentUser={currentUser}
               onUpdateUserBrake={async (on) => {
                 await userBrakeMutation.mutateAsync({ on });
@@ -326,7 +327,7 @@ export function NetworkAccessPage() {
             onClick={() => handleTabChange('requests')}
             className="text-xs sm:text-sm font-semibold"
           >
-            Requests ({pendingRequests.length})
+            Requests ({requestsQuery.isError ? '?' : pendingRequests.length})
           </Button>
           <Button
             type="button"
@@ -335,7 +336,7 @@ export function NetworkAccessPage() {
             onClick={() => handleTabChange('rules')}
             className="text-xs sm:text-sm font-semibold"
           >
-            Rules ({rules.length})
+            Rules ({rulesQuery.isError ? '?' : rules.length})
           </Button>
           <Button
             type="button"
@@ -355,7 +356,7 @@ export function NetworkAccessPage() {
                 onClick={() => handleTabChange('compatibility')}
                 className="text-xs sm:text-sm font-semibold"
               >
-                Compatibility ({compatProfiles.length})
+                Compatibility ({compatQuery.isError ? '?' : compatProfiles.length})
               </Button>
               <Button
                 type="button"
@@ -390,7 +391,7 @@ export function NetworkAccessPage() {
           </h2>
 
           {/* Compatibility Requests (Admin only) */}
-          {isAdmin && compatPending.length > 0 && (
+          {isAdmin && !compatQuery.isError && compatPending.length > 0 && (
             <div className="space-y-3 pb-4 border-b border-border">
               <h3 className="font-semibold text-base text-foreground">
                 Container compatibility requests ({compatPending.length})
@@ -405,7 +406,9 @@ export function NetworkAccessPage() {
             </div>
           )}
 
-          {filteredRequests.length === 0 ? (
+          {requestsQuery.isError ? (
+            <p role="alert">Could not load network requests. Refresh and try again.</p>
+          ) : filteredRequests.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border p-8 text-center">
               <p className="text-sm text-muted-foreground">No pending network requests.</p>
             </div>
@@ -427,7 +430,7 @@ export function NetworkAccessPage() {
           <h2 id="rules-tab-heading" className="sr-only">
             Network rules
           </h2>
-          <RulesList
+          {rulesQuery.isError ? <p role="alert">Could not load network rules. Refresh and try again.</p> : <RulesList
             rules={filteredRules}
             expectedRevision={revision}
             currentUser={currentUser}
@@ -435,8 +438,8 @@ export function NetworkAccessPage() {
             onEditRule={setEditingRule}
             canManageOwn={privileges.canApproveOwn}
             onBlockSeedRule={isAdmin ? handleBlockSeedRule : undefined}
-          />
-          {editingRule && currentUser?.id && (
+          />}
+          {!rulesQuery.isError && !requestsQuery.isError && editingRule && currentUser?.id && (
             <RuleScopeEditor rule={editingRule} userId={currentUser.id} isAdmin={Boolean(isAdmin)} expectedRevision={revision}
               onCancel={() => setEditingRule(null)} onSave={async (updated) => {
                 await ruleMutation.mutateAsync(updated);
@@ -453,7 +456,7 @@ export function NetworkAccessPage() {
           <h2 id="activity-tab-heading" className="sr-only">
             Network activity
           </h2>
-          <NetworkActivity entries={activityEntries} search={search} />
+          {activityQuery.isError ? <p role="alert">Could not load network activity. Refresh and try again.</p> : <NetworkActivity entries={activityEntries} search={search} />}
         </section>
       )}
 
@@ -464,6 +467,7 @@ export function NetworkAccessPage() {
             Compatibility mode
           </h2>
 
+          {compatQuery.isError ? <p role="alert">Could not load compatibility settings. Refresh and try again.</p> : <>
           {compatPending.length > 0 && (
             <div className="space-y-3">
               <h3 className="font-semibold text-base">Pending requests ({compatPending.length})</h3>
@@ -481,6 +485,7 @@ export function NetworkAccessPage() {
             profiles={compatProfiles}
             onRemove={handleRemoveCompat}
           />
+          </>}
         </section>
       )}
 
