@@ -74,7 +74,7 @@ public sealed record WindowsPodmanDevEgressOptions(
             $$"""
             {
               "version": "1.0.0",
-              "hook": { "path": "{{remoteHookScript}}" },
+              "hook": { "path": "{{remoteHookScript}}", "timeout": 45 },
               "when": { "always": true },
               "stages": ["createRuntime"]
             }

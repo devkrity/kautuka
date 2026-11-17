@@ -611,7 +611,8 @@ EOF
 {
   "version": "1.0.0",
   "hook": {
-    "path": "$hooks_dir/kautuka_hook.py"
+    "path": "$hooks_dir/kautuka_hook.py",
+    "timeout": 45
   },
   "when": {
     "always": true

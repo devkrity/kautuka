@@ -70,6 +70,7 @@ export function stageLinuxDevelopmentNacHook(repoRoot, inheritedEnv = process.en
       version: "1.0.0",
       hook: {
         path: hookScript,
+        timeout: 45,
         args: ["kautuka_hook.py"],
         env: [
           `PATH=${SAFE_HOOK_PATH}`,

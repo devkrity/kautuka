@@ -24,7 +24,7 @@ Catalogue artifact downloads follow redirects with a bounded hop count. Each des
 Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host.
 The workload hook refuses a managed workload when its network namespace inode cannot be read (`missing_netns_inode`), so it cannot skip the shared-namespace check.
 Package-proxy rules are selected only for the allowlisted proxy identity, never solely from a container annotation.
-The hook bounds each network-inspection and nft subprocess to ten seconds and refuses the launch if a command times out.
+The hook bounds each network-inspection and nft subprocess to ten seconds and refuses the launch if a command times out. Its runtime configuration also bounds the complete hook to 45 seconds.
 When approving a group, each decision uses the revision returned by the previous decision; the sequence stops if a decision fails.
 The release image inventory includes archives for the pinned Envoy and CoreDNS images so the release archive scanner includes them. First-boot loading before egress startup still requires separate verification.
 

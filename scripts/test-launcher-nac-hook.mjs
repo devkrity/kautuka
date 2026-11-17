@@ -58,6 +58,7 @@ try {
   assert.equal(readFileSync(proxyTemplate, "utf8"), readFileSync(path.join(repositoryRoot, "scripts", "nac", "kautuka_package_proxy.nft.json.tmpl"), "utf8"));
   assert.equal(hookJson.hook.path, hookScript);
   assert.deepEqual(hookJson.hook.args, ["kautuka_hook.py"]);
+  assert.equal(hookJson.hook.timeout, 45, "runtime must bound the whole hook");
   assert.deepEqual(hookJson.stages, ["createRuntime"]);
   assert.deepEqual(hookJson.when, { always: true });
   const configText = readFileSync(managerEnv.CONTAINERS_CONF_OVERRIDE, "utf8");
