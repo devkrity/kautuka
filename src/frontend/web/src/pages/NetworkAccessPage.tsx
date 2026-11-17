@@ -30,7 +30,6 @@ import {
   EmergencyBrakeControls,
   CompatibilityModeCard,
   CompatibilityModeList,
-  OpenInternetGrantDialog,
   NetworkPrivilegesPanel,
 } from '@/features/network-access';
 
@@ -48,14 +47,6 @@ export function NetworkAccessPage() {
   const [search, setSearch] = React.useState('');
   const [generalError, setGeneralError] = React.useState<string | null>(null);
   const [editingRule, setEditingRule] = React.useState<NetworkAccessRuleDto | null>(null);
-
-  // Open Internet dialog state
-  const [openInternetTarget, setOpenInternetTarget] = React.useState<{
-    connectorId: string;
-    connectorDisplayName: string;
-    userId?: string;
-    userDisplayName?: string;
-  } | null>(null);
 
   // Queries
   const requestsQuery = useNetworkRequests();
@@ -204,27 +195,6 @@ export function NetworkAccessPage() {
     } catch (err) {
       setGeneralError(mapApiError(err));
       await compatQuery.refetch();
-    }
-  };
-
-  const handleGrantOpenInternet = async () => {
-    if (!openInternetTarget) return;
-    setGeneralError(null);
-    try {
-      await ruleMutation.mutateAsync({
-        scopeKind: 'user',
-        userId: openInternetTarget.userId,
-        connectorId: openInternetTarget.connectorId,
-        destination: '',
-        destKind: 'any-public',
-        port: 0,
-        allowed: true,
-        expectedRevision: revision,
-      });
-      await rulesQuery.refetch();
-      setOpenInternetTarget(null);
-    } catch (err) {
-      setGeneralError(mapApiError(err));
     }
   };
 
@@ -502,16 +472,6 @@ export function NetworkAccessPage() {
         </section>
       )}
 
-      {/* Open Internet Grant Dialog */}
-      {openInternetTarget && (
-        <OpenInternetGrantDialog
-          open={Boolean(openInternetTarget)}
-          onOpenChange={(open) => !open && setOpenInternetTarget(null)}
-          connectorDisplayName={openInternetTarget.connectorDisplayName}
-          userDisplayName={openInternetTarget.userDisplayName}
-          onConfirm={handleGrantOpenInternet}
-        />
-      )}
     </div>
   );
 }

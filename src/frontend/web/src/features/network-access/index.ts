@@ -4,7 +4,6 @@ export * from './components/PendingApprovalCard';
 export * from './components/GroupedPendingCards';
 export * from './components/RulesList';
 export * from './components/RuleScopeEditor';
-export * from './components/OpenInternetGrantDialog';
 export * from './components/UserNetworkPrivilegesForm';
 export * from './components/NetworkPrivilegesPanel';
 export * from './components/EmergencyBrakeControls';
