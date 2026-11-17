@@ -8,6 +8,23 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class U2_PolicyStoreTests : IDisposable
 {
+    [Theory]
+    [InlineData("ip", "100.64.0.1")]
+    [InlineData("ip", "192.168.1.5")]
+    [InlineData("host", "x.localhost")]
+    [InlineData("host", "metadata.google.internal")]
+    public void ProtectedPendingDestinationsCanBeBlockedButNotAllowed(string kind, string destination)
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json"));
+        var (id, overflow) = store.RecordOrUpdatePendingRequest("user-a", "agent-a", null, false, "user-agent", kind, destination, 443, "agent", "container");
+        Assert.False(overflow);
+        var admin = new NetworkAccessActor("admin", true);
+        Assert.Throws<ArgumentException>(() => store.DecideRequest(admin, id!, true, "agent", store.Revision));
+        var decision = store.DecideRequest(admin, id!, false, "agent", store.Revision);
+        Assert.NotNull(decision.Rule);
+        Assert.False(decision.Rule.Allowed);
+    }
+
     private readonly string tempDir;
 
     public U2_PolicyStoreTests()

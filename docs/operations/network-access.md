@@ -192,6 +192,7 @@ After a hosted startup failure, production Manager keeps admission closed and re
 An explicit admission closure also cancels any deferred startup-canary retry.
 
 Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
+Pending requests for protected or local destinations can be blocked and cleared even when those destinations cannot be allowed.
 
 Inspect the latest hook decisions:
 ```bash

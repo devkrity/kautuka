@@ -206,6 +206,9 @@ public static class NetworkDestinationNormalizer
                     throw new ArgumentException("invalid_destination: Hostname is malformed.", nameof(destination));
                 }
 
+                // A block cannot grant access; allow it to resolve pending requests even for protected destinations.
+                if (!allowed) return ("host", normalizedHost, port);
+
                 if (NetworkAddressClassifier.IsMetadata(normalizedHost)
                     || normalizedHost.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase)
                     || (string.Equals(normalizedHost, "localhost", StringComparison.OrdinalIgnoreCase)
@@ -226,6 +229,8 @@ public static class NetworkDestinationNormalizer
                 {
                     throw new ArgumentException("invalid_destination: IPv4 literal is malformed.", nameof(destination));
                 }
+
+                if (!allowed) return ("ip", normalizedIp, port);
 
                 if (NetworkAddressClassifier.IsMetadata(normalizedIp))
                 {
