@@ -490,7 +490,7 @@ public sealed partial class WorkspaceGrpcService(
         WorkspaceMcpContainerConnectorDefinition probeConnector = WorkspaceGrpcContractMapper.FromProbe(request);
         DateTimeOffset discoveryStarted = DateTimeOffset.UtcNow;
 
-        (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage) = await this.connectorExecutionService
+        (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage, string? imageDigest) = await this.connectorExecutionService
             .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken, request.UserId, request.SaveDiscovery)
             .ConfigureAwait(false);
 
@@ -504,11 +504,15 @@ public sealed partial class WorkspaceGrpcService(
             ToolCount = tools.Count,
             Outcome = ok ? WorkspaceOperationOutcome.Succeeded : WorkspaceOperationOutcome.Failed,
             NetworkApprovalRequired = approvalRequired,
+            ImageDigest = imageDigest ?? string.Empty,
+            SourceDigest = ok && !string.IsNullOrWhiteSpace(probeConnector.BundlePath) && File.Exists(probeConnector.BundlePath)
+                ? McpbImageMaterializer.ComputeSha256Hex(probeConnector.BundlePath) : string.Empty,
         };
         response.Tools.AddRange(tools.Select(static t => new WorkspaceMcpToolMessage
         {
             Name = t.Name,
-            Description = t.Description ?? string.Empty
+            Description = t.Description ?? string.Empty,
+            JsonSchema = t.JsonSchema.ValueKind == JsonValueKind.Undefined ? string.Empty : t.JsonSchema.GetRawText(),
         }));
         return response;
     }
@@ -590,7 +594,13 @@ public sealed partial class WorkspaceGrpcService(
                 workspaceContext,
                 request.ExecutionContext,
                 context.CancellationToken,
-                string.IsNullOrWhiteSpace(request.HostArtifactDirectory) ? null : request.HostArtifactDirectory)
+                string.IsNullOrWhiteSpace(request.HostArtifactDirectory) ? null : request.HostArtifactDirectory,
+                string.IsNullOrWhiteSpace(request.ExpectedImageDigest) ? null : request.ExpectedImageDigest,
+                string.IsNullOrWhiteSpace(request.ExpectedSourceDigest) ? null : request.ExpectedSourceDigest,
+                request.VerifyExecutionCommand ? request.ExpectedCommand : null,
+                request.VerifyExecutionCommand ? request.ExpectedArguments : null,
+                request.VerifyExecutionCommand ? request.ExpectedMcpProtocolVersion : null,
+                request.VerifyExecutionCommand ? request.ExpectedServerType : null)
             .ConfigureAwait(false);
 
         return new WorkspaceMcpContainerCallResponse

@@ -34,6 +34,58 @@ namespace Kautuka.IntegrationTests;
 public sealed class ConnectorValidationEndpointTests
 {
     [Fact]
+    public async Task LocalConnectorSavePersistsToolSchemasAndArtifactDigest()
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        {
+            Ok = true,
+            ToolCount = 1,
+            Tools = { new WorkspaceMcpToolMessage { Name = "fetch", Description = "Fetch a URL", JsonSchema = "{\"type\":\"object\"}" } },
+        });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/schema-test", new
+        {
+            name = "Schema test",
+            transport = "container",
+            containerImage = "example/image@" + digest,
+            containerCommand = "server",
+            enabled = true,
+        }, token).ConfigureAwait(true);
+        McpServerDefinition server = fixture.ReadStoredConnector("schema-test");
+        Assert.Equal(digest, server.LocalImageDigest);
+        ConnectorToolDefinition tool = Assert.Single(server.LocalToolDefinitions!);
+        Assert.Equal("fetch", tool.Name);
+        Assert.Equal("Fetch a URL", tool.Description);
+        Assert.Equal("{\"type\":\"object\"}", tool.JsonSchema);
+        await fixture.ReplayInternalConnectorSave("schema-test", "example/image@" + digest);
+        Assert.Equal("fetch", Assert.Single(fixture.ReadStoredConnector("schema-test").LocalToolDefinitions!).Name);
+    }
+
+    [Fact]
+    public async Task TestingExistingLocalConnectorPersistsCompleteDefinitions()
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        { Ok = false, Message = "Approval needed", NetworkApprovalRequired = true });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/retest", new
+        { name = "Retest", transport = "container", containerImage = "example/image@" + digest, containerCommand = "server", enabled = true }, token).ConfigureAwait(true);
+        Assert.Null(fixture.ReadStoredConnector("retest").LocalToolDefinitions);
+        manager.ProbeResponse = new WorkspaceMcpProbeResponse
+        {
+            Ok = true,
+            ToolCount = 1,
+            Tools = { new WorkspaceMcpToolMessage { Name = "fetch", Description = "Fetch", JsonSchema = "{\"type\":\"object\"}" } }
+        };
+        using JsonDocument tested = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/test", new { id = "retest", transport = "container" }, token).ConfigureAwait(true);
+        McpServerDefinition server = fixture.ReadStoredConnector("retest");
+        Assert.Equal(digest, server.LocalImageDigest);
+        Assert.Equal("{\"type\":\"object\"}", Assert.Single(server.LocalToolDefinitions!).JsonSchema);
+    }
+    [Fact]
     public async Task RemoteConnectorOperationsEmitMetadataOnlyAuditEvents()
     {
         await using var fixture = await ConnectorApiFixture.CreateAsync();
@@ -1837,6 +1889,13 @@ public sealed class ConnectorValidationEndpointTests
                 .McpServers
                 .Select(static server => server.Id)];
 
+        public McpServerDefinition ReadStoredConnector(string id)
+            => app.Services.GetRequiredService<IPlatformConfigurationProvider>().GetCurrent().McpServers.Single(server => server.Id == id);
+
+        public async Task ReplayInternalConnectorSave(string id, string image)
+            => _ = await app.Services.GetRequiredService<IGatewayCatalogStore>().SaveSystemMcpServerAsync(id,
+                new GatewayConnectorUpsertRequest { Name = "Schema test", Transport = "container", ContainerImage = image, ContainerCommand = "server", Enabled = true }, TestContext.Current.CancellationToken);
+
         public (string Scope, string? OwnerUserId) ReadStoredConnectorOwnership(string connectorId)
         {
             McpServerDefinition server = app.Services.GetRequiredService<IPlatformConfigurationProvider>()
@@ -2169,11 +2228,13 @@ public sealed class ConnectorValidationEndpointTests
         public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
         {
             ContainerProbeRequests.Enqueue(request);
-            return Task.FromResult(ProbeResponse ?? new WorkspaceMcpProbeResponse
+            WorkspaceMcpProbeResponse response = (ProbeResponse ?? new WorkspaceMcpProbeResponse
             {
                 Ok = true,
                 ToolCount = 0,
-            });
+            }).Clone();
+            if (response.Ok && string.IsNullOrEmpty(response.ImageDigest)) response.ImageDigest = "sha256:" + new string('a', 64);
+            return Task.FromResult(response);
         }
 
         public Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerToolsAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default)

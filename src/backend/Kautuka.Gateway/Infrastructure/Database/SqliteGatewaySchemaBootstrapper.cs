@@ -195,7 +195,8 @@ internal static class SqliteGatewaySchemaBootstrapper
             {
                 differences.Add($"missing {key.Type} '{key.Name}'");
             }
-            else if (!string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal))
+            else if (!string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal)
+                && !(key.Type == "table" && key.Name == "tool_approval_requests" && ApprovalColumnsMatchIgnoringOrder(expectedSql, actualSql)))
             {
                 differences.Add($"incompatible {key.Type} '{key.Name}'");
             }
@@ -226,6 +227,20 @@ internal static class SqliteGatewaySchemaBootstrapper
             "Back up any required data, then explicitly reset or reprovision the Gateway database before restarting.");
     }
 
+    private static bool ApprovalColumnsMatchIgnoringOrder(string expectedSql, string actualSql)
+    {
+        static string[] Parts(string sql)
+        {
+            string normalized = NormalizeSql(sql);
+            int start = normalized.IndexOf('(', StringComparison.Ordinal);
+            int end = normalized.LastIndexOf(')');
+            if (start < 0 || end <= start || normalized[(end + 1)..].TrimEnd(';').Length != 0) return [];
+            return [.. normalized[(start + 1)..end].Split(',').Order(StringComparer.Ordinal)];
+        }
+        string[] expected = Parts(expectedSql);
+        return expected.Length > 0 && expected.SequenceEqual(Parts(actualSql), StringComparer.Ordinal);
+    }
+
     private static void ApplyCompatibleUpgrades(SqliteConnection connection)
     {
         UpgradeMcpServers(connection);
@@ -234,6 +249,7 @@ internal static class SqliteGatewaySchemaBootstrapper
         MovePreviousWorkflowJournalToCurrent(connection);
         EnsureWorkflowTables(connection);
         Domain.Stores.ToolApprovalSchemaCompat.EnsureWorkflowReviewColumns(connection);
+        Domain.Stores.ToolApprovalSchemaCompat.EnsureToolExecutionColumns(connection);
         Domain.Channels.ChannelInteractionSchemaCompat.EnsureInteractionGroupColumn(connection);
         SqliteGatewaySchemaSeeder.EnsureBuiltinProviderCatalogRows(connection, transaction: null);
         Domain.Stores.ExternalLoginSchemaCompat.EnsureIdentityColumns(connection);

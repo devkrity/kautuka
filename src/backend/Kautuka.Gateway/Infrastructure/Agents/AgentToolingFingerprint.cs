@@ -9,6 +9,44 @@ namespace Kautuka.Gateway.Infrastructure.Agents;
 
 internal static class AgentToolingFingerprint
 {
+    internal static string EndpointHash(Uri? endpoint)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(endpoint?.AbsoluteUri ?? string.Empty)));
+
+    internal static string ConnectorExecutionHash(McpServerDefinition server)
+    {
+        var builder = new StringBuilder();
+        Append(builder, server.Id);
+        Append(builder, server.Transport.ToString());
+        Append(builder, server.HttpUrl?.AbsoluteUri ?? string.Empty);
+        Append(builder, server.ContainerImage ?? string.Empty);
+        Append(builder, server.ContainerCommand ?? string.Empty);
+        Append(builder, server.ContainerArgs.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (string argument in server.ContainerArgs) Append(builder, argument);
+        Append(builder, server.BundlePath ?? string.Empty);
+        Append(builder, server.ServerType ?? string.Empty);
+        Append(builder, server.McpProtocolVersion ?? string.Empty);
+        Append(builder, server.ContainerSidecarName ?? string.Empty);
+        Append(builder, server.RuntimeArtifactType ?? string.Empty);
+        Append(builder, server.RuntimeArtifactSourceDigest ?? string.Empty);
+        Append(builder, server.EnvKeys.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (string key in server.EnvKeys) Append(builder, key);
+        Append(builder, server.CredentialNamespace ?? string.Empty);
+        Append(builder, server.CredentialAssociationId ?? string.Empty);
+        Append(builder, server.CredentialOperationId ?? string.Empty);
+        Append(builder, server.CredentialSourceId ?? string.Empty);
+        Append(builder, server.HttpHeaders.Count.ToString(CultureInfo.InvariantCulture));
+        foreach (var header in server.HttpHeaders)
+        {
+            Append(builder, header.Name);
+            Append(builder, header.Value ?? string.Empty);
+            Append(builder, header.CredentialKey ?? string.Empty);
+            Append(builder, header.Prefix ?? string.Empty);
+        }
+        Append(builder, server.LocalArtifactDigest ?? string.Empty);
+        Append(builder, server.LocalImageDigest ?? string.Empty);
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
     public static string Compute(AgentDefinition agent, PlatformConfiguration config)
     {
         ArgumentNullException.ThrowIfNull(agent);
@@ -152,6 +190,14 @@ internal static class AgentToolingFingerprint
         Append(builder, server.ServerType ?? string.Empty);
         Append(builder, server.RuntimeArtifactType ?? string.Empty);
         Append(builder, server.RuntimeArtifactSourceDigest ?? string.Empty);
+        Append(builder, server.LocalArtifactDigest ?? string.Empty);
+        Append(builder, server.LocalImageDigest ?? string.Empty);
+        foreach (var tool in (server.LocalToolDefinitions ?? []).OrderBy(static tool => tool.Name, StringComparer.Ordinal))
+        {
+            Append(builder, tool.Name);
+            Append(builder, tool.Description);
+            Append(builder, tool.JsonSchema);
+        }
         Append(builder, server.ReadinessTimeoutSeconds?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
         Append(builder, server.JitCooldownSeconds?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
         Append(builder, server.HealthcheckUrl?.AbsoluteUri ?? string.Empty);

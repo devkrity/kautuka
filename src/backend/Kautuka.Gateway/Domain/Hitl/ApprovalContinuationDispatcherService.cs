@@ -622,13 +622,14 @@ internal sealed class ApprovalContinuationDispatcherService(
             .MaxParallelTools ?? 0;
         string[] executed = await PackedToolApproval.InvokeThrottledAsync(
             independentInvokes.Select(item => (Func<CancellationToken, Task<string>>)(ct =>
-                invoker.InvokeAsync(
+                ApprovedToolExecution.RunAsync(approvalStore, item.Row.Id, item.Row.AgentId!, item.Row.SessionId!, item.Row.UserId, item.Row.ToolName, item.Row.ArgumentsJson, () => invoker.InvokePinnedAsync(
                     item.Row.AgentId!,
                     item.Row.SessionId!,
-                    item.Work.UserId ?? item.Row.UserId,
+                    item.Row.UserId,
                     item.Row.ToolName,
                     item.Row.ArgumentsJson,
-                    ct).AsTask())).ToList(),
+                    ReadPinnedTooling(waitState),
+                    ct, item.Row.McpServerId).AsTask(), ct))).ToList(),
             maxParallel,
             cancellationToken).ConfigureAwait(false);
 
@@ -708,19 +709,30 @@ internal sealed class ApprovalContinuationDispatcherService(
             return;
         }
 
-        string executedJson = await packedApprovedToolInvoker.InvokeAsync(
+        string executedJson = await ApprovedToolExecution.RunAsync(approvalStore, approval.Id, approval.AgentId, approval.SessionId, approval.UserId, approval.ToolName, approval.ArgumentsJson, () => packedApprovedToolInvoker.InvokePinnedAsync(
             approval.AgentId,
             approval.SessionId,
-            work.UserId ?? approval.UserId,
+            approval.UserId,
             approval.ToolName,
             approval.ArgumentsJson,
-            cancellationToken).ConfigureAwait(false);
+            ReadPinnedTooling(waitState),
+            cancellationToken, approval.McpServerId).AsTask(), cancellationToken).ConfigureAwait(false);
         runWaitStateStore.PutPackedToolResult(waitState.WaitId, work.RequestId, executedJson, journaledStart: false);
         ApprovalContinuationDispatcherServiceLog.ExecutedPackedToolBeforeModel(
             logger,
             work.RequestId,
             waitState.WaitId,
             approval.ToolName);
+    }
+
+    private static EffectiveToolingSnapshot? ReadPinnedTooling(RunWaitState wait)
+    {
+        string behavior = RunClockEnvelope.Unwrap(wait.BehaviorJson).BehaviorJson;
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize(behavior, KautukaJsonContext.Default.EffectiveRunBehavior)?.Tooling;
+        }
+        catch (System.Text.Json.JsonException) { return null; }
     }
 
     private sealed class TerminalContinuationException : InvalidOperationException

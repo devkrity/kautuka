@@ -384,6 +384,15 @@ internal sealed partial class AgentChatService
             }
 
             AgentRuntime runtime = runtimeResult.Runtime;
+            if (!isContinuationResume && runtime.EffectiveBehavior.Tooling.Definitions?.UnavailableConnectors is { Count: > 0 } unavailable)
+            {
+                string notice = $"[These connectors are unavailable for this run: {string.Join(", ", unavailable)}. Run Test connection in Connectors, then start a new run.]\n\n";
+                await foreach (NaradPersistedEvent delta in EmitDomainAsync(earlyEventWriter, new GatewayChatTokenDelta(notice, false), runtimeEventContext, assistantMessageLifecycle, ct).ConfigureAwait(false))
+                {
+                    yield return delta;
+                    RestoreRunActivity();
+                }
+            }
             runActivity?.SetTag("kautuka.agent.name", runtime.AgentName);
             if (runActivity is not null)
             {

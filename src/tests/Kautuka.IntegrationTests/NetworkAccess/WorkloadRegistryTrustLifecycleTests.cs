@@ -970,6 +970,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 WorkspaceMcpExecutionContext.Isolated,
                 false,
                 null,
+                null,
                 cancellationToken,
             ])!;
             if (replaceAuthorityDuringVerification)

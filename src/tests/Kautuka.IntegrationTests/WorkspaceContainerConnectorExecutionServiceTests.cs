@@ -23,6 +23,68 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceContainerConnectorExecutionServiceTests
 {
+    [Theory]
+    [InlineData("old", "one")]
+    [InlineData("server", "old")]
+    public async Task ChangedCommandOrArgumentsAreRejectedBeforeStartingConnector(string expectedCommand, string expectedArgument)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "connector-command-pin-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var commands = new List<string[]>();
+        var runner = new PodmanCommandRunner((args, _) => { commands.Add([.. args]); return Task.FromResult(new PodmanCommandResult(1, "", "not found", ProcessTerminationReason.NonZeroExit)); });
+        var desired = new WorkspaceDesiredStateStore();
+        string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+        Directory.CreateDirectory(workspacePath);
+        var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", "localhost/test:latest", "server", ["one"], true, false, null, null, [], 30, 600);
+        _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()), [workspace], [connector], []);
+        await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance), new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        try
+        {
+            var result = await service.CallToolAsync("user::web", null, "fetch", "{}", 30, false, workspace, WorkspaceMcpExecutionContext.Isolated,
+                TestContext.Current.CancellationToken, expectedCommand: expectedCommand, expectedArguments: [expectedArgument], expectedMcpProtocolVersion: "");
+            Assert.False(result.Ok);
+            Assert.Contains("execution configuration changed", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(commands, command => command[0] is "run" or "exec");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+    [Fact]
+    public async Task ChangedConnectorBundleIsRejectedBeforeToolExecution()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "connector-pin-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string bundle = Path.Combine(root, "connector.mcpb");
+        await File.WriteAllTextAsync(bundle, "changed", TestContext.Current.CancellationToken);
+        var commands = new List<string[]>();
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            return Task.FromResult(new PodmanCommandResult(1, "", "not found", ProcessTerminationReason.NonZeroExit));
+        });
+        var desired = new WorkspaceDesiredStateStore();
+        string workspacePath = Path.Combine(root, "users", "user", "agents", "agent");
+        Directory.CreateDirectory(workspacePath);
+        var workspace = new ContainerContext("agent", "agent", "user", workspacePath, "/workspace", "image", 30, "512m", 1, [], new Dictionary<string, string>());
+        var connector = new WorkspaceMcpContainerConnectorDefinition("user::web", "localhost/test:latest", "server", [], true, false, bundle, "uv", [], 30, 600);
+        _ = desired.ApplyDesiredState(1, WorkspaceDesiredStateSyncReason.Bootstrap,
+            new ManagerRuntimeSettings(new ManagerWorkspaceDefinition { BaseRoot = root }, new ManagerSandboxRuntimeDefinition { Image = "kautuka-base:latest", DefaultTimeout = 30 }, new WorkspaceTelemetryDefinition()),
+            [workspace], [connector], []);
+        await using var service = new WorkspaceContainerConnectorExecutionService(desired, runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance), new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        try
+        {
+            var result = await service.CallToolAsync("user::web", null, "fetch", "{}", 30, false, workspace,
+                WorkspaceMcpExecutionContext.Isolated, TestContext.Current.CancellationToken, expectedSourceDigest: new string('a', 64));
+            Assert.False(result.Ok);
+            Assert.Contains("package changed", result.FailureMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(commands, command => command[0] is "run" or "exec");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
     private static readonly WorkloadLaunchGate TestOpenWorkloadLaunchGate = new(
         new TestWorkloadStartupState(true),
         new NetworkAccessPolicyStore(Path.Combine(Path.GetTempPath(), $"nac-test-open-gate-{Guid.NewGuid():N}.json")));
@@ -374,7 +436,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 stdioCommand: "python3",
                 stdioArgumentsPrefix: ["-u", "-c", server]);
 
-            (bool ok, IReadOnlyList<McpClientTool> tools, _, string? failureMessage) = await service.ProbeConnectorAsync(
+            (bool ok, IReadOnlyList<McpClientTool> tools, _, string? failureMessage, _) = await service.ProbeConnectorAsync(
                 connector,
                 30,
                 TestContext.Current.CancellationToken,
@@ -523,6 +585,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var runner = new PodmanCommandRunner((args, _) =>
             {
                 commands.Add([.. args]);
+                if (args[0] == "image" && args.Count > 1 && args[1] == "inspect")
+                {
+                    string id = "sha256:" + new string('a', 64);
+                    return Task.FromResult(new PodmanCommandResult(0, args.Contains("--format", StringComparer.Ordinal) ? id : "[{\"Id\":\"" + id + "\"}]", string.Empty, ProcessTerminationReason.Completed));
+                }
                 if (args[0] == "run")
                 {
                     return Task.FromResult(new PodmanCommandResult(125, string.Empty, "synthetic start failure", ProcessTerminationReason.NonZeroExit));
@@ -1780,7 +1847,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var connector = new WorkspaceMcpContainerConnectorDefinition(
                 connectorId, "ghcr.io/devkrity/kautuka-base@sha256:" + new string('a', 64),
                 string.Empty, [], true, false, null, null, [], 30, 600);
-            (bool ok, _, _, _) = await service.ProbeConnectorAsync(connector, 15, CancellationToken.None, user.UserId);
+            (bool ok, _, _, _, _) = await service.ProbeConnectorAsync(connector, 15, CancellationToken.None, user.UserId);
             Assert.False(ok);
 
             Assert.False(policyStore.TryEvaluateTemporaryProbeDecision(

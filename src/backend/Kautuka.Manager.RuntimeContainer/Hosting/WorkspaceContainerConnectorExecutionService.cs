@@ -323,7 +323,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     /// <summary>
     /// Probes a containerized MCP connector without executing tools.
     /// </summary>
-    public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> ProbeConnectorAsync(
+    public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage, string? ImageDigest)> ProbeConnectorAsync(
         string connectorId,
         int timeoutSeconds,
         CancellationToken cancellationToken,
@@ -335,7 +335,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         return await ProbeConnectorAsync(connector, timeoutSeconds, cancellationToken, userId).ConfigureAwait(false);
     }
 
-    public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> ProbeConnectorAsync(
+    public async Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage, string? ImageDigest)> ProbeConnectorAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         int timeoutSeconds,
         CancellationToken cancellationToken,
@@ -381,12 +381,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Ready,
                 "probe-ready");
 
-            return (true, tools, null, null);
+            return (true, tools, null, null, transportLaunch.ImageDigest);
         }
         catch (OperationCanceledException)
         {
             logger.LogWarning("[ContainerConnector] Probe timed out for connector '{ConnectorId}'", connectorId);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.StartupTimeout, "Container connector probe timed out.");
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.StartupTimeout, "Container connector probe timed out.", null);
         }
         catch (InvalidOperationException ex)
         {
@@ -396,7 +396,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 ex,
                 ResolveFailureContainerId(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext, ephemeralWorkload),
                 CancellationToken.None).ConfigureAwait(false);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, failureMessage);
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, failureMessage, null);
         }
         catch (Exception ex)
         {
@@ -406,7 +406,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 ex,
                 ResolveFailureContainerId(connectorId, WorkspaceMcpExecutionContext.Isolated, probeContext, ephemeralWorkload),
                 CancellationToken.None).ConfigureAwait(false);
-            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage);
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.HealthCheckFailed, failureMessage, null);
         }
         finally
         {
@@ -552,7 +552,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext? workspaceContext,
         WorkspaceMcpExecutionContext executionContext,
         CancellationToken cancellationToken,
-        string? hostArtifactDirectory = null)
+        string? hostArtifactDirectory = null,
+        string? expectedImageDigest = null,
+        string? expectedSourceDigest = null,
+        string? expectedCommand = null,
+        IReadOnlyList<string>? expectedArguments = null,
+        string? expectedMcpProtocolVersion = null,
+        string? expectedServerType = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
         ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
@@ -571,6 +577,18 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 timeoutSeconds,
                 allowInternalSystemConnector);
 
+            if (expectedCommand is not null
+                && (!string.Equals(connector.Command ?? string.Empty, expectedCommand, StringComparison.Ordinal)
+                    || !connector.Args.SequenceEqual(expectedArguments ?? [], StringComparer.Ordinal)
+                    || !string.Equals(connector.McpProtocolVersion ?? string.Empty, expectedMcpProtocolVersion ?? string.Empty, StringComparison.Ordinal)
+                    || !string.Equals(connector.ServerType ?? string.Empty, expectedServerType ?? string.Empty, StringComparison.Ordinal)))
+                throw new InvalidOperationException("The connector execution configuration changed. Test the connection and start a new run.");
+
+            if (!string.IsNullOrWhiteSpace(expectedSourceDigest)
+                && (string.IsNullOrWhiteSpace(connector.BundlePath) || !File.Exists(connector.BundlePath)
+                    || !string.Equals(McpbImageMaterializer.ComputeSha256Hex(connector.BundlePath), expectedSourceDigest, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("The connector package changed. Test the connection and start a new run.");
+
             if (logger.IsEnabled(LogLevel.Information))
             {
                 logger.LogInformation("[ContainerConnector] Calling tool '{ToolName}' on connector '{ConnectorId}'", toolName, connector.ConnectorId);
@@ -581,7 +599,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "call-start");
 
-            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot).ConfigureAwait(false);
+            transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, transportLaunch.CancellationToken);
@@ -737,9 +755,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         WorkspaceMcpExecutionContext executionContext = WorkspaceMcpExecutionContext.Unspecified,
         bool isProbe = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
+        string? expectedImageDigest = null,
         CancellationToken cancellationToken = default)
         => CreateTransportCoreAsync(connector, requireEnabled, allowInternalSystemConnector, workspaceContext,
-            executionContext, isProbe, false, authoritativeSnapshot, cancellationToken);
+            executionContext, isProbe, false, authoritativeSnapshot, expectedImageDigest, cancellationToken);
 
     private async Task<TransportLaunch> CreateTransportCoreAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
@@ -750,6 +769,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool isProbe = false,
         bool saveDiscovery = false,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null,
+        string? expectedImageDigest = null,
         CancellationToken cancellationToken = default)
     {
         authoritativeSnapshot ??= desiredStateStore.Snapshot;
@@ -796,6 +816,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     throw new InvalidOperationException($"Container connector '{connector.ConnectorId}' requires a workspace context for agent sandbox execution.");
                 }
 
+                if (!string.IsNullOrWhiteSpace(expectedImageDigest)
+                    && (!connector.Image.Contains("@sha256:", StringComparison.OrdinalIgnoreCase)
+                        && !connector.Image.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException("The connector base image must be pinned to a digest. Test the connection and start a new run.");
+
                 IReadOnlyList<string> desiredConnectorIds = ResolveDesiredSandboxConnectorIds(workspaceContext);
                 OciSandboxSession sandboxSession = await EnsureAgentSandboxProvisionedUnderLeaseAsync(workspaceContext, desiredConnectorIds, cancellationToken).ConfigureAwait(false);
                 AgentSandboxInstalledContract installedContract = await GetInstalledAgentSandboxContractAsync(workspaceContext, connector.ConnectorId, cancellationToken).ConfigureAwait(false);
@@ -830,6 +855,16 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 connector = await PrepareRuntimeConnectorAsync(connector, isBraked, cancellationToken).ConfigureAwait(false);
             }
 
+            string? imageDigest = null;
+            if (isProbe || !string.IsNullOrWhiteSpace(expectedImageDigest))
+            {
+                imageDigest = NormalizePodmanImageId(await TryReadImageIdAsync(connector.Image, cancellationToken).ConfigureAwait(false));
+                if (string.IsNullOrWhiteSpace(imageDigest))
+                    throw new InvalidOperationException("The connector image could not be pinned to an immutable digest.");
+                if (!string.IsNullOrWhiteSpace(expectedImageDigest) && !string.Equals(imageDigest, expectedImageDigest, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The connector image changed. Test the connection and start a new run.");
+                connector = connector with { Image = imageDigest };
+            }
             string runtimeKey = BuildRuntimeKey(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             string containerName = BuildContainerName(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             List<string> arguments;
@@ -901,7 +936,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 Arguments = [.. (stdioArgumentsPrefix ?? []), .. arguments],
                 EnvironmentVariables = ConnectorContainerSpecBuilder.BuildTransportEnvironment(connector),
                 Name = $"container-connector-{connector.ConnectorId}"
-            }), ephemeralWorkload, launchLease);
+            }), ephemeralWorkload, launchLease, imageDigest);
             leaseTransferred = true;
             return transportLaunch;
         }
@@ -2443,13 +2478,15 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private static bool IsCanonicalContainerId(string? value) =>
         value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
-    private sealed class TransportLaunch(StdioClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease)
+    private sealed class TransportLaunch(StdioClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null)
     {
         private NetworkAccess.IWorkloadLaunchLease? launchLease = launchLease;
 
         public StdioClientTransport Transport { get; } = transport;
 
         public EphemeralWorkload? EphemeralWorkload { get; } = ephemeralWorkload;
+
+        public string? ImageDigest { get; } = imageDigest;
 
         public CancellationToken CancellationToken => launchLease?.CancellationToken ?? System.Threading.CancellationToken.None;
 

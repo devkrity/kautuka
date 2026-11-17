@@ -242,6 +242,8 @@ message WorkspaceMcpProbeResponse {
   repeated WorkspaceMcpToolMessage tools   = 4;
   WorkspaceOperationOutcome outcome = 5;
   bool network_approval_required = 6;
+  string image_digest = 7;
+  string source_digest = 8;
 }
 
 message WorkspaceContextMessage {
@@ -348,6 +350,13 @@ message WorkspaceMcpContainerCallRequest {
   WorkspaceMcpExecutionContext execution_context = 9;
   // Host directory for view files. The connector sandbox is not given this path.
   string host_artifact_directory = 10;
+  string expected_image_digest = 11;
+  string expected_source_digest = 12;
+  bool verify_execution_command = 13;
+  string expected_command = 14;
+  repeated string expected_arguments = 15;
+  string expected_mcp_protocol_version = 16;
+  string expected_server_type = 17;
 }
 
 enum WorkspaceMcpExecutionContext {

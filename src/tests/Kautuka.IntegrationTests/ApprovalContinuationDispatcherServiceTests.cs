@@ -1976,6 +1976,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
     private sealed class MutableApprovalStore(params GatewayToolApprovalRequest[] requests) : IGatewayApprovalStore
     {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> executions = new(StringComparer.Ordinal);
+        public bool TryClaimToolExecution(string requestId) => executions.TryAdd(requestId, string.Empty);
+        public string? GetToolExecutionResult(string requestId) => executions.TryGetValue(requestId, out string? result) && result.Length > 0 ? result : null;
+        public bool SaveToolExecutionResult(string requestId, string result) => executions.TryUpdate(requestId, result, string.Empty);
         private readonly Dictionary<string, GatewayToolApprovalRequest> requestsById =
             requests.ToDictionary(static request => request.Id, StringComparer.Ordinal);
 
@@ -2017,6 +2021,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
     private sealed class FakeApprovalStore(params GatewayToolApprovalRequest[] requests) : IGatewayApprovalStore
     {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> executions = new(StringComparer.Ordinal);
+        public bool TryClaimToolExecution(string requestId) => executions.TryAdd(requestId, string.Empty);
+        public string? GetToolExecutionResult(string requestId) => executions.TryGetValue(requestId, out string? result) && result.Length > 0 ? result : null;
+        public bool SaveToolExecutionResult(string requestId, string result) => executions.TryUpdate(requestId, result, string.Empty);
         private readonly IReadOnlyDictionary<string, GatewayToolApprovalRequest> requestsById =
             requests.ToDictionary(static request => request.Id, StringComparer.Ordinal);
 

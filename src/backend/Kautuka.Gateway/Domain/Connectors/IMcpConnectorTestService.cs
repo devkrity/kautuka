@@ -1,5 +1,7 @@
 namespace Kautuka.Gateway.Domain.Connectors;
 
+internal sealed record ConnectorToolDefinition(string Name, string Description, string JsonSchema);
+
 internal sealed record McpConnectorTestResult(
     bool Success,
     string Message,
@@ -7,7 +9,10 @@ internal sealed record McpConnectorTestResult(
     string? PackageChecked = null,
     IReadOnlyList<string>? ToolNames = null,
     IReadOnlyDictionary<string, string?>? ToolDescriptions = null,
-    bool NetworkApprovalRequired = false);
+    bool NetworkApprovalRequired = false,
+    IReadOnlyList<ConnectorToolDefinition>? ToolDefinitions = null,
+    string? ImageDigest = null,
+    string? SourceDigest = null);
 
 internal interface IMcpConnectorTestService
 {

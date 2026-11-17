@@ -131,7 +131,24 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             request.UserId ??= user.Id;
+            if (saved is not null && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
+                request.SaveDiscovery = true;
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
+            if (result.Success && result.ToolDefinitions is not null && saved is not null
+                && string.Equals(saved.Transport, "container", StringComparison.OrdinalIgnoreCase))
+            {
+                string? digest = string.IsNullOrWhiteSpace(saved.BundlePath) ? null : result.SourceDigest;
+                if (!IsCanonicalImageDigest(result.ImageDigest) || (!string.IsNullOrWhiteSpace(saved.BundlePath) && !IsCanonicalSourceDigest(digest)))
+                    return Results.Json(new GatewayErrorResponse("Connector tools could not be saved without an immutable artifact digest."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                try
+                {
+                    await catalog.SaveVerifiedLocalToolsAsync(saved.Id, saved.UpdatedAt, result.ToolDefinitions, digest, result.ImageDigest!, ct).ConfigureAwait(false);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return Results.Json(new GatewayErrorResponse(ex.Message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status409Conflict);
+                }
+            }
             if (string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase))
                 RemoteMcpAudit.Write(context, "connection.tested", user.Id,
                     request.Id ?? "unsaved", saved?.Scope ?? GatewayOwnershipScopes.User, result.Success ? "succeeded" : "failed");
@@ -227,6 +244,10 @@ internal static class GatewayConnectorEndpointMappings
             McpConnectorTestResult validation = await mcpConnectorTestService
                 .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector, user.Id), ct)
                 .ConfigureAwait(false);
+
+            if (validation.Success && validation.ToolDefinitions is not null && (!IsCanonicalImageDigest(validation.ImageDigest)
+                || (!string.IsNullOrWhiteSpace(inspection.Connector.BundlePath) && !IsCanonicalSourceDigest(validation.SourceDigest))))
+                return Results.Json(new GatewayErrorResponse("Connector tools could not be saved without an immutable image digest."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
 
             if (!validation.Success && !validation.NetworkApprovalRequired)
             {
@@ -389,6 +410,9 @@ internal static class GatewayConnectorEndpointMappings
                 candidate.UserId = user.Id;
                 candidate.SaveDiscovery = true;
                 discovery = await testService.TestAsync(candidate, ct).ConfigureAwait(false);
+                if (discovery.Success && discovery.ToolDefinitions is not null && (!IsCanonicalImageDigest(discovery.ImageDigest)
+                    || (!string.IsNullOrWhiteSpace(request.BundlePath) && !IsCanonicalSourceDigest(discovery.SourceDigest))))
+                    return Results.Json(new GatewayErrorResponse("Connector tools could not be saved without an immutable image digest."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
                 if (!discovery.Success && !discovery.NetworkApprovalRequired)
                     return Results.Json(new GatewayErrorResponse(discovery.Message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
                 request = BuildActivatedImportRequest(request, discovery);
@@ -673,8 +697,8 @@ internal static class GatewayConnectorEndpointMappings
         server.HealthcheckIntervalMilliseconds,
         server.Enabled,
         server.IsInternalSystemConnector,
-        server.ToolCount,
-        [.. server.ToolNames?.ToArray() ?? []],
+        string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase) && (server.LocalToolDefinitions is null || !IsCanonicalImageDigest(server.LocalImageDigest)) ? null : server.ToolCount,
+        string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase) && (server.LocalToolDefinitions is null || !IsCanonicalImageDigest(server.LocalImageDigest)) ? [] : [.. server.ToolNames?.ToArray() ?? []],
         [.. server.EnvKeys?.ToArray() ?? []],
         server.Scope,
         server.OwnerUserId,
@@ -730,7 +754,7 @@ internal static class GatewayConnectorEndpointMappings
             BundlePath = connector.BundlePath,
             ServerType = connector.ServerType,
             RuntimeArtifactType = connector.RuntimeArtifactType,
-            RuntimeArtifactSourceDigest = connector.RuntimeArtifactSourceDigest,
+            RuntimeArtifactSourceDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : connector.RuntimeArtifactSourceDigest,
             RuntimeArtifactBuildStatus = connector.RuntimeArtifactType is null ? connector.RuntimeArtifactBuildStatus : "ready",
             ReadinessTimeoutSeconds = connector.ReadinessTimeoutSeconds,
             JitCooldownSeconds = connector.JitCooldownSeconds,
@@ -744,7 +768,18 @@ internal static class GatewayConnectorEndpointMappings
             Enabled = connector.Enabled,
             ToolCount = validation.ToolCount,
             ToolNames = validation.ToolNames?.ToArray(),
+            LocalToolDefinitions = validation.ToolDefinitions,
+            LocalArtifactDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : null,
+            LocalImageDigest = validation.ImageDigest,
+            LocalDiscoveryAttempted = true,
         };
+
+    private static bool IsCanonicalImageDigest(string? digest)
+        => digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.Ordinal)
+            && digest.AsSpan(7).ToString().All(Uri.IsHexDigit);
+
+    private static bool IsCanonicalSourceDigest(string? digest)
+        => digest is { Length: 64 } && digest.All(Uri.IsHexDigit);
 
     private static async Task<IFormFile?> GetArchiveAsync(HttpRequest request, CancellationToken cancellationToken)
     {

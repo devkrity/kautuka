@@ -63,7 +63,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         try
         {
-            Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage)> probe =
+            Task<(bool Ok, IReadOnlyList<McpClientTool> Tools, WorkspaceMcpConnectorUnavailabilityReason? UnavailabilityReason, string? FailureMessage, string? ImageDigest)> probe =
                 service.ProbeConnectorAsync(connector, 15, cancellation.Token, "user-a");
             using TcpClient serverStarted = await listener.AcceptTcpClientAsync(cancellation.Token);
             await cancellation.CancelAsync();

@@ -67,6 +67,8 @@ public sealed class WorkspaceGrpcServiceTests
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect")
+                return Task.FromResult(new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed));
             return Task.FromResult(args[0] == "run"
                 ? new PodmanCommandResult(125, string.Empty, "intentional test launch stop", ProcessTerminationReason.NonZeroExit)
                 : new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));

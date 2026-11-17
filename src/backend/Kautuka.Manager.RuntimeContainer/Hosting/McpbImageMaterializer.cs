@@ -804,7 +804,7 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    private static string ComputeSha256Hex(string filePath)
+    public static string ComputeSha256Hex(string filePath)
     {
         using var stream = File.OpenRead(filePath);
         byte[] hash = SHA256.HashData(stream);

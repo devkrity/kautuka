@@ -27,6 +27,11 @@ internal sealed class PackedApprovedToolInvoker(
         string toolName,
         string? argumentsJson,
         CancellationToken cancellationToken)
+        => await InvokePinnedAsync(agentId, sessionId, userId, toolName, argumentsJson, null, cancellationToken).ConfigureAwait(false);
+
+    public async ValueTask<string> InvokePinnedAsync(
+        string agentId, string sessionId, string? userId, string toolName, string? argumentsJson,
+        EffectiveToolingSnapshot? snapshot, CancellationToken cancellationToken, string? connectorId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
@@ -49,8 +54,11 @@ internal sealed class PackedApprovedToolInvoker(
             userId,
             stageTransitionId: null,
             effectiveSkillManifest: skillManifest);
-        IReadOnlyList<AIFunction> tools = await toolCatalog.BuildToolsAsync(toolContext, cancellationToken).ConfigureAwait(false);
-        AIFunction? match = tools.FirstOrDefault(tool => string.Equals(tool.Name, toolName, StringComparison.Ordinal));
+        if (snapshot?.Definitions is null || string.IsNullOrWhiteSpace(snapshot.DefinitionsHash))
+            throw new InvalidOperationException("This run has no saved tool definitions. Start a new run.");
+        if (!snapshot.ToolNames.Contains(toolName, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("This tool was not available when the run started. Start a new run.");
+        AIFunction? match = await toolCatalog.BuildPinnedToolAsync(toolContext, snapshot.Definitions, snapshot.DefinitionsHash, toolName, connectorId, cancellationToken).ConfigureAwait(false);
         if (match is null)
         {
             PackedApprovedToolInvokerLog.ToolNotFound(logger, agentId, sessionId, toolName);

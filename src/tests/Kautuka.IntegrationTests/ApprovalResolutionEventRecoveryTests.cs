@@ -2,6 +2,7 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Hitl;
+using Kautuka.Gateway.Domain.Stores;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -12,6 +13,78 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ApprovalResolutionEventRecoveryTests
 {
+    [Fact]
+    public async Task ApprovedCallIsNotRepeatedAfterCrashBeforeResultIsSaved()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        int calls = 0;
+        Task<string> Invoke() { calls++; throw new InvalidOperationException("simulated crash"); }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId, request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None));
+        IGatewayApprovalStore reopened = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        string result = await ApprovedToolExecution.RunAsync(reopened, request.Id, request.AgentId!, request.SessionId!, request.UserId, request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        Assert.Equal(1, calls);
+        Assert.Contains("outcome is unknown", result, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ConcurrentApprovedCallsInvokeTheToolOnce()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        async Task<string> Invoke() { Interlocked.Increment(ref calls); started.SetResult(); await release.Task; return "{\"ok\":true}"; }
+        Task<string> first = ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId, request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        await started.Task;
+        Task<string> second = ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId, request.ToolName, request.ArgumentsJson, Invoke, CancellationToken.None);
+        release.SetResult();
+        Assert.Equal(await first, await second);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task ApprovedCallRejectsChangedArgumentsBeforeClaimOrInvocation()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IGatewayApprovalStore store = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        GatewayToolApprovalRequest request = MakeRequest();
+        store.CreateRequest(request);
+        Assert.True(store.Resolve(request.Id, true, null, "user-1", "chat"));
+        bool invoked = false;
+        Task<string> Invoke() { invoked = true; return Task.FromResult("{}"); }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ApprovedToolExecution.RunAsync(store, request.Id, request.AgentId!, request.SessionId!, request.UserId, request.ToolName, "{\"changed\":true}", Invoke, CancellationToken.None));
+        Assert.False(invoked);
+        Assert.True(store.TryClaimToolExecution(request.Id));
+    }
+    [Fact]
+    public async Task ApprovedToolClaimIsDurableAndConcurrentClaimsHaveOneWinner()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        KautukaDatabase database = CreateDatabase(temp.SqlitePath);
+        IGatewayApprovalStore first = CreateGatewayApprovalStore(database);
+        IGatewayApprovalStore second = CreateGatewayApprovalStore(database);
+        GatewayToolApprovalRequest request = MakeRequest();
+        first.CreateRequest(request);
+        Assert.True(first.Resolve(request.Id, true, null, "user-1", "chat"));
+        bool[] claims = await Task.WhenAll(
+            Task.Run(() => first.TryClaimToolExecution(request.Id)),
+            Task.Run(() => second.TryClaimToolExecution(request.Id)));
+        Assert.Single(claims, static won => won);
+        IGatewayApprovalStore reopened = CreateGatewayApprovalStore(CreateDatabase(temp.SqlitePath));
+        Assert.False(reopened.TryClaimToolExecution(request.Id));
+        Assert.Null(reopened.GetToolExecutionResult(request.Id));
+        Assert.True(first.SaveToolExecutionResult(request.Id, "{\"ok\":true}"));
+        Assert.Equal("{\"ok\":true}", reopened.GetToolExecutionResult(request.Id));
+        Assert.False(second.SaveToolExecutionResult(request.Id, "different"));
+    }
     [Fact]
     public void DuplicateApprovalIdIsIdempotentOnlyForTheSameImmutablePayload()
     {

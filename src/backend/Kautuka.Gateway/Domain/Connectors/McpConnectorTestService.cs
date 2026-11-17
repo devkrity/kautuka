@@ -133,7 +133,8 @@ internal sealed class McpConnectorTestService(
 
             IReadOnlyList<string> toolNames = response.Tools.Select(static t => t.Name).ToList();
             IReadOnlyDictionary<string, string?> toolDescriptions = response.Tools.ToDictionary(static t => t.Name, static t => (string?)t.Description);
-            return new McpConnectorTestResult(true, $"Connected. {response.ToolCount} tool(s) available.", response.ToolCount, ToolNames: toolNames, ToolDescriptions: toolDescriptions);
+            return new McpConnectorTestResult(true, $"Connected. {response.ToolCount} tool(s) available.", response.ToolCount, ToolNames: toolNames, ToolDescriptions: toolDescriptions,
+                ToolDefinitions: response.Tools.Select(static t => new ConnectorToolDefinition(t.Name, t.Description, t.JsonSchema)).ToArray(), ImageDigest: response.ImageDigest, SourceDigest: response.SourceDigest);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -212,7 +213,8 @@ internal sealed class McpConnectorTestService(
                 response.ToolCount,
                 PackageChecked: package,
                 ToolNames: toolNames,
-                ToolDescriptions: toolDescriptions);
+                ToolDescriptions: toolDescriptions,
+                ToolDefinitions: response.Tools.Select(static t => new ConnectorToolDefinition(t.Name, t.Description, t.JsonSchema)).ToArray(), ImageDigest: response.ImageDigest, SourceDigest: response.SourceDigest);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

@@ -28,7 +28,9 @@ internal sealed record EffectiveToolingSnapshot(
     string ToolMode,
     bool AllowMultipleToolCalls,
     bool AllowConcurrentInvocation = false,
-    int MaxParallelTools = 0);
+    int MaxParallelTools = 0,
+    Kautuka.Gateway.Infrastructure.Agents.AgentToolSurfaceCatalogue? Definitions = null,
+    string? DefinitionsHash = null);
 
 internal sealed record EffectiveRunBehavior(
     string AgentId,

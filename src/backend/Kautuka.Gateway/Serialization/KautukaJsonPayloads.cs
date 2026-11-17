@@ -455,6 +455,18 @@ internal sealed class GatewayUserPasswordUpdateRequest
 
 internal sealed class GatewayConnectorUpsertRequest
 {
+    [JsonIgnore]
+    public IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition>? LocalToolDefinitions { get; init; }
+
+    [JsonIgnore]
+    public string? LocalArtifactDigest { get; init; }
+
+    [JsonIgnore]
+    public string? LocalImageDigest { get; init; }
+
+    [JsonIgnore]
+    public bool LocalDiscoveryAttempted { get; init; }
+
     public Dictionary<string, string>? DiscoveryEnv { get; init; }
 
     public string? Scope { get; init; }

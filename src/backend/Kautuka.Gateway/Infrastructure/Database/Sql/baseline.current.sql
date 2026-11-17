@@ -172,7 +172,7 @@ CREATE TABLE tool_approval_requests (
             reason        TEXT,
             expires_at     TEXT,
             channel_tether_mode TEXT NOT NULL DEFAULT 'mirror'
-        , checkpoint_id TEXT, resolution_source TEXT, outer_session_id TEXT, outer_agent_id TEXT, agent_definition_revision INTEGER, kind TEXT NOT NULL DEFAULT 'tool', workflow_id TEXT, instance_id TEXT, node_id TEXT);
+        , checkpoint_id TEXT, resolution_source TEXT, outer_session_id TEXT, outer_agent_id TEXT, agent_definition_revision INTEGER, kind TEXT NOT NULL DEFAULT 'tool', workflow_id TEXT, instance_id TEXT, node_id TEXT, execution_started_at TEXT, execution_result_json TEXT);
 CREATE INDEX idx_tool_approval_requests_session
             ON tool_approval_requests(session_id);
 CREATE INDEX idx_tool_approval_requests_decision
