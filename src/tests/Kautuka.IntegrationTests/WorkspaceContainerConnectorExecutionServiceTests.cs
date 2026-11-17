@@ -498,6 +498,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var runner = new PodmanCommandRunner((args, _) =>
             {
                 commands.Add([.. args]);
+                if (args.Count > 1 && args[0] == "image" && args[1] == "inspect")
+                {
+                    string imageId = "sha256:" + new string('a', 64);
+                    return Task.FromResult(new PodmanCommandResult(0, imageId, string.Empty, ProcessTerminationReason.Completed));
+                }
                 if (args[0] == "run")
                 {
                     return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
@@ -986,6 +991,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         var runner = new PodmanCommandRunner((args, _) =>
         {
             commands.Add([.. args]);
+            if (args.Count > 1 && args[0] == "image" && args[1] == "inspect")
+            {
+                string imageId = "sha256:" + new string('a', 64);
+                return Task.FromResult(new PodmanCommandResult(0, imageId, string.Empty, ProcessTerminationReason.Completed));
+            }
             if (args[0] == "run")
             {
                 return Task.FromResult(new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));

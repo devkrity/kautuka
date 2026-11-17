@@ -43,8 +43,10 @@ public sealed class TopologyLaunchAdmissionRaceTests
             cleanupStarted.TrySetResult();
             BlockUntilReleased(releaseCleanup.Task);
         };
-        var runner = new PodmanCommandRunner((_, _) => Task.FromResult(
-            new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit)));
+        var runner = new PodmanCommandRunner((args, _) => Task.FromResult(
+            args.Count > 1 && args[0] == "image" && args[1] == "inspect"
+                ? new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed)
+                : new PodmanCommandResult(1, string.Empty, "not found", ProcessTerminationReason.NonZeroExit)));
         var connector = new WorkspaceMcpContainerConnectorDefinition(
             "stalled-mcp-cleanup", "localhost/test:latest", string.Empty, [], true, false,
             null, null, [], 30, 600);
