@@ -181,6 +181,8 @@ Runtime connector workloads require both a user and an agent identity. Connector
 
 Connector catalogue availability does not change the network workload fingerprint.
 
+Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .

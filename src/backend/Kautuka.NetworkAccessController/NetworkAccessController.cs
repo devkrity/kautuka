@@ -259,7 +259,8 @@ public sealed class NetworkAccessController
         bool isProbe = string.Equals(entry.Purpose, "probe", StringComparison.OrdinalIgnoreCase);
 
         // An explicit block always wins, including over a temporary probe allowance.
-        if (ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort).Kind == ScopeMatchKind.BlockedByRule)
+        ScopeMatchOutcome match = ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort);
+        if (match.Kind == ScopeMatchKind.BlockedByRule)
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
 
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
@@ -283,8 +284,6 @@ public sealed class NetworkAccessController
         }
 
         // 6. Scope resolution & exact-match rule lookup
-        ScopeMatchOutcome match = ResolveContainerScopeRule(state, entry, destKind, normalizedDestination, destinationPort);
-
         switch (match.Kind)
         {
             case ScopeMatchKind.Allowed:
@@ -521,33 +520,6 @@ public sealed class NetworkAccessController
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
 
             default:
-                // Admin-granted systemwide first-party endpoint rules (e.g. AI providers approved at test-connection time)
-                NetworkAccessRule? systemwideRule = FindExactRule(
-                    state.Rules,
-                    scopeKind: "system",
-                    userId: null,
-                    agentId: null,
-                    connectorId: null,
-                    destKind,
-                    normalizedDestination,
-                    input.Port);
-                if (systemwideRule is not null)
-                {
-                    if (!systemwideRule.Allowed)
-                    {
-                        return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-                    }
-
-                    if (destKind == "ip"
-                        && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
-                        && !systemwideRule.AllowLan)
-                    {
-                        return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
-                    }
-
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
-                }
-
                 if (input.Purpose == "provider-test" && input.CorrelationId is { Length: > 0 } token
                     && providerTests.TryGetValue(token, out ProviderTestGrant? grant)
                     && grant.ExpiresAt > timeProvider.GetUtcNow()
@@ -661,26 +633,6 @@ public sealed class NetworkAccessController
                 && string.Equals(rule.DestKind, destKind, StringComparison.Ordinal)
                 && string.Equals(rule.Destination, destination, StringComparison.Ordinal)
                 && rule.Port == port)
-            {
-                return rule;
-            }
-        }
-
-        return null;
-    }
-
-    private static NetworkAccessRule? FindAnyPublicRule(
-        IReadOnlyList<NetworkAccessRule> rules,
-        string userId,
-        string connectorId)
-    {
-        foreach (NetworkAccessRule rule in rules)
-        {
-            if (string.Equals(rule.ScopeKind, "user", StringComparison.Ordinal)
-                && string.Equals(rule.UserId, userId, StringComparison.Ordinal)
-                && string.IsNullOrEmpty(rule.AgentId)
-                && string.Equals(rule.ConnectorId, connectorId, StringComparison.Ordinal)
-                && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal))
             {
                 return rule;
             }
