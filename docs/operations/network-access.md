@@ -19,6 +19,7 @@ If discovery needs network approval, the connector is saved without tool definit
 
 Session compaction model calls use the session owner's network identity and, for agent sessions, the session's agent identity.
 Agent runtime construction, including model capability probing, uses the run's user and agent identity for network checks.
+Background memory extraction uses the originating session's owner and agent for network checks; a missing session does not gain an identity.
 
 On Linux, existing Envoy, CoreDNS, and boundary containers are reused only when their recorded Podman create command matches the requested image and arguments and their resolved image ID matches the current image reference. This also detects a locally rebuilt boundary image under the same tag. Drift stops the egress pod, confirms every present member is inactive and the pod infra member is valid, then removes only the stale named container before recreation. Missing peer containers do not block replacement in a partially created pod. If pod state, stop, or removal cannot be confirmed, startup fails closed. Focused simulated Podman coverage checks image ID, arguments, and partial-pod recovery; this is not live Podman verification.
 
