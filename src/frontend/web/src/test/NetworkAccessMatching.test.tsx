@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { PendingApprovalCard } from '@/features/network-access/components/PendingApprovalCard';
 import type { NetworkAccessRequestDto } from '@/features/network-access/networkAccess';
@@ -115,6 +116,35 @@ describe('network access user scopes', () => {
       onDeleteRule={vi.fn()} onEditRule={edit} canManageOwn />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
     expect(edit).toHaveBeenCalledWith(rule);
+  });
+
+  it('asks for confirmation before removing a rule', async () => {
+    const rule: NetworkAccessRuleDto = {
+      id: 'rule-confirm', scopeKind: 'user', userId: 'alice', destination: 'example.com', destKind: 'host', port: 443,
+      allowed: true, allowLan: false, source: 'user', paused: false, summaryText: '', decidedBy: 'alice',
+      decidedAtUtc: '2026-01-01T00:00:00Z', openInternetBadge: false,
+    };
+    const remove = vi.fn().mockResolvedValue(undefined);
+    render(<RulesList rules={[rule]} expectedRevision={4} currentUser={{ id: 'alice', role: 'user' }} onDeleteRule={remove} canManageOwn />);
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('example.com');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm removal' }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('rule-confirm', 4));
+  });
+  it('asks for confirmation before blocking a built-in rule', async () => {
+    const rule: NetworkAccessRuleDto = {
+      id: 'seed-confirm', scopeKind: 'system', destination: 'example.com', destKind: 'host', port: 443,
+      allowed: true, allowLan: false, source: 'seed', paused: false, summaryText: '', decidedBy: 'system',
+      decidedAtUtc: '2026-01-01T00:00:00Z', openInternetBadge: false,
+    };
+    const block = vi.fn().mockResolvedValue(undefined);
+    render(<RulesList rules={[rule]} expectedRevision={4} currentUser={{ id: 'admin', role: 'admin' }} onDeleteRule={vi.fn()} onBlockSeedRule={block} />);
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'Built in (1)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    expect(block).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm block' }));
+    await waitFor(() => expect(block).toHaveBeenCalledWith(rule));
   });
 
   it('submits a scope change as one replacement of the existing rule', async () => {

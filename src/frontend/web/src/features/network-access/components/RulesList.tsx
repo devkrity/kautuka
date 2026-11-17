@@ -1,6 +1,7 @@
 import React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { formatDestinationDisplay } from '../destinationScope';
 import type { NetworkAccessRuleDto } from '../networkAccess';
@@ -52,6 +53,7 @@ export function RulesList({
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
   const [activeTab, setActiveTab] = React.useState<'allowed' | 'blocked' | 'seed'>('allowed');
   const [submittingRuleId, setSubmittingRuleId] = React.useState<string | null>(null);
+  const [confirmation, setConfirmation] = React.useState<{ rule: NetworkAccessRuleDto; action: 'remove' | 'block' } | null>(null);
 
   // Group rules:
   // - seed: source === 'seed'
@@ -138,7 +140,7 @@ export function RulesList({
                 variant="outline"
                 size="sm"
                 disabled={disabled || submittingRuleId === rule.id}
-                onClick={() => void handleBlockSeed(rule)}
+                onClick={() => setConfirmation({ rule, action: 'block' })}
               >
                 Block
               </Button>
@@ -150,7 +152,7 @@ export function RulesList({
               variant="outline"
               size="sm"
               disabled={disabled || submittingRuleId === rule.id}
-              onClick={() => void handleDelete(rule.id)}
+              onClick={() => setConfirmation({ rule, action: 'remove' })}
             >
               Remove
             </Button>
@@ -197,6 +199,24 @@ export function RulesList({
           )}
         </TabsContent>
       </Tabs>
+      <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{confirmation?.action === 'block' ? 'Block built-in permission?' : 'Remove network rule?'}</DialogTitle>
+            <DialogDescription>
+              {confirmation?.action === 'block' ? 'Block access to ' : 'Remove the rule for '}{confirmation?.rule.destination}?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmation(null)} disabled={Boolean(submittingRuleId)}>Cancel</Button>
+            <Button type="button" variant="destructive" disabled={Boolean(submittingRuleId)} onClick={() => {
+              if (!confirmation) return;
+              const { rule, action } = confirmation;
+              void (action === 'block' ? handleBlockSeed(rule) : handleDelete(rule.id)).then(() => setConfirmation(null)).catch(() => { /* Parent reports the error. */ });
+            }}>{confirmation?.action === 'block' ? 'Confirm block' : 'Confirm removal'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
