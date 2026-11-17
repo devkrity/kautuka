@@ -296,7 +296,7 @@ public static class BoundaryRulesetRenderer
 
         if (upstreams.Count == 0)
         {
-            upstreams.Add("10.248.0.1");
+            upstreams.Add(EgressTopologyManager.OutsideGatewayIp);
         }
 
         string forwarders = string.Join(" ", upstreams);

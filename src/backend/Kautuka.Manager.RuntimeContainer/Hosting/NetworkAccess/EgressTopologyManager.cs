@@ -53,6 +53,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public const string PackageProxyContainerName = "kautuka-pkgs-proxy";
     public const string EgressPodIp = "10.247.0.2";
     public const string OutsidePodIp = "10.248.0.2";
+    public const string OutsideGatewayIp = "10.248.0.1";
     public const string OutsideSubnet = "10.248.0.0/24";
     public const string OutsideLanSourceIp = NetworkAddressClassifier.LanSourceBindAddress;
     public const string PackageProxyIp = "10.247.0.3";
@@ -1169,7 +1170,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             logger.LogInformation("Creating {NetworkName}...", OutsideNetworkName);
             PodmanCommandResult createOut = await podmanRunner
-                .RunAsync(["network", "create", "--opt", $"metric={OutsideNetworkRouteMetric}", "--subnet", OutsideSubnet, "--gateway", "10.248.0.1", OutsideNetworkName], 30, cancellationToken)
+                .RunAsync(["network", "create", "--opt", $"metric={OutsideNetworkRouteMetric}", "--subnet", OutsideSubnet, "--gateway", OutsideGatewayIp, OutsideNetworkName], 30, cancellationToken)
                 .ConfigureAwait(false);
 
             if (createOut.ExitCode != 0)
@@ -1433,12 +1434,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken)
     {
         // Render boundary and configs
-        IReadOnlyList<string> upstreamDnsIps = await DiscoverUpstreamDnsIpsAsync(cancellationToken).ConfigureAwait(false);
-        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, upstreamDnsIps);
+        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp]);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
             isWindowsMtls: isWindowsHostNativeDev);
-        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp);
+        string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
         string boundaryConfigDir = Path.Combine(nacDir, "boundary");
@@ -3565,107 +3565,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             || state.Equals("initialized", StringComparison.OrdinalIgnoreCase);
 
     private sealed record WorkloadNetworkContainer(string Id, string State, IReadOnlyList<string> Names);
-
-    private async Task<IReadOnlyList<string>> DiscoverUpstreamDnsIpsAsync(CancellationToken cancellationToken)
-    {
-        var results = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
-        void TryAddCandidate(string? ipText)
-        {
-            if (string.IsNullOrWhiteSpace(ipText))
-            {
-                return;
-            }
-
-            if (!System.Net.IPAddress.TryParse(ipText.Trim(), out System.Net.IPAddress? parsed)
-                || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
-            {
-                return;
-            }
-
-            byte[] b = parsed.GetAddressBytes();
-            if (b[0] == 127 || (b[0] == 10 && b[1] == 247) || (b[0] == 169 && b[1] == 254))
-            {
-                return;
-            }
-
-            string normalized = parsed.ToString();
-            if (seen.Add(normalized))
-            {
-                results.Add(normalized);
-            }
-        }
-
-        try
-        {
-            PodmanCommandResult netInspect = await podmanRunner
-                .RunAsync(["network", "inspect", OutsideNetworkName], 10, cancellationToken)
-                .ConfigureAwait(false);
-
-            if (netInspect.ExitCode == 0 && !string.IsNullOrWhiteSpace(netInspect.StdOut))
-            {
-                using JsonDocument doc = JsonDocument.Parse(netInspect.StdOut);
-                JsonElement netElem = doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0
-                    ? doc.RootElement[0]
-                    : doc.RootElement;
-
-                if (netElem.TryGetProperty("subnets", out JsonElement subnets) && subnets.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (JsonElement subnet in subnets.EnumerateArray())
-                    {
-                        if (subnet.TryGetProperty("gateway", out JsonElement gwElem))
-                        {
-                            TryAddCandidate(gwElem.GetString());
-                        }
-                    }
-                }
-            }
-        }
-        catch
-        {
-            // Best-effort network gateway inspection
-        }
-
-        if (OperatingSystem.IsLinux())
-        {
-            foreach (string resolvPath in new[] { "/run/systemd/resolve/resolv.conf", "/etc/resolv.conf" })
-            {
-                try
-                {
-                    if (!File.Exists(resolvPath))
-                    {
-                        continue;
-                    }
-
-                    string[] lines = await File.ReadAllLinesAsync(resolvPath, cancellationToken).ConfigureAwait(false);
-                    foreach (string line in lines)
-                    {
-                        string trimmed = line.Trim();
-                        if (trimmed.StartsWith("nameserver", StringComparison.OrdinalIgnoreCase))
-                        {
-                            string[] parts = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                            if (parts.Length >= 2)
-                            {
-                                TryAddCandidate(parts[1]);
-                            }
-                        }
-                    }
-                }
-                catch
-                {
-                    // Best-effort host resolver read
-                }
-            }
-        }
-
-        if (results.Count == 0)
-        {
-            TryAddCandidate("10.248.0.1");
-        }
-
-        return results;
-    }
 
     private static string GetStringProperty(JsonElement element, string propertyName)
     {

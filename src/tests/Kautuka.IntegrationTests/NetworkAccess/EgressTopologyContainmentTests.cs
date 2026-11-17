@@ -8,6 +8,35 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class EgressTopologyContainmentTests
 {
+    [Fact]
+    public async Task ProductionDnsBoundaryAllowsOnlyTheCoreDnsGateway()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nac-dns-config-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args.SequenceEqual(["network", "inspect", EgressTopologyManager.OutsideNetworkName]))
+                return Task.FromResult(new PodmanCommandResult(0, "[{\"subnets\":[{\"gateway\":\"192.168.20.1\"}]}]", ""));
+            if (args.SequenceEqual(["pod", "exists", EgressTopologyManager.EgressPodName]))
+                return Task.FromResult(new PodmanCommandResult(1, "", "not found"));
+            throw new InvalidOperationException("Stop after rendering the production configuration.");
+        });
+        var registry = new WorkloadRegistry();
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, root);
+        try
+        {
+            MethodInfo method = typeof(EgressTopologyManager).GetMethod("EnsureEgressPodAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await (Task)method.Invoke(manager, [false, null, false, null, TestContext.Current.CancellationToken])!);
+            string boundary = await File.ReadAllTextAsync(Path.Combine(root, "nac", "boundary", "boundary.nft"), TestContext.Current.CancellationToken);
+            string corefile = await File.ReadAllTextAsync(Path.Combine(root, "nac", "dns", "Corefile"), TestContext.Current.CancellationToken);
+            Assert.Contains(corefile.Split('\n'), line => string.Equals(line.Trim(), "forward . 10.248.0.1", StringComparison.Ordinal));
+            Assert.Contains("ip daddr 10.248.0.1 meta l4proto { tcp, udp } th dport 53 counter accept comment \"dns_upstream\"", boundary, StringComparison.Ordinal);
+            Assert.DoesNotContain("192.168.20.1", boundary, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
     [Theory]
     [InlineData("")]
     [InlineData("  \n")]

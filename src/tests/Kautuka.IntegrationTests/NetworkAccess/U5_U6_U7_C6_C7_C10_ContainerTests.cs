@@ -1719,12 +1719,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-existing-pod-callsite-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
-        System.Reflection.MethodInfo discoverDns = typeof(EgressTopologyManager).GetMethod(
-            "DiscoverUpstreamDnsIpsAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("DiscoverUpstreamDnsIpsAsync method was not found.");
-        IReadOnlyList<string> upstreamDnsIps = await ((Task<IReadOnlyList<string>>)discoverDns.Invoke(
-            manager, [TestContext.Current.CancellationToken])!).ConfigureAwait(false);
         string nacDirectory = Path.Combine(tempDir, "nac");
         string boundaryDirectory = Path.Combine(nacDirectory, "boundary");
         string envoyDirectory = Path.Combine(nacDirectory, "envoy");
@@ -1734,7 +1728,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Directory.CreateDirectory(dnsDirectory);
         await File.WriteAllTextAsync(
             Path.Combine(boundaryDirectory, "boundary.nft"),
-            BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, upstreamDnsIps: upstreamDnsIps),
+            BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants: false, upstreamDnsIps: [EgressTopologyManager.OutsideGatewayIp]),
             TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(
             Path.Combine(envoyDirectory, "envoy.yaml"),
