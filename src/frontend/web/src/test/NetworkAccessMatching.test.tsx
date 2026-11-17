@@ -81,6 +81,14 @@ describe('network access user scopes', () => {
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ canApproveOwn: true }));
     expect(screen.getAllByRole('checkbox')).toHaveLength(1);
   });
+  it('restores the privilege checkbox and shows an error when saving fails', async () => {
+    const save = vi.fn().mockRejectedValue(new Error('offline'));
+    render(<UserNetworkPrivilegesForm canApproveOwn={false} isAdminViewer onSave={save} />);
+    const checkbox = screen.getByRole('checkbox', { name: 'Can manage their own network access' });
+    fireEvent.click(checkbox);
+    expect(await screen.findByRole('alert')).toHaveTextContent('could not be confirmed');
+    expect(checkbox).not.toBeChecked();
+  });
 
   it('allows a user to edit the scope of their connector rule', () => {
     const rule: NetworkAccessRuleDto = {
