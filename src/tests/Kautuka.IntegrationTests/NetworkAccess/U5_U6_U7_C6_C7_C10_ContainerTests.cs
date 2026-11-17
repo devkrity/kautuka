@@ -238,7 +238,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         }
         catch (Exception exception) when (exception is UnauthorizedAccessException or PlatformNotSupportedException or IOException)
         {
-            return;
+            Assert.Skip($"Cannot create the symbolic link required by this test: {exception.Message}");
         }
 
         var spec = new WorkloadContainerSpec("test-workload", "ghcr.io/devkrity/kautuka-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "10.247.1.10")
