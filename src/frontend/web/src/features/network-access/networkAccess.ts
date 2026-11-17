@@ -175,22 +175,6 @@ export async function checkProviderSystemwideRule(target: ProviderNetworkTarget)
   return { alreadyAllowed, expectedRevision };
 }
 
-export async function grantProviderSystemwideRule(
-  target: ProviderNetworkTarget,
-  expectedRevision: number
-): Promise<NetworkAccessRuleDto> {
-  const response = await apiClient.put<NetworkAccessRuleDto>('/network-access/rules', {
-    scopeKind: 'system',
-    destination: target.host,
-    destKind: target.destKind,
-    port: target.port,
-    allowed: true,
-    allowLan: target.allowLan,
-    expectedRevision,
-  });
-  return response.data;
-}
-
 export interface NetworkAccessActivityDto {
   timestampUtc: string;
   userId?: string;

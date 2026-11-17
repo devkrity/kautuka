@@ -518,17 +518,6 @@ public sealed class WorkloadPostStartVerifier
     private static string NormalizePodmanMachinePath(string path)
         => "/" + string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries));
 
-    private static void VerifyInspectIpv6Disable(JsonElement hostConfig)
-    {
-        if (!hostConfig.TryGetProperty("Sysctls", out JsonElement sysctls)
-            || sysctls.ValueKind != JsonValueKind.Object
-            || !sysctls.TryGetProperty("net.ipv6.conf.all.disable_ipv6", out JsonElement disableIpv6)
-            || !string.Equals(disableIpv6.GetString(), "1", StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException("Network check failed: IPv6 disable sysctl is missing or incorrect.");
-        }
-    }
-
     private async Task VerifyNetnsIpv6DisableAsync(int pid, CancellationToken cancellationToken)
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);

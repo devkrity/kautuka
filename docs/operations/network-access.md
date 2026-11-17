@@ -151,7 +151,7 @@ The package proxy runs at `10.247.0.3` on the workload network. Package clients 
    - CoreDNS inside the egress pod listens on `10.247.0.2:53` for workload queries, returning a fixed synthetic IP (`198.18.250.250`) for all `A` queries and empty `NOERROR` for `AAAA` queries. DNS is never forwarded to external resolvers from the workload side.
    - Envoy resolves upstream domains via its internal loopback listener (`127.0.0.1:10053`), which forwards directly to host/system resolvers. This completely prevents workloads from sending forged SNIs to arbitrary IPs.
 3. **OCI Runtime Hook (`scripts/nac/kautuka_hook.py`)**:
-   - Podman triggers `kautuka_hook.py` at the `createRuntime` stage for every container.
+   - Podman triggers `kautuka_hook.py` at the `createRuntime` stage for every container. The installer generates the hook configuration alongside the installed script; there is no separate hook JSON template.
    - The Linux installer requires the packaged hook payload and fails with a direct error if it is missing; the hook is installed executable at the path configured for rootless Podman.
    - Enforces atomic `table inet kautuka_workload` nftables rules in the container's network namespace:
      - Drops all IPv6 traffic (`ipv6_drop`).
