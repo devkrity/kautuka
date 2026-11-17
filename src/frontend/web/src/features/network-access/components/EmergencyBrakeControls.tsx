@@ -35,15 +35,19 @@ export function EmergencyBrakeControls({
     null
   );
   const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   // User brake toggle
   const handleToggleUserBrake = async () => {
+    setError(null);
     if (!isUserPaused) {
       setConfirmTarget('user');
     } else {
       setSubmitting(true);
       try {
         await onUpdateUserBrake(false);
+      } catch {
+        setError('The change could not be confirmed. Refresh to check network access before trying again.');
       } finally {
         setSubmitting(false);
       }
@@ -52,6 +56,7 @@ export function EmergencyBrakeControls({
 
   // System brake toggle (admin)
   const handleToggleSystemBrake = async () => {
+    setError(null);
     if (!isSystemPaused) {
       setConfirmTarget('system');
     } else {
@@ -59,6 +64,8 @@ export function EmergencyBrakeControls({
       setSubmitting(true);
       try {
         await onUpdateSystemBrake(false);
+      } catch {
+        setError('The change could not be confirmed. Refresh to check network access before trying again.');
       } finally {
         setSubmitting(false);
       }
@@ -68,10 +75,12 @@ export function EmergencyBrakeControls({
   // Target user brake toggle (admin)
   const handleToggleTargetUserBrake = async () => {
     if (!targetUser) return;
+    setError(null);
     setConfirmTarget('targetUser');
   };
 
   const handleConfirmPause = async () => {
+    setError(null);
     setSubmitting(true);
     try {
       if (confirmTarget === 'user') {
@@ -81,14 +90,17 @@ export function EmergencyBrakeControls({
       } else if (confirmTarget === 'targetUser' && targetUser) {
         await onUpdateUserBrake(true, targetUser.id);
       }
+      setConfirmTarget(null);
+    } catch {
+      setError('The change could not be confirmed. Refresh to check network access before trying again.');
     } finally {
       setSubmitting(false);
-      setConfirmTarget(null);
     }
   };
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {error && !confirmTarget && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {/* User's own brake button */}
       <Button
         type="button"
@@ -138,6 +150,7 @@ export function EmergencyBrakeControls({
                 : 'This stops your agents from reaching the internet now and ends open connections. Your rules are kept.'}
             </DialogDescription>
           </DialogHeader>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
 
           <DialogFooter className="mt-4 gap-2 sm:gap-0">
             <Button
