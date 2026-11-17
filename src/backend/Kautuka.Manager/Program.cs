@@ -77,8 +77,9 @@ builder.Services.AddSingleton(sp =>
     new NetworkAccessPolicyStore(
         Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
         logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
-builder.Services.AddSingleton(_ =>
-    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl")));
+builder.Services.AddSingleton(sp =>
+    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl"),
+        10 * 1024 * 1024, sp.GetRequiredService<ILogger<NetworkAccessAuditRing>>()));
 builder.Services.AddSingleton(_ =>
     new ImageCompatibilityStore(Path.Combine(managerDataRoot, "networkAccess", "compat", "image-compat.json")));
 builder.Services.AddSingleton(_ =>

@@ -130,6 +130,7 @@ The package proxy runs at `10.247.0.3` on the workload network. Package clients 
    - Approvals, revocations, user privileges, and emergency brake state flush synchronously (`SaveSync`) with directory fsync, while pending-request creation and retry attempt updates coalesce on a background writer ordered by a monotonic mutation sequence (`inMemoryMutationSeq`) with deterministic LRU eviction so older background snapshots cannot overwrite newer synchronous saves. Failed synchronous writes leave the previous in-memory state active and return the persistence error. Background write failures are logged and retried with exponential backoff.
 6. **Decision Audit Log (`NetworkAccessAuditRing`)**:
    - The bounded background JSONL writer waits up to 5 ms for queue capacity so ordinary decisions do not wait indefinitely for disk I/O. Decisions still queued when that limit expires are summarized by an `audit_loss` record containing the dropped count and earliest/latest event timestamps. A pending loss summary is written during disposal even when no later decision arrives.
+   - If the audit file cannot be written because of an I/O or permission error, Manager emits an error through its normal logger. Network decisions continue, and the unavailable audit file cannot preserve the lost entries.
 
 ---
 

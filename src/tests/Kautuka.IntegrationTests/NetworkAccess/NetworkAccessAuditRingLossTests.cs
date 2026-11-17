@@ -3,10 +3,39 @@ using System.Text.Json;
 
 using Kautuka.NetworkAccessController;
 
+using Microsoft.Extensions.Logging;
+
 namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class NetworkAccessAuditRingLossTests
 {
+    [Fact]
+    public async Task DiskWriteFailure_IsReportedWithoutFailingDecisions()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-audit-write-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string blocker = Path.Combine(root, "not-a-directory");
+        await File.WriteAllTextAsync(blocker, "block", TestContext.Current.CancellationToken);
+        var logger = new CaptureLogger();
+        var constructor = typeof(NetworkAccessAuditRing).GetConstructor([typeof(string), typeof(long), typeof(ILogger<NetworkAccessAuditRing>)]);
+        Assert.NotNull(constructor);
+        var ring = (NetworkAccessAuditRing)constructor.Invoke([Path.Combine(blocker, "audit.jsonl"), 1024L, logger]);
+        try
+        {
+            ring.Record(CreateEntry(DateTimeOffset.UtcNow, "example.com"));
+            await ring.DisposeAsync();
+            Assert.Contains(logger.Messages, message => message.Contains("audit", StringComparison.OrdinalIgnoreCase) && message.Contains("fail", StringComparison.OrdinalIgnoreCase));
+        }
+        finally { await ring.DisposeAsync(); Directory.Delete(root, recursive: true); }
+    }
+
+    private sealed class CaptureLogger : ILogger<NetworkAccessAuditRing>
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+    }
     [Fact]
     public async Task QueueOverflow_WritesExactLossCountAndTimestampRange()
     {

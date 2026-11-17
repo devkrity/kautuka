@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Channels;
 
+using Microsoft.Extensions.Logging;
+
 namespace Kautuka.NetworkAccessController;
 
 /// <summary>
@@ -25,6 +27,7 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
     private readonly Channel<NetworkAccessActivityEntry>? asyncWriterChannel;
     private readonly Task? asyncWriterTask;
     private readonly Action<NetworkAccessActivityEntry>? writeEntry;
+    private readonly ILogger<NetworkAccessAuditRing>? logger;
     private long pendingAuditLossCount;
     private DateTimeOffset? pendingAuditLossFrom;
     private DateTimeOffset? pendingAuditLossTo;
@@ -36,6 +39,12 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
     public NetworkAccessAuditRing(string? logFilePath = null, long maxFileBytes = defaultMaxFileBytes)
         : this(logFilePath, maxFileBytes, 10000, null)
     {
+    }
+
+    public NetworkAccessAuditRing(string? logFilePath, long maxFileBytes, ILogger<NetworkAccessAuditRing> logger)
+        : this(logFilePath, maxFileBytes, 10000, null)
+    {
+        this.logger = logger;
     }
 
     internal NetworkAccessAuditRing(
@@ -533,12 +542,13 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
             stream.Write(jsonBytes);
             stream.WriteByte((byte)'\n');
         }
-        catch (IOException)
+        catch (IOException ex)
         {
-            // Decision path never fails on audit log disk trouble.
+            logger?.LogError(ex, "Network access audit write failed; audit events may be lost.");
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException ex)
         {
+            logger?.LogError(ex, "Network access audit write failed; audit events may be lost.");
         }
     }
 
