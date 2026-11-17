@@ -2,6 +2,7 @@ using Grpc.Core;
 
 using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
@@ -16,6 +17,34 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C11_To_C21_ControllerIntegrationTests
 {
+    [Fact]
+    public async Task BrakeStopsWorkloadsEvenWhenCallerCancelsAfterPersistence()
+    {
+        string dir = CreateTempDir();
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(dir, "policy.json"));
+            var registry = new WorkloadRegistry();
+            RegisterAgent(registry, "10.247.1.10", "alice", "agent-one");
+            using var canceled = new CancellationTokenSource();
+            await canceled.CancelAsync();
+            var stopped = new List<string>();
+            var podman = new PodmanCommandRunner((args, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                if (args[0] == "stop") stopped.Add(args[^1]);
+                return Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+            });
+            await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(dir, "ip.json")), new WorkloadPostStartVerifier(podman), registry, dir);
+            var controller = new NacController(store, registry);
+            var grpc = new WorkspaceGrpcService(null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<WorkspaceGrpcService>.Instance, controller, null, manager);
+            _ = await grpc.SetBrake(new NetworkAccessSetBrakeRequest { Actor = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true }, Scope = "system", On = true }, new TestServerCallContext(canceled.Token));
+            Assert.True(store.GetBrakeSnapshot().System);
+            Assert.Contains("ctr-alice-agent-one", stopped);
+            Assert.Empty(registry.GetAll());
+        }
+        finally { TryDeleteDir(dir); }
+    }
     [Fact]
     public async Task C11_Revocation_DeleteRuleImmediatelyDeniesAndCreatesNewPendingRequest_WithNegativeControl()
     {
@@ -2000,7 +2029,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         }
     }
 
-    private sealed class TestServerCallContext : ServerCallContext
+    private sealed class TestServerCallContext(CancellationToken cancellationToken = default) : ServerCallContext
     {
         private readonly Metadata requestHeaders = [];
         private readonly Metadata responseTrailers = [];
@@ -2011,7 +2040,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         protected override string PeerCore => "unix:test";
         protected override DateTime DeadlineCore => DateTime.MaxValue;
         protected override Metadata RequestHeadersCore => requestHeaders;
-        protected override CancellationToken CancellationTokenCore => CancellationToken.None;
+        protected override CancellationToken CancellationTokenCore => cancellationToken;
         protected override Metadata ResponseTrailersCore => responseTrailers;
         protected override Status StatusCore { get; set; }
         protected override WriteOptions? WriteOptionsCore { get; set; }

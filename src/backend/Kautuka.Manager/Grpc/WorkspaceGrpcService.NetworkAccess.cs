@@ -435,7 +435,7 @@ public sealed partial class WorkspaceGrpcService
             string? targetUser = string.Equals(request.Scope, "system", StringComparison.OrdinalIgnoreCase)
                 ? null
                 : (string.IsNullOrWhiteSpace(request.UserId) ? request.Actor.UserId : request.UserId);
-            await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, context.CancellationToken).ConfigureAwait(false);
+            await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, CancellationToken.None).ConfigureAwait(false);
         }
 
         return ToMessage(brake);

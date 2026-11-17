@@ -95,7 +95,7 @@ jobs:
           call = """            string? targetUser = string.Equals(request.Scope, "system", StringComparison.OrdinalIgnoreCase)
                           ? null
                           : (string.IsNullOrWhiteSpace(request.UserId) ? request.Actor.UserId : request.UserId);
-                      await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, context.CancellationToken).ConfigureAwait(false);"""
+                      await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, CancellationToken.None).ConfigureAwait(false);"""
           if source.count(call) != 1:
               raise SystemExit(f"Expected exactly one production EngageBrakeAsync block; found {source.count(call)}")
           path.write_text(source.replace(call, "            // NC mutation: intentionally omit the production workload stop."), encoding="utf-8")
