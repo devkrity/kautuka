@@ -2053,8 +2053,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.DoesNotContain(calls, call => call.StartsWith("pod create ", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public async Task V7_54_ReconcileRecreatesPodAndReopensGateAfterTransientRulesetReadFailure()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V7_54_ReconcileRecreatesPodAndReopensGateAfterTransientRulesetReadFailure(bool testQuarantineRetry)
     {
         const string healthy = "[{\"State\":\"Running\",\"InfraContainerID\":\"infra-id\",\"Containers\":["
             + "{\"Name\":\"kautuka-egress-boundary\",\"State\":\"exited\"},"
@@ -2071,6 +2073,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         int liveRulesetReadFailuresRemaining = 1;
         int podRemovals = 0;
         int podStarts = 0;
+        const string quarantinedId = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        bool cleanupPhase = false;
+        bool quarantineSurvives = true;
+        int quarantineRemovals = 0;
         var secondRecoveryPodStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseSecondRecoveryPodStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var containerInspectCounts = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -2092,6 +2098,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         {
             string call = string.Join(" ", args);
             calls.Add(call);
+            if (cleanupPhase && args[0] == "ps")
+                return Task.FromResult(new PodmanCommandResult(0, quarantineSurvives ? "[{\"Id\":\"" + quarantinedId + "\",\"State\":\"running\"}]" : "[]", string.Empty, ProcessTerminationReason.Completed));
+            if (cleanupPhase && args[0] == "rm" && args[^1] == quarantinedId)
+            {
+                quarantineRemovals++;
+                if (quarantineRemovals == 1) return Task.FromResult(new PodmanCommandResult(125, "", "temporary failure", ProcessTerminationReason.NonZeroExit));
+                quarantineSurvives = false;
+                return Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+            }
+            if (args[0] == "ps") return Task.FromResult(new PodmanCommandResult(0, "[]", "", ProcessTerminationReason.Completed));
             if (args.Count > 0 && args[0] == "create")
             {
                 int nameIndex = args.ToList().IndexOf("--name");
@@ -2202,6 +2218,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var registry = new WorkloadRegistry();
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v754-recovery-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
+        var desiredState = new WorkspaceDesiredStateStore(Path.Combine(tempDir, "v754-cleanup-state.json"), Microsoft.Extensions.Logging.Abstractions.NullLogger<WorkspaceDesiredStateStore>.Instance);
         await using var manager = new EgressTopologyManager(
             podman,
             allocator,
@@ -2211,7 +2228,8 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             windowsDecisionEndpointIp: "192.168.1.10",
             windowsEnvoyCertificateDirectory: certificateDirectory,
             windowsPodmanMachineName: "nac-test-machine",
-            windowsPodmanHookStateDirectory: "/tmp/kautuka-nac-test");
+            windowsPodmanHookStateDirectory: "/tmp/kautuka-nac-test",
+            desiredStateStore: desiredState);
         await SetExpectedBoundarySourceAsync(manager, TestContext.Current.CancellationToken);
         typeof(EgressTopologyManager)
             .GetField("isStartupGateOpen", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
@@ -2233,6 +2251,21 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Contains("pod rm -f kautuka-egress", calls);
         Assert.Contains(calls, call => call.StartsWith("pod create ", StringComparison.Ordinal));
         Assert.Contains("pod start kautuka-egress", calls);
+
+        if (testQuarantineRetry)
+        {
+            desiredState.QuarantineWorkload(quarantinedId);
+            cleanupPhase = true;
+            var reconcileWorkloads = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            await (Task)reconcileWorkloads.Invoke(manager, [registry, TestContext.Current.CancellationToken])!;
+            Assert.False(manager.IsStartupGateOpen);
+            releaseSecondRecoveryPodStart.TrySetResult();
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.Equal(2, quarantineRemovals);
+            Assert.False(quarantineSurvives);
+            Assert.True(manager.IsStartupGateOpen);
+            return;
+        }
 
         containerInspectCounts.Clear();
         liveRulesetReadFailuresRemaining = 1;

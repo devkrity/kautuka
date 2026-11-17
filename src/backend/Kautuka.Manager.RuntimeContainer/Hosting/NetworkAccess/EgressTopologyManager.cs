@@ -234,6 +234,17 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CompleteStartupGateStateChange(change);
     }
 
+    private void CloseForQuarantineCleanupRetry()
+    {
+        StartupGateStateChange change;
+        lock (gateLock)
+        {
+            if (isStartupGateOpen) transientRecoveryPending = true;
+            change = UpdateStartupGateStateUnderLock(isOpen: false);
+        }
+        CompleteStartupGateStateChange(change);
+    }
+
     private void UpdateStartupGate(bool isOpen, bool clearTransientRecovery)
     {
         StartupGateStateChange change;
@@ -2719,7 +2730,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task ReconcileWorkloadRegistryAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    private async Task<bool> ReconcileWorkloadRegistryAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
         // Compare running containers to registry.
         PodmanCommandResult psResult = await podmanRunner
@@ -2728,8 +2739,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (psResult.ExitCode != 0)
         {
-            return;
+            return false;
         }
+
+        bool cleanupComplete = true;
 
         var liveCids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var runningCids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2777,12 +2790,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         }
                     }
                 }
+                else return false;
             }
             catch
             {
-                // Ignore parse errors
+                return false;
             }
         }
+        else return false;
 
         if (desiredStateStore is not null)
         {
@@ -2802,7 +2817,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
                 {
                     logger.LogCritical(persistenceException, "Could not retry quarantine persistence for unregistered surviving workload {ContainerId}.", quarantinedId);
-                    CloseLaunchAdmission();
+                    cleanupComplete = false;
+                    CloseForQuarantineCleanupRetry();
                 }
                 try
                 {
@@ -2810,13 +2826,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     if (removal.ExitCode != 0)
                     {
                         logger.LogCritical("Persistently quarantined workload {ContainerId} survived removal (rc {ExitCode}); closing launch admission for retry.", quarantinedId, removal.ExitCode);
-                        CloseLaunchAdmission();
+                        cleanupComplete = false;
+                        CloseForQuarantineCleanupRetry();
                     }
                 }
                 catch (Exception cleanupException) when (cleanupException is not OperationCanceledException)
                 {
                     logger.LogCritical(cleanupException, "Persistently quarantined workload {ContainerId} removal threw; closing launch admission for retry.", quarantinedId);
-                    CloseLaunchAdmission();
+                    cleanupComplete = false;
+                    CloseForQuarantineCleanupRetry();
                 }
             }
         }
@@ -2844,7 +2862,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
                 {
                     logger.LogCritical(persistenceException, "Could not retry quarantine persistence for surviving workload {ContainerId}.", quarantineId);
-                    CloseLaunchAdmission();
+                    cleanupComplete = false;
+                    CloseForQuarantineCleanupRetry();
                 }
                 if (WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid))
                 {
@@ -2863,7 +2882,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         logger.LogCritical(cleanupException, "Quarantined workload {ContainerId} removal threw; closing launch admission for retry.", liveCid);
                     }
                 }
-                CloseLaunchAdmission();
+                cleanupComplete = false;
+                CloseForQuarantineCleanupRetry();
                 continue;
             }
             if (isActive)
@@ -2898,7 +2918,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                     {
                         logger.LogCritical(ex, "Could not establish immutable identity for active workload {ContainerId}; closing launch admission.", entry.ContainerId);
                         registry.TryQuarantine(entry.Ip, entry.ContainerId);
-                        CloseLaunchAdmission();
+                        cleanupComplete = false;
+                        CloseForQuarantineCleanupRetry();
                         continue;
                     }
                     logger.LogWarning(ex, "Workload rules drift detected for {ContainerId}; quarantining and removing it.", canonicalId);
@@ -2926,7 +2947,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         try { desiredStateStore?.QuarantineWorkload(canonicalId); }
                         catch (Exception persistenceException) when (persistenceException is not OperationCanceledException) { logger.LogCritical(persistenceException, "Quarantine persistence retry failed for surviving workload {ContainerId}.", canonicalId); }
                         logger.LogCritical("Quarantined workload {ContainerId} survived removal; closing launch admission for retry.", canonicalId);
-                        CloseLaunchAdmission();
+                        cleanupComplete = false;
+                        CloseForQuarantineCleanupRetry();
                     }
                     if (removal?.ExitCode == 0) registry.Deregister(entry.Ip, entry.ContainerId);
                 }
@@ -2956,6 +2978,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             transientWorkloadDenials.TryRemove(entry.Ip, out _);
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
+        return cleanupComplete;
     }
 
     private async Task RecoverEgressTopologyAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
@@ -2981,6 +3004,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         try
         {
+            if (!await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false))
+            {
+                logger.LogWarning("Quarantine cleanup is incomplete; keeping launch admission closed for retry.");
+                return;
+            }
             await RemoveEgressPodIfPresentAsync(cancellationToken).ConfigureAwait(false);
 
             bool isWindowsHostNativeDev = OperatingSystem.IsWindows();
