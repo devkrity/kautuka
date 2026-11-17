@@ -1,3 +1,5 @@
+using Google.Protobuf;
+
 using Grpc.Core;
 
 using Kautuka.Manager.Grpc;
@@ -17,6 +19,24 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C11_To_C21_ControllerIntegrationTests
 {
+    [Fact]
+    public void RuleWriteProtocolDoesNotExposeCallerControlledIdentity()
+    {
+        Assert.Null(NetworkAccessSetRuleRequest.Descriptor.FindFieldByNumber(12));
+        Assert.Null(NetworkAccessSetRuleRequest.Descriptor.FindFieldByNumber(13));
+        byte[] expectedLegacyFields = [0x62, 0x08, (byte)'i', (byte)'s', (byte)'o', (byte)'l', (byte)'a', (byte)'t', (byte)'e', (byte)'d',
+            0x6a, 0x04, (byte)'u', (byte)'s', (byte)'e', (byte)'r'];
+        Assert.Equal(expectedLegacyFields, WithLegacyIdentity(new NetworkAccessSetRuleRequest()).ToByteArray());
+    }
+
+    private static NetworkAccessSetRuleRequest WithLegacyIdentity(NetworkAccessSetRuleRequest request)
+    {
+        // Old clients can still send these wire numbers; protobuf retains them as unknown fields.
+        byte[] legacyFields = [0x62, 0x08, (byte)'i', (byte)'s', (byte)'o', (byte)'l', (byte)'a', (byte)'t', (byte)'e', (byte)'d',
+            0x6a, 0x04, (byte)'u', (byte)'s', (byte)'e', (byte)'r'];
+        return NetworkAccessSetRuleRequest.Parser.ParseFrom([.. request.ToByteArray(), .. legacyFields]);
+    }
+
     [Fact]
     public async Task BrakeStopsWorkloadsEvenWhenCallerCancelsAfterPersistence()
     {
@@ -316,7 +336,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     DestKind = "any-public",
                     Port = 0,
                     Allowed = true,
-                    ExecContext = "isolated",
                     ExpectedRevision = 0,
                 }, ctx);
             });
@@ -335,7 +354,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     DestKind = "any-public",
                     Port = 0,
                     Allowed = true,
-                    ExecContext = "agent-sandbox",
                     ExpectedRevision = 0,
                 }, ctx);
             });
@@ -387,7 +405,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 DestKind = "any-public",
                 Port = 0,
                 Allowed = true,
-                ExecContext = "isolated",
                 ExpectedRevision = twinLan.Revision,
             }, ctx);
             Assert.Equal(4, twinAnyPublic.Revision);
@@ -805,7 +822,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 DestKind = "any-public",
                 Port = 0,
                 Allowed = true,
-                ExecContext = "isolated",
                 ExpectedRevision = ruleRa.Revision,
             }, ctx);
 
@@ -936,7 +952,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 DestKind = "any-public",
                 Port = 0,
                 Allowed = true,
-                ExecContext = "isolated",
                 ExpectedRevision = 0,
             }, ctx);
             Assert.True(grantOpen.Rule.OpenInternetBadge);
@@ -1065,7 +1080,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 DestKind = "any-public",
                 Port = 0,
                 Allowed = true,
-                ExecContext = "isolated",
                 ExpectedRevision = r2.Revision,
             }, ctx);
             NetworkAccessSetRuleResponse r4 = await svc.SetRule(new NetworkAccessSetRuleRequest
@@ -1627,7 +1641,7 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
 
             RpcException exSpoofSandbox = await Assert.ThrowsAsync<RpcException>(async () =>
             {
-                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                _ = await svc.SetRule(WithLegacyIdentity(new NetworkAccessSetRuleRequest
                 {
                     Actor = admin,
                     ScopeKind = "user",
@@ -1637,10 +1651,8 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                     DestKind = "any-public",
                     Port = 0,
                     Allowed = true,
-                    ExecContext = "isolated",
-                    Attribution = "user",
                     ExpectedRevision = controller.PolicyStore.Revision,
-                }, ctx);
+                }), ctx);
             });
             Assert.Equal(StatusCode.InvalidArgument, exSpoofSandbox.StatusCode);
             Assert.Contains("scope_not_enforceable", exSpoofSandbox.Status.Detail, StringComparison.Ordinal);
@@ -1661,7 +1673,7 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.71", "93.184.216.34", 443, "unattr.example.com"));
             RpcException exSpoofUnattr = await Assert.ThrowsAsync<RpcException>(async () =>
             {
-                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                _ = await svc.SetRule(WithLegacyIdentity(new NetworkAccessSetRuleRequest
                 {
                     Actor = admin,
                     ScopeKind = "user",
@@ -1671,10 +1683,8 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                     DestKind = "host",
                     Port = 443,
                     Allowed = true,
-                    ExecContext = "isolated",
-                    Attribution = "user",
                     ExpectedRevision = controller.PolicyStore.Revision,
-                }, ctx);
+                }), ctx);
             });
             Assert.Equal(StatusCode.InvalidArgument, exSpoofUnattr.StatusCode);
             Assert.Contains("scope_not_enforceable", exSpoofUnattr.Status.Detail, StringComparison.Ordinal);
@@ -1728,7 +1738,7 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
 
             RpcException exception = await Assert.ThrowsAsync<RpcException>(async () =>
             {
-                _ = await svc.SetRule(new NetworkAccessSetRuleRequest
+                _ = await svc.SetRule(WithLegacyIdentity(new NetworkAccessSetRuleRequest
                 {
                     Actor = admin,
                     ScopeKind = "user",
@@ -1738,10 +1748,8 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                     DestKind = "any-public",
                     Port = 0,
                     Allowed = true,
-                    ExecContext = "isolated",
-                    Attribution = "user",
                     ExpectedRevision = controller.PolicyStore.Revision,
-                }, ctx);
+                }), ctx);
             });
 
             Assert.Equal(StatusCode.InvalidArgument, exception.StatusCode);

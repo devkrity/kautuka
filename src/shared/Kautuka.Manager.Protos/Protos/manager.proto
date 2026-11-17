@@ -545,8 +545,8 @@ message NetworkAccessSetRuleRequest {
   bool allowed = 9;
   bool allow_lan = 10;
   int64 expected_revision = 11;
-  string exec_context = 12;
-  string attribution = 13;
+  reserved 12, 13;
+  reserved "exec_context", "attribution";
   string replace_rule_id = 14;
 }
 
