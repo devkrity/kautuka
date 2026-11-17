@@ -53,18 +53,16 @@ public sealed partial class WorkspaceGrpcService
             string origin = ResolveClientOrigin(context);
             string effectiveUserId;
             string effectiveAgentId;
-            bool effectiveSystemwide;
 
             if (origin == "channelhost")
             {
-                if (!string.IsNullOrWhiteSpace(request.UserId) || !string.IsNullOrWhiteSpace(request.AgentId) || request.Systemwide)
+                if (!string.IsNullOrWhiteSpace(request.UserId) || !string.IsNullOrWhiteSpace(request.AgentId))
                 {
-                    throw new UnauthorizedAccessException("PermissionDenied: ChannelHost identity is pinned to system/channelhost and cannot specify custom userId, agentId, or systemwide.");
+                    throw new UnauthorizedAccessException("PermissionDenied: ChannelHost identity is pinned to system/channelhost and cannot specify custom userId or agentId.");
                 }
 
                 effectiveUserId = "system";
                 effectiveAgentId = "channelhost";
-                effectiveSystemwide = false;
             }
             else
             {
@@ -75,14 +73,13 @@ public sealed partial class WorkspaceGrpcService
 
                 effectiveUserId = request.UserId.Trim();
                 effectiveAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? "gateway" : request.AgentId.Trim();
-                effectiveSystemwide = request.Systemwide;
             }
 
             NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
                 effectiveUserId,
                 effectiveAgentId,
                 string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim(),
-                effectiveSystemwide,
+                false,
                 request.Host,
                 request.Port,
                 string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,

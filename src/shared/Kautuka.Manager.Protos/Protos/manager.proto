@@ -406,7 +406,8 @@ message NetworkAccessCheckOutboundRequest {
   string user_id = 1;
   string agent_id = 2;
   string connector_id = 3;
-  bool systemwide = 4;
+  reserved 4;
+  reserved "systemwide";
   string host = 5;
   int32 port = 6;
   string purpose = 7;

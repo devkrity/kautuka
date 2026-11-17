@@ -128,6 +128,10 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         Assert.Null(typeof(NetworkAccessScope).GetProperty("Systemwide"));
     }
 
+    [Fact]
+    public void OutboundNetworkProtocolDoesNotCarryCatalogueAvailability()
+        => Assert.Null(typeof(NetworkAccessCheckOutboundRequest).GetProperty("Systemwide"));
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -468,7 +472,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Port = 443,
             UserId = string.Empty, // Pinned origin requirements
             AgentId = string.Empty,
-            Systemwide = false,
         }, channelHostCtx);
 
         Assert.True(outboundResp.Allowed);
@@ -480,7 +483,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Port = 443,
             UserId = "spoofed-user", // Illegal for ChannelHost!
             AgentId = string.Empty,
-            Systemwide = false,
         }, channelHostCtx));
 
         Assert.Equal(StatusCode.PermissionDenied, rpcEx.StatusCode);
@@ -914,7 +916,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Port = 443,
             UserId = "user-a",
             AgentId = "agent-a",
-            Systemwide = false,
             Purpose = "tool",
         }, gatewayCtx);
 
@@ -925,7 +926,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             UserId = "user-a",
             AgentId = string.Empty,
             ConnectorId = "sys-conn",
-            Systemwide = true,
             Purpose = "tool",
         }, gatewayCtx);
 
@@ -963,7 +963,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Port = 443,
             UserId = "user-b",
             AgentId = "agent-b",
-            Systemwide = false,
             Purpose = "tool",
         }, gatewayCtx);
 

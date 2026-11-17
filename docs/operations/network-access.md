@@ -25,6 +25,7 @@ Brake status and updates likewise report Manager outages; an unconfirmed update 
 Requests, rules, activity, and compatibility lists report unavailable when Manager cannot be reached rather than returning an empty list.
 When Manager cannot confirm a request decision or a rule or compatibility change, the API returns unavailable and asks for a refresh before retrying.
 Connector catalogue availability is not part of workload labels, registry entries, or the Gateway outbound network identity. Shared credential lookup remains separate.
+Gateway and Manager should run the same Kautuka release; mixed-version NAC operation is not supported.
 Connector desired-state fingerprints include the image compatibility relaxations as well as the image digest, so a changed profile is visible to reconciliation.
 
 Session compaction model calls use the session owner's network identity and, for agent sessions, the session's agent identity.
