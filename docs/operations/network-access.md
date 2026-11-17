@@ -23,6 +23,7 @@ Background memory extraction uses the originating session's owner and agent for 
 Catalogue artifact downloads follow redirects with a bounded hop count. Each destination is checked by NAC before the next request is sent.
 Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host.
 The workload hook refuses a managed workload when its network namespace inode cannot be read (`missing_netns_inode`), so it cannot skip the shared-namespace check.
+Temporary connector probe grants are cleared using the verified container ID when the probe ends.
 An existing empty or incomplete network policy file is treated as corrupt and refused; it is not reset to an empty policy that could release a saved brake.
 Package-proxy rules are selected only for the allowlisted proxy identity, never solely from a container annotation.
 The hook bounds each network-inspection and nft subprocess to ten seconds and refuses the launch if a command times out. Its runtime configuration also bounds the complete hook to 45 seconds.

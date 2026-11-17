@@ -425,7 +425,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             {
                 try
                 {
-                    CompleteProbeAuthorization(connectorId, probeContext, ephemeralWorkload?.ContainerName);
+                    CompleteProbeAuthorization(connectorId, probeContext, ephemeralWorkload?.VerifiedContainerId ?? transportLaunch?.ContainerId ?? ephemeralWorkload?.ContainerName);
                 }
                 catch (Exception ex)
                 {
@@ -877,6 +877,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
             string runtimeKey = BuildRuntimeKey(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             string containerName = BuildContainerName(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
+            string? persistentContainerId = null;
             List<string> arguments;
             if (UsesImageDefaultCommand(connector))
             {
@@ -929,7 +930,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
             else
             {
-                await EnsureConnectorContainerRunningCoreAsync(
+                persistentContainerId = await EnsureConnectorContainerRunningCoreAsync(
                     connector,
                     runtimeKey,
                     containerName,
@@ -953,7 +954,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             IClientTransport transport = ephemeralWorkload is null
                 ? stdioTransport
                 : new VerifiedConnectorTransport(stdioTransport, token => VerifyEphemeralWorkloadAsync(ephemeralWorkload, connector.ReadinessTimeoutSeconds, token));
-            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest);
+            var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId);
             leaseTransferred = true;
             return transportLaunch;
         }
@@ -1212,10 +1213,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         bool isProbe = false,
         ContainerContext? identityContext = null,
         WorkspaceDesiredStateSnapshot? authoritativeSnapshot = null)
-        => await EnsureConnectorContainerRunningCoreAsync(connector, runtimeKey, containerName, executionContext,
+    {
+        _ = await EnsureConnectorContainerRunningCoreAsync(connector, runtimeKey, containerName, executionContext,
             workspaceContext, cancellationToken, isProbe, false, identityContext, authoritativeSnapshot).ConfigureAwait(false);
+    }
 
-    private async Task EnsureConnectorContainerRunningCoreAsync(
+    private async Task<string?> EnsureConnectorContainerRunningCoreAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string runtimeKey,
         string containerName,
@@ -1270,7 +1273,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
 
             trackedConnectorContainers[runtimeKey] = containerName;
-            return;
+            return inspection.CanonicalContainerId;
         }
 
         string? launchUserId = string.IsNullOrWhiteSpace(identity.UserId) ? null : identity.UserId;
@@ -1385,6 +1388,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         }
 
         trackedConnectorContainers[runtimeKey] = containerName;
+        return hasCreatedId ? createdId : null;
     }
 
     private async Task EnsureExistingConnectorVerifiedAsync(
@@ -2515,7 +2519,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     private static bool IsCanonicalContainerId(string? value) =>
         value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
-    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null)
+    private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null)
     {
         private NetworkAccess.IWorkloadLaunchLease? launchLease = launchLease;
 
@@ -2524,6 +2528,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         public EphemeralWorkload? EphemeralWorkload { get; } = ephemeralWorkload;
 
         public string? ImageDigest { get; } = imageDigest;
+
+        public string? ContainerId { get; } = containerId;
 
         public CancellationToken CancellationToken => launchLease?.CancellationToken ?? System.Threading.CancellationToken.None;
 

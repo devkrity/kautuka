@@ -350,6 +350,11 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         {
             const string imageId = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             const string containerId = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "probe-policy.json"));
+            string probeRequest = Assert.IsType<string>(policyStore.RecordOrUpdatePendingProbeRequest(
+                containerId, "probe-user", null, "binary-mcpb-probe", false, "user", "host", "probe.example", 443, "connector", "probe"));
+            _ = policyStore.DecideRequest(new NetworkAccessActor("admin", true), probeRequest, true, null, policyStore.Revision);
+            Assert.True(policyStore.TryEvaluateTemporaryProbeDecision(containerId, "probe-user", "binary-mcpb-probe", "host", "probe.example", 443, out _, out _));
             var registry = new WorkloadRegistry();
             var calls = new List<string[]>();
             var pidIps = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -432,6 +437,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 workloadRegistry: registry,
                 postStartVerifier: new WorkloadPostStartVerifier(runner, desired),
                 imageCompatibilityStore: store,
+                probePolicyStore: policyStore,
                 workloadLaunchGate: TestOpenWorkloadLaunchGate,
                 stdioCommand: "python3",
                 stdioArgumentsPrefix: ["-u", "-c", server]);
@@ -443,6 +449,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 "probe-user");
 
             Assert.True(ok, failureMessage);
+            Assert.False(policyStore.TryEvaluateTemporaryProbeDecision(containerId, "probe-user", "binary-mcpb-probe", "host", "probe.example", 443, out _, out _));
             Assert.Empty(tools);
             Assert.Contains(calls, args => args[0] == "build");
             Assert.Contains(calls, args => args[0] == "tag");
