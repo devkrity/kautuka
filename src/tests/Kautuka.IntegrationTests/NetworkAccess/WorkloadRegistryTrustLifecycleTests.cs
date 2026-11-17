@@ -644,7 +644,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             }));
             var registry = new WorkloadRegistry();
             var quarantined = new RegistryEntry(
-                ip, identity.UserId, "agent-a", containerId, "connector", desiredConnector.ConnectorId, "isolated", true,
+                ip, identity.UserId, "agent-a", containerId, "connector", desiredConnector.ConnectorId, "isolated", false,
                 "deny-all", "none", string.Join(',', profile.Relaxations), DateTimeOffset.UtcNow);
             registry.Rebuild([quarantined]);
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
@@ -666,7 +666,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             Assert.Equal(containerId, recovered.ContainerId);
             Assert.Equal("normal", recovered.Egress);
             Assert.Equal("user-agent", recovered.Attribution);
-            Assert.True(recovered.Systemwide);
+            Assert.False(recovered.Systemwide);
             Assert.Equal("writable-rootfs", recovered.CompatProfile);
             Assert.True(registry.IsVerified(ip, containerId));
         }
@@ -884,7 +884,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 effectiveConnector,
                 identity,
                 WorkspaceMcpExecutionContext.Isolated);
-            bool systemwide = identity.Systemwide;
+            bool systemwide = string.Equals(effectiveConnector.CatalogScope, "system", StringComparison.Ordinal);
             string? agentId = string.IsNullOrWhiteSpace(identity.AgentId) ? null : identity.AgentId;
             string inspectJson = CreateConnectorInspectJson(
                 containerId,
@@ -944,7 +944,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                     identity.Kind,
                     connectorId,
                     "isolated",
-                    identity.Systemwide,
+                    false,
                     "deny-all",
                     "none",
                     null,
@@ -1000,7 +1000,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             else
             {
                 Assert.Equal(identity.Egress, recovered.Egress);
-                Assert.Equal(identity.Systemwide ? "none" : "user-agent", recovered.Attribution);
+                Assert.Equal(identity.Egress == "deny-all" ? "none" : "user-agent", recovered.Attribution);
                 Assert.True(registry.IsVerified(ip, containerId));
             }
         }

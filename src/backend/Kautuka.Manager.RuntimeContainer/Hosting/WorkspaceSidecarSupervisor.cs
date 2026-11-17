@@ -1012,7 +1012,6 @@ public sealed class WorkspaceSidecarSupervisor(
                 "--label", "io.kautuka.agent=package-proxy",
                 "--label", "io.kautuka.exec-context=agent-sandbox",
                 "--label", "io.kautuka.kind=agent-sandbox",
-                "--label", "io.kautuka.systemwide=false",
                 "--label", "io.kautuka.egress=normal",
                 "--label", "io.kautuka.compat=",
             ]);

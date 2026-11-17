@@ -63,7 +63,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             AgentId = "",
             ConnectorId = "search",
             Egress = "normal",
-            Systemwide = false,
             StartupGateOpen = true,
             IsBraked = false,
         };
@@ -163,7 +162,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             ConnectorId = "search",
             ExecContext = "isolated",
             Kind = "connector",
-            Systemwide = false,
             Egress = "normal",
             StartupGateOpen = true,
             IsBraked = false,
@@ -1104,7 +1102,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             Kind = "agent-sandbox",
             ExecContext = "agent-sandbox",
             Egress = "deny-all",
-            Systemwide = false,
             StartupGateOpen = true,
             IsBraked = false
         };

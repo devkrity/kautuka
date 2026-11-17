@@ -891,7 +891,6 @@ public sealed class PodmanContainerTool(
             AgentId = IsAgentScope(context) ? context.AgentId ?? context.ScopeId : string.Empty,
             ExecContext = "agent-sandbox",
             Kind = "agent-sandbox",
-            Systemwide = false,
             Egress = hasUserAgentIdentity ? "normal" : "deny-all",
             Persistent = true,
             WorkingDirectory = context.ContainerWorkspacePath,

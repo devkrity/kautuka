@@ -16,7 +16,6 @@ internal static class ConnectorContainerSpecBuilder
     internal readonly record struct ConnectorIdentity(
         string UserId,
         string AgentId,
-        bool Systemwide,
         string Egress,
         string Kind);
 
@@ -35,14 +34,12 @@ internal static class ConnectorContainerSpecBuilder
         string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
             ? (workspaceContext?.AgentId ?? workspaceContext?.ScopeId ?? string.Empty)
             : string.Empty;
-        bool systemwide = string.Equals(connector.CatalogScope, "system", StringComparison.OrdinalIgnoreCase);
 
         if (connector.IsInternalSystemConnector)
         {
             return new ConnectorIdentity(
                 userId,
                 string.Empty,
-                systemwide,
                 "deny-all",
                 "system");
         }
@@ -57,7 +54,7 @@ internal static class ConnectorContainerSpecBuilder
             throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
         }
 
-        return new ConnectorIdentity(userId, agentId, systemwide, "normal", "connector");
+        return new ConnectorIdentity(userId, agentId, "normal", "connector");
     }
 
     public static List<string> BuildRun(
@@ -88,7 +85,6 @@ internal static class ConnectorContainerSpecBuilder
             _ => "isolated"
         };
 
-        bool systemwide = identity.Systemwide;
         string egress = identity.Egress;
         string effectiveIp = allocatedIp;
 
@@ -134,7 +130,6 @@ internal static class ConnectorContainerSpecBuilder
             ConnectorId = connector.ConnectorId,
             ExecContext = execContext,
             Kind = identity.Kind,
-            Systemwide = systemwide,
             Egress = egress,
             Purpose = purpose,
             Persistent = persistent,

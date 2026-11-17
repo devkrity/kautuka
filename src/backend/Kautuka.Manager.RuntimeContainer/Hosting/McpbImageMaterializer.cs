@@ -603,7 +603,6 @@ public sealed class McpbImageMaterializer(
             Kind = "builder",
             ExecContext = "builder",
             Egress = "proxy-only",
-            Systemwide = false,
             Persistent = false,
             Replace = true,
             ManagerRole = "builder",

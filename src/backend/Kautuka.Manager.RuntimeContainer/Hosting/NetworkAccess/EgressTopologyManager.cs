@@ -631,7 +631,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             string connector = GetStringProperty(labels, "io.kautuka.connector");
                             string execContext = GetStringProperty(labels, "io.kautuka.exec-context");
                             string kind = GetStringProperty(labels, "io.kautuka.kind");
-                            string systemwideStr = GetStringProperty(labels, "io.kautuka.systemwide");
                             string egress = GetStringProperty(labels, "io.kautuka.egress");
                             string compat = GetStringProperty(labels, "io.kautuka.compat");
                             string purpose = GetStringProperty(labels, "io.kautuka.purpose");
@@ -661,8 +660,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
                                 continue;
                             }
-
-                            bool systemwide = string.Equals(systemwideStr, "true", StringComparison.OrdinalIgnoreCase);
 
                             // Find IP on kautuka-workload
                             string ip = string.Empty;
@@ -717,7 +714,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 kind,
                                 string.IsNullOrWhiteSpace(connector) ? null : connector,
                                 execContext,
-                                systemwide,
+                                false,
                                 // Labels identify a candidate workload, but they are not proof that
                                 // its post-start security verification completed in this process.
                                 // Rebuilt entries stay quarantined until an authoritative desired

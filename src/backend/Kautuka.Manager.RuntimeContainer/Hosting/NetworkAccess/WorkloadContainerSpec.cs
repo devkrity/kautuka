@@ -57,7 +57,6 @@ public sealed record WorkloadContainerSpec
     public string ConnectorId { get; init; } = string.Empty;
     public string ExecContext { get; init; } = "isolated";
     public string Kind { get; init; } = "connector";
-    public bool Systemwide { get; init; }
     public string Egress { get; init; } = "normal";
 
     // Manager labels:
@@ -231,7 +230,6 @@ public sealed record WorkloadContainerSpec
             "--label", $"io.kautuka.connector={ConnectorId ?? string.Empty}",
             "--label", $"io.kautuka.exec-context={ExecContext ?? string.Empty}",
             "--label", $"io.kautuka.kind={Kind ?? string.Empty}",
-            "--label", $"io.kautuka.systemwide={(Systemwide ? "true" : "false")}",
             "--label", $"io.kautuka.egress={Egress ?? string.Empty}",
             "--label", $"io.kautuka.compat={compatLabel}",
         ]);

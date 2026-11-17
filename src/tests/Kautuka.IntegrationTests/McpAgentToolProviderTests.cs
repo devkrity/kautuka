@@ -298,7 +298,6 @@ public sealed class McpAgentToolProviderTests
                 string.Empty, [], true, true, null, null, [], 30, 600);
             ConnectorContainerSpecBuilder.ConnectorIdentity identity =
                 ConnectorContainerSpecBuilder.ResolveIdentity(connector, launchContext, purpose: null);
-            Assert.False(identity.Systemwide);
             Assert.Equal("deny-all", identity.Egress);
             Assert.Equal("system", identity.Kind);
             Assert.Equal("user-alpha", identity.UserId);
@@ -312,7 +311,7 @@ public sealed class McpAgentToolProviderTests
 
             registry.Register(new RegistryEntry(
                 "10.247.1.44", identity.UserId, null, "internal-markitdown", identity.Kind,
-                request.ConnectorId, "isolated", identity.Systemwide, identity.Egress, "none", null,
+                request.ConnectorId, "isolated", false, identity.Egress, "none", null,
                 DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.44", "93.184.216.34", 443, "parser-egress.example", true));

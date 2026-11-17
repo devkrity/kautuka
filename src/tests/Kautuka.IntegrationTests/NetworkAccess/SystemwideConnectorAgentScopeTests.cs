@@ -63,7 +63,6 @@ public sealed class SystemwideConnectorAgentScopeTests
         ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(connector, workspace, null);
         Assert.Equal("alice", identity.UserId);
         Assert.Equal("agent-a", identity.AgentId);
-        Assert.True(identity.Systemwide);
         Assert.Equal("agent-a", PodmanContainerTool.BuildSandboxRegistryEntry(workspace, "10.247.1.12", "sandbox").AgentId);
     }
 

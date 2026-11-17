@@ -27,7 +27,6 @@ public sealed class ConnectorContainerSpecBuilderTests
             ConnectorContainerSpecBuilder.ResolveIdentity(connector, CreateWorkspaceContext(), purpose: null);
         Assert.Equal("user-alpha", identity.UserId);
         Assert.Equal("agent-alpha", identity.AgentId);
-        Assert.False(identity.Systemwide);
         Assert.Equal("normal", identity.Egress);
     }
 
@@ -57,7 +56,6 @@ public sealed class ConnectorContainerSpecBuilderTests
         ConnectorContainerSpecBuilder.ConnectorIdentity identity =
             ConnectorContainerSpecBuilder.ResolveIdentity(connector, null, purpose: null);
 
-        Assert.True(identity.Systemwide);
         Assert.Equal("deny-all", identity.Egress);
         Assert.Equal("system", identity.Kind);
     }
@@ -81,10 +79,11 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
             persistent: true, allocatedIp: "10.247.1.31", isBraked: false);
 
+        Assert.DoesNotContain(alphaArgs, arg => arg.StartsWith("io.kautuka.systemwide=", StringComparison.Ordinal));
+
         Assert.Contains("io.kautuka.user=user-alpha", alphaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
-        Assert.Contains("io.kautuka.systemwide=true", alphaArgs, StringComparer.Ordinal);
-        Assert.Contains("io.kautuka.systemwide=true", betaArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain(betaArgs, arg => arg.StartsWith("io.kautuka.systemwide=", StringComparison.Ordinal));
         Assert.Contains("io.kautuka.kind=system", alphaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.kind=system", betaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.egress=deny-all", alphaArgs, StringComparer.Ordinal);
@@ -116,16 +115,14 @@ public sealed class ConnectorContainerSpecBuilderTests
             connector with { ConnectorId = "user-beta::shared-provider" }, "beta-container", WorkspaceMcpExecutionContext.Isolated, userBeta,
             persistent: true, allocatedIp: "10.247.1.31", isBraked: false);
 
-        Assert.True(alpha.Systemwide);
-        Assert.True(beta.Systemwide);
         Assert.Equal("user-alpha", alpha.UserId);
         Assert.Equal("user-beta", beta.UserId);
         Assert.Equal(userAlpha.ScopeId, alpha.AgentId);
         Assert.Equal(userBeta.ScopeId, beta.AgentId);
         Assert.Equal("connector", alpha.Kind);
         Assert.Equal("normal", alpha.Egress);
-        Assert.Contains("io.kautuka.systemwide=true", alphaArgs, StringComparer.Ordinal);
-        Assert.Contains("io.kautuka.systemwide=true", betaArgs, StringComparer.Ordinal);
+        Assert.DoesNotContain(alphaArgs, arg => arg.StartsWith("io.kautuka.systemwide=", StringComparison.Ordinal));
+        Assert.DoesNotContain(betaArgs, arg => arg.StartsWith("io.kautuka.systemwide=", StringComparison.Ordinal));
         Assert.Contains("io.kautuka.user=user-alpha", alphaArgs, StringComparer.Ordinal);
         Assert.Contains("io.kautuka.user=user-beta", betaArgs, StringComparer.Ordinal);
         Assert.NotEqual(
@@ -139,10 +136,10 @@ public sealed class ConnectorContainerSpecBuilderTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.30", alpha.UserId, alpha.AgentId, "alpha-container", alpha.Kind, connector.ConnectorId,
-                "isolated", alpha.Systemwide, alpha.Egress, "user-agent", null, DateTimeOffset.UtcNow));
+                "isolated", false, alpha.Egress, "user-agent", null, DateTimeOffset.UtcNow));
             registry.Register(new RegistryEntry(
                 "10.247.1.31", beta.UserId, beta.AgentId, "beta-container", beta.Kind, "user-beta::shared-provider",
-                "isolated", beta.Systemwide, beta.Egress, "user-agent", null, DateTimeOffset.UtcNow));
+                "isolated", false, beta.Egress, "user-agent", null, DateTimeOffset.UtcNow));
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, registry);
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
