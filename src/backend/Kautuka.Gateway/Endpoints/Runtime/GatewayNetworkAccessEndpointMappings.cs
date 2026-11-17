@@ -509,7 +509,15 @@ internal static partial class GatewayRuntimeEndpointMappings
                 TargetIsAdmin = targetIsAdmin,
             };
 
-            NetworkAccessUserPrivilegesMessage response = await managerService.SetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
+            NetworkAccessUserPrivilegesMessage response;
+            try
+            {
+                response = await managerService.SetUserPrivilegesAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not confirm the privilege change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var result = new UserNetworkPrivilegesDto(
                 UserId: response.UserId,
