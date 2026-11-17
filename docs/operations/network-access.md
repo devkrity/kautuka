@@ -147,6 +147,8 @@ flowchart LR
 
 The package proxy runs at `10.247.0.3` on the workload network. Package clients resolve its name to a reserved service address and reach it through Envoy; Manager policy controls the connection. The proxy’s own upstream requests also pass through Envoy and Manager policy. Windows local development has been checked with a PyPI index request and a `uv` package install; this does not establish production or Linux live acceptance.
 
+The package proxy is not an npm/PyPI-only service. The pinned `git-pkgs/proxy` image includes other package protocols, including Composer. Its [Composer download handler](https://github.com/git-pkgs/proxy/blob/a45befd0674981d504ae542afad6c9db110e903d/internal/handler/composer.go) obtains the artifact URL from registry metadata and fetches that URL. Manager's built-in public-internet allowance for the proxy therefore does not restrict its upstream destinations to npm and PyPI hosts. A workload that can reach the proxy can request its supported endpoints; the security implications of registry-controlled artifact URLs and redirects have not been demonstrated end to end. Do not treat package-proxy access as equivalent to access only to npm and PyPI.
+
 ### Key Architectural Pillars
 
 1. **Centralized Static Egress Pod (`kautuka-egress`)**:
