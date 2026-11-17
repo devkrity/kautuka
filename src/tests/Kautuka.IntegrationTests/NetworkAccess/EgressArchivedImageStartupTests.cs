@@ -1,0 +1,71 @@
+using Kautuka.Manager.RuntimeContainer.Configuration;
+using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+using Kautuka.NetworkAccessController;
+
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace Kautuka.IntegrationTests.NetworkAccess;
+
+public sealed class EgressArchivedImageStartupTests
+{
+    [Fact]
+    public async Task ProductionInitializationLoadsArchivedEgressImagesBeforeCreatingNetworks()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-archived-egress-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Kautuka:Mode"] = "dev",
+                ["Kautuka:ContainerStateRoot"] = root,
+            }).Build();
+            var paths = new WorkspaceRuntimePaths(configuration, new TestHostEnvironment(), NullLogger<WorkspaceRuntimePaths>.Instance);
+            string envoyArchive = Path.Combine(paths.OciImagesRoot, "envoy.tar");
+            string dnsArchive = Path.Combine(paths.OciImagesRoot, "coredns.tar");
+            await File.WriteAllTextAsync(envoyArchive, "fixture", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(dnsArchive, "fixture", TestContext.Current.CancellationToken);
+            var calls = new List<string>();
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                calls.Add(string.Join(" ", args));
+                int code = args[0] == "network" || args.SequenceEqual(["image", "exists", EgressTopologyManager.EnvoyPinnedImage])
+                    || args.SequenceEqual(["image", "exists", EgressTopologyManager.CoreDnsPinnedImage]) ? 1 : 0;
+                return Task.FromResult(new PodmanCommandResult(code, string.Empty, string.Empty));
+            });
+            var images = new RuntimeImageAllowlist(1,
+            [
+                new RuntimeImageEntry("envoy", EgressTopologyManager.EnvoyPinnedImage, "envoy.tar"),
+                new RuntimeImageEntry("coredns", EgressTopologyManager.CoreDnsPinnedImage, "coredns.tar"),
+            ]);
+            var registry = new WorkloadRegistry();
+            var services = new ServiceCollection();
+            services.AddSingleton(podman);
+            services.AddSingleton(new WorkloadAddressAllocator(Path.Combine(root, "ip.json")));
+            services.AddSingleton(new WorkloadPostStartVerifier(podman));
+            services.AddSingleton<IWorkloadRegistry>(registry);
+            services.AddSingleton(new PodmanImageArchiveStore(podman, paths, images, NullLogger<PodmanImageArchiveStore>.Instance));
+            await using ServiceProvider provider = services.BuildServiceProvider();
+            await using EgressTopologyManager manager = ActivatorUtilities.CreateInstance<EgressTopologyManager>(provider, root);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => manager.InitializeProductionAsync(registry, false, TestContext.Current.CancellationToken));
+            int network = calls.FindIndex(call => call.StartsWith("network ", StringComparison.Ordinal));
+            int envoy = calls.IndexOf("load -i " + envoyArchive);
+            int dns = calls.IndexOf("load -i " + dnsArchive);
+            Assert.True(envoy >= 0 && dns >= 0 && network > envoy && network > dns, string.Join("; ", calls));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private sealed class TestHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "NacTest";
+        public string ContentRootPath { get; set; } = Path.GetTempPath();
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+}

@@ -78,6 +78,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly string startupGateFilePath;
     private readonly string hookLogFilePath;
     private readonly ILogger<EgressTopologyManager> logger;
+    private readonly PodmanImageArchiveStore? imageArchives;
     private readonly string? windowsDecisionEndpointIp;
     private readonly string? windowsEnvoyCertificateDirectory;
     private readonly string? windowsPodmanMachineName;
@@ -129,7 +130,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         WorkspaceDesiredStateStore? desiredStateStore = null,
         ImageCompatibilityStore? imageCompatibilityStore = null,
         NetworkAccessPolicyStore? policyStore = null,
-        bool useDevelopmentSelinuxDomain = false)
+        bool useDevelopmentSelinuxDomain = false,
+        PodmanImageArchiveStore? imageArchives = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -144,6 +146,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.imageCompatibilityStore = imageCompatibilityStore;
         this.policyStore = policyStore;
         this.useDevelopmentSelinuxDomain = useDevelopmentSelinuxDomain;
+        this.imageArchives = imageArchives;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -482,6 +485,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             IsStartupGateOpen = false;
             logger.LogError("Prerequisite check failed: Podman is not operational: {StdErr}", infoResult.StdErr);
             throw new InvalidOperationException($"Podman prerequisite check failed: {infoResult.StdErr}");
+        }
+
+        if (imageArchives is not null)
+        {
+            await imageArchives.TryEnsureImageAsync(EnvoyPinnedImage, cancellationToken).ConfigureAwait(false);
+            await imageArchives.TryEnsureImageAsync(CoreDnsPinnedImage, cancellationToken).ConfigureAwait(false);
         }
 
         // 1. Ensure networks exist
