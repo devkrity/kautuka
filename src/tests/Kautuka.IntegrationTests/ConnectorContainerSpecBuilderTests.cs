@@ -18,7 +18,7 @@ public sealed class ConnectorContainerSpecBuilderTests
 
         ContainerContext userOnly = CreateWorkspaceContext() with { ScopeType = "user", ScopeId = "user-alpha" };
         ConnectorContainerSpecBuilder.ConnectorIdentity discovery =
-            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userOnly, purpose: null);
+            ConnectorContainerSpecBuilder.ResolveIdentity(connector, userOnly, purpose: "save-discovery");
         Assert.Equal("user-alpha", discovery.UserId);
         Assert.True(string.IsNullOrEmpty(discovery.AgentId));
         Assert.Equal("normal", discovery.Egress);

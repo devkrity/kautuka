@@ -135,7 +135,7 @@ public sealed class NetworkAccessMatchingModelTests
             using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
             NetworkAccessDecisionResult Check() => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
             NetworkAccessDecisionResult denied = Check();
             Assert.False(denied.Allowed);
@@ -144,7 +144,7 @@ public sealed class NetworkAccessMatchingModelTests
             store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
             Assert.True(registry.Deregister("10.247.1.10", "container"));
             Assert.Contains(store.ListRequests(new NetworkAccessActor("alice", false)).Requests, item => item.Request.Id == denied.RequestId);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
             DecideRequestResult approval = store.DecideRequest(new NetworkAccessActor("alice", false), denied.RequestId!, true, "connector", store.Revision);
             Assert.Equal("alice::web", approval.Rule?.ConnectorId);
             Assert.True(Check().Allowed);

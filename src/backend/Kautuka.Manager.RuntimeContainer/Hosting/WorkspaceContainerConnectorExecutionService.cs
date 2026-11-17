@@ -792,7 +792,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ConnectorContainerSpecBuilder.ConnectorIdentity launchIdentity = ConnectorContainerSpecBuilder.ResolveIdentity(
             connector,
             workspaceContext,
-            isProbe && !saveDiscovery ? "probe" : null);
+            isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null);
         string? launchUserId = string.IsNullOrWhiteSpace(launchIdentity.UserId) ? null : launchIdentity.UserId;
         workloadLaunchGate?.EnsureLaunchAllowed(launchUserId);
         NetworkAccess.IWorkloadLaunchLease launchLease = workloadLaunchGate is null
@@ -873,7 +873,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
                     connector,
                     workspaceContext,
-                    isProbe && !saveDiscovery ? "probe" : null);
+                    isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null);
                 string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
                     .AllocateNextIp(workloadRegistry);
                 ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
@@ -896,7 +896,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                         attribution,
                         compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                         DateTimeOffset.UtcNow,
-                        isProbe && !saveDiscovery ? "probe" : null);
+                        isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null);
                 if (workloadRegistry is not null
                     && !workloadRegistry.TryRegisterQuarantined(desiredIdentity with { Egress = desiredIdentity.Egress == "deny-all" ? "deny-all" : "proxy-only", Attribution = "none" }))
                 {
@@ -912,7 +912,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     persistent: false,
                     allocatedIp: allocatedIp,
                     isBraked: isBraked,
-                    purpose: isProbe && !saveDiscovery ? "probe" : null,
+                    purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
                     compatProfile: compatProfile);
             }
             else
@@ -1220,7 +1220,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ConnectorContainerSpecBuilder.ConnectorIdentity identity = ConnectorContainerSpecBuilder.ResolveIdentity(
             connector,
             identityContext ?? workspaceContext,
-            isProbe && !saveDiscovery ? "probe" : null);
+            isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null);
         ImageCompatibilityResolution imageResolution = await ResolveImageCompatibilityAsync(connector.Image, cancellationToken).ConfigureAwait(false);
         connector = connector with { Image = imageResolution.Image };
         NetworkAccess.ImageCompatProfile? compatProfile = imageResolution.Profile;
@@ -1301,7 +1301,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 attribution,
                 compatProfile is not null ? string.Join(',', compatProfile.Relaxations) : null,
                 DateTimeOffset.UtcNow,
-                isProbe && !saveDiscovery ? "probe" : null);
+                isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null);
 
         if (workloadRegistry is not null
             && !workloadRegistry.TryRegisterQuarantined(desiredIdentity with { Egress = "deny-all", Attribution = "none" }))
@@ -1317,7 +1317,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             persistent: true,
             allocatedIp: allocatedIp,
             isBraked: isBraked,
-            purpose: isProbe && !saveDiscovery ? "probe" : null,
+            purpose: isProbe ? (saveDiscovery ? "save-discovery" : "probe") : null,
             compatProfile: compatProfile);
 
         PodmanCommandResult result = await podmanCommandRunner

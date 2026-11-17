@@ -435,6 +435,8 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
         {
             if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(connectorId) || !string.IsNullOrEmpty(agentId))
                 throw new ArgumentException("User-attributed connector requires userId and connectorId without agentId.", nameof(entry));
+            if (entry.Kind == "connector" && entry.Purpose is not ("probe" or "save-discovery"))
+                throw new ArgumentException("A connector without an agent must be a probe or save discovery.", nameof(entry));
         }
         else
         {

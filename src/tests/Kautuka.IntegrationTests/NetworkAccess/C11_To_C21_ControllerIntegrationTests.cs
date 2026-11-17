@@ -176,7 +176,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "normal",
                 "user",
                 null,
-                DateTimeOffset.UtcNow));
+                DateTimeOffset.UtcNow, "save-discovery"));
             registry.Register(new RegistryEntry(
                 "10.247.0.24",
                 "user-a",
@@ -189,7 +189,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "normal",
                 "user",
                 null,
-                DateTimeOffset.UtcNow));
+                DateTimeOffset.UtcNow, "save-discovery"));
 
             ServerCallContext ctx = CreateCallContext();
             var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
@@ -1238,7 +1238,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             var registry = new WorkloadRegistry();
             var controller = new NacController(store, registry);
 
-            // A connector can have a user and connector identity without an agent.
+            // Save discovery can have a user and connector identity without an agent.
             registry.Register(new RegistryEntry(
                 "10.247.1.100",
                 "user-x",
@@ -1252,7 +1252,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Attribution: "user",
                 CompatProfile: null,
                 DateTimeOffset.UtcNow,
-                Purpose: null));
+                Purpose: "save-discovery"));
 
             RegistryEntry? reg = registry.FindByIp("10.247.1.100");
             Assert.NotNull(reg);
@@ -1482,8 +1482,8 @@ public sealed class C11_To_C21_ControllerIntegrationTests
 
             registry.Deregister("10.247.1.120", "sys-probe-ctr");
             registry.Register(new RegistryEntry(
-                "10.247.1.121", "user-x", null, "sys-runtime-ctr", "connector", "conn-sys", "isolated",
-                Systemwide: true, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
+                "10.247.1.121", "user-x", "agent-x", "sys-runtime-ctr", "connector", "conn-sys", "isolated",
+                Systemwide: true, Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
             Assert.False(controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.121", "93.184.216.34", 443, "sys-probe.example.com")).Allowed);
         }
@@ -1758,7 +1758,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
 
             RegisterAgent(registry, "10.247.1.80", "user-a", "a1");
             registry.Register(new RegistryEntry(
-                "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+                "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
 
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-block.example.com"));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-allow.example.com"));

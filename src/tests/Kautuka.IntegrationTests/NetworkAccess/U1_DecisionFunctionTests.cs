@@ -270,7 +270,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.31", "user-x", null, "ctr-user-connector", "connector", "connector-x", "isolated",
-            true, "normal", "user", null, DateTimeOffset.UtcNow));
+            true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
         NetworkAccessDecisionResult userConnectorPackage = controller.EvaluateContainerConnection(
             "10.247.1.31", "198.18.250.249", 20101, isTls: false, sni: null);
         Assert.False(userConnectorPackage.Allowed);
@@ -455,10 +455,10 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         const string connectorId = "system::shared-provider";
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.51", "user-alpha", null, "system-provider-alpha", "connector", connectorId,
-            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.52", "user-beta", null, "system-provider-beta", "connector", connectorId,
-            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow));
+            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
 
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
         (_, NetworkAccessRuleView alphaRule) = controller.PolicyStore.SetRule(

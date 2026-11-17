@@ -177,6 +177,8 @@ During post-start verification, an ephemeral connector with normal egress can re
 
 Testing a saved local connector updates its shared tool definitions only when the caller can manage that connector and supplies no custom test environment values. Other authorized users can still test it without changing the shared definitions.
 
+Runtime connector workloads require both a user and an agent identity. Connector tests and save-time discovery may run without an agent and use the user's connector scope.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .
