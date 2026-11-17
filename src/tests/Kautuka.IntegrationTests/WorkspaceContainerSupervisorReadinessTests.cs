@@ -1,8 +1,10 @@
 using Kautuka.Manager.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
@@ -17,6 +19,37 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceContainerSupervisorReadinessTests
 {
+    [Fact]
+    public async Task RoutineReconcileKeepsVerifiedWorkloadIdentity()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-supervisor-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var store = new WorkspaceDesiredStateStore();
+        store.ApplyDesiredState(1, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Bootstrap, CreateRuntimeSettings(root), [], [], []);
+        var registry = new WorkloadRegistry();
+        var restricted = new RegistryEntry("10.247.1.42", "alice", "agent-a", "container-a", "connector", "alice::tool", "isolated", false, "deny-all", "none", null, DateTimeOffset.UtcNow);
+        Assert.True(registry.TryRegisterQuarantined(restricted));
+        Assert.True(registry.TryPromoteVerified(restricted, restricted with { Egress = "normal", Attribution = "user-agent" }));
+        var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed)));
+        var topology = new EgressTopologyManager(runner, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")), new WorkloadPostStartVerifier(runner, store), registry, root);
+        var adapter = new BlockingImageRuntimeAdapter();
+        var worker = CreateWorker(store, new WorkspaceReadinessGate(), adapter, root, topology);
+        try
+        {
+            await worker.StartAsync(TestContext.Current.CancellationToken);
+            await adapter.FirstImageEntered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.True(registry.IsVerified("10.247.1.42", "container-a"));
+            Assert.Equal("normal", registry.FindByIp("10.247.1.42")?.Egress);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+            worker.Dispose();
+            await topology.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task RuntimeGateWaitsForInitialSandboxImagePreparation()
     {
@@ -138,7 +171,8 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
         WorkspaceDesiredStateStore store,
         WorkspaceReadinessGate gate,
         IManagerRuntimeAdapter adapter,
-        string root)
+        string root,
+        EgressTopologyManager? topology = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -175,7 +209,8 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
             new WorkspaceExecTracker(),
             startup,
             NullLogger<WorkspaceContainerSupervisorWorker>.Instance,
-            Path.Combine(root, "runtime-sockets"));
+            Path.Combine(root, "runtime-sockets"),
+            topology);
     }
 
     private static ManagerRuntimeSettings CreateRuntimeSettings(string root, int defaultTimeout = 120)

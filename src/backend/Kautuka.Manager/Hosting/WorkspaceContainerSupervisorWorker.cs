@@ -214,7 +214,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
         if (egressTopologyManager is not null)
         {
-            await egressTopologyManager.RebuildRegistryFromLiveContainersAsync(cancellationToken).ConfigureAwait(false);
             if (!egressTopologyManager.IsPackageProxyRegistered)
             {
                 egressTopologyManager.SetPackageProxyReady(false);
