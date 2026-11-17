@@ -4,6 +4,7 @@ import { PendingApprovalCard } from './PendingApprovalCard';
 import type {
   NetworkAccessRequestDto,
   RequestDecisionDto,
+  RequestDecisionResponseDto,
   UserPrivilegesSummaryDto,
 } from '../networkAccess';
 
@@ -12,7 +13,7 @@ interface GroupedPendingCardsProps {
   currentUser?: { id?: string; displayName?: string | null; role?: string };
   userPrivileges?: UserPrivilegesSummaryDto;
   expectedRevision: number;
-  onDecide: (decision: RequestDecisionDto, requestId: string) => Promise<unknown>;
+  onDecide: (decision: RequestDecisionDto, requestId: string) => Promise<RequestDecisionResponseDto>;
   disabled?: boolean;
 }
 
@@ -80,16 +81,20 @@ export function GroupedPendingCards({
   const handleAllowAllInGroup = async (group: RequestGroup) => {
     setSubmittingGroupId(group.key);
     try {
+      let revision = expectedRevision;
       for (const req of group.requests) {
-        await onDecide(
+        const result = await onDecide(
           {
             allow: true,
             scope: 'agent',
-            expectedRevision,
+            expectedRevision: revision,
           },
           req.id
         );
+        revision = result.revision;
       }
+    } catch {
+      // The parent displays the error and refreshes the current policy.
     } finally {
       setSubmittingGroupId(null);
     }

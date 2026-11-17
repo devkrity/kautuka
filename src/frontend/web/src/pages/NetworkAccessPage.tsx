@@ -133,15 +133,17 @@ export function NetworkAccessPage() {
   const handleDecide = async (decision: RequestDecisionDto, requestId: string) => {
     setGeneralError(null);
     try {
-      await decideMutation.mutateAsync({
+      const result = await decideMutation.mutateAsync({
         requestId,
         decision,
       });
       await requestsQuery.refetch();
       await rulesQuery.refetch();
+      return result;
     } catch (err) {
       setGeneralError(mapApiError(err));
       await requestsQuery.refetch();
+      throw err;
     }
   };
 

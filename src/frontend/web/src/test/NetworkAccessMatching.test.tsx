@@ -7,12 +7,45 @@ import type { NetworkAccessRequestDto } from '@/features/network-access/networkA
 import { UserNetworkPrivilegesForm } from '@/features/network-access/components/UserNetworkPrivilegesForm';
 import { RulesList } from '@/features/network-access/components/RulesList';
 import { RuleScopeEditor } from '@/features/network-access/components/RuleScopeEditor';
+import { GroupedPendingCards } from '@/features/network-access/components/GroupedPendingCards';
 import type { NetworkAccessRuleDto } from '@/features/network-access/networkAccess';
 
 vi.mock('@/features/settings/api/queries', () => ({ useAgents: () => ({ data: [] }) }));
 vi.mock('@/features/connectors/api/queries', () => ({ useConnectors: () => ({ data: [{ id: 'web', name: 'Web Tools', scope: 'user', ownerUserId: 'alice' }] }) }));
 
 describe('network access user scopes', () => {
+  it('uses the revision returned by each decision when allowing a group', async () => {
+    const request: NetworkAccessRequestDto = {
+      id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'My Assistant',
+      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
+    };
+    const onDecide = vi.fn().mockImplementation(async (decision: { expectedRevision: number }) => {
+      const expected = 4 + onDecide.mock.calls.length - 1;
+      if (decision.expectedRevision !== expected) throw new Error('revision conflict');
+      return { revision: expected + 1 };
+    });
+    render(<GroupedPendingCards requests={[request, { ...request, id: 'two', destination: 'two.example' }]}
+      currentUser={{ id: 'alice', role: 'user' }} userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Allow all 2' }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledTimes(2));
+    expect(onDecide).toHaveBeenNthCalledWith(2, expect.objectContaining({ expectedRevision: 5 }), 'two');
+  });
+  it('stops the group when a decision fails', async () => {
+    const request: NetworkAccessRequestDto = {
+      id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'My Assistant',
+      systemwide: false, attribution: 'user-agent', destination: 'one.example', destKind: 'host',
+      port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
+    };
+    const onDecide = vi.fn().mockRejectedValue(new Error('revision conflict'));
+    render(<GroupedPendingCards requests={[request, { ...request, id: 'two', destination: 'two.example' }]}
+      currentUser={{ id: 'alice', role: 'user' }} userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Allow all 2' }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Allow all 2' })).toBeEnabled());
+  });
   it('explains each approval scope without exposing runtime connector IDs', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'request-scopes', userId: 'alice', userDisplayName: 'Alice', agentId: 'agent-1',

@@ -106,6 +106,8 @@ export function PendingApprovalCard({
     setSubmitting(true);
     try {
       await onDecide({ allow: true, scope: 'connector', allowLan: isAdmin && allowLan ? true : undefined, expectedRevision });
+    } catch {
+      // Handled by parent error state
     } finally {
       setSubmitting(false);
     }

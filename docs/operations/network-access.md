@@ -22,6 +22,7 @@ Agent runtime construction, including model capability probing, uses the run's u
 Background memory extraction uses the originating session's owner and agent for network checks; a missing session does not gain an identity.
 Catalogue artifact downloads follow redirects with a bounded hop count. Each destination is checked by NAC before the next request is sent.
 Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host.
+When approving a group, each decision uses the revision returned by the previous decision; the sequence stops if a decision fails.
 The release image inventory includes archives for the pinned Envoy and CoreDNS images so the release archive scanner includes them. First-boot loading before egress startup still requires separate verification.
 
 On Linux, existing Envoy, CoreDNS, and boundary containers are reused only when their recorded Podman create command matches the requested image and arguments and their resolved image ID matches the current image reference. This also detects a locally rebuilt boundary image under the same tag. Drift stops the egress pod, confirms every present member is inactive and the pod infra member is valid, then removes only the stale named container before recreation. Missing peer containers do not block replacement in a partially created pod. If pod state, stop, or removal cannot be confirmed, startup fails closed. Focused simulated Podman coverage checks image ID, arguments, and partial-pod recovery; this is not live Podman verification.
