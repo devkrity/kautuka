@@ -2,7 +2,7 @@ using System.Text.Json;
 
 using Microsoft.Extensions.AI;
 
-namespace Kautuka.Gateway.Infrastructure.Agents;
+namespace Kautuka.Gateway.Domain.Execution;
 
 internal static class AgentToolSurfaceSources
 {
