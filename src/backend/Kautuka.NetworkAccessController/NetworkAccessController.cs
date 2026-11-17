@@ -493,7 +493,6 @@ public sealed class NetworkAccessController
             Kind: !string.IsNullOrEmpty(connectorId) ? "connector" : "agent-sandbox",
             ConnectorId: connectorId,
             ExecContext: "app",
-            Systemwide: false,
             Egress: "normal",
             Attribution: userConnectorWithoutAgent ? "user" : "user-agent",
             CompatProfile: null,

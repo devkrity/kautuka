@@ -381,7 +381,7 @@ public sealed class TopologyLaunchAdmissionRaceTests
                 workloadRunning = true;
                 registry.Register(new RegistryEntry(
                     "10.247.1.44", "user-a", "agent-a", "in-flight-cid", "agent-sandbox", null,
-                    "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                    "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             }, TestContext.Current.CancellationToken);
             await admissionPassed.Task.WaitAsync(TestContext.Current.CancellationToken);
 

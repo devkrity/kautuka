@@ -182,8 +182,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
 
         controller.Registry.Register(new RegistryEntry(
-            "10.247.1.20", null, null, "ctr-builder", "builder", null, "builder", false,
-            "proxy-only", "none", null, DateTimeOffset.UtcNow));
+            "10.247.1.20", null, null, "ctr-builder", "builder", null, "builder", "proxy-only", "none", null, DateTimeOffset.UtcNow));
         NetworkAccessDecisionResult builderPackage = controller.EvaluateContainerConnection(
             "10.247.1.20", packageServiceIp, packageServicePort, isTls: false, sni: null);
         Assert.True(builderPackage.Allowed, builderPackage.Reason);
@@ -197,8 +196,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         Assert.False(builderOtherIp.Allowed);
 
         controller.Registry.Register(new RegistryEntry(
-            "10.247.1.21", null, null, "ctr-deny-all", "system", null, "system", false,
-            "deny-all", "none", null, DateTimeOffset.UtcNow));
+            "10.247.1.21", null, null, "ctr-deny-all", "system", null, "system", "deny-all", "none", null, DateTimeOffset.UtcNow));
         Assert.False(controller.EvaluateContainerConnection(
             "10.247.1.21", packageServiceIp, packageServicePort, isTls: false, sni: null).Allowed);
 
@@ -214,7 +212,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
         controller.Registry.Register(new RegistryEntry(
             "10.247.0.3", "system", "package-proxy", "ctr-package-proxy", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         NetworkAccessDecisionResult proxyUpstream = controller.EvaluateContainerConnection(
             "10.247.0.3", "198.18.250.250", 443, isTls: true, sni: "registry.npmjs.org");
         Assert.True(proxyUpstream.Allowed);
@@ -270,7 +268,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.31", "user-x", null, "ctr-user-connector", "connector", "connector-x", "isolated",
-            true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+"normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
         NetworkAccessDecisionResult userConnectorPackage = controller.EvaluateContainerConnection(
             "10.247.1.31", "198.18.250.249", 20101, isTls: false, sni: null);
         Assert.False(userConnectorPackage.Allowed);
@@ -320,7 +318,6 @@ public sealed class U1_DecisionFunctionTests : IDisposable
             Kind: "system",
             ConnectorId: "markitdown",
             ExecContext: "system",
-            Systemwide: false,
             Egress: "deny-all",
             Attribution: "none",
             CompatProfile: null,
@@ -333,7 +330,6 @@ public sealed class U1_DecisionFunctionTests : IDisposable
             Kind: "builder",
             ConnectorId: null,
             ExecContext: "builder",
-            Systemwide: false,
             Egress: "proxy-only",
             Attribution: "none",
             CompatProfile: null,
@@ -434,8 +430,8 @@ public sealed class U1_DecisionFunctionTests : IDisposable
     {
         NacController controller = CreateController(out _);
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-        controller.Registry.Register(new RegistryEntry("10.247.1.40", "user-x", "a1", "ctr-x", "connector", "conn", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
-        controller.Registry.Register(new RegistryEntry("10.247.1.41", "user-y", "a1", "ctr-y", "connector", "conn", "isolated", true, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        controller.Registry.Register(new RegistryEntry("10.247.1.40", "user-x", "a1", "ctr-x", "connector", "conn", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        controller.Registry.Register(new RegistryEntry("10.247.1.41", "user-y", "a1", "ctr-y", "connector", "conn", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         (_, NetworkAccessRuleView connectorRule) = controller.PolicyStore.SetRule(admin,
             new RuleWriteSpec("user", "user-x", null, "conn", "sys.test", "host", 443, Allowed: true), controller.PolicyStore.Revision);
         Assert.True(controller.EvaluateContainerConnection("10.247.1.40", "198.18.250.250", 443, true, "sys.test").Allowed);
@@ -455,10 +451,10 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         const string connectorId = "system::shared-provider";
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.51", "user-alpha", null, "system-provider-alpha", "connector", connectorId,
-            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+            "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
         controller.Registry.Register(new RegistryEntry(
             "10.247.1.52", "user-beta", null, "system-provider-beta", "connector", connectorId,
-            "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+            "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
 
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
         (_, NetworkAccessRuleView alphaRule) = controller.PolicyStore.SetRule(
@@ -557,7 +553,6 @@ public sealed class U1_DecisionFunctionTests : IDisposable
             Kind: "agent-sandbox",
             ConnectorId: null,
             ExecContext: "agent-sandbox",
-            Systemwide: false,
             Egress: "normal",
             Attribution: "user-agent",
             CompatProfile: null,

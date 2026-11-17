@@ -63,7 +63,7 @@ public sealed class PackageProxyNetworkPathTests
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             WorkloadRulesetRenderer.PackageProxyIp, "system", "package-proxy", cid, "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow, "package-proxy"));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, "package-proxy"));
         await using var manager = new EgressTopologyManager(
             podman,
             new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")),

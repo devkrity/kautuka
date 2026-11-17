@@ -9,6 +9,12 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class SystemwideConnectorAgentScopeTests
 {
     [Fact]
+    public void WorkloadRegistryIdentityDoesNotCarryCatalogueAvailability()
+    {
+        Assert.Null(typeof(RegistryEntry).GetProperty("Systemwide"));
+    }
+
+    [Fact]
     public void CatalogueAvailabilityDoesNotChangeNetworkWorkloadFingerprint()
     {
         var connector = new WorkspaceMcpContainerConnectorDefinition("alice::mail", "image", "command", [], true, false, null, null, [], 30, 600) { CatalogScope = "user" };
@@ -29,7 +35,7 @@ public sealed class SystemwideConnectorAgentScopeTests
         Assert.Equal("alice", ConnectorContainerSpecBuilder.ResolveIdentity(connector, workspace, "probe").UserId);
         Assert.Equal("alice", ConnectorContainerSpecBuilder.ResolveIdentity(connector, workspace, "save-discovery").UserId);
         var registry = new WorkloadRegistry();
-        var entry = new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::mail", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow);
+        var entry = new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::mail", "isolated", "normal", "user", null, DateTimeOffset.UtcNow);
         Assert.Throws<ArgumentException>(() => registry.Register(entry));
         registry.Register(entry with { Purpose = "save-discovery" });
     }
@@ -45,11 +51,11 @@ public sealed class SystemwideConnectorAgentScopeTests
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "old", "connector", "alice::mail", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "old", "connector", "alice::mail", "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
             NetworkAccessDecisionResult oldRequest = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "mail.example", true));
             Assert.False(oldRequest.Allowed);
             store.DecideRequest(admin, oldRequest.RequestId!, true, "user", store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.11", "alice", "agent-a", "new", "connector", "alice::mail", "isolated", true, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.11", "alice", "agent-a", "new", "connector", "alice::mail", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.11", "93.184.216.34", 443, "mail.example", true)).Allowed);
         }
         finally { Directory.Delete(root, recursive: true); }
@@ -84,8 +90,8 @@ public sealed class SystemwideConnectorAgentScopeTests
             Assert.Equal("agent-a", gatewayRequest.AgentId);
             Assert.Equal("connector", gatewayRequest.ActorKind);
             store.DecideRequest(new NetworkAccessActor("alice", false), gatewayRequest.Id, true, "agent", store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "agent-a", "container-a", "connector", "alice::mail", "isolated", true, "normal", "user-agent", null, DateTimeOffset.UtcNow));
-            registry.Register(new RegistryEntry("10.247.1.11", "alice", "agent-b", "container-b", "connector", "alice::mail", "isolated", true, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "agent-a", "container-a", "connector", "alice::mail", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.11", "alice", "agent-b", "container-b", "connector", "alice::mail", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult Check(string ip) => controller.EvaluateContainerConnection(new ContainerConnectionInput(ip, "93.184.216.34", 443, "mail.example", true));
             NetworkAccessDecisionResult first = Check("10.247.1.10");
             Assert.False(first.Allowed);

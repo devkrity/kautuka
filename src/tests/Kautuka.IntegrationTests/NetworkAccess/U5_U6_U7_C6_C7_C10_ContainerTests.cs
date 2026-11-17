@@ -733,7 +733,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             "connector",
             "conn-1",
             "isolated",
-            false,
             "normal",
             "user-agent",
             null,
@@ -985,7 +984,6 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
                 "agent-sandbox",
                 null,
                 "agent-sandbox",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -2340,7 +2338,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             "10.247.1.54", "hash-drift", "agent-a", "hash-drift-container", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v754-rules-hash-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(
@@ -2717,7 +2715,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             "10.247.1.43", "hash-drift", "agent-a", "hash-drift-container", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-boundary-drift-ip.json"));
         var verifier = new WorkloadPostStartVerifier(podman);
         await using var manager = new EgressTopologyManager(podman, allocator, verifier, registry, tempDir);
@@ -2746,7 +2744,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             "10.247.1.31", "user-braked", "agent-a", "container-a", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         var calls = new List<string>();
         var podman = new PodmanCommandRunner((args, _) =>
         {
@@ -2774,7 +2772,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         policy.SetBrake(new NetworkAccessActor("admin", true), "user", "alice", true);
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry("10.247.1.31", "alice", "agent", "container-a", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         int stopAttempts = 0;
         var podman = new PodmanCommandRunner((args, _) =>
         {

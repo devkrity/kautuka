@@ -311,7 +311,7 @@ public sealed class McpAgentToolProviderTests
 
             registry.Register(new RegistryEntry(
                 "10.247.1.44", identity.UserId, null, "internal-markitdown", identity.Kind,
-                request.ConnectorId, "isolated", false, identity.Egress, "none", null,
+                request.ConnectorId, "isolated", identity.Egress, "none", null,
                 DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.44", "93.184.216.34", 443, "parser-egress.example", true));

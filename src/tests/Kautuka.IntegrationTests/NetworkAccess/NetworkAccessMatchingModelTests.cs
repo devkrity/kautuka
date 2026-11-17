@@ -25,7 +25,7 @@ public sealed class NetworkAccessMatchingModelTests
             store.SetRule(new NetworkAccessActor("alice", true), new RuleWriteSpec("user", "alice", null, null, "admin.example", "host", 443, true), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "admin-block.example", "host", 443, true), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("user", "alice", null, null, "admin-block.example", "host", 443, false), store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             string[] destinations = ["user.example", "agent.example", "connector.example"];
             bool Allowed(string host) => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, host, true)).Allowed;
             Assert.All(destinations, host => Assert.True(Allowed(host)));
@@ -71,10 +71,10 @@ public sealed class NetworkAccessMatchingModelTests
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
             store.SetRule(admin, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, true), store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", systemwide, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
-            registry.Register(new RegistryEntry("10.247.1.11", "bob", "secretary", "bob-container", "connector", "bob::web", "isolated", systemwide, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.11", "bob", "secretary", "bob-container", "connector", "bob::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.11", "93.184.216.34", 443, "example.com", true)).Allowed);
 
             store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, false), store.Revision);
@@ -119,7 +119,7 @@ public sealed class NetworkAccessMatchingModelTests
             var admin = new NetworkAccessActor("admin", true);
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, platformAllow), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, agentAllow), store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
         }
         finally { Directory.Delete(root, recursive: true); }
@@ -135,7 +135,7 @@ public sealed class NetworkAccessMatchingModelTests
             using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
             NetworkAccessDecisionResult Check() => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
             NetworkAccessDecisionResult denied = Check();
             Assert.False(denied.Allowed);
@@ -144,7 +144,7 @@ public sealed class NetworkAccessMatchingModelTests
             store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
             Assert.True(registry.Deregister("10.247.1.10", "container"));
             Assert.Contains(store.ListRequests(new NetworkAccessActor("alice", false)).Requests, item => item.Request.Id == denied.RequestId);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", false, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
             DecideRequestResult approval = store.DecideRequest(new NetworkAccessActor("alice", false), denied.RequestId!, true, "connector", store.Revision);
             Assert.Equal("alice::web", approval.Rule?.ConnectorId);
             Assert.True(Check().Allowed);
@@ -166,7 +166,7 @@ public sealed class NetworkAccessMatchingModelTests
             store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
             var alice = new NetworkAccessActor("alice", false);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "example.com", "host", 443, true), store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult Check() => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
             Assert.True(Check().Allowed);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, false), store.Revision);
@@ -186,7 +186,7 @@ public sealed class NetworkAccessMatchingModelTests
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult pending = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true));
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, false), store.Revision);
             DecideRequestResult decision = store.DecideRequest(admin, pending.RequestId!, true, "agent", store.Revision);
@@ -225,7 +225,7 @@ public sealed class NetworkAccessMatchingModelTests
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "198.18.250.249", "ip", 20101, true), store.Revision);
-            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             NetworkAccessDecisionResult result = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "198.18.250.249", 20101, null, false));
             Assert.True(result.Allowed, result.Reason);
             Assert.Equal("pkgs_proxy", result.Cluster);

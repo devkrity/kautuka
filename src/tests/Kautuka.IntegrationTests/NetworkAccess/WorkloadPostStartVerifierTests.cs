@@ -270,7 +270,7 @@ public sealed class WorkloadPostStartVerifierTests
         {
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(AllocatedIp, null, "agent-alpha", ContainerId, "agent-sandbox", null,
-                "agent-sandbox", false, "deny-all", "none", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "deny-all", "none", null, DateTimeOffset.UtcNow));
             return registry;
         }
 
@@ -469,7 +469,7 @@ public sealed class WorkloadPostStartVerifierTests
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             AllocatedIp, "user-alpha", "agent-alpha", ContainerId, "connector", "connector-alpha",
-            "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         return registry;
     }
 

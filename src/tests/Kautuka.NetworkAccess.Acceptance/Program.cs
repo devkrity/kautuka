@@ -208,7 +208,7 @@ public static class Program
             Command = "/bin/sh",
             Args = ["-lc", "sleep 300"],
         };
-        registry.Register(new RegistryEntry(builderIp, null, null, builderName, "builder", null, "builder", false, "proxy-only", "none", null, DateTimeOffset.UtcNow));
+        registry.Register(new RegistryEntry(builderIp, null, null, builderName, "builder", null, "builder", "proxy-only", "none", null, DateTimeOffset.UtcNow));
         PodmanCommandResult start = await podman.RunAsync(builderSpec.Render(), 60, CancellationToken.None).ConfigureAwait(false);
         if (start.ExitCode != 0)
         {
@@ -761,7 +761,7 @@ public static class Program
             await ExecPodmanAsync(["--hooks-dir", hooksDir, "run", "-d", "--name", workloadName, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--user=65532:65532", "--pids-limit=256", "--memory=536870912", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--network", $"{wlNet}:ip={wlIp}", "--dns=10.247.0.2", "--sysctl", "net.ipv6.conf.all.disable_ipv6=1", "--annotation", "io.kautuka.role=workload", toolsImg, "sleep", "300"]).ConfigureAwait(false);
             string wlCid = await InspectContainerIdAsync(workloadName).ConfigureAwait(false);
 
-            registry.Register(new RegistryEntry(wlIp, "u1", "a1", wlCid, "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry(wlIp, "u1", "a1", wlCid, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
             // -----------------------------------------------------------------
             // LIVE PROOF 1 (v7-1): Real Envoy Allowed-Reply through top-level dynamic_metadata["cluster"]
@@ -826,7 +826,7 @@ public static class Program
             string wl2Ip = "10.247.1.11";
             await ExecPodmanAsync(["--hooks-dir", hooksDir, "run", "-d", "--name", workload2Name, "--cap-drop=ALL", "--security-opt=no-new-privileges", "--read-only", "--user=65532:65532", "--pids-limit=256", "--memory=536870912", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m", "--network", $"{wlNet}:ip={wl2Ip}", "--dns=10.247.0.2", "--sysctl", "net.ipv6.conf.all.disable_ipv6=1", "--annotation", "io.kautuka.role=workload", toolsImg, "sleep", "300"]).ConfigureAwait(false);
             string wl2Cid = await InspectContainerIdAsync(workload2Name).ConfigureAwait(false);
-            registry.Register(new RegistryEntry(wl2Ip, "u1", "a1", wl2Cid, "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            registry.Register(new RegistryEntry(wl2Ip, "u1", "a1", wl2Cid, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
             // Verify C6 passes on untampered container (note: verifier expects network name "kautuka-workload"; check netns canonical hash directly via nsenter using BoundaryRulesetRenderer)
             int pid2 = await InspectContainerPidAsync(workload2Name).ConfigureAwait(false);

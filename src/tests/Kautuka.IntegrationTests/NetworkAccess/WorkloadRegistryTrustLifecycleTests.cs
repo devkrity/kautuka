@@ -161,8 +161,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
         const string cid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         DateTimeOffset registered = DateTimeOffset.UtcNow;
         RegistryEntry desired = new(
-            ip, "user-a", "agent-a", cid, "agent-sandbox", null, "agent-sandbox", false,
-            "normal", "user-agent", null, registered);
+            ip, "user-a", "agent-a", cid, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, registered);
         RegistryEntry quarantined = desired with { Egress = "deny-all", Attribution = "none" };
         var registry = new WorkloadRegistry();
         registry.Register(quarantined);
@@ -523,8 +522,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
         var registry = new WorkloadRegistry();
         DateTimeOffset registered = DateTimeOffset.UtcNow;
         RegistryEntry oldEntry = new(
-            oldIp, "user-a", "agent-a", oldContainerId, "connector", "user-a::shared", "isolated-with-agent-files", false,
-            "normal", "user-agent", null, registered);
+            oldIp, "user-a", "agent-a", oldContainerId, "connector", "user-a::shared", "isolated-with-agent-files", "normal", "user-agent", null, registered);
         RegistryEntry replacementEntry = oldEntry with { Ip = replacementIp, ContainerId = replacementContainerId };
         registry.Register(oldEntry);
         string initialInspectJson = CreateConnectorInspectJson(oldContainerId, string.Empty, imageDigest, "fingerprint", "user-a::shared", kind: "connector");
@@ -644,8 +642,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             }));
             var registry = new WorkloadRegistry();
             var quarantined = new RegistryEntry(
-                ip, identity.UserId, "agent-a", containerId, "connector", desiredConnector.ConnectorId, "isolated", false,
-                "deny-all", "none", string.Join(',', profile.Relaxations), DateTimeOffset.UtcNow);
+                ip, identity.UserId, "agent-a", containerId, "connector", desiredConnector.ConnectorId, "isolated", "deny-all", "none", string.Join(',', profile.Relaxations), DateTimeOffset.UtcNow);
             registry.Rebuild([quarantined]);
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             await using var service = new WorkspaceContainerConnectorExecutionService(
@@ -666,7 +663,6 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             Assert.Equal(containerId, recovered.ContainerId);
             Assert.Equal("normal", recovered.Egress);
             Assert.Equal("user-agent", recovered.Attribution);
-            Assert.False(recovered.Systemwide);
             Assert.Equal("writable-rootfs", recovered.CompatProfile);
             Assert.True(registry.IsVerified(ip, containerId));
         }
@@ -944,7 +940,6 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                     identity.Kind,
                     connectorId,
                     "isolated",
-                    false,
                     "deny-all",
                     "none",
                     null,
@@ -1128,8 +1123,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
         {
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
-                ip, "user-a", "agent-a", containerId, "connector", "connector-a", "isolated", false,
-                "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                ip, "user-a", "agent-a", containerId, "connector", "connector-a", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             var runner = new PodmanCommandRunner((args, _) =>
             {
                 if (args[0] == "rm")

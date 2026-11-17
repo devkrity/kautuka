@@ -27,7 +27,7 @@ public sealed class WorkspaceContainerSupervisorReadinessTests
         var store = new WorkspaceDesiredStateStore();
         store.ApplyDesiredState(1, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Bootstrap, CreateRuntimeSettings(root), [], [], []);
         var registry = new WorkloadRegistry();
-        var restricted = new RegistryEntry("10.247.1.42", "alice", "agent-a", "container-a", "connector", "alice::tool", "isolated", false, "deny-all", "none", null, DateTimeOffset.UtcNow);
+        var restricted = new RegistryEntry("10.247.1.42", "alice", "agent-a", "container-a", "connector", "alice::tool", "isolated", "deny-all", "none", null, DateTimeOffset.UtcNow);
         Assert.True(registry.TryRegisterQuarantined(restricted));
         Assert.True(registry.TryPromoteVerified(restricted, restricted with { Egress = "normal", Attribution = "user-agent" }));
         var runner = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(0, "[]", string.Empty, ProcessTerminationReason.Completed)));

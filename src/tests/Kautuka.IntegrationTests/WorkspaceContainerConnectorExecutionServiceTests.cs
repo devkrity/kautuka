@@ -1942,10 +1942,10 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.131", userId, null, completingContainerId, "connector", connectorId, "isolated",
-                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
             registry.Register(new RegistryEntry(
                 "10.247.1.132", userId, null, "overlapping-probe-container", "connector", connectorId, "isolated",
-                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
 
             var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command should run."));
             await using var service = new WorkspaceContainerConnectorExecutionService(

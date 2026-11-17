@@ -14,7 +14,6 @@ public sealed record RegistryEntry(
     string Kind,
     string? ConnectorId,
     string ExecContext,
-    bool Systemwide,
     string Egress,
     string Attribution,
     string? CompatProfile,

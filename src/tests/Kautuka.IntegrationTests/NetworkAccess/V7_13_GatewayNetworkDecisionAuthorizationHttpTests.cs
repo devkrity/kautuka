@@ -149,7 +149,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             Enabled = true,
         }, "system", null, TestContext.Current.CancellationToken);
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.41", userId, "agent-one", "ctr-web", "connector", $"{userId}::web", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.41", userId, "agent-one", "ctr-web", "connector", $"{userId}::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.41", "93.184.216.34", 443, "www.bbc.com"));
         using JsonDocument result = await fixture.SendGetAsync("/api/network-access/requests", token);
         JsonElement request = result.RootElement.GetProperty("requests").EnumerateArray().Single();
@@ -190,11 +190,11 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             adminToken);
 
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.41", aliceId, "alice-agent-one", "ctr-alice-one", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.41", aliceId, "alice-agent-one", "ctr-alice-one", "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.42", aliceId, "alice-agent-two", "ctr-alice-two", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.42", aliceId, "alice-agent-two", "ctr-alice-two", "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.43", bobId, "bob-agent", "ctr-bob", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.43", bobId, "bob-agent", "ctr-bob", "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
         NetworkAccessDecisionResult aliceOwnRequest = fixture.Controller.EvaluateContainerConnection(
             new ContainerConnectionInput("10.247.1.41", "93.184.216.34", 443, "alice-own.example.com"));

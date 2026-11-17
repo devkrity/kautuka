@@ -272,7 +272,6 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
             "connector",
             "conn-web",
             "isolated",
-            Systemwide: false,
             Egress: "normal",
             Attribution: "user-agent",
             CompatProfile: null,

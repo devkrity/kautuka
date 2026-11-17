@@ -667,7 +667,6 @@ public sealed class McpbImageMaterializer(
                 "builder",
                 null,
                 "builder",
-                false,
                 "proxy-only",
                 "none",
                 $"{NetworkAccess.ImageCompatibilityStore.WritableRootfs},{NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps}",

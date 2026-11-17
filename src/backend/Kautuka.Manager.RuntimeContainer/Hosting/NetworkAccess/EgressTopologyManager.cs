@@ -714,7 +714,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 kind,
                                 string.IsNullOrWhiteSpace(connector) ? null : connector,
                                 execContext,
-                                false,
                                 // Labels identify a candidate workload, but they are not proof that
                                 // its post-start security verification completed in this process.
                                 // Rebuilt entries stay quarantined until an authoritative desired
@@ -1346,7 +1345,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         registry.Register(new RegistryEntry(
             PackageProxyIp, "system", "package-proxy", containerId, "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow,
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow,
             Purpose: "package-proxy"));
     }
 

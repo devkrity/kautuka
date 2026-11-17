@@ -202,7 +202,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-sys",
                 "isolated",
-                true,
                 "normal",
                 "user",
                 null,
@@ -215,7 +214,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-iso",
                 "isolated",
-                true,
                 "normal",
                 "user",
                 null,
@@ -753,7 +751,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-1",
                 "isolated",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -921,7 +918,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-open",
                 "isolated",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -1024,7 +1020,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-a",
                 "isolated",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -1277,7 +1272,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-orphan",
                 "isolated",
-                Systemwide: false,
                 Egress: "normal",
                 Attribution: "user",
                 CompatProfile: null,
@@ -1303,7 +1297,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-probe",
                 "isolated",
-                Systemwide: false,
                 Egress: "normal",
                 Attribution: "user",
                 CompatProfile: null,
@@ -1343,7 +1336,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-user",
                 "isolated",
-                Systemwide: false,
                 Egress: "normal",
                 Attribution: "user",
                 CompatProfile: null,
@@ -1412,7 +1404,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 new ContainerConnectionInput("10.247.1.110", "93.184.216.34", 8443, "user-probe.example.com")).Allowed);
             registry.Register(new RegistryEntry(
                 "10.247.1.111", "user-x", null, "user-probe-ctr-other", "connector", "conn-user", "isolated",
-                Systemwide: false, Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
+Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: "probe"));
             Assert.False(controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.111", "93.184.216.34", 443, "user-probe.example.com")).Allowed);
             registry.Deregister("10.247.1.111", "user-probe-ctr-other");
@@ -1425,7 +1417,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             // Negative control 2 (.NC): Runtime container starting afterwards for the SAME user+connector+destination is STILL DENIED with no rule written!
             registry.Register(new RegistryEntry(
                 "10.247.1.112", "user-x", "a1", "runtime-ctr", "connector", "conn-user", "isolated",
-                Systemwide: false, Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
+Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
             NetworkAccessDecisionResult runtimeTry = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.112", "93.184.216.34", 443, "user-probe.example.com"));
             Assert.False(runtimeTry.Allowed);
@@ -1455,7 +1447,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-sys",
                 "isolated",
-                Systemwide: true,
                 Egress: "normal",
                 Attribution: "user",
                 CompatProfile: null,
@@ -1513,7 +1504,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             registry.Deregister("10.247.1.120", "sys-probe-ctr");
             registry.Register(new RegistryEntry(
                 "10.247.1.121", "user-x", "agent-x", "sys-runtime-ctr", "connector", "conn-sys", "isolated",
-                Systemwide: true, Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
+Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset.UtcNow, Purpose: null));
             Assert.False(controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.1.121", "93.184.216.34", 443, "sys-probe.example.com")).Allowed);
         }
@@ -1541,7 +1532,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "connector-cap",
                 "isolated",
-                Systemwide: false,
                 Egress: "normal",
                 Attribution: "user",
                 CompatProfile: null,
@@ -1631,7 +1621,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-sandbox-bound",
                 "agent-sandbox",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -1666,7 +1655,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-unattributed",
                 "isolated",
-                true,
                 "deny-all",
                 "none",
                 null,
@@ -1703,7 +1691,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 "connector",
                 "conn-real-isolated",
                 "isolated",
-                false,
                 "normal",
                 "user-agent",
                 null,
@@ -1788,7 +1775,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
 
             RegisterAgent(registry, "10.247.1.80", "user-a", "a1");
             registry.Register(new RegistryEntry(
-                "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", true, "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
+                "10.247.1.81", "user-a", null, "ctr-sys-user", "connector", "conn-sys-user", "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
 
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-block.example.com"));
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.80", "93.184.216.34", 443, "ord-allow.example.com"));
@@ -1879,7 +1866,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             RegisterAgent(registry, "10.247.1.90", "user-a", "a1");
             RegisterAgent(registry, "10.247.1.91", "user-a", "a2");
             registry.Register(new RegistryEntry(
-                "10.247.1.92", "user-a", "a1", "ctr-iso-a", "connector", "conn-a", "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "10.247.1.92", "user-a", "a1", "ctr-iso-a", "connector", "conn-a", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
             // Create pending requests across agents, ports, destinations, and LAN vs public.
             _ = controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.90", "93.184.216.34", 443, "shared.example.com")); // a1 shared:443
@@ -1973,7 +1960,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             "agent-sandbox",
             null,
             "agent-sandbox",
-            false,
             "normal",
             "user-agent",
             null,

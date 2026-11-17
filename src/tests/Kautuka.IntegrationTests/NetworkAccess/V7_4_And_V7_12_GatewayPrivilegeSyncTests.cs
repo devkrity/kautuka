@@ -92,7 +92,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         AssertPersistedPrivileges(fixture, aliceId, expected: true);
 
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.20", aliceId, "agent-1", "ctr-alice-1", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.20", aliceId, "agent-1", "ctr-alice-1", "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
         using JsonDocument privAfterPromote = await fixture.SendGetAsync($"/api/network-access/users/{aliceId}/privileges", adminToken);
         Assert.True(privAfterPromote.RootElement.GetProperty("canApproveOwn").GetBoolean());
@@ -170,7 +170,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.False(putPriv.RootElement.TryGetProperty("canAllowAllAgents", out _));
 
         fixture.Registry.Register(new RegistryEntry(
-            "10.247.1.30", bobId, "bob-agent", "ctr-bob-1", "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "10.247.1.30", bobId, "bob-agent", "ctr-bob-1", "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
         _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.30", "93.184.216.34", 443, "card1.example.com"));
         _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.30", "93.184.216.34", 443, "card2.example.com"));

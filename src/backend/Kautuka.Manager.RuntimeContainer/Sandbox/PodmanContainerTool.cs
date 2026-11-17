@@ -943,7 +943,6 @@ public sealed class PodmanContainerTool(
             "agent-sandbox",
             null,
             "agent-sandbox",
-            false,
             hasAgentIdentity ? "normal" : "deny-all",
             hasAgentIdentity ? "user-agent" : "none",
             null,

@@ -23,7 +23,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         var registry = new WorkloadRegistry();
         RegistryEntry replacement = new(
             AllocatedIp, "user-1", "agent-1", "new-container", "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow);
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow);
         registry.Register(replacement);
 
         Assert.False(registry.TryQuarantine(AllocatedIp, "old-container", "old-name"));
@@ -42,7 +42,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             AllocatedIp, "user-1", "agent-1", ContainerId, "connector", "connector-1",
-            "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         var calls = new List<string[]>();
         string inspect = idCase == "missing"
             ? "[{\"HostConfig\":{}}]"
@@ -72,7 +72,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             AllocatedIp, "user-1", "agent-1", ContainerId, "connector", "connector-1",
-            "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow, "probe"));
+            "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow, "probe"));
         registry.ContainerDeregistered += (_, _) => throw new IOException("simulated probe grant-store failure");
 
         var calls = new List<string[]>();
@@ -108,7 +108,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 AllocatedIp, "user-1", "agent-1", ContainerId, "connector", "connector-1",
-                "isolated", false, "normal", "user-agent", null, DateTimeOffset.UtcNow, "probe"));
+                "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow, "probe"));
             registry.ContainerDeregistered += (_, _) => throw new IOException("simulated probe grant-store failure");
             var runner = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("No Podman command is expected."));
             await using var service = new WorkspaceContainerConnectorExecutionService(
@@ -158,7 +158,7 @@ public sealed class WorkloadPostStartVerifierCleanupTests
         var registry = new WorkloadRegistry();
         registry.Register(new RegistryEntry(
             AllocatedIp, "user-1", "agent-1", ContainerId, "agent-sandbox", null,
-            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
         var calls = new List<string[]>();
         bool quarantinedAtKill = false;

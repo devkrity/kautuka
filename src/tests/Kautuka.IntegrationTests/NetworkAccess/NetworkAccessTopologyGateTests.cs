@@ -22,7 +22,7 @@ public sealed class NetworkAccessTopologyGateTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.11", "user-a", "agent-a", "container-a", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             string policyPath = Path.Combine(root, "policy.json");
             services.AddSingleton<IWorkloadRegistry>(registry);
             services.AddSingleton(new NetworkAccessPolicyStore(policyPath));
@@ -80,7 +80,7 @@ public sealed class NetworkAccessTopologyGateTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.10", "user-a", "agent-a", "container-a", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             var controller = new Kautuka.NetworkAccessController.NetworkAccessController(
                 policy,
                 registry,

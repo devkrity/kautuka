@@ -35,7 +35,7 @@ public sealed class V7_55_ReconcileRulesDriftTests
         });
         var desired = new WorkspaceDesiredStateStore(Path.Combine(temp, "manager-desired-state.json"), NullLogger<WorkspaceDesiredStateStore>.Instance);
         var registry = new WorkloadRegistry();
-        var restricted = new RegistryEntry(ip, "u1", "a1", cid, "agent-sandbox", null, "agent-sandbox", false, "deny-all", "none", null, DateTimeOffset.UtcNow);
+        var restricted = new RegistryEntry(ip, "u1", "a1", cid, "agent-sandbox", null, "agent-sandbox", "deny-all", "none", null, DateTimeOffset.UtcNow);
         Assert.True(registry.TryRegisterQuarantined(restricted));
         Assert.True(registry.TryPromoteVerified(restricted, restricted with { Egress = "normal", Attribution = "user-agent" }));
         await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
@@ -77,7 +77,7 @@ public sealed class V7_55_ReconcileRulesDriftTests
         });
         var desired = new WorkspaceDesiredStateStore(Path.Combine(temp, "manager-desired-state.json"), NullLogger<WorkspaceDesiredStateStore>.Instance);
         var registry = new WorkloadRegistry();
-        registry.Register(new RegistryEntry(ip, "u1", "a1", containerName, "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        registry.Register(new RegistryEntry(ip, "u1", "a1", containerName, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman, desired), registry, temp, desiredStateStore: desired);
         try
         {
@@ -111,7 +111,7 @@ public sealed class V7_55_ReconcileRulesDriftTests
             return Task.FromResult(new PodmanCommandResult(0, "", ""));
         });
         var registry = new WorkloadRegistry();
-        registry.Register(new RegistryEntry(ip, "u1", "a1", name, "agent-sandbox", null, "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        registry.Register(new RegistryEntry(ip, "u1", "a1", name, "agent-sandbox", null, "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
         await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp, "ip.json")), new WorkloadPostStartVerifier(podman), registry, temp);
         try
         {

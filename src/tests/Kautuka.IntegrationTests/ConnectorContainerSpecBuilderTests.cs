@@ -155,10 +155,10 @@ public sealed class ConnectorContainerSpecBuilderTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.30", alpha.UserId, alpha.AgentId, "alpha-container", alpha.Kind, connector.ConnectorId,
-                "isolated", false, alpha.Egress, "user-agent", null, DateTimeOffset.UtcNow));
+                "isolated", alpha.Egress, "user-agent", null, DateTimeOffset.UtcNow));
             registry.Register(new RegistryEntry(
                 "10.247.1.31", beta.UserId, beta.AgentId, "beta-container", beta.Kind, "user-beta::shared-provider",
-                "isolated", false, beta.Egress, "user-agent", null, DateTimeOffset.UtcNow));
+                "isolated", beta.Egress, "user-agent", null, DateTimeOffset.UtcNow));
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, registry);
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);

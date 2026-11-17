@@ -21,7 +21,7 @@ public sealed class EgressTopologyContainmentTests
         {
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry("10.247.1.41", "alice", "agent", "running-container", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
                 0, args.SequenceEqual(["ps", "-a", "--format", "json"]) ? snapshot : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
             await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
@@ -42,7 +42,7 @@ public sealed class EgressTopologyContainmentTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.41", "user-a", "agent-a", "workload-cid", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
 
             bool workloadRunning = true;
             var calls = new List<string>();
@@ -155,7 +155,7 @@ public sealed class EgressTopologyContainmentTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.43", "user-a", "agent-a", "registered-cid", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             bool workloadRunning = true;
             var calls = new List<string>();
             var podman = new PodmanCommandRunner((args, _) =>
@@ -204,7 +204,7 @@ public sealed class EgressTopologyContainmentTests
             var registry = new WorkloadRegistry();
             registry.Register(new RegistryEntry(
                 "10.247.1.42", "user-a", "agent-a", "surviving-cid", "agent-sandbox", null,
-                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             int containmentAttempts = 0;
             var calls = new List<string>();
             var podman = new PodmanCommandRunner((args, _) =>
