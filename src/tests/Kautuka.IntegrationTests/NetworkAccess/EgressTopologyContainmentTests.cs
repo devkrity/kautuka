@@ -8,6 +8,30 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class EgressTopologyContainmentTests
 {
+    [Theory]
+    [InlineData("not-json")]
+    [InlineData("{}")]
+    [InlineData("[{\"State\":\"running\"}]")]
+    [InlineData("[{\"Id\":\"\",\"State\":\"running\"}]")]
+    public async Task IncompletePodmanSnapshotDoesNotDeregisterRunningWorkload(string snapshot)
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nac-incomplete-ps-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var registry = new WorkloadRegistry();
+            registry.Register(new RegistryEntry("10.247.1.41", "alice", "agent", "running-container", "agent-sandbox", null,
+                "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            var podman = new PodmanCommandRunner((args, _) => Task.FromResult(new PodmanCommandResult(
+                0, args.SequenceEqual(["ps", "-a", "--format", "json"]) ? snapshot : string.Empty, string.Empty, ProcessTerminationReason.Completed)));
+            await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+                new WorkloadPostStartVerifier(podman), registry, root);
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.NotNull(registry.FindByIp("10.247.1.41"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public async Task ReconcileBoundaryDrift_StopsRegisteredRunningWorkload()
     {

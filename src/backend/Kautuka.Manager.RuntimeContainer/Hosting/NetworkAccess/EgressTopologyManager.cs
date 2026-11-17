@@ -2822,7 +2822,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                         string? cid = container.TryGetProperty("Id", out JsonElement idElem) ? idElem.GetString() : null;
                         if (string.IsNullOrWhiteSpace(cid))
                         {
-                            continue;
+                            return false;
                         }
 
                         liveCids.Add(cid);

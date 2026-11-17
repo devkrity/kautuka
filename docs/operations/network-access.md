@@ -32,6 +32,7 @@ Temporary connector probe grants are cleared using the verified container ID whe
 When a connector start fails, its deny-all registration is removed only after Podman confirms the container is absent; an uncertain inspection retains it.
 An existing empty or incomplete network policy file is treated as corrupt and refused; it is not reset to an empty policy that could release a saved brake.
 After a brake is saved, stopping affected workloads continues even if the API caller disconnects. The existing reconcile cycle retries stopping registered workloads while their brake remains active.
+Reconcile leaves registered workloads intact when Podman's container listing is malformed or contains an entry without an ID; it retries instead of treating that listing as proof of termination.
 Package-proxy rules are selected only for the allowlisted proxy identity, never solely from a container annotation.
 The hook bounds each network-inspection and nft subprocess to ten seconds and refuses the launch if a command times out. Its runtime configuration also bounds the complete hook to 45 seconds.
 The Linux installer appends the NAC hook directory to Podman's configured hook directories rather than replacing them. Uninstall removes the NAC hook and its two ruleset templates.
