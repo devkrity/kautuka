@@ -11,3 +11,15 @@ it('reports an unconfirmed pause rather than silently closing the dialog', async
   expect(screen.getByRole('dialog')).toBeInTheDocument();
   await waitFor(() => expect(screen.getByRole('button', { name: 'Pause network' })).toBeEnabled());
 });
+
+it('asks before resuming network access for everyone', async () => {
+  const update = vi.fn().mockResolvedValue(undefined);
+  render(<EmergencyBrakeControls currentUser={{ id: 'admin', role: 'admin' }}
+    brake={{ userPaused: false, systemPaused: true, userLockedByAdmin: false }}
+    onUpdateUserBrake={vi.fn()} onUpdateSystemBrake={update} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Resume network access for everyone' }));
+  expect(update).not.toHaveBeenCalled();
+  expect(screen.getByRole('dialog')).toHaveTextContent('everyone');
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm resume' }));
+  await waitFor(() => expect(update).toHaveBeenCalledWith(false));
+});

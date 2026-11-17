@@ -31,7 +31,7 @@ export function EmergencyBrakeControls({
   const isUserPaused = Boolean(brake?.userPaused);
   const isSystemPaused = Boolean(brake?.systemPaused);
 
-  const [confirmTarget, setConfirmTarget] = React.useState<'user' | 'system' | 'targetUser' | null>(
+  const [confirmTarget, setConfirmTarget] = React.useState<'user' | 'system' | 'targetUser' | 'resumeSystem' | null>(
     null
   );
   const [submitting, setSubmitting] = React.useState(false);
@@ -55,20 +55,12 @@ export function EmergencyBrakeControls({
   };
 
   // System brake toggle (admin)
-  const handleToggleSystemBrake = async () => {
+  const handleToggleSystemBrake = () => {
     setError(null);
     if (!isSystemPaused) {
       setConfirmTarget('system');
     } else {
-      if (!onUpdateSystemBrake) return;
-      setSubmitting(true);
-      try {
-        await onUpdateSystemBrake(false);
-      } catch {
-        setError('The change could not be confirmed. Refresh to check network access before trying again.');
-      } finally {
-        setSubmitting(false);
-      }
+      setConfirmTarget('resumeSystem');
     }
   };
 
@@ -89,6 +81,8 @@ export function EmergencyBrakeControls({
         await onUpdateSystemBrake(true);
       } else if (confirmTarget === 'targetUser' && targetUser) {
         await onUpdateUserBrake(true, targetUser.id);
+      } else if (confirmTarget === 'resumeSystem' && onUpdateSystemBrake) {
+        await onUpdateSystemBrake(false);
       }
       setConfirmTarget(null);
     } catch {
@@ -143,9 +137,11 @@ export function EmergencyBrakeControls({
       <Dialog open={confirmTarget !== null} onOpenChange={(open) => !open && setConfirmTarget(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Pause network access</DialogTitle>
+            <DialogTitle>{confirmTarget === 'resumeSystem' ? 'Resume network access?' : 'Pause network access'}</DialogTitle>
             <DialogDescription className="text-sm pt-2 text-foreground">
-              {confirmTarget === 'system'
+              {confirmTarget === 'resumeSystem'
+                ? 'Resume network access for everyone? Existing network rules will apply.'
+                : confirmTarget === 'system'
                 ? "This stops everyone's agents from reaching the internet now and ends open connections. Your rules are kept."
                 : 'This stops your agents from reaching the internet now and ends open connections. Your rules are kept.'}
             </DialogDescription>
@@ -167,7 +163,7 @@ export function EmergencyBrakeControls({
               disabled={submitting}
               onClick={() => void handleConfirmPause()}
             >
-              Pause network
+              {confirmTarget === 'resumeSystem' ? 'Confirm resume' : 'Pause network'}
             </Button>
           </DialogFooter>
         </DialogContent>
