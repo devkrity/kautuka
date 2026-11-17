@@ -8,6 +8,20 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class U2_PolicyStoreTests : IDisposable
 {
+    [Theory]
+    [InlineData("")]
+    [InlineData("{\"schemaVersion\":2}")]
+    [InlineData("{\"schemaVersion\":2,\"rules\":[],\"requests\":[],\"userPrivileges\":[],\"brake\":{\"system\":true}}")]
+    [InlineData("{\"schemaVersion\":2,\"rules\":[],\"requests\":[],\"userPrivileges\":[],\"brake\":{\"users\":[]}}")]
+    [InlineData("{\"schemaVersion\":1,\"rules\":[],\"requests\":[],\"userPrivileges\":[]}")]
+    public void CorruptOrIncompletePolicyNeverResetsBrakes(string content)
+    {
+        string path = Path.Combine(tempDir, "invalid", "state.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, content);
+        using var store = new NetworkAccessPolicyStore(path);
+        Assert.Throws<InvalidDataException>(() => store.EnsureLoaded());
+    }
     [Fact]
     public void ConfiguredPendingLimitsProtectOtherUsersAndSurviveRestart()
     {

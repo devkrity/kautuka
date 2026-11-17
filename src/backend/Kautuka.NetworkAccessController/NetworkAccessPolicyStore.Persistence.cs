@@ -305,7 +305,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
 
         if (bytes.Length == 0)
         {
-            return state = new NetworkAccessPolicyState(2, 0, [], [], [], BrakeState.Empty);
+            throw new InvalidDataException($"Corrupt empty network policy file at {path}.");
         }
 
         try
@@ -313,6 +313,13 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             NetworkAccessPolicyState loaded = JsonSerializer.Deserialize(bytes, NetworkAccessJsonContext.Default.NetworkAccessPolicyState)
                 ?? throw new InvalidDataException($"Corrupt state file: deserialization returned null for {path}.");
 
+            using JsonDocument document = JsonDocument.Parse(bytes);
+            if (loaded.Requests is null || loaded.Brake is null || loaded.Brake.Users is null
+                || !document.RootElement.TryGetProperty("brake", out JsonElement brake)
+                || brake.ValueKind != JsonValueKind.Object
+                || !brake.TryGetProperty("system", out JsonElement system)
+                || system.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                throw new InvalidDataException($"Incomplete network policy file at {path}.");
             if (loaded.SchemaVersion == 1)
             {
                 NetworkAccessPolicyState reset = loaded with { SchemaVersion = 2, Revision = checked(loaded.Revision + 1), Rules = [], UserPrivileges = [] };
@@ -321,6 +328,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
             }
             if (loaded.SchemaVersion != 2)
                 throw new InvalidDataException($"Unsupported network policy schema version {loaded.SchemaVersion}.");
+            if (loaded.Rules is null || loaded.UserPrivileges is null)
+                throw new InvalidDataException($"Incomplete network policy file at {path}.");
             return state = loaded;
         }
         catch (JsonException ex)
