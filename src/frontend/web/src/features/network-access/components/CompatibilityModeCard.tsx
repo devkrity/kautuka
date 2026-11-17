@@ -124,14 +124,16 @@ export function CompatibilityModeCard({
         >
           Use compatibility mode for this image
         </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={disabled || submitting}
-          onClick={onDismiss}
-        >
-          Keep as is
-        </Button>
+        {onDismiss && (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={disabled || submitting}
+            onClick={onDismiss}
+          >
+            Keep as is
+          </Button>
+        )}
       </div>
     </article>
   );

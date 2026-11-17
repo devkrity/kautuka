@@ -1064,6 +1064,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       expect(chkWrite).toBeChecked();
       expect(chkRoot).toBeChecked();
       expect(chkCaps).toBeChecked();
+      expect(screen.queryByRole('button', { name: 'Keep as is' })).not.toBeInTheDocument();
 
       // Ensure no technical flags are present
       const cardText = document.body.textContent ?? '';
