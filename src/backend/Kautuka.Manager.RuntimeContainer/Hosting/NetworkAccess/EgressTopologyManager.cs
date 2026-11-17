@@ -2597,6 +2597,16 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     internal async Task ReconcileOnceAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
+        if (policyStore is not null)
+        {
+            BrakeState brake = policyStore.GetBrakeSnapshot();
+            if (brake.System)
+                await EngageBrakeAsync(null, registry, cancellationToken).ConfigureAwait(false);
+            else
+                foreach (UserBrakeEntry user in brake.Users)
+                    await EngageBrakeAsync(user.UserId, registry, cancellationToken).ConfigureAwait(false);
+        }
+
         if (topologyIncidentLatched)
         {
             CloseLaunchAdmission();

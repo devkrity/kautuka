@@ -2762,6 +2762,36 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.Equal("container-a", stillTracked?.ContainerId);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReconcileRetriesStoppingAWorkloadWithAnActiveBrake(bool releasedBeforeRetry)
+    {
+        using var policy = new NetworkAccessPolicyStore(Path.Combine(tempDir, "brake-retry-policy.json"));
+        policy.SetBrake(new NetworkAccessActor("admin", true), "user", "alice", true);
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry("10.247.1.31", "alice", "agent", "container-a", "agent-sandbox", null,
+            "agent-sandbox", false, "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        int stopAttempts = 0;
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "stop") return Task.FromResult(++stopAttempts == 1
+                ? new PodmanCommandResult(125, "", "failed", ProcessTerminationReason.NonZeroExit)
+                : new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+            if (args[0] == "kill") return Task.FromResult(new PodmanCommandResult(125, "", "failed", ProcessTerminationReason.NonZeroExit));
+            if (args[0] == "ps") return Task.FromResult(new PodmanCommandResult(0, "[]", "", ProcessTerminationReason.Completed));
+            return Task.FromResult(new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+        });
+        await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "brake-retry-ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, tempDir, policyStore: policy);
+        await manager.EngageBrakeAsync("alice", registry, TestContext.Current.CancellationToken);
+        Assert.Single(registry.GetAll());
+        if (releasedBeforeRetry) policy.SetBrake(new NetworkAccessActor("admin", true), "user", "alice", false);
+        await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+        Assert.Equal(releasedBeforeRetry ? 1 : 2, stopAttempts);
+        Assert.Empty(registry.GetAll());
+    }
+
     [Fact]
     public async Task V7_29_WorkloadPostStartVerifier_RootlessUsesPodmanUnshare_WithNegativeControl()
     {
