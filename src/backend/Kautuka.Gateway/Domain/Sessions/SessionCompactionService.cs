@@ -1,6 +1,7 @@
 using System.Text;
 
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -128,6 +129,10 @@ internal sealed class SessionCompactionService(
 
         try
         {
+            using IDisposable nacScope = NetworkAccessContext.BeginScope(
+                userId: session.OwnerUserId,
+                agentId: string.Equals(session.TargetType, "agent", StringComparison.OrdinalIgnoreCase) ? session.TargetId : null,
+                purpose: "session-compaction", service: "ai-model");
             ChatResponse response = await client.GetResponseAsync(
                 prompt,
                 new ChatOptions
