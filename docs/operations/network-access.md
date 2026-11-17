@@ -173,6 +173,8 @@ The OCI runtime hook logs execution events to `$XDG_STATE_HOME/kautuka/nac/hook.
 
 When an ephemeral connector's MCP transport closes unexpectedly, Gateway includes up to the last 100 Podman log lines in the failure details when its container ID is available. Returned log text is capped at 8,192 characters.
 
+During post-start verification, an ephemeral connector with normal egress can reach only the package proxy. Its normal network policy takes effect after verification; explicitly deny-all workloads remain deny-all.
+
 Inspect the latest hook decisions:
 ```bash
 tail -n 20 ~/.local/state/kautuka/nac/hook.log | jq .

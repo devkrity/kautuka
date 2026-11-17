@@ -898,7 +898,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                         DateTimeOffset.UtcNow,
                         isProbe && !saveDiscovery ? "probe" : null);
                 if (workloadRegistry is not null
-                    && !workloadRegistry.TryRegisterQuarantined(desiredIdentity with { Egress = "deny-all", Attribution = "none" }))
+                    && !workloadRegistry.TryRegisterQuarantined(desiredIdentity with { Egress = desiredIdentity.Egress == "deny-all" ? "deny-all" : "proxy-only", Attribution = "none" }))
                 {
                     throw new InvalidOperationException($"Connector '{connector.ConnectorId}' workload address is already registered.");
                 }

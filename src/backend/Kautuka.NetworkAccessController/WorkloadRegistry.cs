@@ -63,7 +63,7 @@ public interface IWorkloadRegistry
     /// <summary>Atomically promotes a quarantined exact identity to caller-supplied verified policy.</summary>
     bool TryPromoteVerified(RegistryEntry expectedQuarantined, RegistryEntry desired) => false;
 
-    /// <summary>Registers a deny-all candidate only when its IP is not already owned.</summary>
+    /// <summary>Registers a restricted candidate only when its IP is not already owned.</summary>
     bool TryRegisterQuarantined(RegistryEntry candidate) => false;
 
     /// <summary>Returns whether this exact workload identity was verified in the current process.</summary>
@@ -245,7 +245,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
     {
         RegistryEntry expected = ValidateAndNormalize(expectedQuarantined);
         RegistryEntry promoted = ValidateAndNormalize(desired);
-        if (expected.Egress != "deny-all" || expected.Attribution != "none"
+        if (expected.Egress is not ("deny-all" or "proxy-only") || expected.Attribution != "none"
             || !string.Equals(expected.Ip, promoted.Ip, StringComparison.Ordinal)
             || !string.Equals(expected.ContainerId, promoted.ContainerId, StringComparison.Ordinal)
             || (expected with { Egress = promoted.Egress, Attribution = promoted.Attribution }) != promoted)
@@ -269,7 +269,7 @@ public sealed class WorkloadRegistry(ILogger<WorkloadRegistry>? logger = null) :
     public bool TryRegisterQuarantined(RegistryEntry candidate)
     {
         RegistryEntry normalized = ValidateAndNormalize(candidate);
-        if (normalized.Egress != "deny-all" || normalized.Attribution != "none")
+        if (normalized.Egress is not ("deny-all" or "proxy-only") || normalized.Attribution != "none")
         {
             return false;
         }

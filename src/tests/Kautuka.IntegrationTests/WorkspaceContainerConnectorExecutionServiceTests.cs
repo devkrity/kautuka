@@ -849,7 +849,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.Equal(2, inspectedNames.Count);
             Assert.Equal(2, inspectedNames.Distinct(StringComparer.Ordinal).Count());
             Assert.Equal(2, egressDuringVerification.Count);
-            Assert.All(egressDuringVerification, egress => Assert.Equal("deny-all", egress));
+            Assert.All(egressDuringVerification, egress => Assert.Equal("proxy-only", egress));
             Assert.Equal(2, launchArguments.Count);
             Assert.All(launchArguments, run =>
             {
@@ -1065,7 +1065,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var result = await service.ProbeConnectorAsync(connector, 15, TestContext.Current.CancellationToken, "user-a");
 
             Assert.False(result.Ok);
-            Assert.Equal("deny-all", observedEgress);
+            Assert.Equal("proxy-only", observedEgress);
             Assert.Equal("none", observedAttribution);
             Assert.Contains("WorkloadPostStartVerifier failed", result.FailureMessage, StringComparison.Ordinal);
             Assert.Contains(commands, static args => args[0] == "inspect");
