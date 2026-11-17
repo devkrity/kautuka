@@ -139,6 +139,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
         {
             WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out IWorkloadRegistry registry);
             RegisterAgent(registry, "10.247.0.13", "user-a", "a1");
+            controller.PolicyStore.SetApprovalLimits(new NetworkAccessActor("admin", IsAdmin: true), 500, 500);
             ServerCallContext ctx = CreateCallContext();
             var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
 
@@ -169,7 +170,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 RequestId = firstRequestId!,
                 Allow = false,
                 Scope = "agent",
-                ExpectedRevision = 0,
+                ExpectedRevision = controller.PolicyStore.Revision,
             }, ctx);
 
             NetworkAccessDecisionResult afterFree = controller.EvaluateContainerConnection(
