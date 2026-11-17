@@ -50,17 +50,7 @@ public sealed class NetworkAccessMatchingModelTests
     }
 
     [Fact]
-    public void CatalogueAvailabilityDoesNotChangeNetworkRequestIdentity()
-    {
-        string shared = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", "container", "host", "example.com", 443);
-        string personal = NetworkAccessRequest.ComputeId("connector", "user-agent", "alice", "secretary", "web", "container", "host", "example.com", 443);
-        Assert.Equal(shared, personal);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void UserConnectorRuleAppliesToAgentRegardlessOfCatalogueScope(bool systemwide)
+    public void UserConnectorRuleAppliesAcrossAgentsButAgentBlockWins()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-matching-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -79,6 +69,8 @@ public sealed class NetworkAccessMatchingModelTests
 
             store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, false), store.Revision);
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com", true)).Allowed);
+            registry.Register(new RegistryEntry("10.247.1.12", "alice", "researcher", "researcher-container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.12", "93.184.216.34", 443, "example.com", true)).Allowed);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
