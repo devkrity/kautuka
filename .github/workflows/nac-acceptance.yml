@@ -3,21 +3,27 @@ name: Network Access Control Acceptance
 on:
   push:
     branches:
-      - enhancement/network-access-control-v2
+      - 'enhancement/**'
       - main
   pull_request:
     branches:
-      - enhancement/network-access-control-v2
+      - 'enhancement/**'
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   nac-acceptance:
     name: NAC Acceptance Suite (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -33,12 +39,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Set up .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: '10.0.x'
 
       - name: Set up Python 3
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
 
@@ -50,6 +56,9 @@ jobs:
       - name: Run Hook Unit Tests
         run: |
           python3 scripts/nac/test_kautuka_hook.py
+
+      - name: Run launcher tests
+        run: node --test scripts/test-launcher-nac-hook.mjs scripts/test-launcher-web-tools.mjs scripts/launcher-readiness.test.mjs
 
       - name: Build Solution
         run: |
