@@ -288,7 +288,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         ManagedContainerReconcileResult connectorOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
             "connector",
             desiredConnectorNames,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            connectorExecutionService.IsTrackedContainerName).ConfigureAwait(false);
         if (!connectorOrphanResult.Succeeded)
         {
             MarkFailed(snapshot, connectorOrphanResult.FailureClass ?? "connector_orphan_reconcile_failed");

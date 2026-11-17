@@ -5,6 +5,24 @@ namespace Kautuka.IntegrationTests;
 public sealed class WorkspaceHostRuntimeAdapterTests
 {
     [Fact]
+    public async Task ConnectorSweepChecksActiveNamesAfterListingBeforeRemoval()
+    {
+        var removed = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            if (args[0] == "ps") return Task.FromResult(new PodmanCommandResult(0, "active-tmp\nstale-tmp\n", "", ProcessTerminationReason.Completed));
+            if (args[0] == "rm") removed.Add(args[^1]);
+            return Task.FromResult(args[0] == "container"
+                ? new PodmanCommandResult(1, "", "", ProcessTerminationReason.NonZeroExit)
+                : new PodmanCommandResult(0, "", "", ProcessTerminationReason.Completed));
+        });
+        var adapter = new ManagerRuntimeAdapter(podman, new AlwaysAvailableHealthProbe(), Microsoft.Extensions.Logging.Abstractions.NullLogger<ManagerRuntimeAdapter>.Instance);
+        var result = await adapter.RemoveOrphanedManagedContainersAsync("connector", [], TestContext.Current.CancellationToken, name => name == "active-tmp");
+        Assert.True(result.Succeeded);
+        Assert.Equal(["stale-tmp"], removed);
+    }
+
+    [Fact]
     public async Task MissingSandboxImageBuildsDirectlyWithoutTemporaryInstaller()
     {
         var commands = new List<string[]>();

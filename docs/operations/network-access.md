@@ -185,6 +185,7 @@ Connector catalogue availability does not change the network workload fingerprin
 Linux installation includes both the workload and package-proxy nft ruleset templates alongside the OCI hook.
 
 Registry rebuilding happens during topology initialization, not during ordinary workspace supervisor reconciliation. Routine reconciliation preserves verified workload identities.
+Active short-lived connectors remain tracked until cleanup, and the orphan sweep checks current connector activity immediately before removing a candidate.
 
 Network decisions use the applicable platform, user, agent and connector rules; an explicit block takes precedence over a probe's temporary allowance.
 

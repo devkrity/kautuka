@@ -54,6 +54,9 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     public IReadOnlyCollection<string> TrackedContainerNames
         => [.. trackedConnectorContainers.Values.Distinct(StringComparer.OrdinalIgnoreCase)];
 
+    public bool IsTrackedContainerName(string name)
+        => trackedConnectorContainers.Values.Contains(name, StringComparer.OrdinalIgnoreCase);
+
     public IReadOnlyCollection<string> DesiredIsolatedContainerNames(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors)
     {
@@ -912,6 +915,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 }
 
                 ephemeralWorkload = new EphemeralWorkload(containerName, allocatedIp, compatProfile, desiredIdentity);
+                trackedConnectorContainers["ephemeral:" + containerName] = containerName;
                 arguments = BuildConnectorWorkloadRunArguments(
                     connector,
                     containerName,
@@ -960,6 +964,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 if (ephemeralWorkload is not null)
                 {
                     RemoveNeverStartedEphemeralIdentity(ephemeralWorkload);
+                    trackedConnectorContainers.TryRemove("ephemeral:" + ephemeralWorkload.ContainerName, out _);
                 }
 
                 await launchLease.DisposeAsync().ConfigureAwait(false);
@@ -2496,6 +2501,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
         }
 
+        trackedConnectorContainers.TryRemove("ephemeral:" + workload.ContainerName, out _);
         return true;
     }
 

@@ -1412,7 +1412,8 @@ public sealed class WorkloadRegistryTrustLifecycleTests
         public Task<ManagedContainerReconcileResult> RemoveOrphanedManagedContainersAsync(
             string role,
             IReadOnlyCollection<string> desiredContainerNames,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            Func<string, bool>? isActiveConnector = null)
             => Task.FromResult(new ManagedContainerReconcileResult(true, 0, null));
 
         public Task EnsureNetworkAsync(string networkName, CancellationToken cancellationToken)

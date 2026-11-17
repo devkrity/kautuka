@@ -341,7 +341,8 @@ public sealed partial class ManagerRuntimeAdapter(
     public async Task<ManagedContainerReconcileResult> RemoveOrphanedManagedContainersAsync(
         string role,
         IReadOnlyCollection<string> desiredContainerNames,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, bool>? isActiveConnector = null)
     {
         ArgumentNullException.ThrowIfNull(desiredContainerNames);
         if (role is not ("agent" or "connector" or "sidecar"))
@@ -365,6 +366,10 @@ public sealed partial class ManagerRuntimeAdapter(
         int removed = 0;
         foreach (string name in stale)
         {
+            if (role == "connector" && isActiveConnector?.Invoke(name) == true)
+            {
+                continue;
+            }
             PodmanCommandResult remove = await podmanCommandRunner.RunAsync(["rm", "-f", name], 15, cancellationToken).ConfigureAwait(false);
             PodmanCommandResult observed = await podmanCommandRunner.RunAsync(["container", "exists", name], 10, cancellationToken).ConfigureAwait(false);
             if (remove.ExitCode != 0 || observed.ExitCode == 0)

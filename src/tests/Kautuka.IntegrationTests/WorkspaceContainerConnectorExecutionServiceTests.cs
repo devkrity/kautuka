@@ -829,6 +829,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
                 string[] arguments = Assert.IsType<string[]>(JsonSerializer.Deserialize<string[]>(argumentJson));
                 launchArguments.Add(arguments);
             }
+            Assert.All(launchArguments, args => Assert.Contains(args[Array.IndexOf(args, "--name") + 1], service.TrackedContainerNames, StringComparer.OrdinalIgnoreCase));
             foreach (TcpClient client in new[] { clientA, clientB })
             {
                 await client.GetStream().WriteAsync(new byte[] { 1 }, timeout.Token);
