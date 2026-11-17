@@ -181,6 +181,62 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
     setupMockApis();
   });
 
+  it('lets an administrator grant public internet to a selected user and connector', async () => {
+    const previousGet = get.getMockImplementation();
+    get.mockImplementation(async (path: string, config?: { params?: Record<string, unknown> }) => {
+      if (path === '/settings/users') return { data: { users: [{ id: 'user-alice', displayName: 'Alice', username: 'alice' }] } };
+      if (path === '/connectors') return { data: { connectors: [
+        { id: 'web-tools', name: 'Web Tools', scope: 'system', transport: 'container' },
+        { id: 'internal', name: 'Internal Parser', scope: 'system', transport: 'container', isInternalSystemConnector: true },
+        { id: 'remote', name: 'Remote Connector', scope: 'system', transport: 'http' },
+        { id: 'other', name: 'Another User Connector', scope: 'user', ownerUserId: 'user-bob', transport: 'container' },
+      ] } };
+      return previousGet?.(path, config);
+    });
+    const user = userEvent.setup();
+    renderComponent(<NetworkAccessPage />);
+    await user.click(await screen.findByRole('button', { name: /rules \(/i }));
+    await user.click(screen.getByRole('button', { name: /allow a connector to reach public websites/i }));
+    await user.selectOptions(await screen.findByLabelText('User'), 'user-alice');
+    expect(screen.queryByRole('option', { name: 'Internal Parser' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Remote Connector' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Another User Connector' })).not.toBeInTheDocument();
+    await user.selectOptions(await screen.findByLabelText('Connector'), 'web-tools');
+    expect(put).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Allow any public website' }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
+      scopeKind: 'user', userId: 'user-alice', connectorId: 'web-tools', destKind: 'any-public',
+      destination: '', port: 0, allowed: true, expectedRevision: 1,
+    })));
+  });
+
+  it('does not offer the open internet grant to non-administrators', async () => {
+    mockViewer.role = 'user';
+    const user = userEvent.setup();
+    renderComponent(<NetworkAccessPage />);
+    await user.click(await screen.findByRole('button', { name: /rules \(/i }));
+    expect(screen.queryByRole('button', { name: /allow a connector to reach public websites/i })).not.toBeInTheDocument();
+  });
+
+  it('keeps the grant dialog open if Manager rejects the connector context', async () => {
+    const previousGet = get.getMockImplementation();
+    get.mockImplementation(async (path: string, config?: { params?: Record<string, unknown> }) => {
+      if (path === '/settings/users') return { data: { users: [{ id: 'user-alice', displayName: 'Alice', username: 'alice' }] } };
+      if (path === '/connectors') return { data: { connectors: [{ id: 'web-tools', name: 'Web Tools', scope: 'system', transport: 'container' }] } };
+      return previousGet?.(path, config);
+    });
+    put.mockRejectedValue(createMockAxiosError(400));
+    const user = userEvent.setup();
+    renderComponent(<NetworkAccessPage />);
+    await user.click(await screen.findByRole('button', { name: /rules \(/i }));
+    await user.click(screen.getByRole('button', { name: /allow a connector to reach public websites/i }));
+    await user.selectOptions(await screen.findByLabelText('User'), 'user-alice');
+    await user.selectOptions(await screen.findByLabelText('Connector'), 'web-tools');
+    await user.click(screen.getByRole('button', { name: 'Allow any public website' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not confirm this rule was saved');
+    expect(screen.getByRole('dialog')).toBeVisible();
+  });
+
   it('shows a load error and disables brake controls when request state is unavailable', async () => {
     setupMockApis();
     const previousGet = get.getMockImplementation();

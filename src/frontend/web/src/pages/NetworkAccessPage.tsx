@@ -30,6 +30,7 @@ import {
   EmergencyBrakeControls,
   CompatibilityModeCard,
   CompatibilityModeList,
+  OpenInternetGrantDialog,
   NetworkPrivilegesPanel,
 } from '@/features/network-access';
 
@@ -47,6 +48,7 @@ export function NetworkAccessPage() {
   const [search, setSearch] = React.useState('');
   const [generalError, setGeneralError] = React.useState<string | null>(null);
   const [editingRule, setEditingRule] = React.useState<NetworkAccessRuleDto | null>(null);
+  const [openInternetDialog, setOpenInternetDialog] = React.useState(false);
 
   // Queries
   const requestsQuery = useNetworkRequests();
@@ -400,6 +402,7 @@ export function NetworkAccessPage() {
           <h2 id="rules-tab-heading" className="sr-only">
             Network rules
           </h2>
+          {isAdmin && <Button type="button" variant="outline" disabled={rulesQuery.isError || requestsQuery.isError} onClick={() => setOpenInternetDialog(true)}>Allow a connector to reach public websites</Button>}
           {rulesQuery.isError ? <p role="alert">Could not load network rules. Refresh and try again.</p> : <RulesList
             rules={filteredRules}
             expectedRevision={revision}
@@ -419,6 +422,11 @@ export function NetworkAccessPage() {
           )}
         </section>
       )}
+
+      {isAdmin && openInternetDialog && <OpenInternetGrantDialog onClose={() => setOpenInternetDialog(false)} onConfirm={async (userId, connectorId) => {
+        await ruleMutation.mutateAsync({ scopeKind: 'user', userId, connectorId, destination: '', destKind: 'any-public', port: 0, allowed: true, expectedRevision: revision });
+        await Promise.all([rulesQuery.refetch(), requestsQuery.refetch()]);
+      }} />}
 
       {/* Tab: Activity */}
       {activeTab === 'activity' && (
