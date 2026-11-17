@@ -134,7 +134,7 @@ export function PendingApprovalCard({
       className="rounded-xl border border-border bg-card p-4 shadow-sm space-y-3"
     >
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="font-semibold text-base">{agentTitle}</h3>
+        <h3 className="font-semibold text-base break-all">{agentTitle}</h3>
         {isProbe && <Badge variant="secondary">Probe (temporary)</Badge>}
         {request.compatibilityMode && (
           <Badge variant="attention">Compatibility mode (relaxed settings)</Badge>
@@ -180,7 +180,7 @@ export function PendingApprovalCard({
               disabled={disabled || submitting}
               onClick={() => void handleAllowAgent()}
             >
-              {isProbe ? 'Allow for this probe' : request.agentId ? `Allow ${agentLabel} to access this site` : 'Allow access'}
+              {isProbe ? 'Allow for this probe' : request.userId === 'system' ? 'Allow for everyone' : request.agentId ? `Allow ${agentLabel} to access this site` : 'Allow access'}
             </Button>
             <Button
               type="button"
@@ -188,11 +188,13 @@ export function PendingApprovalCard({
               disabled={disabled || submitting}
               onClick={() => void handleKeepBlocked()}
             >
-              Keep blocked
+              {request.userId === 'system' && !isProbe ? 'Block for everyone' : 'Keep blocked'}
             </Button>
           </div>
 
-          {!isProbe && request.agentId && request.connectorId && (
+          {request.userId === 'system' && !isProbe && <p className="text-xs text-muted-foreground">These choices apply to everyone. A block overrides other permissions.</p>}
+
+          {!isProbe && request.userId !== 'system' && request.agentId && request.connectorId && (
             <button type="button" className="text-sm font-medium text-primary hover:underline"
               disabled={disabled || submitting} onClick={() => void handleAllowConnector()}>
               {isOwner
@@ -202,7 +204,7 @@ export function PendingApprovalCard({
           )}
 
           {/* Temporary probe approvals do not create persistent rules. */}
-          {!isProbe && canAllowAllAgents && (
+          {!isProbe && request.userId !== 'system' && canAllowAllAgents && (
             <div className="pt-1">
               <button
                 type="button"

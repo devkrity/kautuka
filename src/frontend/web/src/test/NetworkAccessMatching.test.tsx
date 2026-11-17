@@ -57,6 +57,19 @@ describe('network access user scopes', () => {
       currentUser={{ id: 'admin', role: 'admin' }} expectedRevision={4} onDecide={vi.fn()} />);
     expect(screen.queryByRole('button', { name: 'Allow all 2' })).not.toBeInTheDocument();
   });
+  it('explains when a system request creates a platform-wide allow or block', () => {
+    const request: NetworkAccessRequestDto = {
+      id: 'system-request', userId: 'system', agentId: 'gateway',
+      systemwide: false, attribution: 'user-agent', destination: 'example.com', destKind: 'host',
+      port: 443, actorKind: 'first-party', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'gateway',
+    };
+    render(<PendingApprovalCard request={request} currentUser={{ id: 'admin', role: 'admin' }} expectedRevision={4} onDecide={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Allow for everyone' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Block for everyone' })).toBeInTheDocument();
+    expect(screen.getByText(/block overrides other permissions/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading')).toHaveClass('break-all');
+  });
   it('explains each approval scope without exposing runtime connector IDs', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'request-scopes', userId: 'alice', userDisplayName: 'Alice', agentId: 'agent-1',

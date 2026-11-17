@@ -43,7 +43,7 @@ export function GroupedPendingCards({
     });
 
     for (const req of sorted) {
-      if (!req.agentId) {
+      if (!req.agentId || req.userId === 'system') {
         // Individual ungrouped card
         result.push({
           key: req.id,
