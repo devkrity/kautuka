@@ -68,4 +68,19 @@ with open(sys.argv[1], 'rb') as config:
 assert hooks == [sys.argv[2], {'append': True}], hooks
 PY
 
+# Stop the uninstall after its hook cleanup; record file removals instead of
+# touching service files, so this exercises the actual uninstall path safely.
+removals="$temp_root/uninstall-removals"
+(
+  get_service_user_home() { printf '%s\n' "$temp_root/home"; }
+  resolve_user_runtime_dir() { printf '%s\n' "$temp_root/runtime"; }
+  best_effort_user_systemctl() { :; }
+  best_effort_run_as_service_user() { :; }
+  best_effort_remove_file() { printf '%s\n' "$1" >> "$removals"; }
+  best_effort_remove_dir_if_empty() { exit 0; }
+  uninstall_release "$temp_root/install" "$temp_root/state" "$temp_root/visible" kautuka.service "$(id -un)" false
+)
+grep -Fxq "$temp_root/home/.config/containers/hooks.d/kautuka_workload.nft.json.tmpl" "$removals"
+grep -Fxq "$temp_root/home/.config/containers/hooks.d/kautuka_package_proxy.nft.json.tmpl" "$removals"
+
 echo 'Linux installer NAC hook payload checks passed.'

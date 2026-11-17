@@ -2130,6 +2130,8 @@ uninstall_release() {
         best_effort_remove_file "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"
         best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.json"
         best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.py"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_workload.nft.json.tmpl"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_package_proxy.nft.json.tmpl"
         best_effort_remove_dir_if_empty "$service_home/.config/containers/hooks.d"
         best_effort_remove_dir_if_empty "$service_home/.config/containers/containers.conf.d"
         best_effort_remove_dir_if_empty "$user_unit_dir/kautuka.target.wants"

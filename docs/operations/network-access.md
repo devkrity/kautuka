@@ -33,7 +33,7 @@ An existing empty or incomplete network policy file is treated as corrupt and re
 After a brake is saved, stopping affected workloads continues even if the API caller disconnects. The existing reconcile cycle retries stopping registered workloads while their brake remains active.
 Package-proxy rules are selected only for the allowlisted proxy identity, never solely from a container annotation.
 The hook bounds each network-inspection and nft subprocess to ten seconds and refuses the launch if a command times out. Its runtime configuration also bounds the complete hook to 45 seconds.
-The Linux installer appends the NAC hook directory to Podman's configured hook directories rather than replacing them.
+The Linux installer appends the NAC hook directory to Podman's configured hook directories rather than replacing them. Uninstall removes the NAC hook and its two ruleset templates.
 When approving a group, each decision uses the revision returned by the previous decision; the sequence stops if a decision fails.
 The release image inventory includes archives for the pinned Envoy and CoreDNS images so the release archive scanner includes them. First-boot loading before egress startup still requires separate verification.
 
