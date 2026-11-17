@@ -1,10 +1,13 @@
 import { ConnectorCard } from '@/features/connectors/components/ConnectorCard';
 import { connectorSchema, type Connector } from '@/features/connectors/schemas/connectorSchema';
 import { screen } from '@testing-library/dom';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+const { testConnector } = vi.hoisted(() => ({ testConnector: vi.fn() }));
+
 vi.mock('@/features/connectors/api/queries', () => ({
+  useTestConnector: () => ({ mutate: testConnector, isPending: false }),
   useConnectorOAuth: () => ({
     data: [
       {
@@ -41,6 +44,20 @@ const mail = {
 } as Connector;
 
 describe('ConnectorCard managed sign-in connector', () => {
+  it('offers to refresh the saved mail connector and displays its discovered tools', () => {
+    render(<ConnectorCard connector={{ ...mail, toolCount: 2, toolNames: ['mail_list', 'mail_read'] }} canManage onToggle={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} toggling={false} />);
+    expect(screen.getByText('mail_list')).toBeInTheDocument();
+    expect(screen.getByText('mail_read')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh tools' }));
+    expect(testConnector).toHaveBeenCalledWith(expect.objectContaining({ id: mail.id }), expect.anything());
+  });
+
+  it('shows the discovery failure so the user can act on it', () => {
+    testConnector.mockImplementationOnce((_request, options) => options.onSuccess({ success: false, message: 'Network approval required.' }));
+    render(<ConnectorCard connector={mail} canManage onToggle={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} toggling={false} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh tools' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Network approval required.');
+  });
   it('offers enable and sign-in without launch settings', () => {
     render(
       <ConnectorCard
