@@ -15,8 +15,38 @@ permissions:
   contents: read
 
 jobs:
+  nac-windows:
+    name: NAC Windows Unit Tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install repository dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.5.2 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Set up .NET 10 SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run Windows NAC verification and recovery tests
+        run: dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --filter "FullyQualifiedName~WindowsPodmanDevEgressOptionsTests|FullyQualifiedName~WorkloadRegistryTrustLifecycleTests|FullyQualifiedName~WorkloadPostStartVerifierTests"
+
   nac-acceptance:
     name: NAC Acceptance Suite (Linux)
+    needs: nac-windows
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
