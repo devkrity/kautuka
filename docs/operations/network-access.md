@@ -64,7 +64,9 @@ When Manager's topology startup gate is closed, its container `ext_authz` contro
 
 Agent sandboxes keep the hardened default UID `65532`; Manager mounts `/home/node` as tmpfs so that UID can traverse the home directory and create connector install paths such as `/home/node/.kautuka/connectors`. A real local Podman check confirmed the prior nested `/home/node/.kautuka` tmpfs was inaccessible to UID `65532` and the home-level tmpfs worked.
 
-The Linux rootless Envoy authorization socket uses Envoy's pinned non-root image user and Podman's `keep-groups` option. The Manager creates the admin socket directory with group write and execute permissions; no dedicated service group is provisioned. CoreDNS's internal forwarder uses the resolver configured by Podman inside the egress pod; the boundary permits DNS only to the configured resolver addresses. Podman assigns the workload network's automatic and explicit default routes metric 1000 and the outside network's default route metric 100, so the egress pod sends external traffic through the outside gateway while workloads still route through the egress pod. Startup checks both network metrics and rejects drift. Focused Linux tests cover these settings. The production rootless report records the live route table and passing Envoy approval/rule, E-rebind, E-parser, and LAN-grant scenarios.
+The Linux rootless Envoy authorization socket uses Envoy's pinned non-root image user and Podman's `keep-groups` option. The Manager creates the admin socket directory with group write and execute permissions; no dedicated service group is provisioned. CoreDNS forwards to the outside network gateway `10.248.0.1`; the boundary also permits DNS to discovered host resolver addresses. Podman assigns the workload network's automatic and explicit default routes metric 1000 and the outside network's default route metric 100, so the egress pod sends external traffic through the outside gateway while workloads still route through the egress pod. Startup checks both network metrics and rejects drift. Focused Linux tests cover these settings. The production rootless report records the live route table and passing Envoy approval/rule, E-rebind, E-parser, and LAN-grant scenarios.
+
+For TLS traffic, the destination approval is based on the hostname in the TLS SNI. NAC cannot inspect an encrypted HTTP Host header, so a shared service may accept a different HTTP Host behind an approved SNI.
 
 `PodmanContainerTool` records and labels an agent identity only when its context scope is `agent`; a non-agent scope cannot inherit its scope ID as an agent ID. Sandboxes without both a user and agent identity use `deny-all` egress and no attribution. Registry rebuild preserves explicitly restricted userless sandboxes, while rejecting userless normal-egress workloads. The post-start mount verifier matches the desired workspace by both agent and user, including a missing user. Focused tests cover sandbox identity and registry rebuild using generated labels and a fake Podman runner; they do not prove live Podman restart behavior. Connector container fingerprints are derived at runtime from the resolved user/agent identity, execution context, connector image, and compatibility profile. The desired-state record does not infer an owner from the connector ID. A Linux integration test verifies that reconciliation inspects and preserves the generated IsolatedWithAgentFiles container name for its desired user and agent, using the same fingerprint calculation as launch. This proves the reconciliation identity path with a fake Podman runner; it does not prove live Podman connector reconciliation.
 
@@ -250,11 +252,13 @@ Permissions must be strictly `0600` and owned by the running user. If this file 
 
 ### 3.3 Verifying Firewall Rulesets
 
+The following commands are for rootless Podman on Linux.
+
 #### Boundary Table (Egress Pod)
 Verify the boundary firewall inside the egress pod:
 ```bash
-EGRESS_PID=$(podman pod inspect kautuka-egress -f '{{.InfraContainerID}}')
-nsenter -t $EGRESS_PID -n nft list table ip kautuka_egress
+EGRESS_PID=$(podman inspect -f '{{.State.Pid}}' kautuka-egress-envoy)
+podman unshare nsenter -t "$EGRESS_PID" -n nft list table ip kautuka_egress
 ```
 Expected chains:
 - `prerouting`: redirects TCP to port 15001.
@@ -266,7 +270,7 @@ Expected chains:
 Verify the workload firewall inside a running container:
 ```bash
 CONTAINER_PID=$(podman inspect -f '{{.State.Pid}}' <container_id_or_name>)
-nsenter -t $CONTAINER_PID -n nft list table inet kautuka_workload
+podman unshare nsenter -t "$CONTAINER_PID" -n nft list table inet kautuka_workload
 ```
 Verify the following rule comments are present:
 - `input_drop`
