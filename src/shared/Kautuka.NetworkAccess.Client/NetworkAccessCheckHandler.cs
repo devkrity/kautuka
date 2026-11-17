@@ -106,7 +106,6 @@ public sealed partial class NetworkAccessCheckHandler : DelegatingHandler
             UserId: ambient?.UserId,
             AgentId: ambient?.AgentId,
             ConnectorId: ambient?.ConnectorId,
-            Systemwide: ambient?.Systemwide ?? false,
             CorrelationId: ambient?.CorrelationId,
             ExecutionContext: ambient?.ExecutionContext ?? defaultExecutionContext);
     }

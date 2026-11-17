@@ -33,13 +33,11 @@ public sealed partial class GrpcNetworkAccessChecker(
         // Note: ChannelHost is pinned by certificate identity to system/channelhost in Manager and requires empty strings.
         string effectiveUserId;
         string effectiveAgentId;
-        bool effectiveSystemwide = target.Systemwide;
 
         if (string.Equals(target.ExecutionContext, "channelhost", StringComparison.OrdinalIgnoreCase))
         {
             effectiveUserId = string.Empty;
             effectiveAgentId = string.Empty;
-            effectiveSystemwide = false;
         }
         else
         {
@@ -61,7 +59,6 @@ public sealed partial class GrpcNetworkAccessChecker(
             UserId = effectiveUserId,
             AgentId = effectiveAgentId,
             ConnectorId = target.ConnectorId ?? string.Empty,
-            Systemwide = effectiveSystemwide,
             Host = target.Host,
             Port = target.Port,
             Purpose = target.Purpose ?? string.Empty,

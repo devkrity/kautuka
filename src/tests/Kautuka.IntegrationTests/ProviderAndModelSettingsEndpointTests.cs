@@ -157,7 +157,7 @@ public sealed class ProviderSettingsEndpointTests
                     cancellationToken: TestContext.Current.CancellationToken);
                 Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
                 Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
-                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider", Systemwide: true), checker.Scope);
+                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), checker.Scope);
 
                 var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
                 NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
@@ -190,7 +190,7 @@ public sealed class ProviderSettingsEndpointTests
                 target.UserId ?? string.Empty,
                 target.AgentId ?? string.Empty,
                 target.ConnectorId,
-                target.Systemwide,
+                false,
                 target.Host,
                 target.Port,
                 target.Purpose,

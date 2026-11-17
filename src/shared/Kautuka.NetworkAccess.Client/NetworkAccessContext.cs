@@ -9,7 +9,6 @@ public sealed record NetworkAccessScope(
     string? ConnectorId = null,
     string? Purpose = null,
     string? Service = null,
-    bool Systemwide = false,
     string ExecutionContext = "app",
     string? CorrelationId = null);
 
@@ -28,7 +27,6 @@ public static class NetworkAccessContext
         string? connectorId = null,
         string? purpose = null,
         string? service = null,
-        bool systemwide = false,
         string executionContext = "app",
         string? correlationId = null)
     {
@@ -38,7 +36,6 @@ public static class NetworkAccessContext
             ConnectorId: connectorId,
             Purpose: purpose,
             Service: service,
-            Systemwide: systemwide,
             ExecutionContext: string.IsNullOrWhiteSpace(executionContext) ? "app" : executionContext,
             CorrelationId: correlationId);
 

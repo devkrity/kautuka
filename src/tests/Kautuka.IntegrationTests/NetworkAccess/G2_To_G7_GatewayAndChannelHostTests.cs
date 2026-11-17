@@ -121,6 +121,13 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     // G3.NC: Approved remote MCP host connects successfully (server accept count == 1).
     // -------------------------------------------------------------------------------------------------
 
+    [Fact]
+    public void OutboundNetworkIdentityDoesNotCarryCatalogueAvailability()
+    {
+        Assert.Null(typeof(OutboundTarget).GetProperty("Systemwide"));
+        Assert.Null(typeof(NetworkAccessScope).GetProperty("Systemwide"));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -137,7 +144,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         Assert.Equal("alice", checker.Target.UserId);
         Assert.Equal("secretary", checker.Target.AgentId);
         Assert.Equal("web-tools", checker.Target.ConnectorId);
-        Assert.False(checker.Target.Systemwide);
     }
 
     private sealed class CapturingRemoteMcpChecker : INetworkAccessChecker
@@ -355,7 +361,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             UserId: string.Empty,
             AgentId: string.Empty,
             ConnectorId: null,
-            Systemwide: false,
             ExecutionContext: "channelhost");
 
         var decision = await checker.CheckAsync(target, CancellationToken.None);
@@ -531,7 +536,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
                 UserId = effectiveUserId,
                 AgentId = target.ExecutionContext == "channelhost" ? string.Empty : (target.AgentId ?? string.Empty),
                 ConnectorId = target.ConnectorId ?? string.Empty,
-                Systemwide = target.Systemwide,
                 Purpose = target.Purpose ?? string.Empty,
             };
 

@@ -24,7 +24,7 @@ If Manager cannot load privileges, the API returns unavailable. If it cannot con
 Brake status and updates likewise report Manager outages; an unconfirmed update requires refreshing the status before retrying.
 Requests, rules, activity, and compatibility lists report unavailable when Manager cannot be reached rather than returning an empty list.
 When Manager cannot confirm a request decision or a rule or compatibility change, the API returns unavailable and asks for a refresh before retrying.
-Connector catalogue availability is not added to workload labels or registry entries, used to reconstruct a workload's network identity, or sent in remote MCP network checks. Shared credential lookup remains separate.
+Connector catalogue availability is not part of workload labels, registry entries, or the Gateway outbound network identity. Shared credential lookup remains separate.
 Connector desired-state fingerprints include the image compatibility relaxations as well as the image digest, so a changed profile is visible to reconciliation.
 
 Session compaction model calls use the session owner's network identity and, for agent sessions, the session's agent identity.

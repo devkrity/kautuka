@@ -41,7 +41,6 @@ public sealed partial class NetworkAccessWebSocketChecker(
             UserId: ambient?.UserId,
             AgentId: ambient?.AgentId,
             ConnectorId: ambient?.ConnectorId,
-            Systemwide: ambient?.Systemwide ?? false,
             ExecutionContext: ambient?.ExecutionContext ?? defaultExecutionContext);
 
         NetworkAccessCheckResult result = await checker.CheckAsync(target, cancellationToken).ConfigureAwait(false);

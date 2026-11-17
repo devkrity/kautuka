@@ -9,7 +9,6 @@ public sealed record OutboundTarget(
     string? UserId = null,
     string? AgentId = null,
     string? ConnectorId = null,
-    bool Systemwide = false,
     string? CorrelationId = null,
     string ExecutionContext = "app")
 {
@@ -27,7 +26,6 @@ public sealed record OutboundTarget(
             ConnectorId = ConnectorId ?? scope.ConnectorId,
             Purpose = Purpose ?? scope.Purpose,
             Service = Service ?? scope.Service,
-            Systemwide = Systemwide || scope.Systemwide,
             ExecutionContext = string.IsNullOrWhiteSpace(ExecutionContext) || ExecutionContext == "app"
                 ? scope.ExecutionContext
                 : ExecutionContext,

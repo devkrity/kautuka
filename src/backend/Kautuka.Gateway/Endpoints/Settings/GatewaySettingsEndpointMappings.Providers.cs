@@ -103,7 +103,6 @@ internal static partial class GatewaySettingsEndpointMappings
                 agentId: "gateway",
                 purpose: "provider-test",
                 service: "ai-provider",
-                systemwide: true,
                 correlationId: testToken);
             GatewayProviderTestResult result;
             try { result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false); }
