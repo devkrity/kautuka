@@ -121,6 +121,35 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     // G3.NC: Approved remote MCP host connects successfully (server accept count == 1).
     // -------------------------------------------------------------------------------------------------
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RemoteMcpCatalogueAvailabilityDoesNotEnterNetworkIdentity(bool includeSystemScope)
+    {
+        var checker = new CapturingRemoteMcpChecker();
+        var uri = new Uri("https://mcp.example.com/sse");
+        var context = new RemoteMcpRequestContext(uri, "web-tools", "alice", includeSystemScope, [], [],
+            (_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()));
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, checker, new TrackingHttpHandler()));
+        using var scope = NetworkAccessContext.BeginScope(userId: "alice", agentId: "secretary");
+        using var response = await client.GetAsync(uri);
+        Assert.NotNull(checker.Target);
+        Assert.Equal("alice", checker.Target.UserId);
+        Assert.Equal("secretary", checker.Target.AgentId);
+        Assert.Equal("web-tools", checker.Target.ConnectorId);
+        Assert.False(checker.Target.Systemwide);
+    }
+
+    private sealed class CapturingRemoteMcpChecker : INetworkAccessChecker
+    {
+        public OutboundTarget? Target { get; private set; }
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Target = target;
+            return Task.FromResult(NetworkAccessCheckResult.CreateAllowed("test"));
+        }
+    }
+
     [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
     public async Task G3_RemoteMcp_DeniedBeforeTcpConnect_ProducesAttributedRequest_AndToolCallFinished_WithNegativeControl()

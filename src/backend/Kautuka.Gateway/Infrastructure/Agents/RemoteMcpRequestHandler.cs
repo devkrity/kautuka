@@ -66,7 +66,6 @@ internal sealed class RemoteMcpRequestHandler(
             UserId: context.UserId,
             AgentId: NetworkAccessContext.Current?.AgentId,
             ConnectorId: context.ConnectorId,
-            Systemwide: context.IncludeSystemScope,
             ExecutionContext: "app");
 
         NetworkAccessCheckResult checkResult = await effectiveChecker.CheckAsync(target, cancellationToken).ConfigureAwait(false);
