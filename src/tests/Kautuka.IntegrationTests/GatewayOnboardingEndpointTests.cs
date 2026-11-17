@@ -17,6 +17,7 @@ using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Endpoints.Catalog;
 using Kautuka.Gateway.Infrastructure.Catalog;
 using Kautuka.Gateway.Infrastructure.Updates;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.UpdateService.Protos;
 
 using Microsoft.AspNetCore.Builder;
@@ -31,6 +32,66 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class GatewayOnboardingEndpointTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CatalogueDownloadFollowsOnlyNetworkApprovedRedirects(bool allowTarget)
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        const string original = "https://catalog.test/bundle";
+        const string target = "https://release.test/bundle";
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", original, Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectArtifactHandler(original, target, bundle);
+        var checker = new RedirectChecker(allowTarget);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(new NetworkAccessCheckHandler(checker, transport)));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Contains(checker.Targets, item => item.Host == "catalog.test" && item.UserId == "user-1");
+        Assert.Contains(checker.Targets, item => item.Host == "release.test" && item.UserId == "user-1");
+        Assert.Equal(allowTarget ? HttpStatusCode.OK : HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal(allowTarget, transport.TargetReached);
+    }
+
+    private sealed class RedirectChecker(bool allowTarget) : INetworkAccessChecker
+    {
+        public List<OutboundTarget> Targets { get; } = [];
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Targets.Add(target);
+            return Task.FromResult(target.Host == "release.test" && !allowTarget
+                ? NetworkAccessCheckResult.CreateDenied("test") : NetworkAccessCheckResult.CreateAllowed("test"));
+        }
+    }
+
+    private sealed class RedirectArtifactHandler(string original, string target, byte[] bundle) : HttpMessageHandler
+    {
+        public bool TargetReached { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri?.ToString() == original)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
+                redirect.Headers.Location = new Uri(target);
+                return Task.FromResult(redirect);
+            }
+            TargetReached = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bundle) });
+        }
+    }
     [Fact]
     public async Task CatalogRecommendationsDoNotMutateSeededMarkitdownConnectorAsync()
     {

@@ -183,10 +183,7 @@ internal sealed class GatewayHostedCatalogInstaller(
 
         using HttpClient client = httpClientFactory.CreateClient();
         Uri artifactUri = new(item.ArtifactUrl, UriKind.Absolute);
-        using HttpResponseMessage response = await client.GetAsync(
-            artifactUri,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await GetArtifactFollowingRedirectsAsync(client, artifactUri, cancellationToken).ConfigureAwait(false);
 
         response.EnsureSuccessStatusCode();
 
@@ -200,6 +197,25 @@ internal sealed class GatewayHostedCatalogInstaller(
         VerifyArtifactDigest(item, content);
 
         return new DownloadedCatalogArtifact(content, ResolveFileName(item));
+    }
+
+    private static async Task<HttpResponseMessage> GetArtifactFollowingRedirectsAsync(HttpClient client, Uri uri, CancellationToken cancellationToken)
+    {
+        for (int redirects = 0; ; redirects++)
+        {
+            HttpResponseMessage response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
+                return response;
+            if (redirects >= 10)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Too many catalogue artifact redirects.");
+            }
+            Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            response.Dispose();
+            if (next.Scheme is not ("http" or "https")) throw new HttpRequestException("Unsupported catalogue redirect scheme.");
+            uri = next;
+        }
     }
 
     private static void VerifyArtifactDigest(GatewayHostedCatalogItem item, byte[] content)
