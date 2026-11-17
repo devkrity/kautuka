@@ -8,6 +8,21 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
     [Theory]
+    [InlineData("requests")]
+    [InlineData("rules")]
+    [InlineData("activity")]
+    [InlineData("compat")]
+    public async Task NetworkAccessListsReportManagerOutageAsUnavailable(string section)
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string admin = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        fixture.FailPrivilegeSync = true;
+        using HttpResponseMessage response = await fixture.SendRawJsonAsync(HttpMethod.Get,
+            $"/api/network-access/{section}", new { }, admin);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Theory]
     [InlineData("read")]
     [InlineData("user")]
     [InlineData("system")]

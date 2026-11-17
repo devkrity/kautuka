@@ -42,9 +42,15 @@ internal static partial class GatewayRuntimeEndpointMappings
                 HasSinceRevision = sinceRevision.HasValue,
             };
 
-            NetworkAccessListRequestsResponse response = await managerService.Client.ListRequestsAsync(
-                request,
-                cancellationToken: cancellationToken);
+            NetworkAccessListRequestsResponse response;
+            try
+            {
+                response = await managerService.Client.ListRequestsAsync(request, cancellationToken: cancellationToken);
+            }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load network requests. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var privCache = new Dictionary<string, UserPrivilegesSummaryDto>(StringComparer.Ordinal)
             {
@@ -212,7 +218,12 @@ internal static partial class GatewayRuntimeEndpointMappings
                 FilterUserId = filterUserId,
             };
 
-            NetworkAccessListRulesResponse response = await managerService.Client.ListRulesAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessListRulesResponse response;
+            try { response = await managerService.Client.ListRulesAsync(request, cancellationToken: cancellationToken); }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load network rules. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var ruleDtos = response.Rules
                 .Where(r => isAdmin || string.Equals(r.UserId, user.Id, StringComparison.Ordinal))
@@ -386,7 +397,12 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = isAdmin },
             };
 
-            NetworkAccessListActivityResponse response = await managerService.Client.ListActivityAsync(request, cancellationToken: cancellationToken);
+            NetworkAccessListActivityResponse response;
+            try { response = await managerService.Client.ListActivityAsync(request, cancellationToken: cancellationToken); }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load network activity. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var entries = response.Entries
                 .Where(e => isAdmin || string.Equals(e.UserId, user.Id, StringComparison.Ordinal))
@@ -700,7 +716,12 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
 
             var request = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true };
-            ImageCompatStateResponse response = await managerService.Client.GetImageCompatibilityAsync(request, cancellationToken: cancellationToken);
+            ImageCompatStateResponse response;
+            try { response = await managerService.Client.GetImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
+            catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
+            {
+                return Results.Json(new GatewayErrorResponse("Manager could not load compatibility settings. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
 
             var pendingDtos = response.PendingRequests.Select(p => new ImageCompatRequestDto(
                 ImageDigest: p.ImageDigest,

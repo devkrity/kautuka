@@ -572,13 +572,19 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             => Wrap(grpc.SetApprovalLimits(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessListRequestsResponse> ListRequestsAsync(NetworkAccessListRequestsRequest request, CallOptions options)
-            => Wrap(grpc.ListRequests(request, ctx));
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListRequests(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessDecideResponse> DecideRequestAsync(NetworkAccessDecideRequest request, CallOptions options)
             => Wrap(grpc.DecideRequest(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessListRulesResponse> ListRulesAsync(NetworkAccessListRulesRequest request, CallOptions options)
-            => Wrap(grpc.ListRules(request, ctx));
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListRules(request, ctx));
+
+        public override AsyncUnaryCall<NetworkAccessListActivityResponse> ListActivityAsync(NetworkAccessListActivityRequest request, CallOptions options)
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListActivity(request, ctx));
+
+        public override AsyncUnaryCall<ImageCompatStateResponse> GetImageCompatibilityAsync(NetworkAccessActorMessage request, CallOptions options)
+            => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.GetImageCompatibility(request, ctx));
 
         public override AsyncUnaryCall<NetworkAccessBrakeMessage> GetBrakeAsync(NetworkAccessGetBrakeRequest request, CallOptions options)
             => failPrivilegeSync()
