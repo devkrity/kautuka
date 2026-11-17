@@ -372,10 +372,11 @@ public sealed class ChannelSemanticRenderingTests
     }
 
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    public async Task SlackFileRedirectsRespectNacAndDoNotLeakBotToken(bool allowTarget, bool sameHost)
+    [InlineData(true, true, false)]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    public async Task SlackFileRedirectsRespectNacAndDoNotLeakBotToken(bool allowTarget, bool sameHost, bool differentPort)
     {
         string root = Path.Combine(Path.GetTempPath(), $"kautuka-slack-redirect-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
@@ -387,7 +388,7 @@ public sealed class ChannelSemanticRenderingTests
             ChannelAttachmentStore attachments = new(database, credentials);
             _ = attachments.UpsertAttachment(new UpsertAttachmentRequest { AttachmentId = "slack-1", ProviderKey = "slack", ExpectedSchemaVersion = "slack/v1", Settings = { new AttachmentSettingValue { FieldKey = "owner_user_id", StringValue = "owner" } } });
             credentials.Replace("slack-1", [new RuntimeCredentialValue { FieldKey = "bot_token", SecretValue = "bot-token" }]);
-            using var transport = new SlackRedirectHandler(sameHost);
+            using var transport = new SlackRedirectHandler(sameHost, differentPort);
             var checker = new SlackRedirectChecker(allowTarget);
             using var policy = new NetworkAccessCheckHandler(checker, transport);
             using var factory = new SingleClientFactory(policy);
@@ -397,7 +398,7 @@ public sealed class ChannelSemanticRenderingTests
             if (allowTarget) await ReadAsync();
             else await Assert.ThrowsAsync<NetworkAccessDeniedException>(ReadAsync);
             Assert.Equal(allowTarget, transport.TargetReached);
-            if (allowTarget) Assert.Equal(sameHost ? "bot-token" : null, transport.TargetToken);
+            if (allowTarget) Assert.Equal(sameHost && !differentPort ? "bot-token" : null, transport.TargetToken);
             Assert.Contains(checker.Hosts, host => host == (sameHost ? "files.slack.com" : "cdn.example"));
         }
         finally { ChannelHostSqliteTestCleanup.ReleaseAndDelete(root); }
@@ -413,7 +414,7 @@ public sealed class ChannelSemanticRenderingTests
         }
     }
 
-    private sealed class SlackRedirectHandler(bool sameHost) : HttpMessageHandler
+    private sealed class SlackRedirectHandler(bool sameHost, bool differentPort) : HttpMessageHandler
     {
         public bool TargetReached { get; private set; }
         public string? TargetToken { get; private set; }
@@ -424,7 +425,7 @@ public sealed class ChannelSemanticRenderingTests
             if (request.RequestUri.AbsolutePath == "/start")
             {
                 var response = new HttpResponseMessage(System.Net.HttpStatusCode.Redirect);
-                response.Headers.Location = new Uri(sameHost ? "https://files.slack.com/final" : "https://cdn.example/final");
+                response.Headers.Location = new Uri(sameHost ? (differentPort ? "https://files.slack.com:8443/final" : "https://files.slack.com/final") : "https://cdn.example/final");
                 return Task.FromResult(response);
             }
             TargetReached = true; TargetToken = request.Headers.Authorization?.Parameter;

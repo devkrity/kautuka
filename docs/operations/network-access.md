@@ -21,7 +21,7 @@ Session compaction model calls use the session owner's network identity and, for
 Agent runtime construction, including model capability probing, uses the run's user and agent identity for network checks.
 Background memory extraction uses the originating session's owner and agent for network checks; a missing session does not gain an identity.
 Catalogue artifact downloads follow redirects with a bounded hop count. Each destination is checked by NAC before the next request is sent.
-Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host.
+Slack file downloads also check redirected destinations; the bot token is sent only to the original Slack host and port.
 The workload hook refuses a managed workload when its network namespace inode cannot be read (`missing_netns_inode`), so it cannot skip the shared-namespace check.
 Temporary connector probe grants are cleared using the verified container ID when the probe ends.
 When a connector start fails, its deny-all registration is removed only after Podman confirms the container is absent; an uncertain inspection retains it.

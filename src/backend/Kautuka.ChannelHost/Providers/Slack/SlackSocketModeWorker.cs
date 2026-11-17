@@ -343,11 +343,12 @@ internal sealed class SlackSocketModeWorker(
     private async Task<HttpResponseMessage> DownloadSlackFileAsync(Uri uri, string botToken, CancellationToken cancellationToken)
     {
         string originalHost = uri.IdnHost;
+        int originalPort = uri.Port;
         HttpClient client = httpClientFactory.CreateClient("slack-api");
         for (int redirects = 0; ; redirects++)
         {
             using HttpRequestMessage request = new(HttpMethod.Get, uri);
-            if (string.Equals(uri.IdnHost, originalHost, StringComparison.OrdinalIgnoreCase))
+            if (uri.Port == originalPort && string.Equals(uri.IdnHost, originalHost, StringComparison.OrdinalIgnoreCase))
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", botToken);
             HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
