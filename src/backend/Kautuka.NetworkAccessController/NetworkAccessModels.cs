@@ -162,7 +162,6 @@ public sealed record OutboundCheckInput(
     string UserId,
     string AgentId,
     string? ConnectorId,
-    bool Systemwide,
     string Host,
     int Port,
     string? Purpose,

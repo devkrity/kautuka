@@ -208,7 +208,7 @@ public sealed class NetworkAccessMatchingModelTests
             var admin = new NetworkAccessActor("admin", true);
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "example.com", "host", 443, true), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "example.com", "host", 443, false), store.Revision);
-            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("system", "channelhost", null, false, "example.com", 443, null, null)).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("system", "channelhost", null, "example.com", 443, null, null)).Allowed);
         }
         finally { Directory.Delete(root, recursive: true); }
     }

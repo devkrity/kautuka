@@ -16,7 +16,7 @@ public sealed class ProviderTestTemporaryAccessTests
             var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry(), timeProvider: clock);
             var admin = new NetworkAccessActor("admin", true);
             string token = controller.BeginProviderTest(admin, "provider.example", 443, false);
-            var request = new OutboundCheckInput("admin", "gateway", null, true, "provider.example", 443, "provider-test", token);
+            var request = new OutboundCheckInput("admin", "gateway", null, "provider.example", 443, "provider-test", token);
 
             Assert.True(controller.EvaluateOutboundCheck(request).Allowed);
             clock.Advance(TimeSpan.FromSeconds(29));
@@ -47,7 +47,7 @@ public sealed class ProviderTestTemporaryAccessTests
             var admin = new NetworkAccessActor("admin", true);
             string token = controller.BeginProviderTest(admin, "provider.example", 443, false);
             OutboundCheckInput Test(string user, string host, string id) =>
-                new(user, "gateway", null, true, host, 443, "provider-test", id);
+                new(user, "gateway", null, host, 443, "provider-test", id);
             Assert.True(controller.EvaluateOutboundCheck(Test("admin", "provider.example", token)).Allowed);
             Assert.False(controller.EvaluateOutboundCheck(Test("other", "provider.example", token)).Allowed);
             Assert.False(controller.EvaluateOutboundCheck(Test("admin", "other.example", token)).Allowed);

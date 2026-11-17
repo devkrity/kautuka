@@ -132,6 +132,10 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     public void OutboundNetworkProtocolDoesNotCarryCatalogueAvailability()
         => Assert.Null(typeof(NetworkAccessCheckOutboundRequest).GetProperty("Systemwide"));
 
+    [Fact]
+    public void OutboundDecisionInputDoesNotCarryCatalogueAvailability()
+        => Assert.Null(typeof(OutboundCheckInput).GetProperty("Systemwide"));
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

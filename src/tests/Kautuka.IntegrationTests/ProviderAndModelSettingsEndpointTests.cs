@@ -190,7 +190,6 @@ public sealed class ProviderSettingsEndpointTests
                 target.UserId ?? string.Empty,
                 target.AgentId ?? string.Empty,
                 target.ConnectorId,
-                false,
                 target.Host,
                 target.Port,
                 target.Purpose,
@@ -1102,12 +1101,12 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         private WorkspaceBoolResponse End(NetworkAccessProviderTestEndRequest request)
         {
             controller.EndProviderTest(new(request.Actor.UserId, true), request.Token);
-            TemporaryTestEnded = !controller.EvaluateOutboundCheck(new(testUser!, "gateway", null, true, "provider.example", 443, "provider-test", testToken)).Allowed;
+            TemporaryTestEnded = !controller.EvaluateOutboundCheck(new(testUser!, "gateway", null, "provider.example", 443, "provider-test", testToken)).Allowed;
             return new WorkspaceBoolResponse { Ok = true };
         }
         public NetworkAccessCheckResult CheckTemporaryTest(OutboundTarget target)
         {
-            NetworkAccessDecisionResult decision = controller.EvaluateOutboundCheck(new(target.UserId!, "gateway", null, true, target.Host, target.Port, target.Purpose, target.CorrelationId));
+            NetworkAccessDecisionResult decision = controller.EvaluateOutboundCheck(new(target.UserId!, "gateway", null, target.Host, target.Port, target.Purpose, target.CorrelationId));
             TemporaryTestAllowed = decision.Allowed;
             return new NetworkAccessCheckResult(decision.Allowed, decision.Reason, decision.RequestId, decision.OpenInternetBadge, NetworkAccessDenialKind.Denied);
         }

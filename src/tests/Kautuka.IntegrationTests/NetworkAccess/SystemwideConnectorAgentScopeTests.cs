@@ -84,7 +84,7 @@ public sealed class SystemwideConnectorAgentScopeTests
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
             store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: true, targetIsAdmin: false);
-            NetworkAccessDecisionResult gatewayPending = controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "agent-a", "alice::mail", true, "other.example", 443, "agent-run", "test"));
+            NetworkAccessDecisionResult gatewayPending = controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "agent-a", "alice::mail", "other.example", 443, "agent-run", "test"));
             Assert.False(gatewayPending.Allowed);
             NetworkAccessRequest gatewayRequest = Assert.Single(store.ListRequests(new NetworkAccessActor("alice", false)).Requests).Request;
             Assert.Equal("agent-a", gatewayRequest.AgentId);
@@ -100,7 +100,7 @@ public sealed class SystemwideConnectorAgentScopeTests
             Assert.Equal("agent-a", request.AgentId);
             store.DecideRequest(new NetworkAccessActor("alice", false), request.Id, true, "agent", store.Revision);
             Assert.True(Check("10.247.1.10").Allowed);
-            Assert.True(controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "agent-a", "alice::mail", true, "mail.example", 443, "agent-run", "test")).Allowed);
+            Assert.True(controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "agent-a", "alice::mail", "mail.example", 443, "agent-run", "test")).Allowed);
             Assert.False(Check("10.247.1.11").Allowed);
             NetworkAccessRequest second = Assert.Single(store.ListRequests(new NetworkAccessActor("alice", false)).Requests, item => item.Request.Status == "pending").Request;
             store.DecideRequest(new NetworkAccessActor("alice", false), second.Id, true, "user", store.Revision);

@@ -402,7 +402,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
 
         // Positive baseline: seeded host api.openai.com:443 is allowed for system/gateway
         NetworkAccessDecisionResult seedAllowed = controller.EvaluateOutboundCheck(
-            new OutboundCheckInput("system", "gateway", null, false, "api.openai.com", 443, "model-provider", "corr-1"));
+            new OutboundCheckInput("system", "gateway", null, "api.openai.com", 443, "model-provider", "corr-1"));
         Assert.True(seedAllowed.Allowed);
         Assert.Equal("seed", seedAllowed.Reason);
 
@@ -413,14 +413,14 @@ public sealed class U1_DecisionFunctionTests : IDisposable
             controller.PolicyStore.Revision);
 
         NetworkAccessDecisionResult blocked = controller.EvaluateOutboundCheck(
-            new OutboundCheckInput("system", "gateway", null, false, "api.openai.com", 443, "model-provider", "corr-2"));
+            new OutboundCheckInput("system", "gateway", null, "api.openai.com", 443, "model-provider", "corr-2"));
         Assert.False(blocked.Allowed);
         Assert.Equal("blocked", blocked.Reason);
 
         // Negative control (.NC): delete the block rule -> seed allows again
         controller.PolicyStore.DeleteRule(admin, blockRule.Rule.Id, controller.PolicyStore.Revision);
         NetworkAccessDecisionResult restored = controller.EvaluateOutboundCheck(
-            new OutboundCheckInput("system", "gateway", null, false, "api.openai.com", 443, "model-provider", "corr-3"));
+            new OutboundCheckInput("system", "gateway", null, "api.openai.com", 443, "model-provider", "corr-3"));
         Assert.True(restored.Allowed);
         Assert.Equal("seed", restored.Reason);
     }
@@ -477,7 +477,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         var member = new NetworkAccessActor("user-1", IsAdmin: false);
 
         static OutboundCheckInput Call(string user, string host, int port)
-            => new(user, "gateway", null, false, host, port, "provider-test", null);
+            => new(user, "gateway", null, host, port, "provider-test", null);
 
         // No built-in exception: before any grant, localhost-style provider endpoints are denied.
         Assert.False(controller.EvaluateOutboundCheck(Call("admin-1", "192.168.1.50", 11434)).Allowed);

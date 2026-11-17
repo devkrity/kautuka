@@ -79,7 +79,6 @@ public sealed partial class WorkspaceGrpcService
                 effectiveUserId,
                 effectiveAgentId,
                 string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim(),
-                false,
                 request.Host,
                 request.Port,
                 string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,
