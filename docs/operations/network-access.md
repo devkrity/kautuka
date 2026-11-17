@@ -8,7 +8,9 @@ The Windows Podman Machine development authorization certificates have 30-day le
 
 CI run [43802273218](https://github.com/devkrity/kautuka/actions/runs/43802273218) passed the production rootless Podman/Envoy acceptance, C6, brake negative control, and Linux integration tests on source SHA `590fa249c4cc8bc30875d8fb2ba08b07bedd33c5`. Its acceptance report is available as that run's artifact. Policy-deny verification covers new connections; the isolated Fedora `--live` run remains a manual check.
 
-Historical acceptance reports can mark `ncFlipped` true merely because the negative-control observation uses different field names. Treat the recorded measurements and the independently executed brake mutation as evidence, but do not treat that flag alone as proof that a check was disabled. New observations must be structured and require the scenario's specified shared measurement to change; a changed measurement alone still does not establish mutation coverage. A live acceptance run on the current source is needed.
+Historical acceptance reports can mark `ncFlipped` true merely because the negative-control observation uses different field names. Treat the recorded measurements and the independently executed brake mutation as evidence, but do not treat that flag alone as proof that a check was disabled. New observations must be structured and require the scenario's specified shared measurement to change; a changed measurement alone still does not establish mutation coverage. A live acceptance run on the code intended to ship is needed.
+
+A [local rootless WSL2 run at `0ba4264`](nac-ubuntu-rootless-0ba4264.md) subsequently passed 12/12 scenarios with a separate brake mutation. It does not establish Fedora or hosted CI behavior, and later source changes require their own evidence.
 
 The [network access test index](../../src/tests/Kautuka.IntegrationTests/NetworkAccess/README.md) maps historical test IDs to their files and notes which live test requires explicit opt-in.
 
