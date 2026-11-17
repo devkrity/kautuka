@@ -5,6 +5,7 @@ using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Observability;
+using Kautuka.NetworkAccess.Client;
 
 using Mediator;
 
@@ -631,14 +632,14 @@ internal sealed class ApprovalContinuationDispatcherService(
             .MaxParallelTools ?? 0;
         string[] executed = await PackedToolApproval.InvokeThrottledAsync(
             independentInvokes.Select(item => (Func<CancellationToken, Task<string>>)(ct =>
-                InvokeJournaledToolAsync(item.Row, journalContext, () => ApprovedToolExecution.RunAsync(approvalStore, item.Row.Id, item.Row.AgentId!, item.Row.SessionId!, item.Row.UserId, item.Row.ToolName, item.Row.ArgumentsJson, () => invoker.InvokePinnedAsync(
+                InvokeJournaledToolAsync(item.Row, journalContext, () => ApprovedToolExecution.RunAsync(approvalStore, item.Row.Id, item.Row.AgentId!, item.Row.SessionId!, item.Row.UserId, item.Row.ToolName, item.Row.ArgumentsJson, () => InvokeWithNetworkScopeAsync(item.Row, () => invoker.InvokePinnedAsync(
                     item.Row.AgentId!,
                     item.Row.SessionId!,
                     item.Row.UserId,
                     item.Row.ToolName,
                     item.Row.ArgumentsJson,
                     ReadPinnedTooling(waitState),
-                    ct, item.Row.McpServerId).AsTask(), ct), ct))).ToList(),
+                    ct, item.Row.McpServerId).AsTask()), ct), ct))).ToList(),
             maxParallel,
             cancellationToken).ConfigureAwait(false);
 
@@ -763,20 +764,26 @@ internal sealed class ApprovalContinuationDispatcherService(
             return;
         }
 
-        string executedJson = await ApprovedToolExecution.RunAsync(approvalStore, approval.Id, approval.AgentId, approval.SessionId, approval.UserId, approval.ToolName, approval.ArgumentsJson, () => packedApprovedToolInvoker.InvokePinnedAsync(
+        string executedJson = await ApprovedToolExecution.RunAsync(approvalStore, approval.Id, approval.AgentId, approval.SessionId, approval.UserId, approval.ToolName, approval.ArgumentsJson, () => InvokeWithNetworkScopeAsync(approval, () => packedApprovedToolInvoker.InvokePinnedAsync(
             approval.AgentId,
             approval.SessionId,
             approval.UserId,
             approval.ToolName,
             approval.ArgumentsJson,
             ReadPinnedTooling(waitState),
-            cancellationToken, approval.McpServerId).AsTask(), cancellationToken).ConfigureAwait(false);
+            cancellationToken, approval.McpServerId).AsTask()), cancellationToken).ConfigureAwait(false);
         runWaitStateStore.PutPackedToolResult(waitState.WaitId, work.RequestId, executedJson, journaledStart: false);
         ApprovalContinuationDispatcherServiceLog.ExecutedPackedToolBeforeModel(
             logger,
             work.RequestId,
             waitState.WaitId,
             approval.ToolName);
+    }
+
+    private static async Task<string> InvokeWithNetworkScopeAsync(GatewayToolApprovalRequest approval, Func<Task<string>> invoke)
+    {
+        using IDisposable scope = NetworkAccessContext.BeginScope(approval.UserId, approval.AgentId, approval.McpServerId, purpose: "agent-run");
+        return await invoke().ConfigureAwait(false);
     }
 
     private static EffectiveToolingSnapshot? ReadPinnedTooling(RunWaitState wait)

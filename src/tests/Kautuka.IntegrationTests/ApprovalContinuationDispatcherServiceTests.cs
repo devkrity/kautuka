@@ -4,6 +4,7 @@ using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Hitl;
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.NetworkAccess.Client;
 
 using Mediator;
 
@@ -23,7 +24,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
         var completion = new CapturingPublisher();
         var journal = new RecordingToolJournal();
         var invoker = new BlockingPackedToolInvoker();
-        GatewayToolApprovalRequest approval = CreatePackedFetchApproval("req-boundary", "call-boundary", "approved");
+        GatewayToolApprovalRequest approval = CreatePackedFetchApproval("req-boundary", "call-boundary", "approved") with { McpServerId = "web-tools" };
         var waitStore = new FakeRunWaitStateStore(CreatePackedApprovalWaitState("req-boundary"));
         using var service = new ApprovalContinuationDispatcherService(queue, new FakeApprovalStore(approval), new CapturingContinuationOrchestrator(), waitStore,
             new FakeInvocationLinkStore(), completion, NullLogger<ApprovalContinuationDispatcherService>.Instance, invoker, runtimeEventPublisher: journal);
@@ -32,6 +33,9 @@ public sealed class ApprovalContinuationDispatcherServiceTests
         {
             await queue.EnqueueAsync(CreateApprovedContinuationWork(approval.Id), CancellationToken.None);
             await invoker.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Equal(approval.UserId, invoker.NetworkScope?.UserId);
+            Assert.Equal(approval.AgentId, invoker.NetworkScope?.AgentId);
+            Assert.Equal(approval.McpServerId, invoker.NetworkScope?.ConnectorId);
             Assert.Contains(Narad.Contracts.NaradEventTypes.ToolCallStarted, journal.EventTypes);
             Assert.DoesNotContain(Narad.Contracts.NaradEventTypes.ToolCallFinished, journal.EventTypes);
             await Task.Delay(150, TestContext.Current.CancellationToken);
@@ -46,10 +50,12 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
     private sealed class BlockingPackedToolInvoker : IPackedApprovedToolInvoker
     {
+        public NetworkAccessScope? NetworkScope { get; private set; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async ValueTask<string> InvokeAsync(string agentId, string sessionId, string? userId, string toolName, string? argumentsJson, CancellationToken cancellationToken)
         {
+            NetworkScope = NetworkAccessContext.Current;
             Started.TrySetResult();
             await Release.Task.WaitAsync(cancellationToken);
             return "{}";
