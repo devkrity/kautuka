@@ -325,6 +325,7 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
+    expect(checkRuleMock).not.toHaveBeenCalled();
     expect(testProviderMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
   });
@@ -342,6 +343,8 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
+    expect(checkRuleMock).not.toHaveBeenCalled();
+    expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(testProviderMock).not.toHaveBeenCalled();
   });
 
