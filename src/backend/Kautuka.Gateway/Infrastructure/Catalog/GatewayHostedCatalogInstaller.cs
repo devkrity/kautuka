@@ -91,8 +91,13 @@ internal sealed class GatewayHostedCatalogInstaller(
         }
 
         McpConnectorTestResult validation = await mcpConnectorTestService
-            .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector), cancellationToken)
+            .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector, user.Id), cancellationToken)
             .ConfigureAwait(false);
+
+        if (validation.Success && validation.ToolDefinitions is not null
+            && (!IsCanonicalImageDigest(validation.ImageDigest)
+                || (!string.IsNullOrWhiteSpace(inspection.Connector.BundlePath) && !IsCanonicalSourceDigest(validation.SourceDigest))))
+            throw new InvalidOperationException("Connector tools could not be saved without an immutable image digest.");
 
         if (!validation.Success)
         {
@@ -285,10 +290,11 @@ internal sealed class GatewayHostedCatalogInstaller(
             ["catalogArtifactUrl"] = item.ArtifactUrl ?? string.Empty,
         };
 
-    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector)
+    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector, string userId)
         => new()
         {
             Id = serverId,
+            UserId = userId,
             Transport = connector.Transport ?? "container",
             ContainerImage = connector.ContainerImage,
             ContainerCommand = connector.ContainerCommand,
@@ -320,8 +326,8 @@ internal sealed class GatewayHostedCatalogInstaller(
             BundlePath = connector.BundlePath,
             ServerType = connector.ServerType,
             RuntimeArtifactType = connector.RuntimeArtifactType,
-            RuntimeArtifactSourceDigest = connector.RuntimeArtifactSourceDigest,
-            RuntimeArtifactBuildStatus = "ready",
+            RuntimeArtifactSourceDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : connector.RuntimeArtifactSourceDigest,
+            RuntimeArtifactBuildStatus = connector.RuntimeArtifactType is null ? connector.RuntimeArtifactBuildStatus : "ready",
             ReadinessTimeoutSeconds = connector.ReadinessTimeoutSeconds,
             JitCooldownSeconds = connector.JitCooldownSeconds,
             HealthcheckUrl = connector.HealthcheckUrl,
@@ -330,7 +336,18 @@ internal sealed class GatewayHostedCatalogInstaller(
             Enabled = connector.Enabled,
             ToolCount = validation.ToolCount,
             ToolNames = validation.ToolNames?.ToArray(),
+            LocalToolDefinitions = validation.ToolDefinitions,
+            LocalArtifactDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : null,
+            LocalImageDigest = validation.ImageDigest,
+            LocalDiscoveryAttempted = true,
         };
+
+    private static bool IsCanonicalImageDigest(string? digest)
+        => digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.Ordinal)
+            && digest.AsSpan(7).ToString().All(Uri.IsHexDigit);
+
+    private static bool IsCanonicalSourceDigest(string? digest)
+        => digest is { Length: 64 } && digest.All(Uri.IsHexDigit);
 
     private static void EnsureCanImportConnectors(GatewayUser user)
     {

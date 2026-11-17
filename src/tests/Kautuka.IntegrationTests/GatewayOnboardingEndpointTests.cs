@@ -113,6 +113,7 @@ public sealed class GatewayOnboardingEndpointTests
     [Fact]
     public async Task CatalogRecommendationInstallImportsConnectorAsync()
     {
+        var connectorTest = new RecordingMcpConnectorTestService();
         using var temp = new TemporaryGatewayStateDirectory();
         IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
         GatewayState state = CreateState(configuration);
@@ -151,7 +152,7 @@ public sealed class GatewayOnboardingEndpointTests
                     [artifactUrl] = bundleBytes,
                 })));
                 services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
-                services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+                services.AddSingleton<IMcpConnectorTestService>(connectorTest);
                 services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
                 services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
             }).ConfigureAwait(true);
@@ -169,6 +170,10 @@ public sealed class GatewayOnboardingEndpointTests
         Assert.NotNull(connector);
         Assert.Equal("Kautuka Web Tools", connector!.Name);
         Assert.True(connector.Enabled);
+        Assert.Equal("user-1", connectorTest.LastRequest?.UserId);
+        Assert.Equal("sha256:" + new string('a', 64), connector.LocalImageDigest);
+        Assert.Equal(new string('b', 64), connector.LocalArtifactDigest);
+        Assert.Equal("open_page", Assert.Single(connector.LocalToolDefinitions!).Name);
     }
 
     [Fact]
@@ -531,13 +536,19 @@ public sealed class GatewayOnboardingEndpointTests
 
     private sealed class RecordingMcpConnectorTestService : IMcpConnectorTestService
     {
+        public GatewayConnectorTestRequest? LastRequest { get; private set; }
         public Task<McpConnectorTestResult> TestAsync(GatewayConnectorTestRequest request, CancellationToken ct)
-            => Task.FromResult(new McpConnectorTestResult(
+        {
+            LastRequest = request;
+            return Task.FromResult(new McpConnectorTestResult(
                 true,
                 "Connector validated.",
                 ToolCount: 2,
                 PackageChecked: request.BundlePath,
-                ToolNames: ["open_page", "extract_text"]));
+                ToolNames: ["open_page", "extract_text"],
+                ToolDefinitions: [new ConnectorToolDefinition("open_page", "Open a page", "{\"type\":\"object\"}")],
+                ImageDigest: "sha256:" + new string('a', 64), SourceDigest: new string('b', 64)));
+        }
     }
 
     private sealed class StaticHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
