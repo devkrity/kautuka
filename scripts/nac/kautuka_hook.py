@@ -435,7 +435,7 @@ def decide(state, ips, allowlist, owners, netns_inode="100", allowlist_valid=Tru
             if owner_cid != cid:
                 return ("refuse", "shared_netns")
 
-    return ("allow", "package_proxy_rules" if is_package_proxy else "workload_rules")
+    return ("allow", "workload_rules")
 
 
 def _is_ipv4(value):
