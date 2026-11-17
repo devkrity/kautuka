@@ -43,7 +43,7 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Run Windows NAC verification and recovery tests
-        run: dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --filter "FullyQualifiedName~WindowsPodmanDevEgressOptionsTests|FullyQualifiedName~WorkloadRegistryTrustLifecycleTests|FullyQualifiedName~WorkloadPostStartVerifierTests"
+        run: dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --filter "FullyQualifiedName~WindowsPodmanDevEgressOptionsTests|FullyQualifiedName~WorkloadRegistryTrustLifecycleTests|FullyQualifiedName~WorkloadPostStartVerifierTests|FullyQualifiedName~V7_55_ReconcileFailClosedTests|FullyQualifiedName~V7_55_ReconcileQuarantineRetryTests|FullyQualifiedName~V7_55_QuarantinePersistenceTests|FullyQualifiedName~ProductionDnsBoundaryAllowsOnlyTheCoreDnsGateway"
 
   nac-acceptance:
     name: NAC Acceptance Suite (Linux)
