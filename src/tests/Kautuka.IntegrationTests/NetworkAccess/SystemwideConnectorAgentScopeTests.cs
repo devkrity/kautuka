@@ -83,7 +83,7 @@ public sealed class SystemwideConnectorAgentScopeTests
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
-            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: true, targetIsAdmin: false);
+            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, targetIsAdmin: false);
             NetworkAccessDecisionResult gatewayPending = controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "agent-a", "alice::mail", "other.example", 443, "agent-run", "test"));
             Assert.False(gatewayPending.Allowed);
             NetworkAccessRequest gatewayRequest = Assert.Single(store.ListRequests(new NetworkAccessActor("alice", false)).Requests).Request;

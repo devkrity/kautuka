@@ -244,7 +244,7 @@ public sealed class U8_NonPublicV4AndOpenRulesTests : IDisposable
 
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
         var userX = new NetworkAccessActor("user-x", IsAdmin: false);
-        store.SetUserPrivileges(admin, "user-x", canApproveOwn: true, canAllowAllAgents: true);
+        store.SetUserPrivileges(admin, "user-x", canApproveOwn: true);
 
         // Reject writing any-public by non-admin, at agent scope, without connectorId, or for agent-sandbox
         Assert.Throws<UnauthorizedAccessException>(() =>

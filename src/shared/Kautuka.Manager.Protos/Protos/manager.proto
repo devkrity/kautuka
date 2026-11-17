@@ -475,7 +475,8 @@ message NetworkAccessRuleMessage {
 message NetworkAccessUserPrivilegesMessage {
   string user_id = 1;
   bool can_approve_own = 2;
-  bool can_allow_all_agents = 3;
+  reserved 3;
+  reserved "can_allow_all_agents";
   string set_by = 4;
   string set_at_utc = 5;
   bool has_stored_record = 6;
@@ -598,7 +599,8 @@ message NetworkAccessSetUserPrivilegesRequest {
   NetworkAccessActorMessage actor = 1;
   string user_id = 2;
   bool can_approve_own = 3;
-  bool can_allow_all_agents = 4;
+  reserved 4;
+  reserved "can_allow_all_agents";
   optional bool target_is_admin = 5;
 }
 

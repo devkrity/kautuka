@@ -179,7 +179,7 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
         }
     }
 
-    public void RecordPrivilegeChange(string actorUserId, string targetUserId, bool canApproveOwn, bool canAllowAllAgents)
+    public void RecordPrivilegeChange(string actorUserId, string targetUserId, bool canApproveOwn)
     {
         Record(new NetworkAccessActivityEntry(
             TimestampUtc: DateTimeOffset.UtcNow,
@@ -190,7 +190,7 @@ public sealed class NetworkAccessAuditRing : IAsyncDisposable, IDisposable
             Destination: "user-privileges:" + targetUserId,
             Port: 0,
             Decision: "privilege_updated",
-            Reason: $"canApproveOwn={canApproveOwn},canAllowAllAgents={canAllowAllAgents};actor={actorUserId}",
+            Reason: $"canApproveOwn={canApproveOwn};actor={actorUserId}",
             Cluster: null,
             OpenInternetBadge: false,
             CompatibilityMode: false));

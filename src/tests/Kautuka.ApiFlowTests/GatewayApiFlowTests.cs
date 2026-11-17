@@ -753,7 +753,7 @@ public sealed class GatewayApiFlowTests
 
             public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CallOptions options)
             {
-                var value = new NetworkAccessUserPrivilegesMessage { UserId = request.UserId, CanApproveOwn = request.CanApproveOwn, CanAllowAllAgents = request.CanAllowAllAgents, HasStoredRecord = true };
+                var value = new NetworkAccessUserPrivilegesMessage { UserId = request.UserId, CanApproveOwn = request.CanApproveOwn, HasStoredRecord = true };
                 privileges[request.UserId] = value;
                 return Wrap(value);
             }

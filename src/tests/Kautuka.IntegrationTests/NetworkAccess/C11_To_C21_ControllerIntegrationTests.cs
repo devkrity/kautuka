@@ -20,6 +20,14 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class C11_To_C21_ControllerIntegrationTests
 {
     [Fact]
+    public void NetworkAccessPrivilegeHasOneStoredAndWireField()
+    {
+        Assert.Null(typeof(UserPrivileges).GetProperty("CanAllowAllAgents"));
+        Assert.Null(NetworkAccessUserPrivilegesMessage.Descriptor.FindFieldByNumber(3));
+        Assert.Null(NetworkAccessSetUserPrivilegesRequest.Descriptor.FindFieldByNumber(4));
+    }
+
+    [Fact]
     public void RuleWriteProtocolDoesNotExposeCallerControlledIdentity()
     {
         Assert.Null(NetworkAccessSetRuleRequest.Descriptor.FindFieldByNumber(12));
@@ -249,7 +257,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             NetworkAccessDecisionResult reqA = controller.EvaluateContainerConnection(
@@ -432,13 +439,12 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
             var userA = new NetworkAccessActorMessage { UserId = "user-a", IsAdmin = false };
 
-            // Grant User A both privileges
+            // Grant User A network management permission.
             _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             // 1. Allow example.com:443 for a1 only (scope = agent)
@@ -542,14 +548,13 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             NetworkAccessDecisionResult reqB1 = controller.EvaluateContainerConnection(
                 new ContainerConnectionInput("10.247.0.43", "93.184.216.34", 443, "subcase-b.example.com"));
 
-            // (a) Default (both false): User A sees own request with WaitingForAdmin = true, cannot see User B's request,
+            // (a) Default (management disabled): User A sees own request with WaitingForAdmin = true, cannot see User B's request,
             // and DecideRequest / SetRule by User A fail with PermissionDenied (privilege_required).
             NetworkAccessListRequestsResponse listDefault = await svc.ListRequests(new NetworkAccessListRequestsRequest
             {
                 Actor = userA,
             }, ctx);
             Assert.False(listDefault.Privileges.CanApproveOwn);
-            Assert.False(listDefault.Privileges.CanAllowAllAgents);
             NetworkAccessRequestMessage visibleA1 = Assert.Single(listDefault.Requests);
             Assert.Equal(reqA1.RequestId, visibleA1.Id);
             Assert.True(visibleA1.WaitingForAdmin);
@@ -580,13 +585,12 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.41", "93.184.216.34", 443, "subcase-a.example.com")).Allowed);
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.42", "93.184.216.34", 443, "subcase-a.example.com")).Allowed);
 
-            // (b) canApproveOwn = true, canAllowAllAgents = false
+            // (b) Enable the user's single network management privilege.
             _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = false,
             }, ctx);
 
             NetworkAccessDecisionResult reqA1StepB = controller.EvaluateContainerConnection(
@@ -628,28 +632,18 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             });
             Assert.Equal(StatusCode.PermissionDenied, exCrossUserB.StatusCode);
 
-            // (c) canApproveOwn = true, canAllowAllAgents = true (C18.NC: granting both allows scope = "user")
-            _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
-            {
-                Actor = admin,
-                UserId = "user-a",
-                CanApproveOwn = true,
-                CanAllowAllAgents = true,
-            }, ctx);
-
+            // (c) The user-scoped approval applies to both of User A's agents.
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.41", "93.184.216.34", 443, "step-b-user.example.com")).Allowed);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.42", "93.184.216.34", 443, "step-b-user.example.com")).Allowed);
 
-            // (d) canApproveOwn = false, canAllowAllAgents = true -> stored as (false, true), and User A cannot approve or write user rules
+            // (d) Disabling management prevents User A from writing rules.
             NetworkAccessUserPrivilegesMessage privD = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = false,
-                CanAllowAllAgents = true,
             }, ctx);
             Assert.False(privD.CanApproveOwn);
-            Assert.True(privD.CanAllowAllAgents);
 
             RpcException exStepDSetRule = await Assert.ThrowsAsync<RpcException>(async () =>
             {
@@ -676,7 +670,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                     Actor = userA,
                     UserId = "user-a",
                     CanApproveOwn = true,
-                    CanAllowAllAgents = true,
                 }, ctx);
             });
             Assert.Equal(StatusCode.PermissionDenied, exSelfEscalate.StatusCode);
@@ -689,7 +682,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 new NetworkAccessActor("admin-new", IsAdmin: true),
                 "admin-new",
                 canApproveOwn: true,
-                canAllowAllAgents: true,
                 targetIsAdmin: true);
 
             // Without any prior GetUserPrivileges call, admin-new lists/decides at 'user' scope:
@@ -712,7 +704,7 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             // The role-sync path owns persistence; a decision must not write an implicit read default.
             using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json")))
             {
-                Assert.True(reopened.HasBothPrivileges("admin-new"));
+                Assert.True(reopened.CanManageOwnNetworkAccess("admin-new"));
                 Assert.False(reopened.ListRules(new NetworkAccessActor("admin-new", IsAdmin: true)).Rules.Single(r => r.Rule.Destination == "admin-default.example.com").Paused);
             }
 
@@ -722,11 +714,9 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "admin-new",
                 CanApproveOwn = false,
-                CanAllowAllAgents = false,
                 TargetIsAdmin = false,
             }, ctx);
             Assert.False(demoted.CanApproveOwn);
-            Assert.False(demoted.CanAllowAllAgents);
             Assert.True(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.49", "93.184.216.34", 443, "admin-default.example.com")).Allowed);
             NetworkAccessListRulesResponse afterDemoteRules = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = admin }, ctx);
             Assert.False(afterDemoteRules.Rules.Single(r => r.Destination == "admin-default.example.com").Paused);
@@ -739,10 +729,9 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 TargetIsAdmin = true,
             }, ctx);
             Assert.True(adminDefaultPrivs.CanApproveOwn);
-            Assert.True(adminDefaultPrivs.CanAllowAllAgents);
             using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy", "state.json")))
             {
-                Assert.False(reopened.HasBothPrivileges("legacy-admin-read-only"));
+                Assert.False(reopened.CanManageOwnNetworkAccess("legacy-admin-read-only"));
             }
         }
         finally
@@ -783,7 +772,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             // Create user-scope rule R (example.com:443), agent-scope rule Ra (agent.example.com:443 for a1), and admin any-public rule Rc
@@ -834,7 +822,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = false,
-                CanAllowAllAgents = false,
             }, ctx);
 
             // User-created rules pause and no longer allow requests.
@@ -883,13 +870,12 @@ public sealed class C11_To_C21_ControllerIntegrationTests
             Assert.All(adminFiltered.Rules, r => Assert.Equal("user-a", r.UserId));
             Assert.Contains(adminFiltered.Rules, r => r.Id == ruleR.Rule.Id && r.Paused);
 
-            // Also verify unticking canApproveOwn (with canAllowAllAgents = true) keeps R paused
+            // Also verify disabling management keeps R paused.
             _ = await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest
             {
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = false,
-                CanAllowAllAgents = true,
             }, ctx);
             Assert.False(controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.0.52", "93.184.216.34", 443, "example.com")).Allowed);
 
@@ -899,7 +885,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             NetworkAccessDecisionResult a2Restored = controller.EvaluateContainerConnection(
@@ -1387,7 +1372,6 @@ public sealed class C11_To_C21_ControllerIntegrationTests
                 Actor = admin,
                 UserId = "user-x",
                 CanApproveOwn = true,
-                CanAllowAllAgents = false,
             }, ctx);
             userList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             userReq = userList.Requests.FirstOrDefault(r => r.Destination == "user-probe.example.com");
@@ -1476,7 +1460,6 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                 Actor = admin,
                 UserId = "user-x",
                 CanApproveOwn = false,
-                CanAllowAllAgents = false,
             }, ctx);
             NetworkAccessListRequestsResponse unprivilegedList = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             NetworkAccessRequestMessage unprivilegedRequest = Assert.Single(unprivilegedList.Requests, r => r.Destination == "sys-probe.example.com");
@@ -1494,7 +1477,6 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                 Actor = admin,
                 UserId = "user-x",
                 CanApproveOwn = true,
-                CanAllowAllAgents = false,
             }, ctx);
             NetworkAccessListRequestsResponse userListAfterSys = await svc.ListRequests(new NetworkAccessListRequestsRequest { Actor = userX }, ctx);
             NetworkAccessRequestMessage? sysReq = userListAfterSys.Requests.FirstOrDefault(r => r.Destination == "sys-probe.example.com");
@@ -1587,7 +1569,7 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
             using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
             var admin = new NetworkAccessActor("admin", IsAdmin: true);
             var owner = new NetworkAccessActor("user-a", IsAdmin: false);
-            _ = store.SetUserPrivileges(admin, owner.UserId, canApproveOwn: true, canAllowAllAgents: false);
+            _ = store.SetUserPrivileges(admin, owner.UserId, canApproveOwn: true);
             (string? requestId, bool overflow) = store.RecordOrUpdatePendingRequest(
                 userId: owner.UserId,
                 agentId: null,
@@ -1777,7 +1759,6 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             RegisterAgent(registry, "10.247.1.80", "user-a", "a1");
@@ -1867,7 +1848,6 @@ Egress: "normal", Attribution: "user-agent", CompatProfile: null, DateTimeOffset
                 Actor = admin,
                 UserId = "user-a",
                 CanApproveOwn = true,
-                CanAllowAllAgents = true,
             }, ctx);
 
             RegisterAgent(registry, "10.247.1.90", "user-a", "a1");

@@ -30,7 +30,6 @@ internal static partial class GatewayEndpointUtilities
             Actor = new NetworkAccessActorMessage { UserId = actorUserId, IsAdmin = true },
             UserId = targetUserId,
             CanApproveOwn = targetIsAdmin,
-            CanAllowAllAgents = targetIsAdmin,
             TargetIsAdmin = targetIsAdmin,
         };
 

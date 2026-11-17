@@ -55,40 +55,40 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
     {
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
 
-        // 1. Setup first admin -> Manager PolicyStore immediately persists (true, true).
+        // 1. Setup first admin -> Manager PolicyStore immediately enables management.
         string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
         string adminId = fixture.UserStore.ListUsers().Single(u => u.Username == "admin").Id;
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(adminId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(adminId));
         AssertPersistedPrivileges(fixture, adminId, expected: true);
 
-        // 2. Invite a second admin -> Manager PolicyStore immediately persists (true, true).
+        // 2. Invite a second admin -> Manager PolicyStore immediately enables management.
         using JsonDocument invitedAdminDoc = await fixture.SendJsonAsync(
             HttpMethod.Post,
             "/api/settings/users/invite",
             new { username = "second-admin", email = "admin2@example.com", password = "Testing1!", role = "admin" },
             adminToken);
         string secondAdminId = invitedAdminDoc.RootElement.GetProperty("user").GetProperty("id").GetString()!;
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(secondAdminId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(secondAdminId));
         AssertPersistedPrivileges(fixture, secondAdminId, expected: true);
 
-        // 3. Invite a standard user -> privileges default to (false, false).
+        // 3. Invite a standard user -> management defaults to disabled.
         using JsonDocument invitedUserDoc = await fixture.SendJsonAsync(
             HttpMethod.Post,
             "/api/settings/users/invite",
             new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" },
             adminToken);
         string aliceId = invitedUserDoc.RootElement.GetProperty("user").GetProperty("id").GetString()!;
-        Assert.False(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        Assert.False(fixture.PolicyStore.CanManageOwnNetworkAccess(aliceId));
         AssertPersistedPrivileges(fixture, aliceId, expected: false);
 
-        // 4. Promote Alice -> privileges persist as (true, true) and user-scope rules evaluate Allowed.
+        // 4. Promote Alice -> management is enabled and user-scope rules evaluate Allowed.
         using JsonDocument promoteDoc = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/settings/users/{aliceId}/role",
             new { isAdmin = true },
             adminToken);
         Assert.True(promoteDoc.RootElement.GetProperty("success").GetBoolean());
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(aliceId));
         AssertPersistedPrivileges(fixture, aliceId, expected: true);
 
         fixture.Registry.Register(new RegistryEntry(
@@ -123,7 +123,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             new { isAdmin = false },
             adminToken);
         Assert.True(demoteDoc.RootElement.GetProperty("success").GetBoolean());
-        Assert.False(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        Assert.False(fixture.PolicyStore.CanManageOwnNetworkAccess(aliceId));
         AssertPersistedPrivileges(fixture, aliceId, expected: false);
 
         using JsonDocument privAfterDemote = await fixture.SendGetAsync($"/api/network-access/users/{aliceId}/privileges", adminToken);
@@ -144,7 +144,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         using var reopenedStore = new NetworkAccessPolicyStore(fixture.PolicyStorePath);
         UserPrivileges privileges = reopenedStore.GetUserPrivileges(new NetworkAccessActor("test-admin", IsAdmin: true), userId);
         Assert.Equal(expected, privileges.CanApproveOwn);
-        Assert.Equal(expected, privileges.CanAllowAllAgents);
+        Assert.DoesNotContain("canAllowAllAgents", File.ReadAllText(fixture.PolicyStorePath), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
         string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
 
-        // Create standard non-admin owner Bob and explicitly grant him both privileges.
+        // Create non-admin owner Bob and explicitly grant network management permission.
         using JsonDocument invitedBob = await fixture.SendJsonAsync(
             HttpMethod.Post,
             "/api/settings/users/invite",
@@ -175,7 +175,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.30", "93.184.216.34", 443, "card1.example.com"));
         _ = fixture.Controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.30", "93.184.216.34", 443, "card2.example.com"));
 
-        // GET /requests reflects Bob's stored flags (true, true) even though Bob is non-admin.
+        // GET /requests reflects Bob's stored permission even though Bob is non-admin.
         using JsonDocument listDoc = await fixture.SendGetAsync("/api/network-access/requests", adminToken);
         long rev = listDoc.RootElement.GetProperty("revision").GetInt64();
         JsonElement[] cards = [.. listDoc.RootElement.GetProperty("requests").EnumerateArray()];
@@ -200,7 +200,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.False(decidedReq1.TryGetProperty("ownerCanAllowAllAgents", out _));
         long revAfterDecide1 = decideDoc1.RootElement.GetProperty("revision").GetInt64();
 
-        // Negative control (.NC): updating stored privileges to (true, false) flips OwnerCanAllowAllAgents to false on both GET and decision DTOs.
+        // The legacy all-agents flag is absent from both GET and decision DTOs.
         _ = await fixture.SendJsonAsync(
             HttpMethod.Put,
             $"/api/network-access/users/{bobId}/privileges",
@@ -234,7 +234,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
             new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "admin" },
             adminToken);
         string aliceId = invited.RootElement.GetProperty("user").GetProperty("id").GetString()!;
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(aliceId));
 
         fixture.FailPrivilegeSync = true;
         using HttpResponseMessage response = await fixture.SendRoleUpdateAsync(aliceId, isAdmin: false, adminToken);
@@ -242,7 +242,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         Assert.True(fixture.UserStore.TryGetUserById(aliceId, out GatewayUser? alice));
         Assert.Equal("admin", alice!.Role);
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(aliceId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(aliceId));
     }
 
     [Fact]
@@ -324,15 +324,12 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         UserPrivileges alice = afterRestart.GetUserPrivileges(system, aliceId);
         UserPrivileges bob = afterRestart.GetUserPrivileges(system, bobId, targetIsAdmin: true);
         Assert.True(alice.CanApproveOwn);
-        Assert.False(alice.CanAllowAllAgents);
         Assert.False(bob.CanApproveOwn);
-        Assert.False(bob.CanAllowAllAgents);
         Assert.Equal(adminId, afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == aliceId).SetBy);
         Assert.Equal(adminId, afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == bobId).SetBy);
 
         UserPrivileges legacy = afterRestart.GetRawStateSnapshot().UserPrivileges.Single(item => item.UserId == legacyAdminId);
         Assert.True(legacy.CanApproveOwn);
-        Assert.True(legacy.CanAllowAllAgents);
         Assert.Equal("system", legacy.SetBy);
         Assert.Contains(auditRing.List(system), entry => entry.Reason.Contains("actor=system", StringComparison.Ordinal));
     }

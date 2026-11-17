@@ -82,7 +82,6 @@ public sealed record NetworkAccessRequestView(
 public sealed record UserPrivileges(
     string UserId,
     bool CanApproveOwn,
-    bool CanAllowAllAgents,
     string SetBy,
     DateTimeOffset SetAtUtc);
 

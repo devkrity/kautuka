@@ -388,7 +388,6 @@ public sealed partial class WorkspaceGrpcService
                 ToActor(request.Actor),
                 request.UserId,
                 request.CanApproveOwn,
-                request.CanAllowAllAgents,
                 request.HasTargetIsAdmin ? request.TargetIsAdmin : null);
             return ToMessage(privs);
         });
@@ -611,7 +610,6 @@ public sealed partial class WorkspaceGrpcService
         {
             UserId = privs.UserId,
             CanApproveOwn = privs.CanApproveOwn,
-            CanAllowAllAgents = privs.CanAllowAllAgents,
             SetBy = privs.SetBy,
             SetAtUtc = privs.SetAtUtc.ToString("O", CultureInfo.InvariantCulture),
             HasStoredRecord = hasStoredRecord,

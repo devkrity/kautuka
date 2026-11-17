@@ -78,7 +78,6 @@ public sealed partial class NetworkAccessPolicyStore
         NetworkAccessActor actor,
         string targetUserId,
         bool canApproveOwn,
-        bool canAllowAllAgents,
         bool? targetIsAdmin = null)
     {
         ArgumentNullException.ThrowIfNull(actor);
@@ -90,12 +89,10 @@ public sealed partial class NetworkAccessPolicyStore
         {
             NetworkAccessPolicyState current = Load();
             bool effectiveApprove = canApproveOwn;
-            bool effectiveAllowAll = canAllowAllAgents;
 
             var updated = new UserPrivileges(
                 normalizedTarget,
                 effectiveApprove,
-                effectiveAllowAll,
                 actor.UserId,
                 DateTimeOffset.UtcNow);
 
@@ -110,13 +107,13 @@ public sealed partial class NetworkAccessPolicyStore
                 UserPrivileges = nextPrivs,
             });
 
-            auditRing?.RecordPrivilegeChange(actor.UserId, normalizedTarget, effectiveApprove, effectiveAllowAll);
+            auditRing?.RecordPrivilegeChange(actor.UserId, normalizedTarget, effectiveApprove);
 
             return updated;
         }
     }
 
-    public bool HasBothPrivileges(string userId)
+    public bool CanManageOwnNetworkAccess(string userId)
     {
         if (string.IsNullOrWhiteSpace(userId))
         {
@@ -127,7 +124,7 @@ public sealed partial class NetworkAccessPolicyStore
         {
             NetworkAccessPolicyState current = Load();
             UserPrivileges privs = ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin: false);
-            return privs.CanApproveOwn && privs.CanAllowAllAgents;
+            return privs.CanApproveOwn;
         }
     }
 
@@ -769,7 +766,6 @@ public sealed partial class NetworkAccessPolicyStore
             var adminDefault = new UserPrivileges(
                 userId,
                 CanApproveOwn: true,
-                CanAllowAllAgents: true,
                 SetBy: "system",
                 SetAtUtc: DateTimeOffset.UtcNow);
 
@@ -779,7 +775,6 @@ public sealed partial class NetworkAccessPolicyStore
         return new UserPrivileges(
             userId,
             CanApproveOwn: false,
-            CanAllowAllAgents: false,
             SetBy: "system",
             SetAtUtc: DateTimeOffset.UnixEpoch);
     }

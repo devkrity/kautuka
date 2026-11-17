@@ -60,7 +60,7 @@ public sealed class NetworkAccessMatchingModelTests
             var alice = new NetworkAccessActor("alice", false);
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
-            store.SetUserPrivileges(admin, "alice", true, false, false);
+            store.SetUserPrivileges(admin, "alice", true, false);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "user.example", "host", 443, true), store.Revision);
             store.SetRule(alice, new RuleWriteSpec("agent", "alice", "secretary", null, "agent.example", "host", 443, true), store.Revision);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "connector.example", "host", 443, true), store.Revision);
@@ -72,7 +72,7 @@ public sealed class NetworkAccessMatchingModelTests
             bool Allowed(string host) => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, host, true)).Allowed;
             Assert.All(destinations, host => Assert.True(Allowed(host)));
 
-            store.SetUserPrivileges(admin, "alice", false, false, false);
+            store.SetUserPrivileges(admin, "alice", false, false);
             Assert.All(destinations, host => Assert.False(Allowed(host)));
             Assert.True(Allowed("admin.example"));
             Assert.False(Allowed("admin-block.example"));
@@ -84,7 +84,7 @@ public sealed class NetworkAccessMatchingModelTests
                 Assert.False(reopened.ListRules(admin).Rules.Single(view => view.Rule.Destination == "admin.example").Paused);
             }
 
-            store.SetUserPrivileges(admin, "alice", true, false, false);
+            store.SetUserPrivileges(admin, "alice", true, false);
             Assert.All(destinations, host => Assert.True(Allowed(host)));
             Assert.All(store.ListRules(admin).Rules.Where(view => view.Rule.UserId == "alice"), view => Assert.False(view.Paused));
         }
@@ -127,7 +127,7 @@ public sealed class NetworkAccessMatchingModelTests
             using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             var alice = new NetworkAccessActor("alice", false);
             Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "alice::web", "example.com", "host", 443, true), store.Revision));
-            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, targetIsAdmin: false);
             (_, NetworkAccessRuleView connectorRule) = store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "alice::web", "example.com", "host", 443, true), store.Revision);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "other.example", "host", 443, true), store.Revision);
             store.SetRule(alice, new RuleWriteSpec("agent", "alice", "secretary", null, "third.example", "host", 443, true), store.Revision);
@@ -175,7 +175,7 @@ public sealed class NetworkAccessMatchingModelTests
             Assert.False(denied.Allowed);
             Assert.Equal("no_rule", denied.Reason);
             Assert.NotNull(denied.RequestId);
-            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            store.SetUserPrivileges(new NetworkAccessActor("admin", true), "alice", canApproveOwn: true, targetIsAdmin: false);
             Assert.True(registry.Deregister("10.247.1.10", "container"));
             Assert.Contains(store.ListRequests(new NetworkAccessActor("alice", false)).Requests, item => item.Request.Id == denied.RequestId);
             registry.Register(new RegistryEntry("10.247.1.10", "alice", null, "container", "connector", "alice::web", "isolated", "normal", "user", null, DateTimeOffset.UtcNow, "save-discovery"));
@@ -197,7 +197,7 @@ public sealed class NetworkAccessMatchingModelTests
             var registry = new WorkloadRegistry();
             var controller = new NetworkAccessController.NetworkAccessController(store, registry);
             var admin = new NetworkAccessActor("admin", true);
-            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, targetIsAdmin: false);
             var alice = new NetworkAccessActor("alice", false);
             store.SetRule(alice, new RuleWriteSpec("user", "alice", null, null, "example.com", "host", 443, true), store.Revision);
             registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
@@ -276,7 +276,7 @@ public sealed class NetworkAccessMatchingModelTests
         {
             using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
             var admin = new NetworkAccessActor("admin", true);
-            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            store.SetUserPrivileges(admin, "alice", canApproveOwn: true, targetIsAdmin: false);
             var alice = new NetworkAccessActor("alice", false);
             (_, NetworkAccessRuleView oldRule) = store.SetRule(alice, new RuleWriteSpec("user", "alice", null, "web", "example.com", "host", 443, true), store.Revision);
             long before = store.Revision;
@@ -285,7 +285,7 @@ public sealed class NetworkAccessMatchingModelTests
             Assert.Equal(before + 1, state.Revision);
             NetworkAccessRule rule = Assert.Single(state.Rules);
             Assert.Null(rule.ConnectorId);
-            store.SetUserPrivileges(admin, "bob", canApproveOwn: true, canAllowAllAgents: false, targetIsAdmin: false);
+            store.SetUserPrivileges(admin, "bob", canApproveOwn: true, targetIsAdmin: false);
             Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new NetworkAccessActor("bob", false), new RuleWriteSpec("user", "bob", null, null, "example.com", "host", 443, true), store.Revision, rule.Id));
             Assert.Equal(rule.Id, Assert.Single(store.GetRawStateSnapshot().Rules).Id);
         }
@@ -301,7 +301,7 @@ public sealed class NetworkAccessMatchingModelTests
         {
             string path = Path.Combine(root, "policy.json");
             var oldRule = new NetworkAccessRule("old", "connector-system", null, null, "web", "example.com", "host", 443, true, false, "admin", DateTimeOffset.UtcNow);
-            var privilege = new UserPrivileges("alice", true, false, "admin", DateTimeOffset.UtcNow);
+            var privilege = new UserPrivileges("alice", true, "admin", DateTimeOffset.UtcNow);
             var brake = new BrakeState(true, "admin", DateTimeOffset.UtcNow, []);
             var oldState = new NetworkAccessPolicyState(1, 5, [oldRule], [], [privilege], brake);
             File.WriteAllText(path, JsonSerializer.Serialize(oldState, JsonSerializerOptions.Web));

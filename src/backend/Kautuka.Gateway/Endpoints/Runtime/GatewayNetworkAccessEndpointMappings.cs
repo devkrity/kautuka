@@ -541,7 +541,6 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true },
                 UserId = userId,
                 CanApproveOwn = dto.CanApproveOwn,
-                CanAllowAllAgents = false,
                 TargetIsAdmin = targetIsAdmin,
             };
 

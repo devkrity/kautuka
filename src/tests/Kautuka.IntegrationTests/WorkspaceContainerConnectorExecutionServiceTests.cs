@@ -1880,7 +1880,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var admin = new NetworkAccessActor("admin", IsAdmin: true);
             var user = new NetworkAccessActor("user-alpha", IsAdmin: false);
-            _ = policyStore.SetUserPrivileges(admin, user.UserId, canApproveOwn: true, canAllowAllAgents: false);
+            _ = policyStore.SetUserPrivileges(admin, user.UserId, canApproveOwn: true);
             const string connectorId = "connector-one";
             ContainerContext probeContext = new(
                 "user", user.UserId, user.UserId, "/tmp", "/tmp", string.Empty, 0, string.Empty, 0, [], new Dictionary<string, string>());

@@ -162,7 +162,7 @@ public sealed class ConnectorContainerSpecBuilderTests
             using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
             var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, registry);
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-            _ = policyStore.SetUserPrivileges(admin, "user-alpha", canApproveOwn: true, canAllowAllAgents: true);
+            _ = policyStore.SetUserPrivileges(admin, "user-alpha", canApproveOwn: true);
             _ = policyStore.SetRule(
                 admin,
                 new RuleWriteSpec("user", "user-alpha", null, connector.ConnectorId, "example.com", "host", 443, Allowed: true),

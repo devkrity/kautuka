@@ -83,7 +83,7 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         using HttpResponseMessage response = await fixture.SendRawJsonAsync(HttpMethod.Put,
             $"/api/network-access/users/{adminId}/privileges", new { canApproveOwn = false }, admin);
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-        Assert.True(fixture.PolicyStore.HasBothPrivileges(adminId));
+        Assert.True(fixture.PolicyStore.CanManageOwnNetworkAccess(adminId));
     }
 
     [Theory]
