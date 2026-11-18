@@ -25,8 +25,13 @@ cat > "$tmp/bin/test-runtime" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TEST_ARCHIVE_CALLS"
 if [[ "$1" == save ]]; then
-  [[ "$2" == --format && "$3" == oci-archive && "$4" == -o ]] || exit 42
-  printf 'archive' > "$5"
+  if [[ "$2" == --format && "$3" == oci-archive && "$4" == -o ]]; then
+    printf 'archive' > "$5"
+  elif [[ "$2" == -o ]]; then
+    printf 'archive' > "$3"
+  else
+    exit 42
+  fi
 fi
 EOF
 cat > "$tmp/bin/skopeo" <<'EOF'
@@ -38,6 +43,7 @@ archive_path="${archive_path%%:*}"
 printf 'archive' > "$archive_path"
 EOF
 chmod +x "$tmp/bin/sudo" "$tmp/bin/test-runtime" "$tmp/bin/skopeo"
+ln -s test-runtime "$tmp/bin/docker"
 export PATH="$tmp/bin:$PATH"
 container_runtime=test-runtime
 log_phase() { :; }
@@ -45,17 +51,19 @@ log_phase() { :; }
 source <(sed -n '/^stage_oci_image_archives() {/,/^}$/p' "$repo_root/scripts/build-release-assets.sh")
 
 cat > "$allowlist" <<'EOF'
-{"images":[{"id":"base","image":"base-ref","archive":null},{"id":"one","image":"one-ref","archive":"one.tar"},{"id":"two","image":"two-ref","archive":"two.tar"}]}
+{"images":[{"id":"base","image":"base-ref","archive":null},{"id":"egress-boundary","image":"boundary-ref","archive":"one.tar"},{"id":"two","image":"two-ref","archive":"two.tar"}]}
 EOF
 stage_oci_image_archives "$tmp/rootfs"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/two.tar")" == archive ]]
 [[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 4 ]]
+grep -q '^save --format oci-archive .* boundary-ref$' "$TEST_ARCHIVE_CALLS"
 
 : > "$TEST_ARCHIVE_CALLS"
 container_runtime=docker
 stage_oci_image_archives "$tmp/rootfs"
-[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 2 ]]
+[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 1 ]]
+grep -q '^save -o .* two-ref$' "$TEST_ARCHIVE_CALLS"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 container_runtime=test-runtime
 
