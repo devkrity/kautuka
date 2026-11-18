@@ -241,6 +241,7 @@ jobs:
               -o spdx-json="/src/$release_dir/kautuka-${image_id}-image.spdx.json"
           done < <(node scripts/list-runtime-image-archives.mjs)
           base_image="$(jq -r '.baseImage // empty' "$release_dir/THIRD_PARTY_COMPONENTS.json")"
+          boundary_image="$(jq -er '[.images[] | select(.id == "egress-boundary") | .image] | if length == 1 then .[0] else error("expected one boundary image") end' src/backend/Kautuka.Manager/runtime-images.json)"
           if [[ -z "$base_image" ]]; then
             echo 'error: release component inventory has no immutable kautuka-base image digest.' >&2
             exit 1
@@ -258,7 +259,8 @@ jobs:
           bash scripts/stage-third-party-sources.sh \
             --release-dir "$release_dir" \
             --wsl-rootfs sbom-input/wsl-appliance \
-            --base-image "$base_image"
+            --base-image "$base_image" \
+            --boundary-image "$boundary_image"
           node scripts/generate-release-credits.mjs --directory "$release_dir"
           python3 - "$release_dir" <<'PY'
           import pathlib

@@ -17,6 +17,11 @@
       "archive": "git-pkgs-proxy.tar"
     },
     {
+      "id": "egress-boundary",
+      "image": "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1",
+      "archive": "egress-boundary.tar"
+    },
+    {
       "id": "envoy",
       "image": "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded",
       "archive": "envoy.tar"

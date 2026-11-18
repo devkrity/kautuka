@@ -21,6 +21,11 @@ const actual = result.stdout.trimEnd().split(/\r?\n/).filter(Boolean).sort();
 assert.deepEqual(actual, expected, 'only named image archives should be scanned as docker archives');
 assert.ok(actual.includes('envoy\tenvoy.tar'), 'Envoy must be staged and included in archive scanning');
 assert.ok(actual.includes('coredns\tcoredns.tar'), 'CoreDNS must be staged and included in archive scanning');
+assert.ok(actual.includes('egress-boundary\tegress-boundary.tar'), 'The boundary image must be staged and included in archive scanning');
+const boundaryRelease = JSON.parse(await readFile(path.join(repoRoot, 'src/images/kautuka-egress-boundary/release.json'), 'utf8'));
+const boundaryEntries = runtimeImages.images.filter((image) => image.id === 'egress-boundary');
+assert.equal(boundaryEntries.length, 1, 'the runtime inventory must contain exactly one boundary image');
+assert.equal(boundaryEntries[0].image, boundaryRelease.image, 'the runtime inventory must use the released boundary image digest');
 assert.ok(!actual.some((entry) => entry.startsWith('kautuka-base\t')),
   'registry-pulled kautuka-base has no appliance archive and must be scanned separately');
 console.log(`PASS: selected ${actual.length} named runtime image archives; null archive entries are skipped`);

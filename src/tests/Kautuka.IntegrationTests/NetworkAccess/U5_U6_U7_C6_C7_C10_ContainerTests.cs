@@ -14,6 +14,56 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 {
     private readonly string tempDir;
 
+    [Fact]
+    public void BoundaryContainerUsesPublishedDigestPinnedImage()
+    {
+        string image = EgressTopologyManager.BoundaryInitImage;
+        Assert.Matches("^ghcr\\.io/devkrity/kautuka-egress-boundary@sha256:[0-9a-f]{64}$", image);
+        IReadOnlyList<string> arguments = EgressTopologyManager.BuildBoundaryCreateArgs(Path.Combine(tempDir, "boundary"), false);
+        Assert.Contains(image, arguments);
+    }
+
+    [Fact]
+    public async Task MissingBoundaryImageIsPulledByDigestWithoutBuildingOnHost()
+    {
+        var calls = new List<string[]>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            int exitCode = args.Count > 1 && args[0] == "image" && args[1] == "exists" ? 1 : 0;
+            return Task.FromResult(new PodmanCommandResult(exitCode, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "boundary-image-ips.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), tempDir);
+        var method = typeof(EgressTopologyManager).GetMethod("EnsureBoundaryImageAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Boundary image initialization is missing.");
+        await (Task)method.Invoke(manager, [TestContext.Current.CancellationToken])!;
+
+        Assert.Contains(calls, args => args.SequenceEqual(["pull", EgressTopologyManager.BoundaryInitImage]));
+        Assert.DoesNotContain(calls, args => args.Length > 0 && args[0] == "build");
+    }
+
+    [Fact]
+    public async Task FailedBoundaryImagePullIsReportedWithoutBuilding()
+    {
+        var calls = new List<string[]>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(args.ToArray());
+            return Task.FromResult(new PodmanCommandResult(1, string.Empty, "registry unavailable", ProcessTerminationReason.Completed));
+        });
+        var allocator = new WorkloadAddressAllocator(Path.Combine(tempDir, "boundary-image-failure-ips.json"));
+        await using var manager = new EgressTopologyManager(podman, allocator, new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), tempDir);
+        var method = typeof(EgressTopologyManager).GetMethod("EnsureBoundaryImageAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Boundary image initialization is missing.");
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => (Task)method.Invoke(manager, [TestContext.Current.CancellationToken])!);
+        Assert.Contains("Failed to pull pinned boundary image", error.Message, StringComparison.Ordinal);
+        Assert.Contains(calls, args => args.SequenceEqual(["pull", EgressTopologyManager.BoundaryInitImage]));
+        Assert.DoesNotContain(calls, args => args.Length > 0 && args[0] == "build");
+    }
+
     public U5_U6_U7_C6_C7_C10_ContainerTests()
     {
         tempDir = Path.Combine(Path.GetTempPath(), "kautuka-nac-tests-" + Guid.NewGuid().ToString("N"));

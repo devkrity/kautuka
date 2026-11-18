@@ -14,6 +14,16 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class EgressArchivedImageStartupTests
 {
     [Fact]
+    public void PublishedBoundaryImageMatchesThePackagedArchiveInventory()
+    {
+        RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(
+            Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName), requirePresent: true);
+        RuntimeImageEntry entry = Assert.Single(images.Images, image => image.Id == "egress-boundary");
+        Assert.Equal(EgressTopologyManager.BoundaryInitImage, entry.Image);
+        Assert.Equal("egress-boundary.tar", entry.Archive);
+    }
+
+    [Fact]
     public async Task ProductionInitializationLoadsArchivedEgressImagesBeforeCreatingNetworks()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-archived-egress-" + Guid.NewGuid().ToString("N"));
@@ -28,20 +38,24 @@ public sealed class EgressArchivedImageStartupTests
             var paths = new WorkspaceRuntimePaths(configuration, new TestHostEnvironment(), NullLogger<WorkspaceRuntimePaths>.Instance);
             string envoyArchive = Path.Combine(paths.OciImagesRoot, "envoy.tar");
             string dnsArchive = Path.Combine(paths.OciImagesRoot, "coredns.tar");
+            string boundaryArchive = Path.Combine(paths.OciImagesRoot, "egress-boundary.tar");
             await File.WriteAllTextAsync(envoyArchive, "fixture", TestContext.Current.CancellationToken);
             await File.WriteAllTextAsync(dnsArchive, "fixture", TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(boundaryArchive, "fixture", TestContext.Current.CancellationToken);
             var calls = new List<string>();
             var podman = new PodmanCommandRunner((args, _) =>
             {
                 calls.Add(string.Join(" ", args));
                 int code = args[0] == "network" || args.SequenceEqual(["image", "exists", EgressTopologyManager.EnvoyPinnedImage])
-                    || args.SequenceEqual(["image", "exists", EgressTopologyManager.CoreDnsPinnedImage]) ? 1 : 0;
+                    || args.SequenceEqual(["image", "exists", EgressTopologyManager.CoreDnsPinnedImage])
+                    || args.SequenceEqual(["image", "exists", EgressTopologyManager.BoundaryInitImage]) ? 1 : 0;
                 return Task.FromResult(new PodmanCommandResult(code, string.Empty, string.Empty));
             });
             var images = new RuntimeImageAllowlist(1,
             [
                 new RuntimeImageEntry("envoy", EgressTopologyManager.EnvoyPinnedImage, "envoy.tar"),
                 new RuntimeImageEntry("coredns", EgressTopologyManager.CoreDnsPinnedImage, "coredns.tar"),
+                new RuntimeImageEntry("egress-boundary", EgressTopologyManager.BoundaryInitImage, "egress-boundary.tar"),
             ]);
             var registry = new WorkloadRegistry();
             var services = new ServiceCollection();
@@ -56,7 +70,8 @@ public sealed class EgressArchivedImageStartupTests
             int network = calls.FindIndex(call => call.StartsWith("network ", StringComparison.Ordinal));
             int envoy = calls.IndexOf("load -i " + envoyArchive);
             int dns = calls.IndexOf("load -i " + dnsArchive);
-            Assert.True(envoy >= 0 && dns >= 0 && network > envoy && network > dns, string.Join("; ", calls));
+            int boundary = calls.IndexOf("load -i " + boundaryArchive);
+            Assert.True(envoy >= 0 && dns >= 0 && boundary >= 0 && network > envoy && network > dns && network > boundary, string.Join("; ", calls));
         }
         finally { Directory.Delete(root, recursive: true); }
     }

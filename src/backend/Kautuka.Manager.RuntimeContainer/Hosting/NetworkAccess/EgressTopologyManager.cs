@@ -64,7 +64,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public const string EnvoyPinnedImage = "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded";
     public const string CoreDnsPinnedImage = "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea";
-    public const string BoundaryInitImage = "localhost/kautuka-egress-boundary:local";
+    public const string BoundaryInitImage = "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1";
 
     private readonly PodmanCommandRunner podmanRunner;
     private readonly WorkloadAddressAllocator addressAllocator;
@@ -490,6 +490,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (imageArchives is not null)
         {
+            await imageArchives.TryEnsureImageAsync(BoundaryInitImage, cancellationToken).ConfigureAwait(false);
             await imageArchives.TryEnsureImageAsync(EnvoyPinnedImage, cancellationToken).ConfigureAwait(false);
             await imageArchives.TryEnsureImageAsync(CoreDnsPinnedImage, cancellationToken).ConfigureAwait(false);
         }
@@ -2550,27 +2551,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
-        string dockerfilePath = Path.Combine(AppContext.BaseDirectory, "sidecar-assets", "egress-boundary", "Dockerfile");
-        if (!File.Exists(dockerfilePath))
+        PodmanCommandResult pull = await podmanRunner
+            .RunAsync(["pull", BoundaryInitImage], 300, cancellationToken)
+            .ConfigureAwait(false);
+        if (pull.ExitCode != 0)
         {
-            dockerfilePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "images", "kautuka-egress-boundary", "Dockerfile"));
-        }
-
-        if (File.Exists(dockerfilePath))
-        {
-            string contextDir = Path.GetDirectoryName(dockerfilePath)!;
-            logger.LogInformation("Building boundary init image '{Image}' from {Path}...", BoundaryInitImage, dockerfilePath);
-            PodmanCommandResult buildResult = await podmanRunner
-                .RunAsync(["build", "-t", BoundaryInitImage, "-f", dockerfilePath, contextDir], 120, cancellationToken)
-                .ConfigureAwait(false);
-            if (buildResult.ExitCode != 0)
-            {
-                throw new InvalidOperationException($"Failed to build boundary init image '{BoundaryInitImage}' from '{dockerfilePath}' (rc {buildResult.ExitCode}): {buildResult.StdErr}");
-            }
-        }
-        else
-        {
-            throw new FileNotFoundException($"Boundary init image '{BoundaryInitImage}' is not present and its Dockerfile could not be found.", dockerfilePath);
+            throw new InvalidOperationException($"Failed to pull pinned boundary image '{BoundaryInitImage}' (rc {pull.ExitCode}): {pull.StdErr}");
         }
     }
 
