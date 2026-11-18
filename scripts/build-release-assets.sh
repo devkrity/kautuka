@@ -486,12 +486,9 @@ PY
     log_phase "Saving first-boot OCI archive ${image_id}"
     local tmp_archive
     tmp_archive="$(mktemp --suffix=.tar)"
-    if [[ "$image_id" =~ ^(egress-boundary|envoy|coredns|git-pkgs-proxy)$ && "$container_runtime" == docker ]]; then
-      command -v skopeo >/dev/null 2>&1 || { echo 'error: skopeo is required to preserve image digests in OCI archives when building with Docker.' >&2; return 1; }
+    if [[ "$image_id" =~ ^(egress-boundary|envoy|coredns|git-pkgs-proxy)$ ]]; then
+      command -v skopeo >/dev/null 2>&1 || { echo 'error: skopeo is required to preserve image digests in OCI archives.' >&2; return 1; }
       skopeo copy --preserve-digests "docker://$image_ref" "oci-archive:$tmp_archive:$image_ref"
-    elif [[ "$image_id" =~ ^(egress-boundary|envoy|coredns|git-pkgs-proxy)$ ]]; then
-      "$container_runtime" pull "$image_ref"
-      "$container_runtime" save --format oci-archive -o "$tmp_archive" "$image_ref"
     else
       "$container_runtime" pull "$image_ref"
       "$container_runtime" save -o "$tmp_archive" "$image_ref"

@@ -56,11 +56,11 @@ EOF
 stage_oci_image_archives "$tmp/rootfs"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/two.tar")" == archive ]]
-[[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 10 ]]
-grep -q '^save --format oci-archive .* boundary-ref$' "$TEST_ARCHIVE_CALLS"
-grep -q '^save --format oci-archive .* dns-ref$' "$TEST_ARCHIVE_CALLS"
-grep -q '^save --format oci-archive .* envoy-ref$' "$TEST_ARCHIVE_CALLS"
-grep -q '^save --format oci-archive .* proxy-ref$' "$TEST_ARCHIVE_CALLS"
+[[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 6 ]]
+[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 4 ]]
+for image in boundary-ref dns-ref envoy-ref proxy-ref; do
+  grep -q "^skopeo copy --preserve-digests docker://$image " "$TEST_ARCHIVE_CALLS"
+done
 
 : > "$TEST_ARCHIVE_CALLS"
 container_runtime=docker
