@@ -1353,7 +1353,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 ["Tmpfs"] = new JsonObject
                 {
                     ["/tmp"] = "rw,noexec,nosuid,size=67108864",
-                    ["/home/node/.kautuka"] = "rw,noexec,nosuid,size=16777216",
+                    ["/home/node"] = "rw,nodev,nosuid,mode=1777",
                 },
                 ["Sysctls"] = new JsonObject { ["net.ipv6.conf.all.disable_ipv6"] = "1" },
                 ["PidMode"] = "private",
