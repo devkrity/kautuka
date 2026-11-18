@@ -116,7 +116,7 @@ if [[ "$phase" == prepare || "$phase" == prepare-committed ]]; then
         printf '%s\n' 'kautuka-maintenance-page-v1' > "/opt/kautuka/webhost/versions/$release/.maintenance-page-v1"
     done
     # The real updater reads stdout from the helper; no detached override is used.
-    [[ "$(/usr/local/lib/kautuka/apply-release --capabilities)" == 'safe-state-recovery-v5' ]]
+    [[ "$(/usr/local/lib/kautuka/apply-release --capabilities)" == 'safe-state-recovery-v6' ]]
     mkdir -p /var/lib/kautuka/agents/agent-123 /var/lib/kautuka/agents/agent-123/files \
         /var/lib/kautuka/credentialsHost/vault/vault-keys \
         /var/lib/kautuka/security/channel/channel-private \

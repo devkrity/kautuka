@@ -709,11 +709,11 @@ public sealed class UpdateServiceIntegrationTests
                 : Path.Combine(tempRoot, "apply-release");
             if (OperatingSystem.IsWindows())
             {
-                await File.WriteAllTextAsync(helperPath, "@echo off\r\nif \"%1\"==\"--capabilities\" echo safe-state-recovery-v5\r\necho helper %*\r\nexit /b 0\r\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
+                await File.WriteAllTextAsync(helperPath, "@echo off\r\nif \"%1\"==\"--capabilities\" echo safe-state-recovery-v6\r\necho helper %*\r\nexit /b 0\r\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
             }
             else
             {
-                await File.WriteAllTextAsync(helperPath, "#!/bin/sh\nif [ \"$1\" = \"--capabilities\" ]; then echo safe-state-recovery-v5; exit 0; fi\necho helper \"$@\"\nexit 0\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
+                await File.WriteAllTextAsync(helperPath, "#!/bin/sh\nif [ \"$1\" = \"--capabilities\" ]; then echo safe-state-recovery-v6; exit 0; fi\necho helper \"$@\"\nexit 0\n", TestContext.Current.CancellationToken).ConfigureAwait(true);
                 File.SetUnixFileMode(helperPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
@@ -774,8 +774,8 @@ public sealed class UpdateServiceIntegrationTests
                 : Path.Combine(tempRoot, "apply-release");
             string callsPath = Path.Combine(tempRoot, "calls.txt");
             string helper = OperatingSystem.IsWindows()
-                ? $"@echo off\r\necho %* >> \"{callsPath}\"\r\necho legacy-helper\r\nexit /b 0\r\n"
-                : $"#!/bin/sh\necho \"$*\" >> '{callsPath}'\necho legacy-helper\nexit 0\n";
+                ? $"@echo off\r\necho %* >> \"{callsPath}\"\r\necho safe-state-recovery-v5\r\nexit /b 0\r\n"
+                : $"#!/bin/sh\necho \"$*\" >> '{callsPath}'\necho safe-state-recovery-v5\nexit 0\n";
             await File.WriteAllTextAsync(helperPath, helper, TestContext.Current.CancellationToken).ConfigureAwait(true);
             if (!OperatingSystem.IsWindows())
             {

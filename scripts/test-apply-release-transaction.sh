@@ -29,6 +29,14 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$temp_dir/private.pem"
 openssl ec -in "$temp_dir/private.pem" -pubout -out /etc/kautuka/manifest-public-key.pem 2>/dev/null
 chmod 644 /etc/kautuka/manifest-public-key.pem
 
+hooks_dir=/var/lib/kautuka/.config/containers/hooks.d
+mkdir -p "$hooks_dir" /var/lib/kautuka/.config/containers/containers.conf.d
+for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
+    cp "$script_dir/nac/$file" "$hooks_dir/$file"
+done
+printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" > /var/lib/kautuka/.config/containers/containers.conf.d/99-kautuka-hooks.conf
+printf '{"version":"1.0.0","hook":{"path":"%s/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}\n' "$hooks_dir" > "$hooks_dir/kautuka_hook.json"
+
 services=(manager updateservice webhost gateway channelhost credentialshost)
 for service in "${services[@]}"; do
     mkdir -p "/opt/kautuka/$service/versions/v1.0.0"
@@ -93,6 +101,8 @@ make_signed_release() {
         printf '#!/bin/sh\nexit 0\n' > "$destination/kautuka-$service"
         chmod 755 "$destination/kautuka-$service"
     done
+    mkdir -p "$payload/bin/scripts"
+    cp "$script_dir/nac/kautuka_hook.py" "$script_dir/nac/kautuka_workload.nft.json.tmpl" "$script_dir/nac/kautuka_package_proxy.nft.json.tmpl" "$payload/bin/scripts/"
     printf '%s\n' 'kautuka-maintenance-page-v1' > "$payload/services/webhost/.maintenance-page-v1"
     if [[ "$protocol" == current ]]; then
         cp "$script_dir/kautuka-apply-release.sh" "$payload/bin/kautuka-apply-release"
@@ -122,7 +132,7 @@ run_helper() {
       /usr/local/lib/kautuka/apply-release "$@"
 }
 
-[[ "$(run_helper --capabilities)" == 'safe-state-recovery-v5' ]]
+[[ "$(run_helper --capabilities)" == 'safe-state-recovery-v6' ]]
 exec 8>"$temp_dir/lock"
 flock -n 8
 run_helper --boot-recover
@@ -157,7 +167,7 @@ run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuk
 protocol_status=$?
 set -e
 [[ $protocol_status -ne 0 ]]
-grep -Fq 'required safe-state-recovery-v5' "$temp_dir/missing-protocol.log"
+grep -Fq 'required safe-state-recovery-v6' "$temp_dir/missing-protocol.log"
 
 make_signed_release 1.0.1
 set +e
