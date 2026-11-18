@@ -51,6 +51,8 @@ The Linux installer appends the NAC hook directory to Podman's configured hook d
 When approving a group, each decision uses the revision returned by the previous decision; the sequence stops if a decision fails.
 The x64 release pins Envoy and CoreDNS to the x64 manifests in their reviewed multi-platform indexes. Their OCI archives, together with the boundary and package-proxy archives, retain the exact pinned digest when loaded by Podman. Fedora tests loaded and ran Envoy and CoreDNS from fresh stores without pulling; complete installed first-boot startup still requires separate verification. Other architectures retain the existing online multi-platform references and are not covered by these x64 archives.
 
+The image inventory test compares both x64 pins with the release inventory and third-party component catalog on every host architecture.
+
 On Linux, existing Envoy, CoreDNS, and boundary containers are reused only when their recorded Podman create command matches the requested image and arguments and their resolved image ID matches the current image reference. Drift stops the egress pod, confirms every present member is inactive and the pod infra member is valid, then removes only the stale named container before recreation. Missing peer containers do not block replacement in a partially created pod. If pod state, stop, or removal cannot be confirmed, startup fails closed. Focused simulated Podman coverage checks image ID, arguments, and partial-pod recovery; this is not live Podman verification.
 
 ---

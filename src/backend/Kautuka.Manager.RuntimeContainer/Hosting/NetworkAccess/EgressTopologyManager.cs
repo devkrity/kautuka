@@ -65,11 +65,13 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     // The published Linux/Windows release is x64. These are the x64 manifests from the
     // previously pinned indexes, so their exact digests survive an offline OCI archive.
+    public const string EnvoyX64Image = "docker.io/envoyproxy/envoy@sha256:16e0d4dac937ffa34103aa6ba1013dc2030b9de2a249273c8d23c7c5c2989664";
+    public const string CoreDnsX64Image = "docker.io/coredns/coredns@sha256:1ba6f47265602e2e50a9c4669e3a955e4298a0d30dc82f39293d4bf1a851e0ff";
     public static string EnvoyPinnedImage => RuntimeInformation.OSArchitecture == Architecture.X64
-        ? "docker.io/envoyproxy/envoy@sha256:16e0d4dac937ffa34103aa6ba1013dc2030b9de2a249273c8d23c7c5c2989664"
+        ? EnvoyX64Image
         : "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded";
     public static string CoreDnsPinnedImage => RuntimeInformation.OSArchitecture == Architecture.X64
-        ? "docker.io/coredns/coredns@sha256:1ba6f47265602e2e50a9c4669e3a955e4298a0d30dc82f39293d4bf1a851e0ff"
+        ? CoreDnsX64Image
         : "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea";
     public const string BoundaryInitImage = "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1";
 
