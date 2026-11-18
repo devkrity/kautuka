@@ -24,9 +24,20 @@ EOF
 cat > "$tmp/bin/test-runtime" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TEST_ARCHIVE_CALLS"
-if [[ "$1" == save ]]; then printf 'archive' > "$3"; fi
+if [[ "$1" == save ]]; then
+  [[ "$2" == --format && "$3" == oci-archive && "$4" == -o ]] || exit 42
+  printf 'archive' > "$5"
+fi
 EOF
-chmod +x "$tmp/bin/sudo" "$tmp/bin/test-runtime"
+cat > "$tmp/bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+printf 'skopeo %s\n' "$*" >> "$TEST_ARCHIVE_CALLS"
+[[ "$1" == copy && "$2" == --preserve-digests && "$3" == docker://* && "$4" == oci-archive:* ]] || exit 42
+archive_path="${4#oci-archive:}"
+archive_path="${archive_path%%:*}"
+printf 'archive' > "$archive_path"
+EOF
+chmod +x "$tmp/bin/sudo" "$tmp/bin/test-runtime" "$tmp/bin/skopeo"
 export PATH="$tmp/bin:$PATH"
 container_runtime=test-runtime
 log_phase() { :; }
@@ -40,6 +51,13 @@ stage_oci_image_archives "$tmp/rootfs"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/two.tar")" == archive ]]
 [[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 4 ]]
+
+: > "$TEST_ARCHIVE_CALLS"
+container_runtime=docker
+stage_oci_image_archives "$tmp/rootfs"
+[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 2 ]]
+[[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
+container_runtime=test-runtime
 
 for invalid in '{"id":"bad","image":"ref","archive":"../../escape.tar"}' \
   '{"id":"bad","image":"ref","archive":"one.tar"}' \
