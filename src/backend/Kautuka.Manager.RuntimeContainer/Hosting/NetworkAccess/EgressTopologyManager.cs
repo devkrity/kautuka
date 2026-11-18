@@ -223,7 +223,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
         private set
         {
-            UpdateStartupGate(value, clearTransientRecovery: false);
+            UpdateStartupGate(value);
         }
     }
 
@@ -287,12 +287,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CompleteStartupGateStateChange(change);
     }
 
-    private void UpdateStartupGate(bool isOpen, bool clearTransientRecovery)
+    private void UpdateStartupGate(bool isOpen)
     {
         StartupGateStateChange change;
         lock (gateLock)
         {
-            if (isOpen || clearTransientRecovery)
+            if (isOpen)
             {
                 transientRecoveryPending = false;
             }
