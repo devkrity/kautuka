@@ -49,7 +49,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load network requests. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load network requests. Try again.");
             }
 
             var privCache = new Dictionary<string, UserPrivilegesSummaryDto>(StringComparer.Ordinal)
@@ -187,7 +187,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the decision. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the decision. Refresh and try again.");
             }
         });
 
@@ -226,7 +226,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             try { response = await managerService.Client.ListRulesAsync(request, cancellationToken: cancellationToken); }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load network rules. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load network rules. Try again.");
             }
 
             var ruleDtos = response.Rules
@@ -331,7 +331,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the rule change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the rule change. Refresh and try again.");
             }
         });
 
@@ -383,7 +383,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the rule change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the rule change. Refresh and try again.");
             }
         });
 
@@ -413,7 +413,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             try { response = await managerService.Client.ListActivityAsync(request, cancellationToken: cancellationToken); }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load network activity. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load network activity. Try again.");
             }
 
             var entries = response.Entries
@@ -498,14 +498,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load network access privileges. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load network access privileges. Try again.");
             }
 
-            var result = new UserNetworkPrivilegesDto(
-                UserId: response.UserId,
-                CanApproveOwn: response.CanApproveOwn,
-                SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
-                SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
+            var result = MapUserNetworkPrivileges(response);
 
             return Results.Json(result, KautukaJsonContext.Default.UserNetworkPrivilegesDto);
         });
@@ -551,14 +547,10 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the privilege change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the privilege change. Refresh and try again.");
             }
 
-            var result = new UserNetworkPrivilegesDto(
-                UserId: response.UserId,
-                CanApproveOwn: response.CanApproveOwn,
-                SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
-                SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
+            var result = MapUserNetworkPrivileges(response);
 
             return Results.Json(result, KautukaJsonContext.Default.UserNetworkPrivilegesDto);
         });
@@ -589,7 +581,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load network pause status. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load network pause status. Try again.");
             }
 
             NetworkAccessUserBrakeMessage? userBrake = response.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
@@ -660,7 +652,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the network pause change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the network pause change. Refresh and try again.");
             }
         });
 
@@ -700,7 +692,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the network pause change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the network pause change. Refresh and try again.");
             }
             NetworkAccessUserBrakeMessage? userBrake = response.Users.FirstOrDefault(u => string.Equals(u.UserId, user.Id, StringComparison.Ordinal));
             var result = new NetworkAccessBrakeDto(
@@ -731,7 +723,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             try { response = await managerService.Client.GetImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not load compatibility settings. Try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not load compatibility settings. Try again.");
             }
 
             var pendingDtos = response.PendingRequests.Select(p => new ImageCompatRequestDto(
@@ -791,7 +783,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             try { response = await managerService.Client.SetImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the compatibility change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the compatibility change. Refresh and try again.");
             }
 
             var result = new ImageCompatProfileDto(
@@ -829,7 +821,7 @@ internal static partial class GatewayRuntimeEndpointMappings
             try { await managerService.Client.DeleteImageCompatibilityAsync(request, cancellationToken: cancellationToken); }
             catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded)
             {
-                return Results.Json(new GatewayErrorResponse("Manager could not confirm the compatibility change. Refresh and try again."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                return ManagerUnavailable("Manager could not confirm the compatibility change. Refresh and try again.");
             }
             return Results.NoContent();
         });
@@ -978,6 +970,16 @@ internal static partial class GatewayRuntimeEndpointMappings
             WaitingForAdmin: waitingForAdmin,
             OwnerCanApproveOwn: canApproveOwn);
     }
+
+    private static IResult ManagerUnavailable(string message)
+        => Results.Json(new GatewayErrorResponse(message), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+
+    private static UserNetworkPrivilegesDto MapUserNetworkPrivileges(NetworkAccessUserPrivilegesMessage response)
+        => new(
+            UserId: response.UserId,
+            CanApproveOwn: response.CanApproveOwn,
+            SetBy: string.IsNullOrWhiteSpace(response.SetBy) ? null : response.SetBy,
+            SetAtUtc: string.IsNullOrWhiteSpace(response.SetAtUtc) ? null : response.SetAtUtc);
 
     private static string FormatRuleSummaryText(
         NetworkAccessRuleMessage rule,

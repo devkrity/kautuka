@@ -28,7 +28,7 @@ Connector tests use the authenticated caller's identity; a user ID in the submit
 The rule and compatibility APIs reject missing required fields with a bad-request response.
 If Manager cannot load privileges, the API returns unavailable. If it cannot confirm an update, it asks the administrator to refresh before retrying; a timeout alone does not establish whether the update was applied.
 Brake status and updates likewise report Manager outages; an unconfirmed update requires refreshing the status before retrying.
-Requests, rules, activity, and compatibility lists report unavailable when Manager cannot be reached rather than returning an empty list.
+Requests, rules, activity, and compatibility lists return HTTP 503 when Manager is unavailable or times out rather than returning an empty list.
 When Manager cannot confirm a request decision or a rule or compatibility change, the API returns unavailable and asks for a refresh before retrying.
 Connector catalogue availability is not part of NAC workload labels, registry entries, outbound checks, or approval requests. Shared credential lookup remains separate.
 Gateway and Manager should run the same Kautuka release; mixed-version NAC operation is not supported.
