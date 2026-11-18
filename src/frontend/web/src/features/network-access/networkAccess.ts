@@ -1,111 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/apiClient';
 
-export interface NetworkAccessRequestDto {
-  id: string;
-  userId?: string;
-  userDisplayName?: string;
-  userPronoun?: string;
-  agentId?: string;
-  agentDisplayName?: string;
-  connectorId?: string;
-  connectorDisplayName?: string;
-  attribution: 'user-agent' | 'user' | 'none';
-  destination: string;
-  destKind: 'host' | 'ip';
-  port: number;
-  actorKind: 'agent' | 'connector' | 'builder' | 'first-party';
-  firstSeenUtc: string;
-  lastSeenUtc: string;
-  attempts: number;
-  status: 'pending' | 'allowed' | 'blocked';
-  origin: 'container' | 'gateway' | 'channelhost';
-  purpose?: string;
-  compatibilityMode?: boolean;
-  waitingForAdmin?: boolean;
-  ownerCanApproveOwn?: boolean;
-}
+import type {
+  NetworkAccessBrakeDto,
+  NetworkRequestsResponseDto,
+  NetworkAccessRuleDto,
+  NetworkRulesResponseDto,
+  RequestDecisionDto,
+  RequestDecisionResponseDto,
+  CreateOrUpdateRuleDto,
+  ProviderNetworkTarget,
+  NetworkActivityResponseDto,
+  UserNetworkPrivilegesDto,
+  UpdateUserNetworkPrivilegesDto,
+  UpdateUserBrakeDto,
+  UpdateSystemBrakeDto,
+  ImageCompatProfileDto,
+  ImageCompatResponseDto,
+  CreateCompatProfileDto,
+} from './networkAccessTypes';
 
-export interface UserPrivilegesSummaryDto {
-  canApproveOwn: boolean;
-}
-
-export interface NetworkAccessBrakeDto {
-  userPaused: boolean;
-  userPausedBy?: string;
-  userLockedByAdmin: boolean;
-  systemPaused: boolean;
-  systemPausedBy?: string;
-}
-
-export interface NetworkRequestsResponseDto {
-  revision: number;
-  requests: NetworkAccessRequestDto[];
-  privileges: UserPrivilegesSummaryDto;
-  brake: NetworkAccessBrakeDto;
-}
-
-export interface NetworkAccessRuleDto {
-  id: string;
-  scopeKind: 'agent' | 'user' | 'system';
-  userId?: string;
-  userDisplayName?: string;
-  agentId?: string;
-  agentDisplayName?: string;
-  connectorId?: string;
-  connectorDisplayName?: string;
-  destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
-  port: number;
-  allowed: boolean;
-  allowLan: boolean;
-  source: 'user' | 'seed';
-  paused: boolean;
-  summaryText: string;
-  decidedBy: string;
-  decidedAtUtc: string;
-  openInternetBadge: boolean;
-  protectedFromUser?: boolean;
-}
-
-export interface NetworkRulesResponseDto {
-  revision: number;
-  rules: NetworkAccessRuleDto[];
-}
-
-export interface RequestDecisionDto {
-  allow: boolean;
-  scope?: 'agent' | 'user' | 'connector' | 'system';
-  allowLan?: boolean;
-  expectedRevision: number;
-}
-
-export interface RequestDecisionResponseDto {
-  revision: number;
-  rule?: NetworkAccessRuleDto;
-  request?: NetworkAccessRequestDto;
-}
-
-export interface CreateOrUpdateRuleDto {
-  scopeKind: 'agent' | 'user' | 'system';
-  userId?: string;
-  agentId?: string;
-  connectorId?: string;
-  destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
-  port: number;
-  allowed: boolean;
-  allowLan?: boolean;
-  expectedRevision: number;
-  replaceRuleId?: string;
-}
-
-export interface ProviderNetworkTarget {
-  host: string;
-  port: number;
-  destKind: 'host' | 'ip';
-  allowLan: boolean;
-}
+export type * from './networkAccessTypes';
 
 const DEFAULT_PROVIDER_URLS: Record<string, string> = {
   ollama: 'http://localhost:11434',
@@ -176,81 +91,10 @@ export async function checkProviderSystemwideRule(target: ProviderNetworkTarget)
   return { alreadyAllowed, expectedRevision };
 }
 
-export interface NetworkAccessActivityDto {
-  timestampUtc: string;
-  userId?: string;
-  userDisplayName?: string;
-  agentId?: string;
-  agentDisplayName?: string;
-  connectorId?: string;
-  connectorDisplayName?: string;
-  destination: string;
-  port: number;
-  decision: 'allow' | 'deny';
-  reason: string;
-  openInternetBadge: boolean;
-  compatibilityMode: boolean;
-}
-
-export interface NetworkActivityResponseDto {
-  entries: NetworkAccessActivityDto[];
-}
-
-export interface UserNetworkPrivilegesDto {
-  userId: string;
-  canApproveOwn: boolean;
-  setBy?: string;
-  setAtUtc?: string;
-}
-
-export interface UpdateUserNetworkPrivilegesDto {
-  canApproveOwn: boolean;
-}
-
-export interface UpdateUserBrakeDto {
-  userId?: string;
-  on: boolean;
-}
-
-export interface UpdateSystemBrakeDto {
-  on: boolean;
-}
-
-export interface ImageCompatRequestDto {
-  imageDigest: string;
-  connectorId?: string;
-  connectorDisplayName?: string;
-  firstSeenUtc: string;
-  reason?: string;
-}
-
-export interface ImageCompatProfileDto {
-  imageDigest: string;
-  connectorId?: string;
-  connectorDisplayName?: string;
-  relaxations: ('writable-rootfs' | 'root-user' | 'file-ownership-caps')[];
-  grantedBy: string;
-  grantedAtUtc: string;
-  reason?: string;
-}
-
-export interface ImageCompatResponseDto {
-  pendingRequests: ImageCompatRequestDto[];
-  profiles: ImageCompatProfileDto[];
-}
-
-export interface CreateCompatProfileDto {
-  connectorId?: string;
-  connectorDisplayName?: string;
-  relaxations: ('writable-rootfs' | 'root-user' | 'file-ownership-caps')[];
-  reason?: string;
-}
-
 // ──────────────── Query Keys ────────────────
 export const networkAccessKeys = {
   all: ['network-access'] as const,
   requests: (sinceRevision?: number) => ['network-access', 'requests', sinceRevision] as const,
-  pendingCount: ['network-access', 'pending-count'] as const,
   rules: (userId?: string) => ['network-access', 'rules', userId] as const,
   activity: ['network-access', 'activity'] as const,
   privileges: (userId: string) => ['network-access', 'privileges', userId] as const,
@@ -283,15 +127,14 @@ export function useNetworkRequests(sinceRevision?: number, enabled: boolean = tr
  */
 export function useNetworkPendingCount(enabled: boolean = true) {
   return useQuery({
-    queryKey: networkAccessKeys.pendingCount,
+    queryKey: networkAccessKeys.requests(),
     queryFn: async () => {
       const response = await apiClient.get<NetworkRequestsResponseDto>('/network-access/requests');
-      const pending = response.data?.requests?.filter((r) => r.status === 'pending') ?? [];
-      return {
-        count: pending.length,
-        requests: pending,
-        brake: response.data?.brake,
-      };
+      return response.data;
+    },
+    select: (data: NetworkRequestsResponseDto) => {
+      const pending = data?.requests?.filter((r) => r.status === 'pending') ?? [];
+      return { count: pending.length, requests: pending, brake: data?.brake };
     },
     enabled,
     refetchInterval: 15000,
