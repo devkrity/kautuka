@@ -63,17 +63,31 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private const string WorkloadNetworkRouteMetric = "1000";
     private const string OutsideNetworkRouteMetric = "100";
 
-    // The published Linux/Windows release is x64. These are the x64 manifests from the
-    // previously pinned indexes, so their exact digests survive an offline OCI archive.
-    public const string EnvoyX64Image = "docker.io/envoyproxy/envoy@sha256:16e0d4dac937ffa34103aa6ba1013dc2030b9de2a249273c8d23c7c5c2989664";
-    public const string CoreDnsX64Image = "docker.io/coredns/coredns@sha256:1ba6f47265602e2e50a9c4669e3a955e4298a0d30dc82f39293d4bf1a851e0ff";
-    public static string EnvoyPinnedImage => RuntimeInformation.OSArchitecture == Architecture.X64
-        ? EnvoyX64Image
-        : "docker.io/envoyproxy/envoy@sha256:09ca6f2140a61ad8df11779a4a30d52b48433d444466328494f9188c9c35eded";
-    public static string CoreDnsPinnedImage => RuntimeInformation.OSArchitecture == Architecture.X64
-        ? CoreDnsX64Image
-        : "docker.io/coredns/coredns@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea";
-    public const string BoundaryInitImage = "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1";
+    // Image pins are embedded from the same manifest used by release tooling.
+    private static readonly RuntimeImageAllowlist runtimeImages = LoadRuntimeImages();
+    public static string EnvoyX64Image => FindRuntimeImage("envoy").Image;
+    public static string CoreDnsX64Image => FindRuntimeImage("coredns").Image;
+    public static string EnvoyPinnedImage => SelectRuntimeImage("envoy", RuntimeInformation.OSArchitecture);
+    public static string CoreDnsPinnedImage => SelectRuntimeImage("coredns", RuntimeInformation.OSArchitecture);
+    public static string BoundaryInitImage => FindRuntimeImage("egress-boundary").Image;
+
+    private static RuntimeImageAllowlist LoadRuntimeImages()
+    {
+        using Stream stream = typeof(EgressTopologyManager).Assembly.GetManifestResourceStream("Kautuka.RuntimeImages.json")
+            ?? throw new InvalidOperationException("Embedded runtime image manifest is missing.");
+        return JsonSerializer.Deserialize(stream, RuntimeImageAllowlistJsonContext.Default.RuntimeImageAllowlist)
+            ?? throw new InvalidOperationException("Embedded runtime image manifest is invalid.");
+    }
+
+    private static RuntimeImageEntry FindRuntimeImage(string id)
+        => runtimeImages.Images.Single(entry => string.Equals(entry.Id, id, StringComparison.Ordinal));
+
+    internal static string SelectRuntimeImage(string id, Architecture architecture)
+    {
+        RuntimeImageEntry entry = FindRuntimeImage(id);
+        return architecture == Architecture.X64 ? entry.Image
+            : entry.Arm64Image ?? throw new InvalidOperationException($"No non-x64 image is configured for '{id}'.");
+    }
 
     private readonly PodmanCommandRunner podmanRunner;
     private readonly WorkloadAddressAllocator addressAllocator;
@@ -95,6 +109,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly string? windowsPodmanHookStateDirectory;
     private readonly bool useDevelopmentSelinuxDomain;
 
+    // Gate and launch-admission state are changed together under gateLock. Closing
+    // admission cancels the current lease generation; reopening starts a new one.
+    // Recovery flags describe independent checks that may need retrying and do not
+    // by themselves authorize a reopen. A latched incident keeps admission closed.
     private readonly object gateLock = new();
     private bool isStartupGateOpen;
     private bool launchAdmissionClosed = true;

@@ -31,6 +31,21 @@ public sealed class EgressArchivedImageStartupTests
         Assert.Equal(EgressTopologyManager.CoreDnsX64Image, components.EnumerateArray().Single(i => i.GetProperty("id").GetString() == "coredns").GetProperty("image").GetString());
     }
     [Fact]
+    public void EgressImagePinsUseTheManifestForBothArchitectures()
+    {
+        RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(
+            Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName), requirePresent: true);
+        foreach (string id in new[] { "envoy", "coredns" })
+        {
+            RuntimeImageEntry entry = Assert.Single(images.Images, image => image.Id == id);
+            Assert.Equal(entry.Image, EgressTopologyManager.SelectRuntimeImage(id, System.Runtime.InteropServices.Architecture.X64));
+            Assert.NotNull(entry.Arm64Image);
+            Assert.Equal(entry.Arm64Image, EgressTopologyManager.SelectRuntimeImage(id, System.Runtime.InteropServices.Architecture.Arm64));
+            Assert.NotEqual(entry.Image, entry.Arm64Image);
+        }
+    }
+
+    [Fact]
     public void PublishedBoundaryImageMatchesThePackagedArchiveInventory()
     {
         RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(
