@@ -51,6 +51,11 @@ internal sealed class GatewayHostedCatalogInstaller(
             throw new InvalidOperationException($"Unsupported catalog item kind '{item.Kind}'.");
         }
 
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: string.Equals(item.Kind, "connector", StringComparison.OrdinalIgnoreCase) ? item.Id : null,
+            purpose: "catalog-install",
+            service: "catalog");
         DownloadedCatalogArtifact artifact = await DownloadArtifactAsync(item, cancellationToken).ConfigureAwait(false);
         string scope = GatewayOwnershipAccess.ResolveCatalogScope(user, requestedScope);
         string? ownerUserId = GatewayOwnershipAccess.ResolveCatalogOwnerUserId(scope, user);
@@ -86,10 +91,15 @@ internal sealed class GatewayHostedCatalogInstaller(
         }
 
         McpConnectorTestResult validation = await mcpConnectorTestService
-            .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector), cancellationToken)
+            .TestAsync(BuildImportValidationRequest(inspection.ServerId, inspection.Connector, user.Id), cancellationToken)
             .ConfigureAwait(false);
 
-        if (!validation.Success)
+        if (validation.Success && validation.ToolDefinitions is not null
+            && (!IsCanonicalImageDigest(validation.ImageDigest)
+                || (!string.IsNullOrWhiteSpace(inspection.Connector.BundlePath) && !IsCanonicalSourceDigest(validation.SourceDigest))))
+            throw new InvalidOperationException("Connector tools could not be saved without an immutable image digest.");
+
+        if (!validation.Success && !validation.NetworkApprovalRequired)
         {
             throw new InvalidOperationException(validation.Message);
         }
@@ -101,7 +111,10 @@ internal sealed class GatewayHostedCatalogInstaller(
             ownerUserId,
             cancellationToken).ConfigureAwait(false);
 
-        return new GatewayHostedCatalogInstallResult("connector", inspection.ServerId, hasExisting);
+        if (validation.NetworkApprovalRequired)
+            _ = await catalogStore.SaveMcpServerDiscoveryAsync(inspection.ServerId, null, null, cancellationToken).ConfigureAwait(false);
+
+        return new GatewayHostedCatalogInstallResult("connector", inspection.ServerId, hasExisting, validation.NetworkApprovalRequired);
     }
 
     private async Task<GatewayHostedCatalogInstallResult> InstallSkillAsync(
@@ -170,10 +183,7 @@ internal sealed class GatewayHostedCatalogInstaller(
 
         using HttpClient client = httpClientFactory.CreateClient();
         Uri artifactUri = new(item.ArtifactUrl, UriKind.Absolute);
-        using HttpResponseMessage response = await client.GetAsync(
-            artifactUri,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await GetArtifactFollowingRedirectsAsync(client, artifactUri, cancellationToken).ConfigureAwait(false);
 
         response.EnsureSuccessStatusCode();
 
@@ -187,6 +197,27 @@ internal sealed class GatewayHostedCatalogInstaller(
         VerifyArtifactDigest(item, content);
 
         return new DownloadedCatalogArtifact(content, ResolveFileName(item));
+    }
+
+    private static async Task<HttpResponseMessage> GetArtifactFollowingRedirectsAsync(HttpClient client, Uri uri, CancellationToken cancellationToken)
+    {
+        for (int redirects = 0; ; redirects++)
+        {
+            HttpResponseMessage response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
+                return response;
+            if (redirects >= 3)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Too many catalogue artifact redirects.");
+            }
+            Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            response.Dispose();
+            if (next.Scheme is not ("http" or "https")) throw new HttpRequestException("Unsupported catalogue redirect scheme.");
+            if (uri.Scheme == Uri.UriSchemeHttps && next.Scheme != Uri.UriSchemeHttps)
+                throw new HttpRequestException("Catalogue artifact redirects cannot downgrade HTTPS to HTTP.");
+            uri = next;
+        }
     }
 
     private static void VerifyArtifactDigest(GatewayHostedCatalogItem item, byte[] content)
@@ -280,10 +311,12 @@ internal sealed class GatewayHostedCatalogInstaller(
             ["catalogArtifactUrl"] = item.ArtifactUrl ?? string.Empty,
         };
 
-    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector)
+    private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector, string userId)
         => new()
         {
             Id = serverId,
+            UserId = userId,
+            SaveDiscovery = true,
             Transport = connector.Transport ?? "container",
             ContainerImage = connector.ContainerImage,
             ContainerCommand = connector.ContainerCommand,
@@ -315,8 +348,8 @@ internal sealed class GatewayHostedCatalogInstaller(
             BundlePath = connector.BundlePath,
             ServerType = connector.ServerType,
             RuntimeArtifactType = connector.RuntimeArtifactType,
-            RuntimeArtifactSourceDigest = connector.RuntimeArtifactSourceDigest,
-            RuntimeArtifactBuildStatus = "ready",
+            RuntimeArtifactSourceDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : connector.RuntimeArtifactSourceDigest,
+            RuntimeArtifactBuildStatus = connector.RuntimeArtifactType is null ? connector.RuntimeArtifactBuildStatus : "ready",
             ReadinessTimeoutSeconds = connector.ReadinessTimeoutSeconds,
             JitCooldownSeconds = connector.JitCooldownSeconds,
             HealthcheckUrl = connector.HealthcheckUrl,
@@ -325,7 +358,18 @@ internal sealed class GatewayHostedCatalogInstaller(
             Enabled = connector.Enabled,
             ToolCount = validation.ToolCount,
             ToolNames = validation.ToolNames?.ToArray(),
+            LocalToolDefinitions = validation.ToolDefinitions,
+            LocalArtifactDigest = validation.Success && !string.IsNullOrWhiteSpace(connector.BundlePath) ? validation.SourceDigest : null,
+            LocalImageDigest = validation.ImageDigest,
+            LocalDiscoveryAttempted = true,
         };
+
+    private static bool IsCanonicalImageDigest(string? digest)
+        => digest is { Length: 71 } && digest.StartsWith("sha256:", StringComparison.Ordinal)
+            && digest.AsSpan(7).ToString().All(Uri.IsHexDigit);
+
+    private static bool IsCanonicalSourceDigest(string? digest)
+        => digest is { Length: 64 } && digest.All(Uri.IsHexDigit);
 
     private static void EnsureCanImportConnectors(GatewayUser user)
     {

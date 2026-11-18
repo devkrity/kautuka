@@ -35,7 +35,13 @@ internal static partial class GatewayAuthEndpointMappings
             .WithSummary("Returns whether initial admin setup is still required")
             .Produces<AuthSetupStatusResponse>(StatusCodes.Status200OK);
 
-        RouteHandlerBuilder setup = app.MapPost("/api/auth/setup", (AuthSetupRequest? body, IGatewayUserStore users, SetupPossession setupToken, ILoggerFactory loggerFactory) =>
+        RouteHandlerBuilder setup = app.MapPost("/api/auth/setup", async (
+            AuthSetupRequest? body,
+            IGatewayUserStore users,
+            SetupPossession setupToken,
+            IManagerGrpcService managerService,
+            ILoggerFactory loggerFactory,
+            CancellationToken cancellationToken) =>
         {
             ILogger logger = loggerFactory.CreateLogger("Kautuka.Gateway.Auth.Setup");
             if (body is null)
@@ -80,6 +86,14 @@ internal static partial class GatewayAuthEndpointMappings
                         KautukaJsonContext.Default.AuthErrorResponse,
                         statusCode: StatusCodes.Status400BadRequest);
                 }
+
+                await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                    managerService,
+                    actorUserId: created.Id,
+                    targetUserId: created.Id,
+                    targetIsAdmin: true,
+                    logger,
+                    cancellationToken).ConfigureAwait(false);
 
                 return Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse);
             }

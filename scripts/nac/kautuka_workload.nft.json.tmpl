@@ -1,0 +1,191 @@
+{
+  "nftables": [
+    {
+      "table": {
+        "family": "inet",
+        "name": "kautuka_workload"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "name": "input",
+        "type": "filter",
+        "hook": "input",
+        "prio": 0,
+        "policy": "drop"
+      }
+    },
+    {
+      "chain": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "name": "output",
+        "type": "filter",
+        "hook": "output",
+        "prio": 0,
+        "policy": "drop"
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "input",
+        "expr": [
+          { "match": { "op": "==", "left": { "meta": { "key": "iifname" } }, "right": "lo" } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "input",
+        "expr": [
+          { "match": { "op": "in", "left": { "ct": { "key": "state" } }, "right": ["established", "related"] } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "input",
+        "comment": "input_drop",
+        "expr": [
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "expr": [
+          { "match": { "op": "==", "left": { "meta": { "key": "oifname" } }, "right": "lo" } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "ipv6_drop",
+        "expr": [
+          { "match": { "op": "==", "left": { "meta": { "key": "nfproto" } }, "right": "ipv6" } },
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "spoof_drop",
+        "expr": [
+          { "match": { "op": "!=", "left": { "meta": { "key": "oifname" } }, "right": "lo" } },
+          { "match": { "op": "!=", "left": { "payload": { "protocol": "ip", "field": "saddr" } }, "right": "{{IP}}" } },
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "expr": [
+          { "match": { "op": "==", "left": { "payload": { "protocol": "ip", "field": "daddr" } }, "right": "10.247.0.2" } },
+          { "match": { "op": "==", "left": { "payload": { "protocol": "tcp", "field": "dport" } }, "right": 15001 } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "expr": [
+          { "match": { "op": "==", "left": { "payload": { "protocol": "ip", "field": "daddr" } }, "right": "10.247.0.2" } },
+          { "match": { "op": "==", "left": { "meta": { "key": "l4proto" } }, "right": { "set": ["tcp", "udp"] } } },
+          { "match": { "op": "==", "left": { "payload": { "protocol": "th", "field": "dport" } }, "right": 53 } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "wl_net_drop",
+        "expr": [
+          { "match": { "op": "==", "left": { "payload": { "protocol": "ip", "field": "daddr" } }, "right": { "prefix": { "addr": "10.247.0.0", "len": 16 } } } },
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "meta_drop",
+        "expr": [
+          { "match": { "op": "==", "left": { "payload": { "protocol": "ip", "field": "daddr" } }, "right": { "set": ["168.63.129.16", { "prefix": { "addr": "169.254.0.0", "len": 16 } }] } } },
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "udp_drop",
+        "expr": [
+          { "match": { "op": "==", "left": { "meta": { "key": "l4proto" } }, "right": "udp" } },
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "expr": [
+          { "match": { "op": "==", "left": { "meta": { "key": "l4proto" } }, "right": "tcp" } },
+          { "accept": null }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "comment": "final_drop",
+        "expr": [
+          { "counter": { "packets": 0, "bytes": 0 } },
+          { "drop": null }
+        ]
+      }
+    }
+  ]
+}

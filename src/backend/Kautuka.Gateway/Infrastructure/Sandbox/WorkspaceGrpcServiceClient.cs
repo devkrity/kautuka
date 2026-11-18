@@ -17,6 +17,8 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
     internal static readonly TimeSpan DesiredStateMaterializationDeadline = TimeSpan.FromMinutes(31);
     private readonly ManagerService.ManagerServiceClient client = new(callInvoker);
 
+    public ManagerService.ManagerServiceClient Client => client;
+
     public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
         => Call("Ping", () => client.PingAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), cancellationToken: cancellationToken).ResponseAsync);
 
@@ -79,6 +81,24 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
             deadline: utcNow.Add(DesiredStateMaterializationDeadline),
             cancellationToken: cancellationToken);
 
+    public Task<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Call(
+            "GetUserPrivileges",
+            () => client.GetUserPrivilegesAsync(
+                request,
+                headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+                deadline: DateTime.UtcNow.AddSeconds(10),
+                cancellationToken: cancellationToken).ResponseAsync);
+
+    public Task<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Call(
+            "SetUserPrivileges",
+            () => client.SetUserPrivilegesAsync(
+                request,
+                headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+                deadline: DateTime.UtcNow.AddSeconds(10),
+                cancellationToken: cancellationToken).ResponseAsync);
+
     private static WorkspaceDesiredStateUpdate ToMessage(ManagerDesiredStateUpdateRequest request)
     {
         var message = new WorkspaceDesiredStateUpdate
@@ -129,6 +149,7 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
         {
             ScopeType = workspace.ScopeType,
             ScopeId = workspace.ScopeId,
+            AgentId = workspace.AgentId ?? string.Empty,
             UserId = workspace.UserId ?? string.Empty,
             HostWorkspacePath = workspace.HostWorkspacePath,
             ContainerWorkspacePath = workspace.ContainerWorkspacePath,
@@ -160,6 +181,7 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
             ServerType = connector.ServerType ?? string.Empty,
             IsInternalSystemConnector = connector.IsInternalSystemConnector,
             McpProtocolVersion = connector.McpProtocolVersion ?? string.Empty,
+            CatalogScope = connector.CatalogScope,
         };
 
         message.Args.AddRange(connector.Args);

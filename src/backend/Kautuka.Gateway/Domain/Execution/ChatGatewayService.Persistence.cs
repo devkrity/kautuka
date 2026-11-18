@@ -1,6 +1,7 @@
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Memory;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -289,9 +290,14 @@ internal sealed partial class ChatGatewayService
         string sessionId = job.SessionId;
         try
         {
+            state.Sessions.TryGetValue(sessionId, out GatewaySession? session);
+            string ownerUserId = session?.OwnerUserId ?? string.Empty;
+            using IDisposable nacScope = NetworkAccessContext.BeginScope(
+                userId: ownerUserId,
+                agentId: string.Equals(session?.TargetType, "agent", StringComparison.OrdinalIgnoreCase) ? session?.TargetId : null,
+                purpose: "memory-extraction", service: "ai-model");
             IChatClient? client = await ResolveExtractionClientAsync(targetType, targetId, ct).ConfigureAwait(false);
             ChatGatewayServiceLog.FactExtractionClientResolved(logger, client is null ? "null" : "resolved", targetType, targetId);
-            string ownerUserId = state.Sessions.TryGetValue(sessionId, out GatewaySession? session) ? session.OwnerUserId : string.Empty;
 
             DateTimeOffset timestamp = DateTimeOffset.UtcNow;
             IReadOnlyList<GatewayMemoryFact> facts = await factExtractor.ExtractAsync(
@@ -311,7 +317,7 @@ internal sealed partial class ChatGatewayService
                 if (toStore.Count > 0)
                 {
                     List<GatewayMemoryFact> stamped = toStore
-                        .Select((f, index) => f with { Id = $"{job.Id}-{index}", OwnerUserId = state.Sessions.TryGetValue(sessionId, out GatewaySession? session) ? session.OwnerUserId : string.Empty, SessionId = sessionId })
+                        .Select((f, index) => f with { Id = $"{job.Id}-{index}", OwnerUserId = ownerUserId, SessionId = sessionId })
                         .Where(f => !state.MemoryStore.TryGet(f.Id, out _))
                         .ToList();
                     state.UpsertAgentMemoryFacts(targetType, targetId, stamped);

@@ -3,17 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/stage-third-party-sources.sh --release-dir <dir> --wsl-rootfs <extracted-rootfs> --base-image <image@sha256:digest>
+Usage: scripts/stage-third-party-sources.sh --release-dir <dir> --wsl-rootfs <extracted-rootfs> --base-image <image@sha256:digest> --boundary-image <image@sha256:digest>
 
 Stages immutable source snapshots for distributed sidecar images and the
 elkjs frontend component, plus source RPMs for Fedora packages installed in
-the WSL rootfs and kautuka-base.
+the WSL rootfs, kautuka-base, and egress boundary image.
 EOF
 }
 
 release_dir=''
 wsl_rootfs=''
 base_image=''
+boundary_image=''
 runtime="${KAUTUKA_RELEASE_CONTAINER_RUNTIME:-docker}"
 curl_bin="${KAUTUKA_RELEASE_CURL:-curl}"
 fedora_image="${FEDORA_SOURCE_IMAGE:-quay.io/fedora/fedora:44}"
@@ -22,12 +23,17 @@ while [[ $# -gt 0 ]]; do
     --release-dir) release_dir="$2"; shift 2 ;;
     --wsl-rootfs) wsl_rootfs="$2"; shift 2 ;;
     --base-image) base_image="$2"; shift 2 ;;
+    --boundary-image) boundary_image="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
-if [[ -z "$release_dir" || -z "$wsl_rootfs" || -z "$base_image" ]]; then
+if [[ -z "$release_dir" || -z "$wsl_rootfs" || -z "$base_image" || -z "$boundary_image" ]]; then
   usage >&2
+  exit 2
+fi
+if [[ ! "$boundary_image" =~ ^ghcr\.io/devkrity/kautuka-egress-boundary@sha256:[a-f0-9]{64}$ ]]; then
+  echo 'error: boundary image must be the exact immutable egress boundary digest for this release.' >&2
   exit 2
 fi
 if [[ ! "$base_image" =~ ^ghcr\.io/devkrity/kautuka-base@sha256:[a-f0-9]{64}$ ]]; then
@@ -75,9 +81,11 @@ NODE
 )
 
 base_sources="$("$runtime" run --rm --entrypoint /bin/cat "$base_image" /usr/share/doc/kautuka/FEDORA_SOURCE_RPMS.txt)"
+boundary_sources="$("$runtime" run --rm --entrypoint /bin/cat "$boundary_image" /usr/share/doc/kautuka/FEDORA_SOURCE_RPMS.txt)"
 {
   cat "$wsl_rootfs/usr/share/doc/kautuka/FEDORA_SOURCE_RPMS.txt"
   printf '%s\n' "$base_sources"
+  printf '%s\n' "$boundary_sources"
 } | sed '/^[[:space:]]*$/d' | sort -u > "$work_dir/fedora-srpm-list.txt"
 test -s "$work_dir/fedora-srpm-list.txt"
 
@@ -167,7 +175,7 @@ const text = [
   '',
   'The companion `THIRD_PARTY_COMPONENTS.json` release asset records the machine-readable image digests, source URLs, commits, and license expressions. `THIRD_PARTY_NOTICES.txt` gives the human-readable notices. License texts named above are in the companion `kautuka-licenses.zip` release asset.',
   '',
-  'The Fedora archive contains source RPMs for the complete installed package sets in the release WSL rootfs and exact `kautuka-base` image digest. `Fedora-SOURCE-RPMS.txt` names each source RPM and `Fedora-SOURCE-RPMS.sha256` verifies the source RPM files within the archive.',
+  'The Fedora archive contains source RPMs for the complete installed package sets in the release WSL rootfs and exact `kautuka-base` and egress boundary image digests. `Fedora-SOURCE-RPMS.txt` names each source RPM and `Fedora-SOURCE-RPMS.sha256` verifies the source RPM files within the archive.',
   '',
   '`SHA256SUMS` verifies these Git source snapshots, the Fedora source RPM archive, and its source manifest.',
   '',

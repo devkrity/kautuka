@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
@@ -9,10 +10,15 @@ using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Autopilot;
+using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Protos;
+using Kautuka.NetworkAccess.Client;
+using Kautuka.NetworkAccessController;
+using Kautuka.Manager.Protos;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -22,6 +28,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Xunit.Sdk;
 
@@ -34,6 +41,199 @@ namespace Kautuka.IntegrationTests;
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ProviderSettingsEndpointTests
 {
+    [Fact]
+    public async Task SavingProviderRollsBackWhenRuleWriteFails()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        fixture.FailRuleWrite = true;
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new { id = "failed-rule", type = "ollama", settings = new { base_url = "http://localhost:11434" } }, token);
+        Assert.False(response.IsSuccessStatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("failed-rule"));
+    }
+
+    [Fact]
+    public async Task UpdatingProviderRestoresPreviousSettingsWhenRuleWriteFails()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument initial = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new { id = "existing-provider", type = "ollama", settings = new { base_url = "http://localhost:11434" } }, token);
+        fixture.FailRuleWrite = true;
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new { id = "existing-provider", type = "ollama", settings = new { base_url = "http://192.168.1.12:11434" } }, token);
+        Assert.False(response.IsSuccessStatusCode);
+        using JsonDocument providers = await fixture.SendJsonAsync(HttpMethod.Get, "/api/settings/providers", null, token);
+        JsonElement saved = providers.RootElement.GetProperty("providers").EnumerateArray().Single(item => item.GetProperty("id").GetString() == "existing-provider");
+        Assert.Equal("http://localhost:11434", saved.GetProperty("settings").GetProperty("base_url").GetString());
+    }
+
+    [Fact]
+    public async Task TestConnectionUsesTemporaryAuthorizationAndEndsIt()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync(useControlledValidation: true);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument response = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/test",
+            new { id = "test", type = "openai", allowTemporaryNetworkAccess = true, settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
+        Assert.True(response.RootElement.GetProperty("success").GetBoolean());
+        Assert.True(fixture.TemporaryTestAllowed);
+        Assert.True(fixture.TemporaryTestEnded);
+        Assert.DoesNotContain(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules, view => view.Rule.Destination == "provider.example");
+    }
+
+    [Fact]
+    public async Task SavingProviderFailsWithoutChangingCatalogWhenManagerIsUnavailable()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        fixture.ManagerUnavailable = true;
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new { id = "offline-provider", type = "ollama", settings = new { base_url = "http://localhost:11434" } }, token);
+        Assert.False(response.IsSuccessStatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("offline-provider"));
+    }
+
+    [Fact]
+    public async Task SavingProviderReplacesMatchingSystemBlockWithAllowRule()
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        var admin = new NetworkAccessActor("admin", true);
+        var (revision, _) = fixture.ProviderRules.ListRules(admin);
+        fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "provider.example", "host", 443, false), revision);
+        using JsonDocument _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/save",
+            new { id = "openai-test", type = "openai", settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
+        NetworkAccessRule rule = Assert.Single(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "provider.example").Rule;
+        Assert.True(rule.Allowed);
+        Assert.False(rule.AllowLan);
+        Assert.Equal("system", rule.ScopeKind);
+    }
+
+    [Fact]
+    public async Task TestConnectionCreatesAdminApprovalBeforeSystemwideProviderRule_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-provider-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            await using var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var controller = new NetworkAccessController.NetworkAccessController(policyStore, new WorkloadRegistry());
+            var providerTypeCatalog = new SeededProviderTypeCatalog();
+            var checker = new ProviderTestNetworkAccessChecker(controller);
+            var aiClientFactory = new KautukaAiClientFactory(
+                [new OpenAiCompatibleProvider("openai", checker: checker)],
+                new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())),
+                providerTypeCatalog);
+            var validation = new ProviderValidationService(
+                DispatchProxy.Create<IGatewayCatalogStore, EmptyProviderCatalogStoreProxy>(),
+                aiClientFactory,
+                providerTypeCatalog,
+                NullLogger<ProviderValidationService>.Instance);
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.UseTestServer();
+            builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
+            builder.Services.AddSingleton<IProviderValidationService>(validation);
+            builder.Services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
+            WebApplication app = builder.Build();
+            await using (app)
+            {
+                app.MapGatewaySettingsEndpoints();
+                await app.StartAsync(TestContext.Current.CancellationToken);
+                using HttpClient client = app.GetTestClient();
+
+                using HttpResponseMessage response = await client.PostAsJsonAsync(
+                    "/api/settings/providers/test",
+                    new
+                    {
+                        provider_id = "custom-openai",
+                        type = "openai",
+                        settings = new
+                        {
+                            base_url = "https://api.provider.test/v1",
+                            api_key = "test-key",
+                        },
+                    },
+                    cancellationToken: TestContext.Current.CancellationToken);
+                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+                Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
+                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), checker.Scope);
+
+                var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+                NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
+                    .Select(static view => view.Request)
+                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
+                Assert.NotNull(pending);
+                Assert.Equal("gateway", pending.AgentId);
+                Assert.Equal("user-agent", pending.Attribution);
+                Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
+                await policyStore.FlushPendingWritesAsync();
+            }
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private sealed class ProviderTestNetworkAccessChecker(NetworkAccessController.NetworkAccessController controller) : INetworkAccessChecker
+    {
+        public NetworkAccessScope? Scope { get; private set; }
+        public List<OutboundTarget> Targets { get; } = [];
+
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Scope = NetworkAccessContext.Current;
+            Targets.Add(target);
+            NetworkAccessDecisionResult decision = controller.EvaluateOutboundCheck(new OutboundCheckInput(
+                target.UserId ?? string.Empty,
+                target.AgentId ?? string.Empty,
+                target.ConnectorId,
+                target.Host,
+                target.Port,
+                target.Purpose,
+                target.CorrelationId));
+            return Task.FromResult(new NetworkAccessCheckResult(
+                decision.Allowed,
+                decision.Reason,
+                decision.RequestId,
+                decision.OpenInternetBadge,
+                NetworkAccessDenialKind.Denied));
+        }
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1852", Justification = "DispatchProxy must derive from an unsealed proxy base.")]
+    private class EmptyProviderCatalogStoreProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IGatewayCatalogStore.TryGetProvider))
+            {
+                args![1] = null;
+                return false;
+            }
+
+            if (targetMethod is null || targetMethod.ReturnType == typeof(void))
+            {
+                return null;
+            }
+
+            return targetMethod.ReturnType.IsValueType
+                ? Activator.CreateInstance(targetMethod.ReturnType)
+                : null;
+        }
+    }
+
+    private sealed class ProviderTestAdminAuthGuard : IGatewayAuthGuard
+    {
+        public bool TryAuthorize(HttpContext context, out GatewayUser? user) { user = Admin(); return true; }
+        public IResult? RequireAuthenticated(HttpContext context, out GatewayUser? user) { user = Admin(); return null; }
+        public IResult? RequireAdmin(HttpContext context, out GatewayUser? user) { user = Admin(); return null; }
+        private static GatewayUser Admin() => new(
+            Id: "admin-1", Username: "admin", Password: "", Role: "admin", IsActive: true,
+            Email: "admin@example.test", DisplayName: "Admin");
+    }
+
     [Fact]
     public async Task SaveProviderPersistsToCatalog()
     {
@@ -49,6 +249,10 @@ public sealed class ProviderSettingsEndpointTests
         Assert.Equal("ollama-local", saved.RootElement.GetProperty("provider").GetProperty("id").GetString());
         Assert.Equal("ollama", saved.RootElement.GetProperty("provider").GetProperty("type").GetString());
         Assert.False(saved.RootElement.GetProperty("provider").GetProperty("hasApiKey").GetBoolean());
+        NetworkAccessRule rule = Assert.Single(fixture.ProviderRules.ListRules(new NetworkAccessActor("admin", true)).Rules,
+            view => view.Rule.ScopeKind == "system" && view.Rule.Destination == "localhost" && view.Rule.Port == 11434).Rule;
+        Assert.True(rule.Allowed);
+        Assert.True(rule.AllowLan);
 
         using JsonDocument list = await fixture.SendJsonAsync(HttpMethod.Get, "/api/settings/providers", null, token);
         JsonElement providers = list.RootElement.GetProperty("providers");
@@ -721,8 +925,16 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
     }
 
     public HttpClient Client { get; }
+    public NetworkAccessPolicyStore ProviderRules { get; private set; } = null!;
+    public bool ManagerUnavailable { get => providerInvoker.Unavailable; set => providerInvoker.Unavailable = value; }
+    public bool FailRuleWrite { get => providerInvoker.FailRuleWrite; set => providerInvoker.FailRuleWrite = value; }
+    public bool TemporaryTestAllowed => providerInvoker.TemporaryTestAllowed;
+    public bool TemporaryTestEnded => providerInvoker.TemporaryTestEnded;
+    private ProviderRulesCallInvoker providerInvoker = null!;
+    internal static IManagerGrpcService CreateTestManager(NetworkAccessPolicyStore rules)
+        => new ManagerGrpcServiceClient(new ProviderRulesCallInvoker(rules), "http://localhost");
 
-    public static async Task<ProviderModelFixture> CreateAsync()
+    public static async Task<ProviderModelFixture> CreateAsync(bool useControlledValidation = false)
     {
         string root = Path.Combine(
             Path.GetTempPath(), "kautuka-provider-model-tests", Guid.NewGuid().ToString("N"));
@@ -744,6 +956,15 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
 
         builder.WebHost.UseTestServer();
         GatewayAppBootstrap.ConfigureServices(builder);
+        var providerRules = new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json"));
+        var providerInvoker = new ProviderRulesCallInvoker(providerRules);
+        if (useControlledValidation)
+        {
+            builder.Services.RemoveAll<IProviderValidationService>();
+            builder.Services.AddSingleton<IProviderValidationService>(new ControlledProviderValidation(providerInvoker));
+        }
+        builder.Services.RemoveAll<IManagerGrpcService>();
+        builder.Services.AddSingleton<IManagerGrpcService>(new ManagerGrpcServiceClient(providerInvoker, "http://localhost"));
 
         // Remove background services that are irrelevant to these tests.
         RemoveHostedService<WorkspaceDesiredStateStartupService>(builder.Services);
@@ -767,7 +988,7 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         GatewayAppBootstrap.ConfigureApp(app, database);
         await app.StartAsync().ConfigureAwait(true);
 
-        return new ProviderModelFixture(root, previousEnvironment, app);
+        return new ProviderModelFixture(root, previousEnvironment, app) { ProviderRules = providerRules, providerInvoker = providerInvoker };
     }
 
     public async Task<string> LoginAsBootstrapAdminAsync()
@@ -841,10 +1062,100 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
         Client.Dispose();
         await app.StopAsync().ConfigureAwait(true);
         await app.DisposeAsync().ConfigureAwait(true);
+        ProviderRules.Dispose();
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", previousEnvironment);
         SqliteTestPoolCleanup.ClearPoolsUnderDirectory(root);
         if (Directory.Exists(root))
             await TestDirectoryCleanup.DeleteDirectoryWithRetryAsync(root).ConfigureAwait(false);
+    }
+
+    private sealed class ProviderRulesCallInvoker(NetworkAccessPolicyStore store) : CallInvoker
+    {
+        private readonly NetworkAccessController.NetworkAccessController controller = new(store, new WorkloadRegistry());
+        public bool Unavailable { get; set; }
+        public bool FailRuleWrite { get; set; }
+        public bool TemporaryTestAllowed { get; private set; }
+        public bool TemporaryTestEnded { get; private set; }
+        private string? testUser;
+        private string? testToken;
+        public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request)
+        {
+            if (Unavailable) throw new RpcException(new Status(StatusCode.Unavailable, "Manager unavailable."));
+            object response = request switch
+            {
+                NetworkAccessListRulesRequest list => List(list),
+                NetworkAccessSetRuleRequest set => Set(set),
+                NetworkAccessProviderTestRequest begin => Begin(begin),
+                NetworkAccessProviderTestEndRequest end => End(end),
+                _ => throw new RpcException(new Status(StatusCode.Unavailable, "No test manager implementation.")),
+            };
+            return new(Task.FromResult((TResponse)response), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), () => { });
+        }
+        private NetworkAccessProviderTestResponse Begin(NetworkAccessProviderTestRequest request)
+        {
+            testUser = request.Actor.UserId;
+            testToken = controller.BeginProviderTest(new(testUser, true), request.Host, request.Port, request.AllowLan);
+            return new NetworkAccessProviderTestResponse { Token = testToken };
+        }
+        private WorkspaceBoolResponse End(NetworkAccessProviderTestEndRequest request)
+        {
+            controller.EndProviderTest(new(request.Actor.UserId, true), request.Token);
+            TemporaryTestEnded = !controller.EvaluateOutboundCheck(new(testUser!, "gateway", null, "provider.example", 443, "provider-test", testToken)).Allowed;
+            return new WorkspaceBoolResponse { Ok = true };
+        }
+        public NetworkAccessCheckResult CheckTemporaryTest(OutboundTarget target)
+        {
+            NetworkAccessDecisionResult decision = controller.EvaluateOutboundCheck(new(target.UserId!, "gateway", null, target.Host, target.Port, target.Purpose, target.CorrelationId));
+            TemporaryTestAllowed = decision.Allowed;
+            return new NetworkAccessCheckResult(decision.Allowed, decision.Reason, decision.RequestId, decision.OpenInternetBadge, NetworkAccessDenialKind.Denied);
+        }
+        private NetworkAccessListRulesResponse List(NetworkAccessListRulesRequest request)
+        {
+            var (revision, rules) = store.ListRules(new NetworkAccessActor(request.Actor.UserId, request.Actor.IsAdmin));
+            var result = new NetworkAccessListRulesResponse { Revision = revision };
+            result.Rules.AddRange(rules.Select(view => Map(view.Rule, view.Paused)));
+            return result;
+        }
+        private NetworkAccessSetRuleResponse Set(NetworkAccessSetRuleRequest request)
+        {
+            if (FailRuleWrite) throw new RpcException(new Status(StatusCode.Unavailable, "Rule write failed."));
+            var (revision, rule) = store.SetRule(new NetworkAccessActor(request.Actor.UserId, request.Actor.IsAdmin),
+                new RuleWriteSpec(request.ScopeKind, null, null, null, request.Destination, request.DestKind, request.Port, request.Allowed, request.AllowLan), request.ExpectedRevision);
+            return new NetworkAccessSetRuleResponse { Revision = revision, Rule = Map(rule.Rule, rule.Paused) };
+        }
+        private static NetworkAccessRuleMessage Map(NetworkAccessRule rule, bool paused) => new()
+        {
+            ScopeKind = rule.ScopeKind,
+            Destination = rule.Destination,
+            DestKind = rule.DestKind,
+            Port = rule.Port,
+            Allowed = rule.Allowed,
+            AllowLan = rule.AllowLan,
+            Paused = paused,
+        };
+        public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
+        public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
+        public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options) => throw new NotSupportedException();
+        public override TResponse BlockingUnaryCall<TRequest, TResponse>(Method<TRequest, TResponse> method, string? host, CallOptions options, TRequest request) => throw new NotSupportedException();
+    }
+    private sealed class ControlledProviderValidation(ProviderRulesCallInvoker invoker) : IProviderValidationService
+    {
+        public async Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
+        {
+            using var client = new HttpClient(new NetworkAccessCheckHandler(new ControlledChecker(invoker), new ControlledTransport()));
+            using HttpResponseMessage response = await client.GetAsync(new Uri("https://provider.example/v1"), cancellationToken);
+            return new GatewayProviderTestResult(response.IsSuccessStatusCode, "controlled test");
+        }
+    }
+    private sealed class ControlledChecker(ProviderRulesCallInvoker invoker) : INetworkAccessChecker
+    {
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+            => Task.FromResult(invoker.CheckTemporaryTest(target));
+    }
+    private sealed class ControlledTransport : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
     }
 
     private static void RemoveHostedService<T>(IServiceCollection services)

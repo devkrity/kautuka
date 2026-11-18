@@ -29,9 +29,9 @@ public sealed class LinuxApplyReleaseHelperContractTests
         Assert.Contains("KAUTUKA_APPLY_DETACHED", source, StringComparison.Ordinal);
         Assert.Contains("systemd-run", source, StringComparison.Ordinal);
         Assert.Contains("artifact must be under /var/lib/kautuka/updateService/updates/", source, StringComparison.Ordinal);
-        Assert.Contains("# Kautuka-Apply-Protocol: 5", source, StringComparison.Ordinal);
+        Assert.Contains("# Kautuka-Apply-Protocol: 6", source, StringComparison.Ordinal);
         Assert.Contains("--capabilities", source, StringComparison.Ordinal);
-        Assert.Contains("safe-state-recovery-v5", source, StringComparison.Ordinal);
+        Assert.Contains("safe-state-recovery-v6", source, StringComparison.Ordinal);
         Assert.Contains("assert_maintenance_webhost", source, StringComparison.Ordinal);
         Assert.Contains("--recover", source, StringComparison.Ordinal);
         Assert.Contains("--boot-recover", source, StringComparison.Ordinal);

@@ -88,7 +88,10 @@ internal sealed record GatewayMcpServer(
     IReadOnlyList<RemoteMcpCredential>? Credentials = null,
     IReadOnlyList<RemoteMcpHeader>? HttpHeaders = null,
     string? CredentialNamespace = null, string? CredentialAssociationId = null, string? CredentialOperationId = null, string? CredentialSourceId = null,
-    bool RequiresCredentialReentry = false);
+    bool RequiresCredentialReentry = false,
+    IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition>? LocalToolDefinitions = null,
+    string? LocalArtifactDigest = null,
+    string? LocalImageDigest = null);
 
 internal sealed record GatewaySkill(
     string Id,

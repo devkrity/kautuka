@@ -3,7 +3,8 @@ namespace Kautuka.Gateway.Infrastructure.Catalog;
 internal sealed record GatewayHostedCatalogInstallResult(
     string Kind,
     string Id,
-    bool Updated);
+    bool Updated,
+    bool NetworkApprovalRequired = false);
 
 internal interface IGatewayHostedCatalogInstaller
 {

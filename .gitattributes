@@ -17,6 +17,10 @@
 *.sh text eol=lf
 *.sh.in text eol=lf
 *.in text eol=lf
+*.py text eol=lf
+*.tmpl text eol=lf
+*.proto text eol=lf
+*.slnx text eol=lf
 *.ps1 text eol=lf
 compliance/licenses/*.txt text eol=lf
 .editorconfig text eol=lf

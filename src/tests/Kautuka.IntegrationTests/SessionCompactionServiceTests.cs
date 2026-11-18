@@ -5,6 +5,7 @@ using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Sessions;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
@@ -49,6 +50,8 @@ public sealed class SessionCompactionServiceTests
         Assert.Contains("Recent messages already preserved separately:", chatClient.LastPrompt, StringComparison.Ordinal);
         Assert.Equal(ChatResponseFormat.Text, chatClient.LastOptions?.ResponseFormat);
         Assert.Equal(512, chatClient.LastOptions?.MaxOutputTokens);
+        Assert.Equal("user-1", chatClient.NetworkScope?.UserId);
+        Assert.Equal("agent-1", chatClient.NetworkScope?.AgentId);
     }
 
     [Fact]
@@ -178,6 +181,7 @@ public sealed class SessionCompactionServiceTests
 
     private sealed class RecordingChatClient : IChatClient
     {
+        public NetworkAccessScope? NetworkScope { get; private set; }
         private readonly ChatClientMetadata metadata = new("recording", null, null);
 
         public string LastPrompt { get; private set; } = string.Empty;
@@ -191,6 +195,7 @@ public sealed class SessionCompactionServiceTests
             ChatOptions? options = null,
             CancellationToken cancellationToken = default)
         {
+            NetworkScope = NetworkAccessContext.Current;
             LastPrompt = string.Join(
                 "\n",
                 messages

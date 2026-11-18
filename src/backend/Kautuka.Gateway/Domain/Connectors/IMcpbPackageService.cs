@@ -157,6 +157,7 @@ internal sealed class McpbPackageService(KautukaDatabase database) : IMcpbPackag
             string bundleName = ReadRequiredString(root, "name");
             string displayName = ReadOptionalString(root, "display_name") ?? bundleName;
             string description = ReadRequiredString(root, "description");
+            string[]? toolNames = ReadToolNames(root);
 
             JsonElement author = ReadRequiredObject(root, "author");
             ValidateAllowedFields(author, allowedAuthorFields, "manifest.author");
@@ -204,6 +205,8 @@ internal sealed class McpbPackageService(KautukaDatabase database) : IMcpbPackag
                     RuntimeArtifactSourceDigest = persistedBundle.SourceDigest,
                     RuntimeArtifactBuildStatus = "pending",
                     EnvKeys = envKeys.Length == 0 ? null : envKeys,
+                    ToolNames = toolNames,
+                    ToolCount = toolNames?.Length,
                     Enabled = true,
                     ReadinessTimeoutSeconds = 60,
                     JitCooldownSeconds = 600,
@@ -376,6 +379,23 @@ internal sealed class McpbPackageService(KautukaDatabase database) : IMcpbPackag
 
         string? result = value.GetString()?.Trim();
         return string.IsNullOrWhiteSpace(result) ? null : result;
+    }
+
+    private static string[]? ReadToolNames(JsonElement root)
+    {
+        if (!root.TryGetProperty("tools", out JsonElement tools) || tools.ValueKind == JsonValueKind.Null)
+            return null;
+        if (tools.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("manifest.tools must be an array when present.");
+
+        var names = new List<string>();
+        foreach (JsonElement tool in tools.EnumerateArray())
+        {
+            if (tool.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException("manifest.tools entries must be objects.");
+            names.Add(ReadRequiredString(tool, "name"));
+        }
+        return [.. names];
     }
 
     private static string[] ReadStringArray(JsonElement parent, string name)

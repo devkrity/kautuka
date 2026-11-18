@@ -29,12 +29,17 @@ internal static partial class GatewaySettingsEndpointMappings
 
         app.MapPost("/api/settings/models/discover", async (JsonElement body, IModelProbeService modelProbeService, IGatewayAuthGuard auth, HttpContext context) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: adminUser.Id,
+                agentId: "gateway",
+                purpose: "ai-discovery",
+                service: "ai-model");
             return Results.Json(
                 new GatewayDiscoveredModelsResponse([..
                     (await modelProbeService.DiscoverModelsAsync(body.GetStringProperty("providerId", "")).ConfigureAwait(false))
@@ -51,12 +56,17 @@ internal static partial class GatewaySettingsEndpointMappings
 
         app.MapPost("/api/settings/models/probe-candidate", async (JsonElement body, IModelProbeService probeService, IGatewayAuthGuard auth, HttpContext context) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: adminUser.Id,
+                agentId: "gateway",
+                purpose: "ai-probe",
+                service: "ai-model");
             GatewayModelCapabilities capabilities = await probeService.ProbeModelCandidateAsync(
                 body.GetStringProperty("providerId", string.Empty),
                 body.GetStringProperty("modelName", string.Empty)).ConfigureAwait(false);
@@ -92,12 +102,17 @@ internal static partial class GatewaySettingsEndpointMappings
 
         app.MapPost("/api/settings/models/{modelId}/probe", async (string modelId, IModelProbeService probeService, IGatewayAuthGuard auth, HttpContext context) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: adminUser.Id,
+                agentId: "gateway",
+                purpose: "ai-probe",
+                service: "ai-model");
             GatewayModelCapabilities? capabilities = await probeService.ProbeModelAsync(modelId).ConfigureAwait(false);
             return capabilities is null
                 ? Results.Json(new GatewayErrorResponse("Model not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound)

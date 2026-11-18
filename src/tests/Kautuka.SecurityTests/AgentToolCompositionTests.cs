@@ -1,6 +1,9 @@
+using Kautuka.Gateway.Domain.Execution;
+
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Infrastructure.Agents;
 using Kautuka.Gateway.Infrastructure.Configuration;
+using Kautuka.Gateway.Serialization;
 
 using Microsoft.Extensions.AI;
 
@@ -8,6 +11,56 @@ namespace Kautuka.SecurityTests;
 
 public sealed class AgentToolCompositionTests
 {
+    [Fact]
+    public async Task ApprovedToolHydratesOnlyPinnedDefinitionWithoutRediscovery()
+    {
+        AgentToolContext context = BuildContext(new AgentDefinition { Id = "agent-1", Scope = "system" });
+        var provider = new ChangingToolProvider();
+        var catalog = new AgentToolCatalog([provider], new MemoryAgentToolSurfaceStore(),
+            new StaticPlatformConfigurationProvider(new PlatformConfiguration { Agents = [context.AgentDefinition] }));
+        AgentRunToolSet first = await catalog.BuildRunToolsAsync(context, null, TestContext.Current.CancellationToken);
+        provider.Name = "changed";
+        AIFunction pinned = await catalog.BuildPinnedToolAsync(context, first.Catalogue, first.Hash, "original", null, TestContext.Current.CancellationToken);
+        Assert.Equal("original", pinned.Name);
+        Assert.Equal(1, provider.Discoveries);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await catalog.BuildPinnedToolAsync(context, first.Catalogue, "incorrect", "original", null, TestContext.Current.CancellationToken).ConfigureAwait(true));
+    }
+    [Fact]
+    public async Task RunToolDefinitionsArePinnedAcrossResumeAndRefreshedForNewRun()
+    {
+        AgentToolContext context = BuildContext(new AgentDefinition { Id = "agent-1", Scope = "system" });
+        var provider = new ChangingToolProvider();
+        var catalog = new AgentToolCatalog([provider], new MemoryAgentToolSurfaceStore(),
+            new StaticPlatformConfigurationProvider(new PlatformConfiguration { Agents = [context.AgentDefinition] }));
+        AgentRunToolSet first = await catalog.BuildRunToolsAsync(context, null, TestContext.Current.CancellationToken);
+        provider.Name = "changed";
+        string persisted = System.Text.Json.JsonSerializer.Serialize(first.Catalogue, KautukaJsonContext.Default.AgentToolSurfaceCatalogue);
+        AgentToolSurfaceCatalogue restored = System.Text.Json.JsonSerializer.Deserialize(persisted, KautukaJsonContext.Default.AgentToolSurfaceCatalogue)!;
+        AgentRunToolSet resumed = await catalog.BuildRunToolsAsync(context, restored, TestContext.Current.CancellationToken);
+        Assert.Equal("original", Assert.Single(resumed.Tools).Name);
+        Assert.Equal(first.Hash, resumed.Hash);
+        Assert.Equal(1, provider.Discoveries);
+        AgentRunToolSet next = await catalog.BuildRunToolsAsync(context, null, TestContext.Current.CancellationToken);
+        Assert.Equal("changed", Assert.Single(next.Tools).Name);
+        Assert.NotEqual(first.Hash, next.Hash);
+        Assert.Equal(2, provider.Discoveries);
+    }
+
+    private sealed class ChangingToolProvider : IAgentToolSurfaceContributor
+    {
+        public string Name { get; set; } = "original";
+        public int Discoveries { get; private set; }
+        public string SurfaceSource => "test";
+        public ValueTask<IEnumerable<AIFunction>> BuildToolsAsync(AgentToolContext context, CancellationToken ct)
+            => ValueTask.FromResult<IEnumerable<AIFunction>>([]);
+        public ValueTask<AgentToolSurfaceContribution> ContributeAsync(AgentToolContext context, CancellationToken ct)
+        {
+            Discoveries++;
+            return ValueTask.FromResult(new AgentToolSurfaceContribution([AgentToolSurfaceEntry.Describe("test", "remote", Name, "description", "{}")], true));
+        }
+        public ValueTask<IReadOnlyList<AIFunction>> HydrateAsync(AgentToolContext context, IReadOnlyList<AgentToolSurfaceEntry> entries, CancellationToken ct)
+            => ValueTask.FromResult<IReadOnlyList<AIFunction>>([.. entries.Select(entry => AIFunctionFactory.Create(() => "ok", entry.Name))]);
+    }
     [Fact]
     public async Task RunShellProviderReturnsNoToolsWhenCommandExecutionDisabled()
     {

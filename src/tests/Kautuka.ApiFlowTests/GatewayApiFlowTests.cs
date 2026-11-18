@@ -94,7 +94,7 @@ public sealed class GatewayApiFlowTests
     }
 
     [Fact]
-    public async Task ConnectorCredentialEndpointStillFiltersUndeclaredKeys()
+    public async Task ConnectorCredentialEndpointRejectsUndeclaredKeys()
     {
         await using var fixture = await ApiFlowFixture.CreateAsync();
         string accessToken = await fixture.LoginAsBootstrapAdminAsync();
@@ -105,20 +105,13 @@ public sealed class GatewayApiFlowTests
             envKeys: ["GOOGLE_CLIENT_ID"],
             enabled: false);
 
-        using JsonDocument putResponse = await fixture.SendJsonAsync(
-            HttpMethod.Put,
-            "/api/credentials/connector/gmail-mcp",
-            new
-            {
-                entries = new Dictionary<string, string>
-                {
-                    ["GOOGLE_CLIENT_ID"] = "cid",
-                    ["UNDECLARED_KEY"] = "blocked",
-                },
-            },
-            accessToken: accessToken).ConfigureAwait(true);
-
-        Assert.Contains("1 credential", putResponse.RootElement.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        using var invalidRequest = new HttpRequestMessage(HttpMethod.Put, "/api/credentials/connector/gmail-mcp")
+        {
+            Content = JsonContent.Create(new { entries = new Dictionary<string, string> { ["GOOGLE_CLIENT_ID"] = "cid", ["UNDECLARED_KEY"] = "blocked" } }),
+        };
+        invalidRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(invalidRequest, TestContext.Current.CancellationToken).ConfigureAwait(true);
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 
         using JsonDocument statusResponse = await fixture.SendJsonAsync(
             HttpMethod.Get,
@@ -127,7 +120,7 @@ public sealed class GatewayApiFlowTests
             accessToken: accessToken).ConfigureAwait(true);
 
         string[] configured = [.. statusResponse.RootElement.GetProperty("configuredKeys").EnumerateArray().Select(static item => item.GetString() ?? string.Empty)];
-        Assert.Contains("GOOGLE_CLIENT_ID", configured, StringComparer.Ordinal);
+        Assert.DoesNotContain("GOOGLE_CLIENT_ID", configured, StringComparer.Ordinal);
         Assert.DoesNotContain("UNDECLARED_KEY", configured, StringComparer.Ordinal);
     }
 
@@ -200,6 +193,8 @@ public sealed class GatewayApiFlowTests
                     new Lazy<CredentialsService.CredentialsServiceClient>(new FakeCredentialsServiceClient())));
             builder.Services.RemoveAll<IChannelRegistrationProvisioningService>();
             builder.Services.AddSingleton<IChannelRegistrationProvisioningService>(new NoOpChannelRegistrationProvisioningService());
+            builder.Services.RemoveAll<Kautuka.NetworkAccess.Client.INetworkAccessChecker>();
+            builder.Services.AddSingleton<Kautuka.NetworkAccess.Client.INetworkAccessChecker>(new AllowAllNetworkAccessChecker());
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
             WebApplication app = builder.Build();
@@ -313,6 +308,7 @@ public sealed class GatewayApiFlowTests
                     containerArgs = Array.Empty<string>(),
                     containerSidecarName = (string?)null,
                     envKeys,
+                    credentials = envKeys.Select(key => new { key, label = key, required = false }).ToArray(),
                     enabled,
                 },
                 accessToken).ConfigureAwait(true);
@@ -661,8 +657,18 @@ public sealed class GatewayApiFlowTests
             }
         }
 
+        private sealed class AllowAllNetworkAccessChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+        {
+            public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
+                Kautuka.NetworkAccess.Client.OutboundTarget target,
+                CancellationToken cancellationToken = default)
+                => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("api_flow_allowed"));
+        }
+
         private sealed class TestWorkspaceGrpcService : IManagerGrpcService
         {
+            public ManagerService.ManagerServiceClient Client { get; } = new TestManagerClient();
+
             public Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default)
                 => Task.FromResult(new WorkspaceBoolResponse { Ok = true, Message = request.Message });
 
@@ -734,6 +740,42 @@ public sealed class GatewayApiFlowTests
 
             public Task<DesiredStateUpdateResponse> UpdateDesiredStateAsync(ManagerDesiredStateUpdateRequest request, CancellationToken cancellationToken = default)
                 => Task.FromResult(new DesiredStateUpdateResponse { Outcome = DesiredStateUpdateOutcome.Applied, Message = "api-flow-test" });
+        }
+
+        private sealed class TestManagerClient : ManagerService.ManagerServiceClient
+        {
+            private readonly List<NetworkAccessRuleMessage> rules = [];
+            private readonly Dictionary<string, NetworkAccessUserPrivilegesMessage> privileges = new(StringComparer.Ordinal);
+
+            public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CallOptions options)
+                => Wrap(privileges.TryGetValue(request.UserId, out NetworkAccessUserPrivilegesMessage? saved)
+                    ? saved : new NetworkAccessUserPrivilegesMessage { UserId = request.UserId });
+
+            public override AsyncUnaryCall<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CallOptions options)
+            {
+                var value = new NetworkAccessUserPrivilegesMessage { UserId = request.UserId, CanApproveOwn = request.CanApproveOwn, HasStoredRecord = true };
+                privileges[request.UserId] = value;
+                return Wrap(value);
+            }
+
+            public override AsyncUnaryCall<NetworkAccessListRulesResponse> ListRulesAsync(NetworkAccessListRulesRequest request, CallOptions options)
+            {
+                var response = new NetworkAccessListRulesResponse { Revision = rules.Count };
+                response.Rules.AddRange(rules);
+                return Wrap(response);
+            }
+
+            public override AsyncUnaryCall<NetworkAccessSetRuleResponse> SetRuleAsync(NetworkAccessSetRuleRequest request, CallOptions options)
+            {
+                if (!request.Actor.IsAdmin || request.ScopeKind != "system" || request.ExpectedRevision != rules.Count)
+                    throw new RpcException(new Status(StatusCode.PermissionDenied, "Invalid test rule"));
+                var rule = new NetworkAccessRuleMessage { ScopeKind = request.ScopeKind, Destination = request.Destination, DestKind = request.DestKind, Port = request.Port, Allowed = request.Allowed, AllowLan = request.AllowLan };
+                rules.Add(rule);
+                return Wrap(new NetworkAccessSetRuleResponse { Rule = rule, Revision = rules.Count });
+            }
+
+            private static AsyncUnaryCall<T> Wrap<T>(T response) where T : class
+                => new(Task.FromResult(response), Task.FromResult(new Metadata()), () => Status.DefaultSuccess, () => new Metadata(), static () => { });
         }
 
         private sealed class NoOpChannelRegistrationProvisioningService : IChannelRegistrationProvisioningService

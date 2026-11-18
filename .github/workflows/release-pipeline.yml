@@ -32,7 +32,7 @@ on:
         type: boolean
 
 env:
-  KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.26'
+  KAUTUKA_UPCOMING_STABLE_VERSION: '0.1.27'
 
 concurrency:
   # Serialize both channels so a newer same-series Preview cannot publish after
@@ -287,6 +287,9 @@ jobs:
       - name: Verify Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Verify Envoy SELinux policy installation
+        run: bash ./scripts/test-linux-installer-envoy-selinux.sh
+
       - name: Verify Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 
@@ -307,6 +310,9 @@ jobs:
 
       - name: Verify runtime archive staging
         run: bash ./scripts/test-runtime-archive-staging.sh
+
+      - name: Verify WSL NAC hook staging
+        run: bash ./scripts/test-wsl-nac-hook-staging.sh
 
       - name: Verify Fedora source RPM archive fallback
         run: node ./scripts/test-stage-third-party-sources.mjs

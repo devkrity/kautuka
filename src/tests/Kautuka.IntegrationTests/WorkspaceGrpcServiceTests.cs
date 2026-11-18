@@ -1,13 +1,21 @@
+using System.Net.Sockets;
+
 using Grpc.Core;
+using Grpc.Net.Client;
 
 using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using ManagerSandboxRuntimeDefinition = Kautuka.Manager.RuntimeContainer.Configuration.SandboxRuntimeDefinition;
@@ -17,6 +25,190 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceGrpcServiceTests
 {
+    [Fact]
+    public void SaveDiscoveryOnlyReportsRecentPendingRequestForSameUserAndConnector()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "save-discovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new Kautuka.NetworkAccessController.NetworkAccessPolicyStore(Path.Combine(root, "policy.json"));
+            DateTimeOffset started = DateTimeOffset.UtcNow;
+            store.RecordOrUpdatePendingRequest("alice", null, "alice::web", "user", "host", "example.com", 443, "connector", "container", observedAtUtc: started.AddSeconds(1));
+            var requests = store.GetRawStateSnapshot().Requests;
+            Assert.True(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "web", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "bob", "web", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "other", started));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest(requests, "alice", "web", started.AddSeconds(2)));
+            Assert.False(WorkspaceGrpcService.HasRecentDiscoveryRequest([requests[0] with { AgentId = "secretary" }], "alice", "web", started));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch(bool saveDiscovery)
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "workspace-grpc-probe-identity-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        string capturedArgumentsPath = Path.Combine(stateDirectory, "probe-arguments.txt");
+        bool isWindows = OperatingSystem.IsWindows();
+        string captureScriptPath = Path.Combine(stateDirectory, isWindows ? "capture-probe-arguments.cmd" : "capture-probe-arguments.sh");
+        await File.WriteAllTextAsync(
+            captureScriptPath,
+            isWindows
+                ? $"@echo off\r\necho %* > \"{capturedArgumentsPath}\"\r\nexit /b 1\r\n"
+                : $"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{capturedArgumentsPath}'\nexit 1\n",
+            TestContext.Current.CancellationToken);
+        var commands = new List<string[]>();
+        using var policyStore = new Kautuka.NetworkAccessController.NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+        var launchGate = new WorkloadLaunchGate(new ReadyWorkloadStartupState(), policyStore);
+        var runner = new PodmanCommandRunner((args, _) =>
+        {
+            commands.Add([.. args]);
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect")
+                return Task.FromResult(new PodmanCommandResult(0, "sha256:" + new string('a', 64), string.Empty, ProcessTerminationReason.Completed));
+            return Task.FromResult(args[0] == "run"
+                ? new PodmanCommandResult(125, string.Empty, "intentional test launch stop", ProcessTerminationReason.NonZeroExit)
+                : new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed));
+        });
+
+        await using var connectorExecution = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(),
+            runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance,
+            addressAllocator: new WorkloadAddressAllocator(Path.Combine(stateDirectory, "ip-cursor.json")),
+            workloadLaunchGate: launchGate,
+            stdioCommand: isWindows ? "cmd.exe" : "sh",
+            stdioArgumentsPrefix: isWindows ? ["/c", captureScriptPath] : [captureScriptPath]);
+        var readiness = new WorkspaceReadinessGate();
+        readiness.SignalReady();
+        var service = new WorkspaceGrpcService(
+            null!, new WorkspaceDesiredStateStore(), readiness, new WorkspaceExecTracker(),
+            new StubRuntimeHealthProbe(true), connectorExecution, null!, null!,
+            NullLogger<WorkspaceGrpcService>.Instance,
+            networkAccessController: new Kautuka.NetworkAccessController.NetworkAccessController(policyStore, new Kautuka.NetworkAccessController.WorkloadRegistry()));
+
+        try
+        {
+            WorkspaceMcpProbeResponse response = await service.ProbeMcpContainer(
+                new WorkspaceMcpContainerProbeRequest
+                {
+                    ConnectorId = "kautuka-web-tools",
+                    Image = "localhost/kautuka-test-probe:latest",
+                    TimeoutSeconds = 15,
+                    UserId = "test-user-identity",
+                    SaveDiscovery = saveDiscovery,
+                },
+                TestServerCallContext.Instance);
+
+            Assert.False(response.Ok);
+            string launchArguments = await File.ReadAllTextAsync(capturedArgumentsPath, TestContext.Current.CancellationToken);
+            Assert.Contains("io.kautuka.user=test-user-identity", launchArguments, StringComparison.Ordinal);
+            if (saveDiscovery)
+                Assert.DoesNotContain("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
+            else
+                Assert.Contains("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
+            Assert.DoesNotContain("A user identity is required before starting a connector workload.", response.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
+    private sealed class ReadyWorkloadStartupState : IWorkloadStartupState
+    {
+        public bool IsStartupGateOpen => true;
+    }
+
+    [Fact]
+    public async Task V7_40_GatewaySystemScopeSurvivesDesiredStateGrpcMapping_WithNegativeControl()
+    {
+        var gatewayConnector = new WorkspaceMcpContainerConnectorPayload(
+            "user-a::shared-provider",
+            "shared-provider",
+            "ghcr.io/example/provider@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "",
+            [],
+            Enabled: true,
+            IsInternalSystemConnector: false,
+            BundlePath: null,
+            ServerType: null,
+            Environment: [],
+            ReadinessTimeoutSeconds: 30,
+            JitCooldownSeconds: 600,
+            CatalogScope: "system");
+        var desiredState = new WorkspaceDesiredStatePayload(
+            new ManagerRuntimeSettingsPayload("/tmp/kautuka-workspaces", "ghcr.io/example/sandbox:latest", 2, "2g", 3600, null, null, null, null, null),
+            [],
+            [gatewayConnector],
+            []);
+        var update = new ManagerDesiredStateUpdateRequest(desiredState, 1, WorkspaceDesiredStateSyncReason.Bootstrap, Guid.NewGuid().ToString("D"), "gateway-v7-40-test");
+
+        var store = new WorkspaceDesiredStateStore();
+        var readiness = new WorkspaceReadinessGate();
+        readiness.SignalReady();
+        await using var connectorExecution = new WorkspaceContainerConnectorExecutionService(
+            store,
+            new PodmanCommandRunner(),
+            new McpbImageMaterializer(new PodmanCommandRunner(), NullLogger<McpbImageMaterializer>.Instance),
+            null!,
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        var service = new WorkspaceGrpcService(
+            null!, store, readiness, new WorkspaceExecTracker(), new StubRuntimeHealthProbe(true), connectorExecution,
+            null!, null!, NullLogger<WorkspaceGrpcService>.Instance);
+        string socketDirectory = Path.Combine(Path.GetTempPath(), $"kautuka-v7-40-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(socketDirectory);
+        string socketPath = Path.Combine(socketDirectory, "manager.sock");
+        try
+        {
+            WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+            builder.WebHost.ConfigureKestrel(kestrel =>
+                kestrel.ListenUnixSocket(socketPath, listen => listen.Protocols = HttpProtocols.Http2));
+            builder.Services.AddGrpc();
+            builder.Services.AddSingleton(service);
+            await using WebApplication app = builder.Build();
+            app.MapGrpcService<WorkspaceGrpcService>();
+            await app.StartAsync(TestContext.Current.CancellationToken);
+
+            var endpoint = new UnixDomainSocketEndPoint(socketPath);
+            var handler = new SocketsHttpHandler
+            {
+                ConnectCallback = async (_, cancellationToken) =>
+                {
+                    var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                    try
+                    {
+                        await socket.ConnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                },
+            };
+            using GrpcChannel channel = GrpcChannel.ForAddress("http://localhost", new GrpcChannelOptions { HttpHandler = handler });
+            var client = new ManagerGrpcServiceClient(channel.CreateCallInvoker(), "unix://manager.sock");
+            DesiredStateUpdateResponse response = await client.UpdateDesiredStateAsync(update, TestContext.Current.CancellationToken);
+
+            Assert.Equal(DesiredStateUpdateOutcome.Applied, response.Outcome);
+            WorkspaceMcpContainerConnectorDefinition saved = Assert.Single(store.Snapshot.DesiredContainerConnectors);
+            Assert.Equal(gatewayConnector.ConnectorId, saved.ConnectorId);
+            Assert.Equal("system", saved.CatalogScope);
+            await app.StopAsync(TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            Directory.Delete(socketDirectory, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("user-missing")]
     [InlineData("")]

@@ -88,17 +88,17 @@ public sealed class GatewayContractCoverageTests
 
     private static string ReadGatewayEndpointSources()
     {
-        string endpointDirectory = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "src", "backend", "Kautuka.Gateway", "Endpoints"));
+        string endpointDirectory = Path.Combine(ContractTestRepository.FindRoot(), "src", "backend", "Kautuka.Gateway", "Endpoints");
         return string.Join(Environment.NewLine, Directory.EnumerateFiles(endpointDirectory, "*.cs", SearchOption.AllDirectories).Select(File.ReadAllText));
     }
 
     private static string GetGatewayApprovalMappingsPath()
     {
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "src", "backend", "Kautuka.Gateway", "Endpoints", "Runtime", "GatewayApprovalEndpointMappings.cs"));
+        return Path.Combine(ContractTestRepository.FindRoot(), "src", "backend", "Kautuka.Gateway", "Endpoints", "Runtime", "GatewayApprovalEndpointMappings.cs");
     }
 
     private static string GetGatewayAuthGuardPath()
     {
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "src", "backend", "Kautuka.Gateway", "Domain", "Auth", "GatewayAuthGuard.cs"));
+        return Path.Combine(ContractTestRepository.FindRoot(), "src", "backend", "Kautuka.Gateway", "Domain", "Auth", "GatewayAuthGuard.cs");
     }
 }

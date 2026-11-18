@@ -288,6 +288,7 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
               {providerValidationMessage}
             </Alert>
           )}
+
         </div>
       </div>
 

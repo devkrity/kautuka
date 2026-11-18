@@ -53,8 +53,8 @@ internal static partial class GatewayCatalogEndpointMappings
 
             try
             {
-                _ = await catalogInstaller.InstallAsync(kind, id, user, requestedScope: null, cancellationToken).ConfigureAwait(false);
-                return Results.Json(new GatewaySavedResponse(true), KautukaJsonContext.Default.GatewaySavedResponse);
+                GatewayHostedCatalogInstallResult result = await catalogInstaller.InstallAsync(kind, id, user, requestedScope: null, cancellationToken).ConfigureAwait(false);
+                return Results.Json(new GatewayCatalogInstallResponse(true, result.NetworkApprovalRequired), KautukaJsonContext.Default.GatewayCatalogInstallResponse);
             }
             catch (KeyNotFoundException ex)
             {

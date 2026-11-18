@@ -4,6 +4,7 @@ using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Hitl;
 using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.NetworkAccess.Client;
 
 using Mediator;
 
@@ -16,6 +17,62 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ApprovalContinuationDispatcherServiceTests
 {
+    [Fact]
+    public async Task ApprovedToolPublishesStartBeforeTheCallAndFinishAfterItReturns()
+    {
+        var queue = new TestApprovalContinuationQueue();
+        var completion = new CapturingPublisher();
+        var journal = new RecordingToolJournal();
+        var invoker = new BlockingPackedToolInvoker();
+        GatewayToolApprovalRequest approval = CreatePackedFetchApproval("req-boundary", "call-boundary", "approved") with { McpServerId = "web-tools" };
+        var waitStore = new FakeRunWaitStateStore(CreatePackedApprovalWaitState("req-boundary"));
+        using var service = new ApprovalContinuationDispatcherService(queue, new FakeApprovalStore(approval), new CapturingContinuationOrchestrator(), waitStore,
+            new FakeInvocationLinkStore(), completion, NullLogger<ApprovalContinuationDispatcherService>.Instance, invoker, runtimeEventPublisher: journal);
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            await queue.EnqueueAsync(CreateApprovedContinuationWork(approval.Id), CancellationToken.None);
+            await invoker.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Equal(approval.UserId, invoker.NetworkScope?.UserId);
+            Assert.Equal(approval.AgentId, invoker.NetworkScope?.AgentId);
+            Assert.Equal(approval.McpServerId, invoker.NetworkScope?.ConnectorId);
+            Assert.Contains(Narad.Contracts.NaradEventTypes.ToolCallStarted, journal.EventTypes);
+            Assert.DoesNotContain(Narad.Contracts.NaradEventTypes.ToolCallFinished, journal.EventTypes);
+            await Task.Delay(150, TestContext.Current.CancellationToken);
+            invoker.Release.TrySetResult();
+            _ = await completion.WaitForCompletedAsync();
+            Assert.Equal([Narad.Contracts.NaradEventTypes.RunResumed, Narad.Contracts.NaradEventTypes.ToolCallStarted, Narad.Contracts.NaradEventTypes.ToolCallFinished], journal.EventTypes);
+            var events = journal.Events.ToArray();
+            Assert.True(DateTimeOffset.Parse(events[2].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) - DateTimeOffset.Parse(events[1].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) >= TimeSpan.FromMilliseconds(100));
+        }
+        finally { invoker.Release.TrySetResult(); await service.StopAsync(CancellationToken.None); }
+    }
+
+    private sealed class BlockingPackedToolInvoker : IPackedApprovedToolInvoker
+    {
+        public NetworkAccessScope? NetworkScope { get; private set; }
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async ValueTask<string> InvokeAsync(string agentId, string sessionId, string? userId, string toolName, string? argumentsJson, CancellationToken cancellationToken)
+        {
+            NetworkScope = NetworkAccessContext.Current;
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return "{}";
+        }
+    }
+
+    private sealed class RecordingToolJournal : IRuntimeEventPublisher
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Narad.Contracts.NaradAuthorityEventDraft> events = new();
+        public IReadOnlyCollection<Narad.Contracts.NaradAuthorityEventDraft> Events => events.ToArray();
+        public IReadOnlyCollection<string> EventTypes => events.Select(static item => item.EventType).ToArray();
+        public ValueTask<Narad.Contracts.NaradPersistedEvent> PublishAsync(Narad.Contracts.NaradAuthorityEventDraft draft, NaradEventContext context, CancellationToken cancellationToken = default)
+        {
+            events.Enqueue(draft);
+            return ValueTask.FromResult(NaradTestEventFactory.FromDraft(draft, context, events.Count, events.Count));
+        }
+    }
     [Fact]
     public async Task HeartbeatFailureRetriesItsWorkWithoutStoppingDispatcherOrBlockingNextApproval()
     {
@@ -463,10 +520,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
         var continuationOrchestrator = new CapturingContinuationOrchestrator();
         GatewayToolApprovalRequest[] fetches =
         [
-            CreatePackedFetchApproval("req-a", "call-a", "approved"),
-            CreatePackedFetchApproval("req-b", "call-b", "approved"),
-            CreatePackedFetchApproval("req-c", "call-c", "approved"),
-            CreatePackedFetchApproval("req-d", "call-d", "approved"),
+            CreatePackedFetchApproval("req-a", "call-a", "approved") with { McpServerId = "connector-a", ArgumentsJson = "{\"id\":\"a\"}" },
+            CreatePackedFetchApproval("req-b", "call-b", "approved") with { McpServerId = "connector-b", ArgumentsJson = "{\"id\":\"b\"}" },
+            CreatePackedFetchApproval("req-c", "call-c", "approved") with { McpServerId = "connector-c", ArgumentsJson = "{\"id\":\"c\"}" },
+            CreatePackedFetchApproval("req-d", "call-d", "approved") with { McpServerId = "connector-d", ArgumentsJson = "{\"id\":\"d\"}" },
         ];
         var approvalStore = new FakeApprovalStore(fetches);
         RunWaitState waitState = CreatePackedApprovalWaitState("req-a", "req-b", "req-c", "req-d");
@@ -501,6 +558,14 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             _ = await publisher.WaitForCompletedAsync().ConfigureAwait(true);
             Assert.Equal(4, packedInvoker.InvokeCount);
             Assert.True(packedInvoker.MaxInFlight >= 4, $"expected 4 overlapping invokes, max in-flight was {packedInvoker.MaxInFlight}");
+            Assert.Equal(4, packedInvoker.NetworkScopes.Count);
+            Assert.All(packedInvoker.NetworkScopes, invocation =>
+            {
+                Assert.Equal("user-1", invocation.Scope?.UserId);
+                Assert.Equal("agent-caller-1", invocation.Scope?.AgentId);
+                Assert.Contains(fetches, approval => approval.ArgumentsJson == invocation.ArgumentsJson
+                    && approval.McpServerId == invocation.Scope?.ConnectorId);
+            });
             Assert.True(RunClockEnvelope.TryReadPackedToolResults(
                 runWaitStateStore.GetByWaitId(waitState.WaitId)?.BehaviorJson,
                 out IReadOnlyDictionary<string, PackedToolResult> results));
@@ -1976,6 +2041,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
     private sealed class MutableApprovalStore(params GatewayToolApprovalRequest[] requests) : IGatewayApprovalStore
     {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> executions = new(StringComparer.Ordinal);
+        public bool TryClaimToolExecution(string requestId) => executions.TryAdd(requestId, string.Empty);
+        public string? GetToolExecutionResult(string requestId) => executions.TryGetValue(requestId, out string? result) && result.Length > 0 ? result : null;
+        public bool SaveToolExecutionResult(string requestId, string result) => executions.TryUpdate(requestId, result, string.Empty);
         private readonly Dictionary<string, GatewayToolApprovalRequest> requestsById =
             requests.ToDictionary(static request => request.Id, StringComparer.Ordinal);
 
@@ -2017,6 +2086,10 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
     private sealed class FakeApprovalStore(params GatewayToolApprovalRequest[] requests) : IGatewayApprovalStore
     {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> executions = new(StringComparer.Ordinal);
+        public bool TryClaimToolExecution(string requestId) => executions.TryAdd(requestId, string.Empty);
+        public string? GetToolExecutionResult(string requestId) => executions.TryGetValue(requestId, out string? result) && result.Length > 0 ? result : null;
+        public bool SaveToolExecutionResult(string requestId, string result) => executions.TryUpdate(requestId, result, string.Empty);
         private readonly IReadOnlyDictionary<string, GatewayToolApprovalRequest> requestsById =
             requests.ToDictionary(static request => request.Id, StringComparer.Ordinal);
 
@@ -2273,6 +2346,8 @@ public sealed class ApprovalContinuationDispatcherServiceTests
 
         public int InvokeCount => invokeCount;
 
+        public System.Collections.Concurrent.ConcurrentBag<(string? ArgumentsJson, NetworkAccessScope? Scope)> NetworkScopes { get; } = [];
+
         public async ValueTask<string> InvokeAsync(
             string agentId,
             string sessionId,
@@ -2281,6 +2356,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             string? argumentsJson,
             CancellationToken cancellationToken)
         {
+            NetworkScopes.Add((argumentsJson, NetworkAccessContext.Current));
             Interlocked.Increment(ref invokeCount);
             lock (gate)
             {

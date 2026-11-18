@@ -21,6 +21,7 @@ public sealed class McpbPackageServiceTests
               "version": "1.2.3",
               "description": "Acme tools",
               "author": { "name": "Acme" },
+              "tools": [{ "name": "acme_search", "description": "Search" }],
               "user_config": {
                 "api_key": {
                   "type": "string",
@@ -56,6 +57,9 @@ public sealed class McpbPackageServiceTests
         Assert.Equal("Acme MCP", inspection.BundleName);
         Assert.Equal("Acme MCP Bundle", inspection.Connector.Name);
         Assert.Equal("Acme tools", inspection.Connector.Description);
+        Assert.NotNull(inspection.Connector.ToolNames);
+        Assert.Equal(["acme_search"], inspection.Connector.ToolNames);
+        Assert.Equal(1, inspection.Connector.ToolCount);
         Assert.Equal("container", inspection.Connector.Transport);
         Assert.Equal(McpCommandTransportMapper.NodeImage, inspection.Connector.ContainerImage);
         Assert.Equal("node", inspection.Connector.ContainerCommand);

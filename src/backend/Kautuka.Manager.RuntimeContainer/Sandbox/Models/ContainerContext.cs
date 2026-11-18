@@ -16,7 +16,12 @@ public sealed record ContainerContext(
     IReadOnlyList<string> BaseCapabilities,
     IReadOnlyDictionary<string, string> ContainerEnvironment)
 {
+    public string? AgentId { get; init; }
+
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;
+
+    /// <summary>Configured workspace authority root supplied by the Manager desired-state store.</summary>
+    public string? WorkspaceBaseRoot { get; init; }
 }

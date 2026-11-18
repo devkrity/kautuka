@@ -93,7 +93,8 @@ public sealed record RuntimeImageAllowlist(
 public sealed record RuntimeImageEntry(
     string Id,
     string Image,
-    string? Archive);
+    string? Archive,
+    string? Arm64Image = null);
 
 public static class RuntimeImageAllowlistLoader
 {
@@ -135,6 +136,10 @@ public static class RuntimeImageAllowlistLoader
                 }
 
                 ContainerImageProvenancePolicy.EnsureTrusted(entry.Image, $"Allowlist entry '{entry.Id}'");
+                if (!string.IsNullOrWhiteSpace(entry.Arm64Image))
+                {
+                    ContainerImageProvenancePolicy.EnsureTrusted(entry.Arm64Image, $"Allowlist entry '{entry.Id}' (arm64)");
+                }
             }
 
             return loaded;

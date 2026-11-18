@@ -5,9 +5,7 @@ public sealed class GatewayToolPolicyAgentToolGuardTests
     [Fact]
     public void AgentExecutionPathsDoNotReadSandboxEnabledDirectlyOutsideBindingResolution()
     {
-        string projectRoot = Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory,
-            "..", "..", "..", "..", "..", ".."));
+        string projectRoot = ContractTestRepository.FindRoot();
 
         string[] guardedFiles =
         [

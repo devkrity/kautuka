@@ -31,7 +31,8 @@ public interface IManagerRuntimeAdapter
     Task<ManagedContainerReconcileResult> RemoveOrphanedManagedContainersAsync(
         string role,
         IReadOnlyCollection<string> desiredContainerNames,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Func<string, bool>? isActiveConnector = null);
 
     /// <summary>
     /// Ensures a Podman network exists, creating it if absent.

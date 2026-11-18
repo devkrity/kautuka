@@ -28,6 +28,24 @@ const {
   saveAgentMock: vi.fn(),
 }));
 
+const { checkRuleMock } = vi.hoisted(() => ({
+  checkRuleMock: vi.fn(),
+}));
+
+vi.mock('@/features/network-access/networkAccess', () => ({
+  resolveProviderNetworkTarget: (type: string, baseUrl?: string | null) => {
+    const raw = baseUrl || (type === 'ollama' ? 'http://localhost:11434' : 'https://generativelanguage.googleapis.com/');
+    const url = new URL(raw);
+    return {
+      host: url.hostname,
+      port: url.port ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
+      destKind: 'host',
+      allowLan: url.hostname === 'localhost',
+    };
+  },
+  checkProviderSystemwideRule: checkRuleMock,
+}));
+
 vi.mock('@/features/auth', () => ({
   useCurrentUser: () => ({
     data: {
@@ -127,6 +145,7 @@ describe('useOnboardingFlow existing setup detection', () => {
       },
     });
 
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
     saveProviderMock.mockResolvedValue({ data: {} });
     probeModelCandidateMock.mockResolvedValue({
       data: {
@@ -281,7 +300,7 @@ describe('useOnboardingFlow existing setup detection', () => {
       await result.current.saveSetup();
     });
 
-    expect(testProviderMock).toHaveBeenCalledTimes(1);
+    expect(testProviderMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(probeModelCandidateMock).toHaveBeenCalledWith({
       providerId: 'generated-provider',
@@ -290,6 +309,43 @@ describe('useOnboardingFlow existing setup detection', () => {
     await waitFor(() => expect(saveModelMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveAgentMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.stage).toBe('recommendations'));
+  });
+
+  it('saves the provider without a test or separate network prompt', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 7 });
+
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+
+    await act(async () => {
+      result.current.setProviderForm((prev) => ({ ...prev, apiCredential: 'key-123' }));
+    });
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+
+    expect(checkRuleMock).not.toHaveBeenCalled();
+    expect(testProviderMock).not.toHaveBeenCalled();
+    expect(saveProviderMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prompt when the provider address is already allowed', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    checkRuleMock.mockResolvedValue({ alreadyAllowed: true, expectedRevision: 7 });
+
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () => {
+      result.current.setProviderForm((prev) => ({ ...prev, apiCredential: 'key-123' }));
+    });
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+
+    expect(checkRuleMock).not.toHaveBeenCalled();
+    expect(saveProviderMock).toHaveBeenCalledTimes(1);
+    expect(testProviderMock).not.toHaveBeenCalled();
   });
 
   it('requires a second confirmation when the starter model probe returns a warning', async () => {

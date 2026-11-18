@@ -36,6 +36,11 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "GetHostStatus",
     };
 
+    private static readonly HashSet<string> channelHostMethods = new(StringComparer.Ordinal)
+    {
+        servicePrefix + "CheckOutbound",
+    };
+
     private static readonly HashSet<string> gatewayMethods = new(StringComparer.Ordinal)
     {
         servicePrefix + "Ping",
@@ -54,6 +59,25 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "ProbeMcpContainer",
         servicePrefix + "ListMcpContainerTools",
         servicePrefix + "CallMcpContainerTool",
+        servicePrefix + "CheckOutbound",
+        servicePrefix + "BeginProviderTest",
+        servicePrefix + "EndProviderTest",
+        servicePrefix + "ListRequests",
+        servicePrefix + "DecideRequest",
+        servicePrefix + "ListRules",
+        servicePrefix + "SetRule",
+        servicePrefix + "DeleteRule",
+        servicePrefix + "ListActivity",
+        servicePrefix + "GetUserPrivileges",
+        servicePrefix + "SetUserPrivileges",
+        servicePrefix + "GetBrake",
+        servicePrefix + "SetBrake",
+        servicePrefix + "GetApprovalLimits",
+        servicePrefix + "SetApprovalLimits",
+        servicePrefix + "GetNetworkAccessStatus",
+        servicePrefix + "GetImageCompatibility",
+        servicePrefix + "SetImageCompatibility",
+        servicePrefix + "DeleteImageCompatibility",
     };
 
     public static bool IsAuthorized(string clientCommonName, string method)
@@ -65,6 +89,7 @@ internal static class ManagerRpcAuthorizationPolicy
         {
             ManagerClientIdentities.GatewayCommonName => gatewayMethods.Contains(method),
             ManagerClientIdentities.UpdateServiceCommonName => statusMethods.Contains(method),
+            ManagerClientIdentities.ChannelHostCommonName => channelHostMethods.Contains(method),
             _ => false,
         };
     }

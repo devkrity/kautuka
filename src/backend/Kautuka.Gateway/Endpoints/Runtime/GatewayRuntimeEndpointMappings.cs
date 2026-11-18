@@ -13,6 +13,7 @@ internal static partial class GatewayRuntimeEndpointMappings
         MapGatewayRuntimeWorkflowEndpoints(app);
         MapGatewayRuntimeBehaviorEndpoints(app);
         MapGatewayRuntimeSystemEndpoints(app);
+        MapGatewayNetworkAccessEndpoints(app);
 
         return app;
     }

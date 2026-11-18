@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package envoy.service.auth.v3;
+
+import "google/protobuf/struct.proto";
+
+// Upstream reference copy from Envoy v1.40.2:
+// - api/envoy/service/auth/v3/external_auth.proto
+// - api/envoy/service/auth/v3/attribute_context.proto
+// - api/envoy/config/core/v3/address.proto
+// - google/rpc/status.proto
+// Used by unit test U3 to verify that no field number in the vendored proto drifts.
+service Authorization {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {
+  AttributeContext attributes = 1;
+}
+
+message AttributeContext {
+  Peer source = 1;
+  Peer destination = 2;
+  Peer request = 4;
+  map<string, string> context_extensions = 10;
+  TLSSession tls_session = 12;
+}
+
+message Peer {
+  Address address = 1;
+  string service = 2;
+  map<string, string> labels = 3;
+  string principal = 4;
+  string certificate = 5;
+}
+
+message Address {
+  SocketAddress socket_address = 1;
+}
+
+message SocketAddress {
+  int32 protocol = 1;
+  string address = 2;
+  uint32 port_value = 3;
+  string named_port = 4;
+  string resolver_name = 5;
+  bool ipv4_compat = 6;
+}
+
+message TLSSession {
+  string sni = 1;
+}
+
+message CheckResponse {
+  Status status = 1;
+  google.protobuf.Struct dynamic_metadata = 4;
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+}

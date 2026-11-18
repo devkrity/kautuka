@@ -8,6 +8,8 @@ Provider behavior is registered through `IAiClientProvider` implementations in G
 
 Tools are exposed through `IAgentToolProvider` registrations. Tool execution must pass policy evaluation, retain exact call identity, produce bounded serializable results, and emit canonical lifecycle events. Host operations must go through Manager rather than invoking Podman/filesystem authority from Gateway.
 
+The run's pinned tool catalogue is a Gateway domain value; infrastructure providers construct it without making the domain depend on infrastructure types.
+
 ## Agent as a tool
 
 AAAT registration creates `invoke_agent_*` tools for explicitly exposed agents. Preserve the exact parent run/tool/root lineage and durable invocation aggregate. Leaf mode disallows AAAT recursion, not ordinary child tools or approvals.

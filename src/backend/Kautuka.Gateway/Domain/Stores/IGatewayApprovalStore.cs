@@ -4,6 +4,9 @@ namespace Kautuka.Gateway.Domain.Stores;
 
 internal interface IGatewayApprovalStore
 {
+    bool TryClaimToolExecution(string requestId) => throw new NotImplementedException();
+    string? GetToolExecutionResult(string requestId) => throw new NotImplementedException();
+    bool SaveToolExecutionResult(string requestId, string result) => throw new NotImplementedException();
     /// <summary>Persists a new tool approval request. The decision is null (pending).</summary>
     void CreateRequest(GatewayToolApprovalRequest request);
 

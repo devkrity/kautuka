@@ -164,6 +164,7 @@ internal sealed record GatewayApplianceHealthPayload(
 internal sealed record GatewayToolsResponse(object[] Tools);
 
 internal sealed record GatewaySavedResponse(bool Saved);
+internal sealed record GatewayCatalogInstallResponse(bool Saved, bool NetworkApprovalRequired);
 
 internal sealed record GatewayDeletedResponse(bool Deleted);
 
@@ -172,7 +173,8 @@ internal sealed record GatewayProviderTypeItem(
     string FriendlyName,
     bool RequiresApiKey,
     bool RequiresBaseUrl,
-    bool SupportsHttpTimeoutSeconds);
+    bool SupportsHttpTimeoutSeconds,
+    string? DefaultBaseUrl = null);
 
 internal sealed record GatewayProviderTypesResponse(GatewayProviderTypeItem[] ProviderTypes);
 
@@ -454,6 +456,20 @@ internal sealed class GatewayUserPasswordUpdateRequest
 
 internal sealed class GatewayConnectorUpsertRequest
 {
+    [JsonIgnore]
+    public IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition>? LocalToolDefinitions { get; init; }
+
+    [JsonIgnore]
+    public string? LocalArtifactDigest { get; init; }
+
+    [JsonIgnore]
+    public string? LocalImageDigest { get; init; }
+
+    [JsonIgnore]
+    public bool LocalDiscoveryAttempted { get; init; }
+
+    public Dictionary<string, string>? DiscoveryEnv { get; init; }
+
     public string? Scope { get; init; }
 
     public string? Name { get; init; }
@@ -564,6 +580,12 @@ internal sealed class GatewayConnectorTestRequest
     public Dictionary<string, string>? TestEnv { get; init; }
 
     public string? Id { get; init; }
+
+    [JsonIgnore]
+    public string? UserId { get; set; }
+
+    [JsonIgnore]
+    public bool SaveDiscovery { get; set; }
 
     [JsonIgnore]
     public RemoteMcpRequestContext? RemoteContext { get; init; }

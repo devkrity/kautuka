@@ -188,6 +188,7 @@ internal sealed class WorkspaceDesiredStatePublisher(
         {
             Append(builder, workspace.ScopeType);
             Append(builder, workspace.ScopeId);
+            Append(builder, workspace.AgentId ?? string.Empty);
             Append(builder, workspace.UserId ?? string.Empty);
             Append(builder, workspace.HostWorkspacePath);
             Append(builder, workspace.ContainerWorkspacePath);
@@ -214,6 +215,7 @@ internal sealed class WorkspaceDesiredStatePublisher(
             Append(builder, connector.Command);
             Append(builder, connector.Enabled ? "1" : "0");
             Append(builder, connector.IsInternalSystemConnector ? "1" : "0");
+            Append(builder, connector.CatalogScope);
             Append(builder, connector.BundlePath ?? string.Empty);
             Append(builder, connector.ServerType ?? string.Empty);
             Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));

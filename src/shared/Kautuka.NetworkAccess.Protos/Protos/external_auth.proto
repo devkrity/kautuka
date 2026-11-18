@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package envoy.service.auth.v3;
+
+option csharp_namespace = "Kautuka.NetworkAccess.Protos.Envoy.Service.Auth.V3";
+
+import "google/protobuf/struct.proto";
+
+// Wire-compatible vendored subset of Envoy v1.40.2 envoy/service/auth/v3/external_auth.proto
+// and its referenced attribute_context.proto, address.proto, and google/rpc/status.proto types.
+// Field numbers and message wire layout match upstream Envoy v1.40.2 exactly.
+service Authorization {
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+message CheckRequest {
+  AttributeContext attributes = 1;
+}
+
+message AttributeContext {
+  Peer source = 1;
+  Peer destination = 2;
+  TLSSession tls_session = 12;
+}
+
+message Peer {
+  Address address = 1;
+  string service = 2;
+}
+
+message Address {
+  SocketAddress socket_address = 1;
+}
+
+message SocketAddress {
+  int32 protocol = 1;
+  string address = 2;
+  uint32 port_value = 3;
+}
+
+message TLSSession {
+  string sni = 1;
+}
+
+message CheckResponse {
+  Status status = 1;
+  google.protobuf.Struct dynamic_metadata = 4;
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+}

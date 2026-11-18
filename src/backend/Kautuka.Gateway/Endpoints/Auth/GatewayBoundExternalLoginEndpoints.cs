@@ -47,6 +47,11 @@ internal static partial class GatewayAuthEndpointMappings
         string cookie = ExternalLoginSessionStore.CreateCookieBinding();
         string flow;
         BrokerInstallationIdentity installation;
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: actorId ?? "system",
+            agentId: actorId is null ? "system" : "gateway",
+            purpose: intent == "LINK" ? "oidc-link" : "oidc-login",
+            service: "external-auth");
         try
         {
             flow = await broker.StartAsync(host, new BrokerHandoffStart(provider, intent == "LINK" ? "link" : "login", state,
@@ -89,6 +94,12 @@ internal static partial class GatewayAuthEndpointMappings
         if (body is null || !IsBoundToken(body.Nonce)
             || !TryBoundSession(body, context, sessions, auth, out ExternalLoginSession? session) || session is null
             || session.BrokerFlowId is null || session.BrokerOrigin is null) return Results.Unauthorized();
+        string oidcUserId = session.Intent == "LINK" && !string.IsNullOrWhiteSpace(session.LinkUserId) ? session.LinkUserId : "system";
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: oidcUserId,
+            agentId: oidcUserId == "system" ? "system" : "gateway",
+            purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
+            service: "external-auth");
         try { await broker.BindBrowserAsync(new Uri(session.BrokerOrigin), session.BrokerFlowId, body.Nonce!, ct).ConfigureAwait(false); }
         catch (HttpRequestException ex) { return BrokerFailure(context, ex); }
         catch (Exception ex) when (IsRetryableBrokerFailure(ex, ct)) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
@@ -98,7 +109,8 @@ internal static partial class GatewayAuthEndpointMappings
 
     private static async Task<IResult> CompleteBoundExternalLogin(BoundExternalOperationRequest? body, HttpContext context,
         ExternalLoginSessionStore sessions, IGatewayAuthGuard auth, ExternalLoginProviders providers, BrokerHandoffClient broker,
-        IExternalIdentityClient identities, IGatewayUserStore users, IGatewayTokenStore tokens, SetupPossession setupToken, ILoggerFactory loggerFactory, CancellationToken ct)
+        IExternalIdentityClient identities, IGatewayUserStore users, IGatewayTokenStore tokens, SetupPossession setupToken,
+        IManagerGrpcService managerService, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         ILogger logger = loggerFactory.CreateLogger("Kautuka.Gateway.ExternalLogin");
         context.Response.Headers.CacheControl = "no-store";
@@ -115,6 +127,12 @@ internal static partial class GatewayAuthEndpointMappings
             if (session.CompletedResponse is not null && session.CompletedRefreshToken is not null)
                 return BoundLoginResult(context, session, tokens, users, isReplay: true);
             if (session.BrokerOrigin is null || session.BrokerFlowId is null) return Results.Unauthorized();
+            string oidcUserId = session.Intent == "LINK" && !string.IsNullOrWhiteSpace(session.LinkUserId) ? session.LinkUserId : "system";
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: oidcUserId,
+                agentId: oidcUserId == "system" ? "system" : "gateway",
+                purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
+                service: "external-auth");
             string? token;
             try { token = await broker.ExchangeSocialAsync(new Uri(session.BrokerOrigin), session.BrokerFlowId, session.CodeVerifier, ct).ConfigureAwait(false); }
             catch (HttpRequestException ex) { LogBoundLoginFailure(logger, "broker_exchange", ex.StatusCode?.ToString() ?? "unavailable"); return BrokerFailure(context, ex); }
@@ -131,6 +149,16 @@ internal static partial class GatewayAuthEndpointMappings
             identity = identity with { InviteCode = body.InviteCode, LinkUserId = session.Intent == "LINK" ? session.LinkUserId : null };
             if (!users.TryCompleteExternalSignIn(identity, body.SetupToken, setupToken, out GatewayUser? user, out string accountReason) || user is null)
             { LogBoundLoginFailure(logger, "account_resolution", accountReason); return Results.Unauthorized(); }
+            if (string.Equals(accountReason, "created", StringComparison.Ordinal))
+            {
+                await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                    managerService,
+                    actorUserId: user.Id,
+                    targetUserId: user.Id,
+                    targetIsAdmin: GatewayOwnershipAccess.IsAdmin(user),
+                    logger,
+                    ct).ConfigureAwait(false);
+            }
             string access = tokens.IssueAccessToken(user.Id);
             string refresh = tokens.IssueRefreshToken(user.Id);
             session.CompletedResponse = new AuthLoginResponse(access, "bearer", checked((int)GatewayTokenStore.AccessTokenLifetime.TotalSeconds),

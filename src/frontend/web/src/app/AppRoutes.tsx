@@ -37,6 +37,11 @@ const ApprovalsPage = React.lazy(() =>
     import('@/pages/ApprovalsPage').then((module) => ({ default: module.ApprovalsPage }))
   )
 );
+const NetworkAccessPage = React.lazy(() =>
+  lazyImportWithRecovery('page:network-access', () =>
+    import('@/pages/NetworkAccessPage').then((module) => ({ default: module.NetworkAccessPage }))
+  )
+);
 const ConnectorsPage = React.lazy(() =>
   lazyImportWithRecovery('page:connectors', () =>
     import('@/pages/ConnectorsPage').then((module) => ({ default: module.ConnectorsPage }))
@@ -196,6 +201,7 @@ export function AppRoutes({ authenticated, needsSetup, onLoginSuccess }: Readonl
           element={requireAuth(<WorkflowsPage />)}
         />
         <Route path="/approvals" element={requireAuth(<ApprovalsPage />)} />
+        <Route path="/network-access" element={requireAuth(<NetworkAccessPage />)} />
         <Route path="/connectors" element={requireAuth(<ConnectorsPage />)} />
         <Route path="/skills" element={requireAuth(<SkillsPage />)} />
         <Route path="/memories" element={requireAuth(<MemoriesPage />)} />

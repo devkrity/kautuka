@@ -95,13 +95,14 @@ internal sealed partial class AgentChatService
 
         var leftoverInvokes = new List<(int Index, Func<CancellationToken, Task<string>> Invoke)>();
         Func<CancellationToken, Task<string>> CreateIndependentInvoke(ToolApprovalResponseInfo item)
-            => ct => packedApprovedToolInvoker!.InvokeAsync(
+            => ct => ApprovedToolExecution.RunAsync(approvalStore, item.RequestId, io.AgentId, io.SessionId, approvalStore.GetById(item.RequestId)?.UserId, item.ToolName, item.ArgumentsJson, () => packedApprovedToolInvoker!.InvokePinnedAsync(
                 io.AgentId,
                 io.SessionId,
-                io.UserId,
+                approvalStore.GetById(item.RequestId)?.UserId,
                 item.ToolName,
                 item.ArgumentsJson,
-                ct).AsTask();
+                io.Runtime.EffectiveBehavior.Tooling,
+                ct, approvalStore.GetById(item.RequestId)?.McpServerId).AsTask(), ct);
         for (int index = 0; index < pack.Count; index++)
         {
             ToolApprovalResponseInfo current = pack[index];
@@ -299,7 +300,9 @@ internal sealed partial class AgentChatService
                 : null;
             packedRequestIds.Add(tarc.RequestId);
 
-            string? mcpServerId = HitlApprovalIdentity.ResolveMcpServerId(platformConfiguration, io.AgentId, toolName);
+            AgentToolSurfaceEntry[] matchingMcp = io.Runtime.EffectiveBehavior.Tooling?.Definitions?.Entries
+                .Where(entry => entry.Source == AgentToolSurfaceSources.Mcp && entry.Name == toolName).ToArray() ?? [];
+            string? mcpServerId = matchingMcp.Length == 1 ? matchingMcp[0].SourceId : null;
             long? agentDefinitionRevision = TryResolveAgentDefinitionRevision(io.AgentId);
             if (!io.Runtime.RequireApprovalForAllTools && !ToolApprovalPolicyEvaluator.RequiresHumanApproval(
                 toolExecutionPolicyService,
@@ -443,13 +446,14 @@ internal sealed partial class AgentChatService
                         autoResponse.ToolName,
                         autoResponse.ArgumentsJson ?? "{}",
                         io.CancellationToken).ConfigureAwait(false);
-                    string executed = await packedApprovedToolInvoker.InvokeAsync(
+                    string executed = await ApprovedToolExecution.RunAsync(approvalStore, autoResponse.RequestId, io.AgentId, io.SessionId, approvalUserId, autoResponse.ToolName, autoResponse.ArgumentsJson, () => packedApprovedToolInvoker.InvokePinnedAsync(
                         io.AgentId,
                         io.SessionId,
-                        io.UserId,
+                        approvalUserId,
                         autoResponse.ToolName,
                         autoResponse.ArgumentsJson,
-                        io.CancellationToken).ConfigureAwait(false);
+                        io.Runtime.EffectiveBehavior.Tooling,
+                        io.CancellationToken, approvalStore.GetById(autoResponse.RequestId)?.McpServerId).AsTask(), io.CancellationToken).ConfigureAwait(false);
                     ChatExecutionHelpers.RecordToolCallResult(
                         io.CompletedToolCalls,
                         autoResponse.ToolCallId,

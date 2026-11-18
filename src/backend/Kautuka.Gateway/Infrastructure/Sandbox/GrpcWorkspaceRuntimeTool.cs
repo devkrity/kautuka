@@ -150,6 +150,7 @@ internal sealed class GrpcWorkspaceRuntimeTool(
         {
             ScopeType = workspace.ScopeType,
             ScopeId = workspace.ScopeId,
+            AgentId = workspace.AgentId ?? string.Empty,
             UserId = workspace.UserId ?? string.Empty,
             HostWorkspacePath = workspace.HostWorkspacePath,
             ContainerWorkspacePath = workspace.ContainerWorkspacePath,
@@ -181,7 +182,8 @@ internal sealed class GrpcWorkspaceRuntimeTool(
             payload.Image,
             payload.DefaultTimeoutSeconds,
             payload.BaseCapabilities,
-            payload.ContainerEnvironment.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase));
+            payload.ContainerEnvironment.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase))
+        { AgentId = payload.AgentId };
     }
 
     private static WorkspaceSandboxSession FromSandboxResponse(WorkspaceSandboxResponse response)

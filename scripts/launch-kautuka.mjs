@@ -14,6 +14,10 @@ import { createConnection } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isUnixSocketAcceptingConnections } from "./launcher-readiness.mjs";
+import { webToolsMcpbCommand } from "./launcher-web-tools.mjs";
+import { canRemoveLinuxDevelopmentNacHook, removeLinuxDevelopmentNacHook, stageLinuxDevelopmentNacHook } from "./launcher-nac-hook.mjs";
+import { killProcessTree } from "./launcher-process-tree.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -46,26 +50,31 @@ const SERVICES = [
     name: "CredentialsHost",
     project: "src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj",
     readySocket: "credentialshost",
+    windowsPort: 20002,
   },
   {
     name: "ChannelHost",
     project: "src/backend/Kautuka.ChannelHost/Kautuka.ChannelHost.csproj",
     readySocket: "channelhost",
+    windowsPort: 20003,
   },
   {
     name: "Manager",
     project: "src/backend/Kautuka.Manager/Kautuka.Manager.csproj",
     readySocket: "manager",
+    windowsPort: 20001,
   },
   {
     name: "UpdateService",
     project: "src/backend/Kautuka.UpdateService/Kautuka.UpdateService.csproj",
     readySocket: "updateservice",
+    windowsPort: 20004,
   },
   {
     name: "Gateway",
     project: "src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj",
     readySocket: "gateway",
+    windowsPort: 20000,
   },
   {
     name: "WebHost",
@@ -94,6 +103,7 @@ function socketFileExists(socketPath) {
 /** @type {{ name: string, process: import('node:child_process').ChildProcess }[]} */
 const children = [];
 let shuttingDown = false;
+let linuxNacHookStage;
 
 function runCommand(label, command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -149,13 +159,27 @@ function spawnService(service) {
     throw new Error(`Project not found: ${projectPath}`);
   }
 
+  const serviceEnvironment = { ...process.env };
+  if (process.platform === "linux" && service.name === "Manager" && linuxNacHookStage) {
+    Object.assign(serviceEnvironment, linuxNacHookStage.managerEnvironment);
+  }
+  const useWindowsTcp = process.platform === "win32"
+    && (!serviceEnvironment.Kautuka__Transport
+      || serviceEnvironment.Kautuka__Transport.toLowerCase() === "tcp");
+  if (process.platform === "win32" && !serviceEnvironment.Kautuka__Transport) {
+    // Use loopback TCP for the Windows native stack. It lets readiness checks prove a
+    // listener is accepting connections instead of mistaking a stale Unix socket file
+    // for a service that finished its (potentially long) NAC startup.
+    serviceEnvironment.Kautuka__Transport = "tcp";
+  }
+
   const child = spawn(
     "dotnet",
     ["run", "--no-build", "--project", projectPath],
     {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: serviceEnvironment,
       ...(process.platform !== "win32" ? { detached: true } : {}),
     },
   );
@@ -178,13 +202,13 @@ function spawnService(service) {
     void shutdown(typeof code === "number" && code !== 0 ? code : 1);
   });
 
-  children.push({ name: service.name, process: child });
+  children.push({ name: service.name, process: child, useWindowsTcp });
 }
 
 // Gateway performs a bounded built-in MCP metadata bootstrap before binding.  Give
 // every service the same two-minute startup ceiling so a legitimate bootstrap
 // cannot race the launcher readiness check.
-function waitForPort(service, timeoutMs = 120_000) {
+function waitForPort(service, timeoutMs = 120_000, useWindowsTcp = process.platform === "win32") {
   const deadline = Date.now() + timeoutMs;
 
   return new Promise((resolve, reject) => {
@@ -194,11 +218,27 @@ function waitForPort(service, timeoutMs = 120_000) {
         return;
       }
 
-      if (service.readySocket) {
-        // Kestrel creates the socket file as it binds. Node cannot dial an AF_UNIX
-        // socket on Windows, where a path is treated as a named pipe, so the file
-        // appearing is the portable readiness signal.
+      if (service.readySocket && !(useWindowsTcp && service.windowsPort)) {
         const socketPath = socketPathFor(service);
+        if (process.platform === "linux") {
+          void isUnixSocketAcceptingConnections(socketPath).then((isReady) => {
+            if (isReady) {
+              resolve(undefined);
+              return;
+            }
+
+            if (Date.now() >= deadline) {
+              reject(new Error(`${service.name} did not accept a connection on ${socketPath} within ${timeoutMs}ms`));
+              return;
+            }
+
+            setTimeout(probe, 200);
+          });
+          return;
+        }
+
+        // Node cannot reliably inspect live Unix socket entries on Windows. The
+        // Windows native stack uses TCP above; other platforms keep the file check.
         if (socketFileExists(socketPath)) {
           resolve(undefined);
           return;
@@ -213,7 +253,12 @@ function waitForPort(service, timeoutMs = 120_000) {
         return;
       }
 
-      const socket = createConnection({ host: "127.0.0.1", port: service.readyPort });
+      const port = service.readyPort ?? (useWindowsTcp ? service.windowsPort : undefined);
+      if (!port) {
+        reject(new Error(`${service.name} has no configured readiness endpoint`));
+        return;
+      }
+      const socket = createConnection({ host: "127.0.0.1", port });
       socket.setTimeout(1_000);
       socket.once("connect", () => {
         socket.destroy();
@@ -222,7 +267,7 @@ function waitForPort(service, timeoutMs = 120_000) {
       const retry = () => {
         socket.destroy();
         if (Date.now() >= deadline) {
-          reject(new Error(`${service.name} did not listen on port ${service.readyPort} within ${timeoutMs}ms`));
+          reject(new Error(`${service.name} did not listen on port ${port} within ${timeoutMs}ms`));
           return;
         }
         setTimeout(probe, 200);
@@ -235,41 +280,6 @@ function waitForPort(service, timeoutMs = 120_000) {
   });
 }
 
-function killProcessTree(child) {
-  return new Promise((resolve) => {
-    if (!child.pid) {
-      resolve(undefined);
-      return;
-    }
-
-    if (process.platform === "win32") {
-      const killer = spawn(
-        "taskkill",
-        ["/pid", String(child.pid), "/T", "/F"],
-        { stdio: "ignore", windowsHide: true },
-      );
-      killer.on("exit", () => resolve(undefined));
-      return;
-    }
-
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      resolve(undefined);
-      return;
-    }
-
-    setTimeout(() => {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        // already stopped
-      }
-      resolve(undefined);
-    }, 2000);
-  });
-}
-
 async function shutdown(exitCode = 0) {
   if (shuttingDown) {
     return;
@@ -278,17 +288,30 @@ async function shutdown(exitCode = 0) {
   shuttingDown = true;
   process.stderr.write("[launch-kautuka] shutting down services...\n");
 
-  await Promise.all(
+  const stoppedGroups = await Promise.all(
     children.map(async ({ name, process: child }) => {
       try {
-        await killProcessTree(child);
+        const stopped = await killProcessTree(child);
+        if (!stopped) {
+          process.stderr.write(`[launch-kautuka] ${name} process group is still present; retaining temporary NAC hook files for safety.\n`);
+        }
+        return stopped;
       } catch (error) {
         process.stderr.write(
           `[launch-kautuka] failed to stop ${name}: ${error instanceof Error ? error.message : String(error)}\n`,
         );
+        return false;
       }
     }),
   );
+
+  if (linuxNacHookStage && canRemoveLinuxDevelopmentNacHook(stoppedGroups)) {
+    try {
+      removeLinuxDevelopmentNacHook(linuxNacHookStage.directory);
+    } catch (error) {
+      process.stderr.write(`[launch-kautuka] failed to remove temporary NAC hook files: ${error instanceof Error ? error.message : String(error)}\n`);
+    }
+  }
 
   process.exit(exitCode);
 }
@@ -298,6 +321,12 @@ async function main() {
     process.stdout.write(`[launch-kautuka] Telegram timing capture: ${telegramDiagnosticsPath} (up to 10000 records)\n`);
   }
   const skipBuild = process.argv.includes("--skip-build");
+
+  if (process.platform === "linux" && process.env.CONTAINERS_CONF_OVERRIDE?.trim()) {
+    throw new Error(
+      "CONTAINERS_CONF_OVERRIDE is already set. The Linux development launcher needs this Podman override for its temporary NAC hook; unset it and retry.",
+    );
+  }
 
   if (!skipBuild) {
     process.stdout.write("[launch-kautuka] building solution...\n");
@@ -324,13 +353,28 @@ async function main() {
   await runCommand("stage m365 mail", "node", ["scripts/stage-m365-mail-mcpb.mjs"]);
   process.stdout.write("[launch-kautuka] staging Google mail connector...\n");
   await runCommand("stage google mail", "node", ["scripts/stage-google-mail-mcpb.mjs"]);
+  process.stdout.write("[launch-kautuka] staging built-in web-tools MCP bundle...\n");
+  try {
+    const webToolsCommand = webToolsMcpbCommand(process.platform, repoRoot);
+    await runCommand("stage built-in web-tools MCP bundle", webToolsCommand.command, webToolsCommand.args);
+  } catch (error) {
+    process.stderr.write(`[launch-kautuka] warning: web-tools MCP bundle staging failed; continuing with any previously staged bundle: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
 
   process.stdout.write("[launch-kautuka] starting services...\n");
+  if (process.platform === "linux") {
+    linuxNacHookStage = stageLinuxDevelopmentNacHook(repoRoot, process.env);
+    process.stdout.write("[launch-kautuka] staged isolated Linux development NAC OCI hook for Manager.\n");
+  }
   for (const service of SERVICES) {
     spawnService(service);
     const child = children.at(-1);
-    await waitForPort({ ...service, process: child.process });
-    const readyOn = service.readySocket ? socketPathFor(service) : `port ${service.readyPort}`;
+    await waitForPort({ ...service, process: child.process }, 120_000, child.useWindowsTcp);
+    const readyOn = child.useWindowsTcp && service.windowsPort
+      ? `port ${service.windowsPort}`
+      : service.readySocket
+        ? socketPathFor(service)
+        : `port ${service.readyPort}`;
     process.stdout.write(`[launch-kautuka] ${service.name} ready on ${readyOn}.\n`);
   }
 

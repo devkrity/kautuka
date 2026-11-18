@@ -51,6 +51,8 @@ internal sealed record WorkspaceRuntimeContext(
     IReadOnlyList<string> BaseCapabilities,
     IReadOnlyDictionary<string, string> ContainerEnvironment)
 {
+    public string? AgentId { get; init; }
+
     /// <summary>Returned when Kautuka.Manager is unreachable. Workspace dirs will be created on first use.</summary>
     internal static readonly WorkspaceRuntimeContext Unavailable = new(
         string.Empty, string.Empty, null,

@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Execution;
+
 namespace Kautuka.Gateway.Infrastructure.Agents;
 
 internal interface IAgentToolSurfaceStore

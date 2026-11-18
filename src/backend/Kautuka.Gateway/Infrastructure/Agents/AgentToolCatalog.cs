@@ -1,4 +1,10 @@
+using Kautuka.Gateway.Domain.Execution;
+
 using Kautuka.Gateway.Domain.Connectors;
+
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 using Microsoft.Extensions.AI;
 
@@ -39,7 +45,11 @@ internal interface IAgentToolSurfaceContributor : IAgentToolProvider
 internal interface IAgentToolCatalog
 {
     ValueTask<IReadOnlyList<AIFunction>> BuildToolsAsync(AgentToolContext context, CancellationToken ct);
+    ValueTask<AgentRunToolSet> BuildRunToolsAsync(AgentToolContext context, AgentToolSurfaceCatalogue? pinned, CancellationToken ct);
+    ValueTask<AIFunction> BuildPinnedToolAsync(AgentToolContext context, AgentToolSurfaceCatalogue pinned, string expectedHash, string toolName, string? connectorId, CancellationToken ct);
 }
+
+internal sealed record AgentRunToolSet(IReadOnlyList<AIFunction> Tools, AgentToolSurfaceCatalogue Catalogue, string Hash);
 
 internal sealed class AgentToolCatalog(
     IEnumerable<IAgentToolProvider> providers,
@@ -53,6 +63,60 @@ internal sealed class AgentToolCatalog(
     private readonly RemoteMcpCredentialRevisionTracker credentialRevisions = credentialRevisions ?? new();
     private readonly object sync = new();
     private readonly Dictionary<string, Task<AgentToolSurfaceContribution>> inflight = new(StringComparer.Ordinal);
+
+    public async ValueTask<AIFunction> BuildPinnedToolAsync(AgentToolContext context, AgentToolSurfaceCatalogue pinned, string expectedHash, string toolName, string? connectorId, CancellationToken ct)
+    {
+        string json = JsonSerializer.Serialize(pinned, KautukaJsonContext.Default.AgentToolSurfaceCatalogue);
+        string hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
+        if (!string.Equals(hash, expectedHash, StringComparison.Ordinal))
+            throw new InvalidOperationException("The saved tool definitions changed. Start a new run.");
+        AgentDefinition? agent = configProvider.GetCurrent().Agents.FirstOrDefault(item => item.Id == context.AgentId);
+        if (agent is null || !agent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, agent.Scope, agent.OwnerUserId))
+            throw new InvalidOperationException("Agent is no longer available to this caller.");
+        AgentToolSurfaceEntry[] matching = [.. pinned.Entries.Where(entry => entry.Name == toolName
+            && (connectorId is null || (entry.Source == AgentToolSurfaceSources.Mcp && entry.SourceId == connectorId)))];
+        if (matching.Length != 1) throw new InvalidOperationException("The approved tool is unavailable or ambiguous. Start a new run.");
+        AgentToolSurfaceEntry selected = matching[0];
+        if (selected.Source == AgentToolSurfaceSources.Mcp && string.IsNullOrWhiteSpace(connectorId))
+            throw new InvalidOperationException("The approved connector was not identified. Start a new run.");
+        IAgentToolSurfaceContributor? contributor = providers.Select(AsContributor).FirstOrDefault(item => item.SurfaceSource == selected.Source);
+        if (contributor is null) throw new InvalidOperationException("The approved tool provider is unavailable. Start a new run.");
+        IReadOnlyList<AIFunction> tools = await contributor.HydrateAsync(context with { AgentDefinition = agent }, [selected], ct).ConfigureAwait(false);
+        return tools.SingleOrDefault(tool => tool.Name == toolName)
+            ?? throw new InvalidOperationException("The approved tool is unavailable. Start a new run.");
+    }
+
+    public async ValueTask<AgentRunToolSet> BuildRunToolsAsync(AgentToolContext context, AgentToolSurfaceCatalogue? pinned, CancellationToken ct)
+    {
+        AgentDefinition? currentAgent = configProvider.GetCurrent().Agents.FirstOrDefault(agent => string.Equals(agent.Id, context.AgentId, StringComparison.Ordinal));
+        if (currentAgent is null || !currentAgent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, currentAgent.Scope, currentAgent.OwnerUserId))
+            throw new InvalidOperationException("Agent is no longer available to this caller.");
+        context = context with { AgentDefinition = currentAgent };
+        AgentToolSurfaceCatalogue catalogue;
+        if (pinned is null)
+        {
+            string fingerprint = AgentToolingFingerprint.Compute(currentAgent, configProvider.GetCurrent());
+            var entries = new List<AgentToolSurfaceEntry>();
+            var unavailable = new List<string>();
+            foreach (IAgentToolProvider provider in providers)
+            {
+                AgentToolSurfaceContribution contribution = await AsContributor(provider).ContributeAsync(context, ct).ConfigureAwait(false);
+                entries.AddRange(contribution.Entries);
+                if (contribution.UnavailableConnectors is not null) unavailable.AddRange(contribution.UnavailableConnectors);
+            }
+            PlatformConfiguration latest = configProvider.GetCurrent();
+            AgentDefinition? latestAgent = latest.Agents.FirstOrDefault(agent => string.Equals(agent.Id, context.AgentId, StringComparison.Ordinal));
+            if (latestAgent is null || !latestAgent.Enabled || !GatewayOwnershipAccess.CallerCanUse(context.UserId, latestAgent.Scope, latestAgent.OwnerUserId)
+                || !string.Equals(fingerprint, AgentToolingFingerprint.Compute(latestAgent, latest), StringComparison.Ordinal))
+                throw new InvalidOperationException("Connector configuration changed during discovery. Start a new run.");
+            catalogue = new AgentToolSurfaceCatalogue { Entries = [.. entries.OrderBy(static entry => entry.Source, StringComparer.Ordinal).ThenBy(static entry => entry.SourceId, StringComparer.Ordinal).ThenBy(static entry => entry.Name, StringComparer.Ordinal)], UnavailableConnectors = [.. unavailable.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)] };
+        }
+        else catalogue = pinned;
+        string json = JsonSerializer.Serialize(catalogue, KautukaJsonContext.Default.AgentToolSurfaceCatalogue);
+        string hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
+        var hydrated = await HydrateAsync(context, catalogue.Entries, ct).ConfigureAwait(false);
+        return new AgentRunToolSet(hydrated, catalogue, hash);
+    }
 
     public async ValueTask<IReadOnlyList<AIFunction>> BuildToolsAsync(AgentToolContext context, CancellationToken ct)
     {

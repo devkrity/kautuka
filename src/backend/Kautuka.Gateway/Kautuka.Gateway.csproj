@@ -28,6 +28,7 @@
     <ProjectReference Include="..\..\shared\Kautuka.Hosting\Kautuka.Hosting.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Telemetry\Kautuka.Telemetry.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Security\Kautuka.Security.csproj" />
+    <ProjectReference Include="..\..\shared\Kautuka.NetworkAccess.Client\Kautuka.NetworkAccess.Client.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.UpdateService.Protos\Kautuka.UpdateService.Protos.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.CredentialsHost.Protos\Kautuka.CredentialsHost.Protos.csproj" />

@@ -15,6 +15,7 @@ internal sealed record ManagerDesiredStateUpdateRequest(
 /// </summary>
 internal interface IManagerGrpcService
 {
+    ManagerService.ManagerServiceClient Client => throw new NotSupportedException();
     Task<WorkspaceBoolResponse> PingAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerStatusResponse> GetHostStatusAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
     Task<ManagerRuntimeContainersResponse> ListRuntimeContainersAsync(WorkspacePingRequest request, CancellationToken cancellationToken = default);
@@ -32,4 +33,8 @@ internal interface IManagerGrpcService
     Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerToolsAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default);
     Task<WorkspaceMcpContainerCallResponse> CallMcpContainerToolAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default);
     Task<DesiredStateUpdateResponse> UpdateDesiredStateAsync(ManagerDesiredStateUpdateRequest request, CancellationToken cancellationToken = default);
+    Task<NetworkAccessUserPrivilegesMessage> GetUserPrivilegesAsync(NetworkAccessGetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Client.GetUserPrivilegesAsync(request, cancellationToken: cancellationToken).ResponseAsync;
+    Task<NetworkAccessUserPrivilegesMessage> SetUserPrivilegesAsync(NetworkAccessSetUserPrivilegesRequest request, CancellationToken cancellationToken = default)
+        => Client.SetUserPrivilegesAsync(request, cancellationToken: cancellationToken).ResponseAsync;
 }

@@ -2,7 +2,7 @@ using System.Text.Json;
 
 using Microsoft.Extensions.AI;
 
-namespace Kautuka.Gateway.Infrastructure.Agents;
+namespace Kautuka.Gateway.Domain.Execution;
 
 internal static class AgentToolSurfaceSources
 {
@@ -15,6 +15,8 @@ internal static class AgentToolSurfaceSources
 internal sealed class AgentToolSurfaceCatalogue
 {
     public List<AgentToolSurfaceEntry> Entries { get; set; } = [];
+
+    public List<string> UnavailableConnectors { get; set; } = [];
 }
 
 internal sealed class AgentToolSurfaceEntry
@@ -28,6 +30,14 @@ internal sealed class AgentToolSurfaceEntry
     public string Description { get; set; } = string.Empty;
 
     public string JsonSchema { get; set; } = "{}";
+
+    public string? ArtifactDigest { get; set; }
+
+    public string? ImageDigest { get; set; }
+
+    public string? ExecutionConfigHash { get; set; }
+
+    public string? EffectiveEndpointHash { get; set; }
 
     internal static AgentToolSurfaceEntry From(string source, string sourceId, AIFunction tool)
     {
@@ -66,7 +76,8 @@ internal sealed class AgentToolSurfaceEntry
 
 internal readonly record struct AgentToolSurfaceContribution(
     IReadOnlyList<AgentToolSurfaceEntry> Entries,
-    bool Complete = true);
+    bool Complete = true,
+    IReadOnlyList<string>? UnavailableConnectors = null);
 
 internal sealed record AgentToolSurfaceSnapshot(
     string Fingerprint,

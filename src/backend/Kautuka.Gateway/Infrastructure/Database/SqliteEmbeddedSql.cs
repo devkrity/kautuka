@@ -5,6 +5,7 @@ namespace Kautuka.Gateway.Infrastructure.Database;
 internal static class SqliteEmbeddedSql
 {
     public static readonly string GatewayCurrent = Load("baseline.current.sql");
+    public static readonly string GatewayLegacy20261010 = Load("gateway-2026-10-10.1.sql");
     public static readonly string AgentStoreCurrent = Load("baseline.agent.current.sql");
     public static readonly string BaselineUsageV1 = Load("baseline.usage.v1.sql");
 

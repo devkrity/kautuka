@@ -179,7 +179,13 @@ export const ConnectorsPage: React.FC = () => {
     }
 
     saveMutation.mutate(
-      { connectorId: d.id, data: buildSavePayload(d) },
+      {
+        connectorId: d.id,
+        data: {
+          ...buildSavePayload(d),
+          ...(d.transport === 'http' ? {} : { discoveryEnv: nonEmpty }),
+        },
+      },
       {
         onSuccess: () => {
           setModalTarget(null);
@@ -277,6 +283,11 @@ export const ConnectorsPage: React.FC = () => {
           onSave={handleSave}
           onClose={() => setModalTarget(null)}
           saving={saveMutation.isPending || credsMutation.isPending}
+          saveStatus={
+            credsMutation.isPending
+              ? 'Saving connector credentials…'
+              : 'Saving the connector. Kautuka may build its image and check its tools, which can take a few minutes.'
+          }
           saveLabel={
             modalTarget !== 'new' && modalTarget != null && !canManageConnector(modalTarget)
               ? 'Save Credentials'

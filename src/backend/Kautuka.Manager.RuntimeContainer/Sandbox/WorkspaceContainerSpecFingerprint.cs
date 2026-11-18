@@ -15,6 +15,7 @@ public static class WorkspaceContainerSpecFingerprint
         var builder = new StringBuilder();
         Append(builder, context.ScopeType);
         Append(builder, context.ScopeId);
+        Append(builder, context.AgentId ?? string.Empty);
         Append(builder, context.UserId ?? string.Empty);
         Append(builder, Path.GetFullPath(context.HostWorkspacePath));
         Append(builder, context.ContainerWorkspacePath);

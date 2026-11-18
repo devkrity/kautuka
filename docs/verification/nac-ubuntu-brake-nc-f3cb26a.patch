@@ -1,0 +1,16 @@
+diff --git a/src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs b/src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs
+index 986b6c6..aa4ae13 100644
+--- a/src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs
++++ b/src/backend/Kautuka.Manager/Grpc/WorkspaceGrpcService.NetworkAccess.cs
+@@ -427,10 +427,7 @@ public sealed partial class WorkspaceGrpcService
+ 
+         if (request.On && egressTopologyManager is not null)
+         {
+-            string? targetUser = string.Equals(request.Scope, "system", StringComparison.OrdinalIgnoreCase)
+-                ? null
+-                : (string.IsNullOrWhiteSpace(request.UserId) ? request.Actor.UserId : request.UserId);
+-            await egressTopologyManager.EngageBrakeAsync(targetUser, Nac.Registry, CancellationToken.None).ConfigureAwait(false);
++            // Negative control: omit the workload stop.
+         }
+ 
+         return ToMessage(brake);

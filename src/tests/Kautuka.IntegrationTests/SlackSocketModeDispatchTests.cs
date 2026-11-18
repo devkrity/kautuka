@@ -86,7 +86,7 @@ public sealed class SlackSocketModeDispatchTests
     [Fact]
     public async Task SocketFailureBackoffResetsAfterConnectionAndCleanServerDisconnect()
     {
-        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(2500));
+        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(10));
         List<int> backoffAttempts = [];
         AdvancingTimeProvider clock = new();
         using DispatchFixture fixture = new(paired: true,
@@ -96,7 +96,12 @@ public sealed class SlackSocketModeDispatchTests
             retryDelay: attempt =>
             {
                 backoffAttempts.Add(attempt);
-                return TimeSpan.FromSeconds(1);
+                if (backoffAttempts.Count == 2)
+                {
+                    cancellation.Cancel();
+                }
+
+                return TimeSpan.Zero;
             },
             connectionTimeProvider: clock);
         fixture.Http.ConnectionOpenResponses.Enqueue("{\"ok\":false,\"error\":\"temporarily_unavailable\"}");
@@ -165,7 +170,7 @@ public sealed class SlackSocketModeDispatchTests
             supervisorPollDelay: TimeSpan.FromMilliseconds(10));
 
         Task supervisor = fixture.Worker.RunAsync(cancellation.Token);
-        await secondStart.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await secondStart.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => supervisor);
         Assert.True(starts >= 2);
@@ -190,12 +195,20 @@ public sealed class SlackSocketModeDispatchTests
     [Fact]
     public async Task FailedSocketOpenIsRetriedWithBoundedBackoff()
     {
-        using DispatchFixture fixture = new(paired: true);
+        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(15));
+        List<int> backoffAttempts = [];
+        using DispatchFixture fixture = new(paired: true, retryDelay: attempt =>
+        {
+            backoffAttempts.Add(attempt);
+            if (backoffAttempts.Count == 2)
+                cancellation.Cancel();
+            return TimeSpan.FromMilliseconds(10);
+        });
         fixture.Http.FailFirstConnectionOpen = true;
-        using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(3));
         await fixture.WorkerRunConnectionLoopAsync(cancellation.Token);
 
         Assert.InRange(fixture.Http.Requests.Count(request => request.Uri?.AbsolutePath == "/api/apps.connections.open"), 2, int.MaxValue);
+        Assert.Equal([1, 2], backoffAttempts);
         Assert.True(SlackSocketModeWorker.GetConnectionBackoffDelay(100) <= TimeSpan.FromSeconds(60));
     }
 

@@ -124,6 +124,21 @@ jobs:
       - name: Test Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Test Linux installer NAC hook payload
+        run: bash ./scripts/test-linux-installer-nac-hook.sh
+
+      - name: Test Envoy SELinux policy installation
+        run: bash ./scripts/test-linux-installer-envoy-selinux.sh
+
+      - name: Test Linux installer trust and socket provisioning
+        run: bash ./scripts/test-linux-installer-security.sh
+
+      - name: Test WSL NAC hook staging
+        run: bash ./scripts/test-wsl-nac-hook-staging.sh
+
+      - name: Test actual release runtime image inventory
+        run: node ./scripts/test-release-runtime-image-inventory.mjs
+
       - name: Test release source preparation and channel configuration
         run: node ./scripts/test-release-source-preparation.mjs
 

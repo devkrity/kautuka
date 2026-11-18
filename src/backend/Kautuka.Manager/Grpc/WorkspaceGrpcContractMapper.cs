@@ -42,7 +42,8 @@ internal static class WorkspaceGrpcContractMapper
             runtimeSettings.Sandbox.DefaultMemory ?? string.Empty,
             message.DefaultTimeoutSeconds,
             [.. message.BaseCapabilities],
-            message.ContainerEnvironment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase));
+            message.ContainerEnvironment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase))
+        { AgentId = NormalizeOptional(message.AgentId) };
     }
 
     public static ManagerRuntimeSettings FromRuntime(ManagerRuntimeSettingsMessage? message)
@@ -99,6 +100,7 @@ internal static class WorkspaceGrpcContractMapper
         {
             ScopeType = context.ScopeType,
             ScopeId = context.ScopeId,
+            AgentId = context.AgentId ?? string.Empty,
             UserId = context.UserId ?? string.Empty,
             HostWorkspacePath = context.HostWorkspacePath,
             ContainerWorkspacePath = context.ContainerWorkspacePath,

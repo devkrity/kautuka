@@ -59,6 +59,11 @@ internal static partial class ConnectorOAuthEndpointMappings
             DateTimeOffset.UtcNow, out BoundMailSession? session) || session is null)
             return checkedSession.BrowserConfirmed ? Results.StatusCode(StatusCodes.Status202Accepted) : Results.Unauthorized();
         bool completed = false;
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: session.CatalogConnectorId,
+            purpose: "connector-oauth",
+            service: "connector-auth");
         try
         {
             bool StillAuthorized() => TryGetUser(auth, context, out GatewayUser? current) && current is not null && current.Id == user.Id
@@ -110,6 +115,11 @@ internal static partial class ConnectorOAuthEndpointMappings
             || !ConnectorAuthProfile.TryNormalizeReturnOrigin(context.Request.Headers.Origin.ToString(), out string origin)) return Results.BadRequest();
         BoundMailSessionStore.StartIntent? intent = sessions.BeginStart(user.Id, profile!.Id);
         if (intent is null) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: profile!.Id,
+            purpose: "connector-oauth",
+            service: "connector-auth");
         try
         {
             BrokerMailStoredState saved = await credentials.ReadAsync(user.Id, profile!.Id, ct).ConfigureAwait(false);
@@ -187,6 +197,11 @@ internal static partial class ConnectorOAuthEndpointMappings
             || !sessions.TryGet(body.State, user.Id, origin, context.Request.Cookies[BoundMailCookie + "_" + body.State], body.TabHandle, DateTimeOffset.UtcNow, out BoundMailSession? session)
             || session is null || !TryAuthorizeConnector(catalog, user, session.CatalogConnectorId, out _)) return Results.Unauthorized();
         if (!sessions.AllowAttempt(user.Id, DateTimeOffset.UtcNow)) return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: session.CatalogConnectorId,
+            purpose: "connector-oauth",
+            service: "connector-auth");
         try { await broker.BindBrowserAsync(new Uri(session.BrokerOrigin), session.FlowId, body.Nonce!, ct).ConfigureAwait(false); }
         catch (HttpRequestException e) { return BoundMailBrokerFailure(context, e); }
         catch (Exception e) when (e is InvalidDataException or System.Text.Json.JsonException or Grpc.Core.RpcException

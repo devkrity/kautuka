@@ -14,7 +14,7 @@ using ModelContextProtocol.Client;
 
 namespace Kautuka.Manager.Grpc;
 
-public sealed class WorkspaceGrpcService(
+public sealed partial class WorkspaceGrpcService(
     IContainerTool workspaceTool,
     WorkspaceDesiredStateStore desiredStateStore,
     WorkspaceReadinessGate readinessGate,
@@ -23,7 +23,10 @@ public sealed class WorkspaceGrpcService(
     WorkspaceContainerConnectorExecutionService connectorExecutionService,
     ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService,
     PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService,
-    ILogger<WorkspaceGrpcService> logger) : ManagerService.ManagerServiceBase
+    ILogger<WorkspaceGrpcService> logger,
+    Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;
@@ -34,6 +37,9 @@ public sealed class WorkspaceGrpcService(
     private readonly ManagerRuntimeContainerDiagnosticsService runtimeContainerDiagnosticsService = runtimeContainerDiagnosticsService;
     private readonly PkgsProxyCacheDiagnosticsService pkgsProxyCacheDiagnosticsService = pkgsProxyCacheDiagnosticsService;
     private readonly ILogger<WorkspaceGrpcService> logger = logger;
+    private readonly Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = networkAccessController;
+    private readonly Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = imageCompatibilityStore;
+    private readonly Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = egressTopologyManager;
 
     /// <summary>
     /// Awaits machine readiness before any container operation. If the machine is reinitialising,
@@ -482,10 +488,14 @@ public sealed class WorkspaceGrpcService(
         await this.WaitForReadyAsync(context.CancellationToken).ConfigureAwait(false);
 
         WorkspaceMcpContainerConnectorDefinition probeConnector = WorkspaceGrpcContractMapper.FromProbe(request);
+        DateTimeOffset discoveryStarted = DateTimeOffset.UtcNow;
 
-        (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage) = await this.connectorExecutionService
-            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken)
+        (bool ok, IReadOnlyList<McpClientTool> tools, WorkspaceMcpConnectorUnavailabilityReason? reason, string? failureMessage, string? imageDigest) = await this.connectorExecutionService
+            .ProbeConnectorAsync(probeConnector, request.TimeoutSeconds <= 0 ? 30 : request.TimeoutSeconds, context.CancellationToken, request.UserId, request.SaveDiscovery)
             .ConfigureAwait(false);
+
+        bool approvalRequired = request.SaveDiscovery && !ok && !string.IsNullOrWhiteSpace(request.UserId)
+            && HasRecentDiscoveryRequest(Nac.PolicyStore.GetRawStateSnapshot().Requests, request.UserId, request.ConnectorId, discoveryStarted);
 
         var response = new WorkspaceMcpProbeResponse
         {
@@ -493,13 +503,32 @@ public sealed class WorkspaceGrpcService(
             Message = ok ? $"Connector '{request.ConnectorId}' is available." : failureMessage ?? $"Connector '{request.ConnectorId}' is unavailable.",
             ToolCount = tools.Count,
             Outcome = ok ? WorkspaceOperationOutcome.Succeeded : WorkspaceOperationOutcome.Failed,
+            NetworkApprovalRequired = approvalRequired,
+            ImageDigest = imageDigest ?? string.Empty,
+            SourceDigest = ok && !string.IsNullOrWhiteSpace(probeConnector.BundlePath) && File.Exists(probeConnector.BundlePath)
+                ? McpbImageMaterializer.ComputeSha256Hex(probeConnector.BundlePath) : string.Empty,
         };
         response.Tools.AddRange(tools.Select(static t => new WorkspaceMcpToolMessage
         {
             Name = t.Name,
-            Description = t.Description ?? string.Empty
+            Description = t.Description ?? string.Empty,
+            JsonSchema = t.JsonSchema.ValueKind == JsonValueKind.Undefined ? string.Empty : t.JsonSchema.GetRawText(),
         }));
         return response;
+    }
+
+    internal static bool HasRecentDiscoveryRequest(
+        IReadOnlyList<Kautuka.NetworkAccessController.NetworkAccessRequest> requests,
+        string userId,
+        string scopedConnectorId,
+        DateTimeOffset started)
+    {
+        string prefix = userId + "::";
+        string connectorId = scopedConnectorId.StartsWith(prefix, StringComparison.Ordinal)
+            ? scopedConnectorId[prefix.Length..] : scopedConnectorId;
+        return requests.Any(pending => pending.Status == "pending" && pending.UserId == userId
+            && string.IsNullOrWhiteSpace(pending.AgentId) && pending.LastSeenUtc >= started
+            && (pending.ConnectorId == connectorId || pending.ConnectorId == prefix + connectorId));
     }
 
     public override async Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerTools(WorkspaceMcpContainerCallRequest request, ServerCallContext context)
@@ -565,7 +594,13 @@ public sealed class WorkspaceGrpcService(
                 workspaceContext,
                 request.ExecutionContext,
                 context.CancellationToken,
-                string.IsNullOrWhiteSpace(request.HostArtifactDirectory) ? null : request.HostArtifactDirectory)
+                string.IsNullOrWhiteSpace(request.HostArtifactDirectory) ? null : request.HostArtifactDirectory,
+                string.IsNullOrWhiteSpace(request.ExpectedImageDigest) ? null : request.ExpectedImageDigest,
+                string.IsNullOrWhiteSpace(request.ExpectedSourceDigest) ? null : request.ExpectedSourceDigest,
+                request.VerifyExecutionCommand ? request.ExpectedCommand : null,
+                request.VerifyExecutionCommand ? request.ExpectedArguments : null,
+                request.VerifyExecutionCommand ? request.ExpectedMcpProtocolVersion : null,
+                request.VerifyExecutionCommand ? request.ExpectedServerType : null)
             .ConfigureAwait(false);
 
         return new WorkspaceMcpContainerCallResponse
@@ -629,7 +664,10 @@ public sealed class WorkspaceGrpcService(
                     [.. connector.Environment.Select(static pair => new KeyValuePair<string, string>(pair.Key, pair.Value))],
                     connector.ReadinessTimeoutSeconds <= 0 ? 30 : connector.ReadinessTimeoutSeconds,
                     connector.JitCooldownSeconds <= 0 ? 600 : connector.JitCooldownSeconds,
-                    string.IsNullOrWhiteSpace(connector.McpProtocolVersion) ? null : connector.McpProtocolVersion))];
+                    string.IsNullOrWhiteSpace(connector.McpProtocolVersion) ? null : connector.McpProtocolVersion)
+                {
+                    CatalogScope = connector.CatalogScope,
+                })];
             IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> desiredSandboxConnectorBindings = [.. request.SandboxConnectorBindings.Select(static binding =>
                 new WorkspaceSandboxConnectorBindingsDefinition(
                     binding.ScopeType,

@@ -309,6 +309,21 @@ fail() {
     exit 1
 }
 
+install_nac_hook_payload() {
+    local hook_source="$1"
+    local hook_destination="$2"
+    [[ -f "$hook_source" ]] || fail "required network access hook payload is missing: $hook_source"
+    install -m 0755 -- "$hook_source" "$hook_destination"
+    local ruleset_source="${hook_source%kautuka_hook.py}kautuka_workload.nft.json.tmpl"
+    local ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_workload.nft.json.tmpl"
+    [[ -f "$ruleset_source" ]] || fail "required network access ruleset template is missing: $ruleset_source"
+    install -m 0644 -- "$ruleset_source" "$ruleset_destination"
+    local proxy_ruleset_source="${hook_source%kautuka_hook.py}kautuka_package_proxy.nft.json.tmpl"
+    local proxy_ruleset_destination="${hook_destination%kautuka_hook.py}kautuka_package_proxy.nft.json.tmpl"
+    [[ -f "$proxy_ruleset_source" ]] || fail "required package proxy ruleset template is missing: $proxy_ruleset_source"
+    install -m 0644 -- "$proxy_ruleset_source" "$proxy_ruleset_destination"
+}
+
 require_root() {
     if [[ ${EUID} -ne 0 ]]; then
         fail "this installer must run as root"
@@ -525,6 +540,55 @@ EOF
     systemctl enable --now kautuka-root-rshared.service >/dev/null
 }
 
+ensure_nac_prerequisites() {
+    local missing=0
+    command -v nft >/dev/null 2>&1 || missing=1
+    command -v nsenter >/dev/null 2>&1 || missing=1
+    command -v unshare >/dev/null 2>&1 || missing=1
+    command -v python3 >/dev/null 2>&1 || missing=1
+    if ! command -v pasta >/dev/null 2>&1 && ! command -v slirp4netns >/dev/null 2>&1; then
+        missing=1
+    fi
+
+    if (( missing == 1 )); then
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y nftables util-linux python3 passt >/dev/null 2>&1 || dnf install -y nftables util-linux python3 slirp4netns >/dev/null 2>&1 || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables util-linux python3 passt >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables util-linux python3 slirp4netns >/dev/null 2>&1 || true
+        fi
+    fi
+
+    command -v nft >/dev/null 2>&1 || fail "nftables (nft) is required for network access control. Please install nftables."
+    command -v nsenter >/dev/null 2>&1 || fail "util-linux (nsenter) is required for network access control. Please install util-linux."
+    command -v unshare >/dev/null 2>&1 || fail "util-linux (unshare) is required for network access control. Please install util-linux."
+    command -v python3 >/dev/null 2>&1 || fail "python3 is required for the OCI network access hook. Please install python3."
+    command -v pasta >/dev/null 2>&1 || command -v slirp4netns >/dev/null 2>&1 || fail "pasta or slirp4netns is required for rootless container networking. Please install pasta or slirp4netns."
+}
+
+install_envoy_selinux_policy() {
+    local policy_file="$1" templates="${2:-/usr/share/udica/templates}"
+    envoy_selinux_enabled=false
+    if ! command -v getenforce >/dev/null 2>&1; then return 0; fi
+    case "$(getenforce)" in Enforcing|Permissive) ;; *) return 0 ;; esac
+    [[ -r "$policy_file" ]] || { echo 'error: the Envoy SELinux policy is missing from the release.' >&2; return 1; }
+    if [[ ! -r "$templates/base_container.cil" || ! -r "$templates/net_container.cil" ]]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y udica; fi
+    fi
+    [[ -r "$templates/base_container.cil" && -r "$templates/net_container.cil" ]] || {
+        echo 'error: SELinux is enabled but udica policy templates are unavailable.' >&2; return 1;
+    }
+    command -v semodule >/dev/null 2>&1 || { echo 'error: SELinux policy installation requires semodule.' >&2; return 1; }
+    local installed_modules
+    installed_modules="$(semodule -l)" || return 1
+    local policy_inputs=()
+    if ! printf '%s\n' "$installed_modules" | grep -Eq '^base_container([[:space:]]|$)'; then policy_inputs+=("$templates/base_container.cil"); fi
+    if ! printf '%s\n' "$installed_modules" | grep -Eq '^net_container([[:space:]]|$)'; then policy_inputs+=("$templates/net_container.cil"); fi
+    policy_inputs+=("$policy_file")
+    semodule -i "${policy_inputs[@]}" || return 1
+    envoy_selinux_enabled=true
+}
+
 ensure_rootless_podman_ready() {
     local service_user="$1"
     local service_group="$2"
@@ -533,14 +597,19 @@ ensure_rootless_podman_ready() {
     local graph_root="$service_home/.local/share/containers/storage"
     local run_root="$xdg_runtime_dir/containers"
     local storage_conf_path="$service_home/.config/containers/storage.conf"
+    local hooks_dir="$service_home/.config/containers/hooks.d"
+    local containers_conf_dir="$service_home/.config/containers/containers.conf.d"
 
     ensure_subid_entry /etc/subuid "$service_user"
     ensure_subid_entry /etc/subgid "$service_user"
     ensure_rootless_idmap_helpers
+    ensure_nac_prerequisites
 
     mkdir -p \
         "$service_home" \
         "$service_home/.config/containers" \
+        "$hooks_dir" \
+        "$containers_conf_dir" \
         "$service_home/.local/share/containers" \
         "$graph_root"
     chown "$service_user:$service_group" "$service_home"
@@ -553,6 +622,29 @@ ensure_rootless_podman_ready() {
         "$service_home/.local/share" \
         "$service_home/.local/share/containers" \
         "$graph_root"
+
+    cat > "$containers_conf_dir/99-kautuka-hooks.conf" <<EOF
+[engine]
+hooks_dir = ["$hooks_dir", { append = true }]
+EOF
+    chmod 0644 "$containers_conf_dir/99-kautuka-hooks.conf"
+    chown "$service_user:$service_group" "$containers_conf_dir/99-kautuka-hooks.conf"
+
+    cat > "$hooks_dir/kautuka_hook.json" <<EOF
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "$hooks_dir/kautuka_hook.py",
+    "timeout": 45
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["createRuntime"]
+}
+EOF
+    chmod 0644 "$hooks_dir/kautuka_hook.json"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.json"
 
     loginctl enable-linger "$service_user"
     validate_linger_enabled "$service_user"
@@ -716,6 +808,8 @@ write_manager_user_unit() {
     local unit_path="$1"
     local install_root="$2"
     local visible_root="$3"
+    local selinux_env=''
+    if [[ "${4:-false}" == 'true' ]]; then selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'; fi
 
     cat > "$unit_path" <<EOF
 [Unit]
@@ -730,6 +824,7 @@ ExecStart=${install_root}/current/kautuka-manager
 Environment=Kautuka__Mode=prod
 Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${visible_root}/logs/manager
+${selinux_env}
 Restart=always
 RestartSec=5
 Delegate=yes
@@ -1069,6 +1164,7 @@ grant_socket_group_membership() {
 # 0700 so the system-scope services could never traverse into it.
 install_socket_runtime_dirs() {
     local service_user="$1"
+    local service_group="${2:-$1}"
     local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'
 
     install -d -m 0755 /usr/lib/tmpfiles.d
@@ -1089,6 +1185,7 @@ install_socket_runtime_dirs() {
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
             'd /run/kautuka 0755 root root -' \
             'f /run/kautuka-db-writer.lock 0644 root root -'
+        printf 'd /run/kautuka/networkaccess-envoy 0710 %s %s -\n' "$service_user" "$service_group"
 
         local entry
         local service_key
@@ -2056,6 +2153,15 @@ uninstall_release() {
             best_effort_remove_file "$user_unit_dir/$unit"
         done
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" daemon-reload
+        best_effort_run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman pod rm -f kautuka-egress >/dev/null 2>&1 || true
+        best_effort_run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" podman network rm -f kautuka-workload kautuka-outside >/dev/null 2>&1 || true
+        best_effort_remove_file "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.json"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_hook.py"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_workload.nft.json.tmpl"
+        best_effort_remove_file "$service_home/.config/containers/hooks.d/kautuka_package_proxy.nft.json.tmpl"
+        best_effort_remove_dir_if_empty "$service_home/.config/containers/hooks.d"
+        best_effort_remove_dir_if_empty "$service_home/.config/containers/containers.conf.d"
         best_effort_remove_dir_if_empty "$user_unit_dir/kautuka.target.wants"
         best_effort_remove_dir_if_empty "$user_unit_dir/default.target.wants"
         best_effort_remove_dir_if_empty "$user_unit_dir"
@@ -2724,7 +2830,7 @@ PY
     usermod --append --groups "$service_group" kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-credentials
-    install_socket_runtime_dirs "$service_user"
+    install_socket_runtime_dirs "$service_user" "$service_group"
     if id -nG kautuka-channelhost | tr ' ' '\n' | grep -Fxq "$service_group"; then
         fail "kautuka-channelhost must not belong to the broad appliance group: $service_group"
     fi
@@ -2784,6 +2890,14 @@ PY
     copy_runtime_payload "$content_root" "$version_root"
     chmod +x "$version_root/kautuka-manager"
 
+    local hooks_dir="$service_home/.config/containers/hooks.d"
+    local envoy_selinux_enabled=false
+    install_envoy_selinux_policy "$version_root/scripts/kautuka_envoy.cil"
+    install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
+    chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
+
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
     local channel_security_root="$internal_state_root/security"
@@ -2800,7 +2914,7 @@ PY
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
 
-    write_manager_user_unit "$unit_path" "$install_root" "$visible_root"
+    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled"
     chmod 0644 "$unit_path"
     chown -R "$service_user:$service_group" "$unit_dir"
 

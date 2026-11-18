@@ -79,7 +79,7 @@ public sealed class RemoteMcpSdkTransportTests
                 Interlocked.Increment(ref resolutions);
                 return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [Assert.Single(keys)] = secret });
             }, CredentialNamespace: "fixture-incarnation", ProtocolVersion: protocolVersion);
-        await using (McpClient client = await new McpHttpClientFactory().CreateAsync(new HttpClientTransportOptions { Endpoint = endpoint }, true, context, TestContext.Current.CancellationToken))
+        await using (McpClient client = await new McpHttpClientFactory(new AllowAllTestChecker()).CreateAsync(new HttpClientTransportOptions { Endpoint = endpoint }, true, context, TestContext.Current.CancellationToken))
         {
             IList<McpClientTool> tools = await client.ListToolsAsync(cancellationToken: TestContext.Current.CancellationToken);
             Assert.Equal("[redacted]", Assert.Single(tools).Description);
@@ -93,5 +93,13 @@ public sealed class RemoteMcpSdkTransportTests
         Assert.Equal(requests.Count, resolutions);
         if (protocolVersion is not null) Assert.Equal(protocolVersion, initializedVersion);
         await app.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    private sealed class AllowAllTestChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+    {
+        public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
+            Kautuka.NetworkAccess.Client.OutboundTarget target,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("test_allowed"));
     }
 }

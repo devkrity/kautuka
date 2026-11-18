@@ -46,20 +46,23 @@ internal sealed partial class McpAgentToolProvider
             return new AgentToolSurfaceContribution([], Complete: true);
         }
 
+        List<string> unavailable = [.. activeDefs.Where(static item => item.Definition.Transport == McpTransport.Http && item.Definition.RequiresCredentialReentry).Select(static item => string.IsNullOrWhiteSpace(item.Definition.Name) ? item.Definition.Id : item.Definition.Name)];
         bool skippedLegacy = activeDefs.RemoveAll(static item => item.Definition.Transport == McpTransport.Http && item.Definition.RequiresCredentialReentry) > 0;
 
         Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)>[] tasks = activeDefs
-            .Select(binding => ConnectSafeAsync(binding.Definition, binding.Binding, context, ct))
+            .Select(binding => ConnectSafeAsync(binding.Definition, context, ct))
             .ToArray();
         (string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)[] results = await Task.WhenAll(tasks).ConfigureAwait(false);
 
         var entries = new List<AgentToolSurfaceEntry>();
         bool complete = !skippedLegacy;
-        foreach ((_, IReadOnlyList<AgentToolSurfaceEntry>? listed) in results)
+        foreach ((string id, IReadOnlyList<AgentToolSurfaceEntry>? listed) in results)
         {
             if (listed is null)
             {
                 complete = false;
+                McpServerDefinition failed = activeDefs.First(item => string.Equals(item.Definition.Id, id, StringComparison.Ordinal)).Definition;
+                unavailable.Add(string.IsNullOrWhiteSpace(failed.Name) ? failed.Id : failed.Name);
                 continue;
             }
 
@@ -67,7 +70,7 @@ internal sealed partial class McpAgentToolProvider
         }
 
         McpAgentToolProviderLog.TotalToolsAvailable(logger, context.AgentId, entries.Count);
-        return new AgentToolSurfaceContribution(entries, complete);
+        return new AgentToolSurfaceContribution(entries, complete, unavailable);
     }
 
     public ValueTask<IReadOnlyList<AIFunction>> HydrateAsync(
@@ -115,6 +118,10 @@ internal sealed partial class McpAgentToolProvider
                     entry.Name,
                     entry.Description,
                     McpToolInvocationCodec.ParseToolJsonSchema(entry.JsonSchema),
+                    entry.ArtifactDigest,
+                    entry.ImageDigest,
+                    entry.ExecutionConfigHash,
+                    entry.EffectiveEndpointHash,
                     context));
             }
 
@@ -133,6 +140,10 @@ internal sealed partial class McpAgentToolProvider
         string toolName,
         string description,
         JsonElement jsonSchema,
+        string? artifactDigest,
+        string? imageDigest,
+        string? executionConfigHash,
+        string? effectiveEndpointHash,
         AgentToolContext context)
     {
         return new McpProxyAIFunction(
@@ -176,6 +187,15 @@ internal sealed partial class McpAgentToolProvider
                         : $"Remote connector '{serverDef.Name}' needs its authentication updated. Ask the connector owner or an administrator.");
                 }
 
+                if (string.IsNullOrWhiteSpace(executionConfigHash)
+                    || !string.Equals(executionConfigHash, AgentToolingFingerprint.ConnectorExecutionHash(serverDef), StringComparison.Ordinal))
+                    throw new InvalidOperationException($"Connector '{serverDef.Name}' changed since this run started. Test the connection and start a new run.");
+                if (serverDef.Transport == McpTransport.Container
+                    && (string.IsNullOrWhiteSpace(imageDigest)
+                        || !string.Equals(imageDigest, serverDef.LocalImageDigest, StringComparison.OrdinalIgnoreCase)
+                        || !string.Equals(artifactDigest, serverDef.LocalArtifactDigest, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException($"Connector '{serverDef.Name}' changed since this run started. Test the connection and start a new run.");
+
                 AgentToolInvocationContextState? invocationContext = AgentToolInvocationContext.Current;
                 McpAgentToolProviderLog.ConnectorToolInvoking(
                     logger,
@@ -192,7 +212,9 @@ internal sealed partial class McpAgentToolProvider
                 {
                     try
                     {
-                        return await InvokeHttpAsync(serverDef, toolName, arguments, context, cancellationToken).ConfigureAwait(false);
+                        if (string.IsNullOrWhiteSpace(effectiveEndpointHash))
+                            throw new InvalidOperationException("The connector endpoint was not pinned. Start a new run.");
+                        return await InvokeHttpAsync(serverDef, toolName, arguments, context, effectiveEndpointHash, executionConfigHash!, cancellationToken).ConfigureAwait(false);
                     }
                     catch (RemoteMcpConfigurationException ex)
                     {
@@ -200,13 +222,13 @@ internal sealed partial class McpAgentToolProvider
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
-                        throw new InvalidOperationException(RemoteMcpFailureMessages.Describe(ex));
+                        throw new InvalidOperationException(RemoteMcpFailureMessages.Describe(ex) + " If the connector's tools have changed, start a new run.");
                     }
                 }
 
                 if (serverDef.Transport == McpTransport.Container)
                 {
-                    return await InvokeContainerAsync(serverDef, binding, toolName, arguments, context, cancellationToken).ConfigureAwait(false);
+                    return await InvokeContainerAsync(serverDef, binding, toolName, arguments, context, imageDigest!, cancellationToken).ConfigureAwait(false);
                 }
 
                 throw new NotSupportedException($"MCP transport '{serverDef.Transport}' is not supported. Only Container and Http transports are supported.");
@@ -218,13 +240,17 @@ internal sealed partial class McpAgentToolProvider
         string toolName,
         AIFunctionArguments arguments,
         AgentToolContext context,
+        string effectiveEndpointHash,
+        string executionConfigHash,
         CancellationToken cancellationToken)
     {
         McpClient client = await CreateHttpClientAsync(
             serverDef,
             context.UserId,
             context,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            effectiveEndpointHash,
+            expectedExecutionHash: executionConfigHash).ConfigureAwait(false);
         await using (client.ConfigureAwait(false))
         {
             Dictionary<string, object?> toolInput = McpToolInvocationCodec.ParseInput(
@@ -242,6 +268,7 @@ internal sealed partial class McpAgentToolProvider
         string toolName,
         AIFunctionArguments arguments,
         AgentToolContext context,
+        string expectedImageDigest,
         CancellationToken cancellationToken)
     {
         ToolPolicyDecision executionDecision = toolExecutionPolicyService.EvaluateConnectorExposure(
@@ -260,7 +287,7 @@ internal sealed partial class McpAgentToolProvider
 
         bool allowInternalSystemConnector = serverDef.IsInternalSystemConnector;
         string scopedConnectorId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(context.UserId, serverDef.Id);
-        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, context);
+        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(context);
         var callRequest = new WorkspaceMcpContainerCallRequest
         {
             Runtime = new ManagerRuntimeSettingsMessage(),
@@ -271,7 +298,14 @@ internal sealed partial class McpAgentToolProvider
             AllowInternalSystemConnector = allowInternalSystemConnector,
             ExecutionContext = binding.ExecutionContext,
             HostArtifactDirectory = ResolveHostArtifactDirectory(context) ?? string.Empty,
+            ExpectedImageDigest = expectedImageDigest,
+            ExpectedSourceDigest = serverDef.LocalArtifactDigest ?? string.Empty,
+            VerifyExecutionCommand = true,
+            ExpectedCommand = serverDef.ContainerCommand ?? string.Empty,
+            ExpectedMcpProtocolVersion = serverDef.McpProtocolVersion ?? string.Empty,
+            ExpectedServerType = serverDef.ServerType ?? string.Empty,
         };
+        callRequest.ExpectedArguments.AddRange(serverDef.ContainerArgs);
         if (workspaceContext is not null)
         {
             callRequest.WorkspaceContext = workspaceContext;

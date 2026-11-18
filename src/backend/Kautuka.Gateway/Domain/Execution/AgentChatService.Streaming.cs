@@ -12,6 +12,7 @@ using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Infrastructure.Observability;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
@@ -349,7 +350,11 @@ internal sealed partial class AgentChatService
 
             bool isContinuationResume = approvalResponse is not null
                 || continuationRequest?.Enabled == true;
-            AgentRuntimeResult runtimeResult = await runtimeFactory.BuildAsync(agentId, sessionId, userId, stageTransitionId, memoryFacts, isContinuationResume, string.Equals(runTrigger, "workflow_test", StringComparison.Ordinal), continuationRequest?.SessionStateJson, continuationRequest?.EffectiveBehaviorJson, ct).ConfigureAwait(false);
+            AgentRuntimeResult runtimeResult;
+            using (NetworkAccessContext.BeginScope(userId: userId, agentId: agentId, purpose: "agent-run", service: "ai-model"))
+            {
+                runtimeResult = await runtimeFactory.BuildAsync(agentId, sessionId, userId, stageTransitionId, memoryFacts, isContinuationResume, string.Equals(runTrigger, "workflow_test", StringComparison.Ordinal), continuationRequest?.SessionStateJson, continuationRequest?.EffectiveBehaviorJson, ct).ConfigureAwait(false);
+            }
             RestoreRunActivity();
             if (!runtimeResult.IsSuccess)
             {
@@ -383,6 +388,15 @@ internal sealed partial class AgentChatService
             }
 
             AgentRuntime runtime = runtimeResult.Runtime;
+            if (!isContinuationResume && runtime.EffectiveBehavior.Tooling.Definitions?.UnavailableConnectors is { Count: > 0 } unavailable)
+            {
+                string notice = $"[These connectors are unavailable for this run: {string.Join(", ", unavailable)}. Run Test connection in Connectors, then start a new run.]\n\n";
+                await foreach (NaradPersistedEvent delta in EmitDomainAsync(earlyEventWriter, new GatewayChatTokenDelta(notice, false), runtimeEventContext, assistantMessageLifecycle, ct).ConfigureAwait(false))
+                {
+                    yield return delta;
+                    RestoreRunActivity();
+                }
+            }
             runActivity?.SetTag("kautuka.agent.name", runtime.AgentName);
             if (runActivity is not null)
             {
@@ -613,6 +627,8 @@ internal sealed partial class AgentChatService
             continuationRequest?.ActiveElapsed ?? TimeSpan.Zero,
             ct);
         ct = runBudget.Token;
+        using IDisposable nacScope = NetworkAccessContext.BeginScope(userId: userId, agentId: agentId, purpose: "agent-run", service: "ai-model");
+        NetworkAccessDeniedException? aiCallNacDenial = null;
 
         var eventWriter = CreateExecutionEventWriter();
         messageLifecycle ??= new AssistantMessageLifecycle(
@@ -1149,23 +1165,29 @@ internal sealed partial class AgentChatService
         }
         catch (Exception ex)
         {
+            NetworkAccessDeniedException? nacEx = ChatToolNetworkAccessHelper.FindNetworkAccessDeniedException(ex);
+
             if (!string.IsNullOrWhiteSpace(activeToolCallId)
                 && wireEmittedToolCallIds.Contains(activeToolCallId))
             {
+                JsonElement toolFinishedElement = await ChatToolNetworkAccessHelper.BuildToolCallFinishedPayloadAsync(
+                    ex,
+                    nacEx,
+                    activeToolCallId,
+                    activeToolName).ConfigureAwait(false);
+
                 await eventWriter.WriteRuntimeAsync(
                     writer,
                     NaradEventTypes.ToolCallFinished,
-                    JsonSerializer.SerializeToElement(new JsonObject
-                    {
-                        ["toolCallId"] = activeToolCallId,
-                        ["toolName"] = activeToolName,
-                        ["response"] = null,
-                        ["message"] = ex.Message,
-                        ["outcome"] = "error",
-                    }, KautukaJsonContext.Default.JsonObject),
+                    toolFinishedElement,
                     runtimeEventContext!,
                     CancellationToken.None).ConfigureAwait(false);
             }
+            else if (nacEx is not null)
+            {
+                aiCallNacDenial = nacEx;
+            }
+
             result = "failed";
             errorMsg = ex.Message;
             AgentChatServiceLog.AgentStreamFailed(logger, ex, agentId);
@@ -1179,7 +1201,23 @@ internal sealed partial class AgentChatService
                     if (errorMsg is not null)
                     {
                         await eventWriter.WriteAsync(writer, new GatewayChatTokenDelta($"[Error: {errorMsg}]", false), runtimeEventContext!, messageLifecycle, CancellationToken.None).ConfigureAwait(false);
-                        await eventWriter.WriteAsync(writer, new GatewayChatStreamDone(Error("agent", agentId, sessionId, errorMsg)), runtimeEventContext!, messageLifecycle, CancellationToken.None).ConfigureAwait(false);
+                        GatewayRunState terminalRunState = aiCallNacDenial is not null
+                            ? new GatewayRunState(
+                                GatewayRunPhases.Failed,
+                                ErrorCode: aiCallNacDenial.NaradReason,
+                                ErrorMessage: errorMsg,
+                                Destination: aiCallNacDenial.Destination,
+                                Port: aiCallNacDenial.Port,
+                                RequestId: aiCallNacDenial.RequestId,
+                                ApprovalUrl: "/network-access")
+                            : new GatewayRunState(GatewayRunPhases.Failed);
+
+                        await eventWriter.WriteAsync(
+                            writer,
+                            new GatewayChatStreamDone(new GatewayChatResult("agent", agentId, sessionId, $"[{errorMsg}]", false, new GatewayMetrics(0, 0, 0), null, null, [], Run: terminalRunState)),
+                            runtimeEventContext!,
+                            messageLifecycle,
+                            CancellationToken.None).ConfigureAwait(false);
                     }
                     else
                     {

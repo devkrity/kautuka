@@ -1,0 +1,165 @@
+{
+  "schemaVersion": 1,
+  "seeds": [
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "api.openai.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "api.anthropic.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "api.groq.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "api.mistral.ai",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "openrouter.ai",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "generativelanguage.googleapis.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "channelhost",
+      "destination": "api.telegram.org",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "channelhost",
+      "destination": "slack.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "channelhost",
+      "destination": "files.slack.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "channelhost",
+      "destination": "wss-primary.slack.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "channelhost",
+      "destination": "wss-backup.slack.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "system",
+      "userId": "",
+      "agentId": "",
+      "destination": "198.18.250.249",
+      "destKind": "ip",
+      "port": 20101,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "package-proxy",
+      "destination": "",
+      "destKind": "any-public",
+      "port": 0,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "package-proxy",
+      "destination": "registry.npmjs.org",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "package-proxy",
+      "destination": "pypi.org",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "package-proxy",
+      "destination": "files.pythonhosted.org",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    }
+  ]
+}

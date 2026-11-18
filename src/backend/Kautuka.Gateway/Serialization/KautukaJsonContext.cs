@@ -8,6 +8,7 @@ using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Domain.Workflows;
 using Kautuka.Gateway.Endpoints.Runtime;
+using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Connectors;
 
 using Microsoft.Extensions.AI;
@@ -15,6 +16,8 @@ using Microsoft.Extensions.AI;
 namespace Kautuka.Gateway.Serialization;
 
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(NetworkAccessApprovalLimitsDto))]
+[JsonSerializable(typeof(GatewayCatalogInstallResponse))]
 [JsonSerializable(typeof(GatewaySlackPairingStatusResponse))]
 [JsonSerializable(typeof(ExecutionQuarantineItem))]
 [JsonSerializable(typeof(ExecutionQuarantineItem[]))]
@@ -348,6 +351,30 @@ namespace Kautuka.Gateway.Serialization;
 [JsonSerializable(typeof(ConnectorOAuthCatalogResponse))]
 [JsonSerializable(typeof(ConnectorOAuthStatusItem))]
 [JsonSerializable(typeof(ConnectorOAuthDisconnectResponse))]
+[JsonSerializable(typeof(NetworkAccessRequestDto))]
+[JsonSerializable(typeof(NetworkAccessRequestDto[]))]
+[JsonSerializable(typeof(UserPrivilegesSummaryDto))]
+[JsonSerializable(typeof(NetworkAccessBrakeDto))]
+[JsonSerializable(typeof(NetworkRequestsResponseDto))]
+[JsonSerializable(typeof(NetworkAccessRuleDto))]
+[JsonSerializable(typeof(NetworkAccessRuleDto[]))]
+[JsonSerializable(typeof(NetworkRulesResponseDto))]
+[JsonSerializable(typeof(RequestDecisionDto))]
+[JsonSerializable(typeof(RequestDecisionResponseDto))]
+[JsonSerializable(typeof(CreateOrUpdateRuleDto))]
+[JsonSerializable(typeof(NetworkAccessActivityDto))]
+[JsonSerializable(typeof(NetworkAccessActivityDto[]))]
+[JsonSerializable(typeof(NetworkActivityResponseDto))]
+[JsonSerializable(typeof(UserNetworkPrivilegesDto))]
+[JsonSerializable(typeof(UpdateUserNetworkPrivilegesDto))]
+[JsonSerializable(typeof(UpdateUserBrakeDto))]
+[JsonSerializable(typeof(UpdateSystemBrakeDto))]
+[JsonSerializable(typeof(ImageCompatRequestDto))]
+[JsonSerializable(typeof(ImageCompatRequestDto[]))]
+[JsonSerializable(typeof(ImageCompatProfileDto))]
+[JsonSerializable(typeof(ImageCompatProfileDto[]))]
+[JsonSerializable(typeof(ImageCompatResponseDto))]
+[JsonSerializable(typeof(CreateCompatProfileDto))]
 internal sealed partial class KautukaJsonContext : JsonSerializerContext
 {
 }

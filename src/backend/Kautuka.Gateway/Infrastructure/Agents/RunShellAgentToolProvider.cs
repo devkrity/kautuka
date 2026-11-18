@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Execution;
+
 using System.Text.Json.Nodes;
 
 using Microsoft.Extensions.AI;

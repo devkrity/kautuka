@@ -2,6 +2,7 @@ import { BrandMark } from '@/components/BrandMark';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { APPROVAL_REFRESH_INTERVAL_MS, usePendingApprovals } from '@/features/approvals';
+import { useNetworkPendingCount } from '@/features/network-access';
 import { useCurrentUser, UserProfileDialog, UserVersionInfo } from '@/features/auth';
 import { ROLE_ADMIN } from '@/features/settings';
 import { cn } from '@/lib/utils';
@@ -16,6 +17,7 @@ import {
   MemoryStick,
   MessageSquare,
   Moon,
+  Network,
   Plug,
   Settings,
   ShieldCheck,
@@ -56,6 +58,7 @@ const navItems: Array<{
   { to: '/workspace', label: 'Workspace', icon: MessageSquare },
   { to: '/workflows', label: 'Workflows', icon: GitBranch },
   { to: '/approvals', label: 'Approvals', icon: ShieldCheck },
+  { to: '/network-access', label: 'Network access', icon: Network },
   { to: '/autopilot', label: 'Auto-Pilot', icon: Timer },
   { to: '/connectors', label: 'Connectors', icon: Plug },
   { to: '/skills', label: 'Skills', icon: Sparkles },
@@ -92,6 +95,9 @@ export function Header({
     refetchIntervalInBackground: false,
   });
   const pendingApprovals = pendingList.length;
+
+  const { data: networkPending } = useNetworkPendingCount(authenticated);
+  const pendingNetwork = networkPending?.count ?? 0;
 
   const { data: user } = useCurrentUser();
   const userInitials = user?.displayName
@@ -160,19 +166,27 @@ export function Header({
                     ) : null}
                   </span>
                 )}
-                {item.to === '/approvals' && pendingApprovals > 0 && (
-                  <span
-                    className={cn(
-                      'inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-xs font-semibold',
-                      active
-                        ? 'bg-primary-foreground text-primary-fill'
-                        : 'bg-primary-fill text-primary-foreground',
-                      collapsed ? 'absolute -right-1 -top-1' : 'ml-auto'
-                    )}
-                  >
-                    {pendingApprovals > 99 ? '99+' : pendingApprovals}
-                  </span>
-                )}
+                {(() => {
+                  const badgeCount =
+                    item.to === '/approvals'
+                      ? pendingApprovals
+                      : item.to === '/network-access'
+                        ? pendingNetwork
+                        : 0;
+                  return badgeCount > 0 ? (
+                    <span
+                      className={cn(
+                        'inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-xs font-semibold',
+                        active
+                          ? 'bg-primary-foreground text-primary-fill'
+                          : 'bg-primary-fill text-primary-foreground',
+                        collapsed ? 'absolute -right-1 -top-1' : 'ml-auto'
+                      )}
+                    >
+                      {badgeCount > 99 ? '99+' : badgeCount}
+                    </span>
+                  ) : null;
+                })()}
               </Link>
             );
           })}

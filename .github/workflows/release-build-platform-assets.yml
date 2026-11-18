@@ -170,6 +170,9 @@ jobs:
           printf 'RELEASE_MANIFEST_PRIVATE_KEY_PATH=%s\n' "$private_key_path" >> "$GITHUB_ENV"
           printf 'RELEASE_MANIFEST_PUBLIC_KEY_PATH=%s\n' "$public_key_path" >> "$GITHUB_ENV"
 
+      - name: Install OCI archive tooling
+        run: sudo apt-get update && sudo apt-get install -y skopeo
+
       - name: Build Linux platform, WSL rootfs, and descriptor assets
         env:
           CHANNEL: ${{ inputs.channel }}

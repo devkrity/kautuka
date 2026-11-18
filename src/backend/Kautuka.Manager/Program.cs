@@ -3,7 +3,9 @@ using Kautuka.Manager.Grpc;
 using Kautuka.Manager.Hosting;
 using Kautuka.Manager.RuntimeContainer.Configuration;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
+using Kautuka.NetworkAccessController;
 using Kautuka.Telemetry.DependencyInjection;
 using Kautuka.Telemetry.Security;
 using Kautuka.Telemetry.Telemetry;
@@ -23,8 +25,35 @@ builder.AddKautukaLogging(LogLevel.Debug);
 builder.AddKautukaTelemetry(
     KautukaActivitySources.ProcessKind.Manager,
     KautukaActivitySources.Component.Manager);
+
+// -----------------------------------------------------------------------
+// Resolve canonical shared data root.
+// All mutable state is anchored through the shared host path policy.
+// -----------------------------------------------------------------------
+string managerDataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
+managerDataRoot = Path.GetFullPath(managerDataRoot);
+KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
+string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
+var podmanCommandRunner = new PodmanCommandRunner();
+WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
+if (OperatingSystem.IsWindows())
+{
+    try
+    {
+        windowsPodmanDevEgress = await WindowsPodmanDevEgressOptions.CreateAsync(
+            podmanCommandRunner,
+            Path.Combine(managerDataRoot, "networkAccess", "envoy-certs"),
+            CancellationToken.None).ConfigureAwait(false);
+    }
+    catch (Exception ex)
+    {
+        await Console.Error.WriteLineAsync(
+            $"Windows Podman NAC mTLS setup failed; workload startup will remain closed: {ex.Message}").ConfigureAwait(false);
+    }
+}
+
 builder.Services.AddSingleton<WorkspaceRuntimePaths>();
-builder.Services.AddSingleton<PodmanCommandRunner>();
+builder.Services.AddSingleton(podmanCommandRunner);
 builder.Services.AddSingleton(static sp => WorkspaceSidecarCatalogLoader.Load(
     Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
     sp.GetRequiredService<WorkspaceRuntimePaths>(),
@@ -38,6 +67,84 @@ builder.Services.AddSingleton(static sp =>
         requirePresent: !environment.IsDevelopment(),
         logger);
 });
+
+// -----------------------------------------------------------------------
+// Network Access Controller (NAC v7) module & Egress infrastructure
+// -----------------------------------------------------------------------
+builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
+    new WorkloadRegistry(sp.GetRequiredService<ILogger<WorkloadRegistry>>()));
+builder.Services.AddSingleton(sp =>
+    new NetworkAccessPolicyStore(
+        Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
+        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
+builder.Services.AddSingleton(sp =>
+    new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl"),
+        10 * 1024 * 1024, sp.GetRequiredService<ILogger<NetworkAccessAuditRing>>()));
+builder.Services.AddSingleton(_ =>
+    new ImageCompatibilityStore(Path.Combine(managerDataRoot, "networkAccess", "compat", "image-compat.json")));
+builder.Services.AddSingleton(_ =>
+    new WorkloadAddressAllocator(Path.Combine(managerDataRoot, "networkAccess", "ip-cursor.json")));
+builder.Services.AddSingleton<WorkloadPostStartVerifier>();
+string envoySocketDir = Path.Combine(socketRoot, "networkaccess-envoy");
+string hookStateDir = Environment.GetEnvironmentVariable("XDG_STATE_HOME") is { Length: > 0 } xdgState
+    ? Path.Combine(xdgState, "kautuka", "nac")
+    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "state", "kautuka", "nac");
+builder.Services.AddSingleton(sp =>
+    new EgressTopologyManager(
+        sp.GetRequiredService<PodmanCommandRunner>(),
+        sp.GetRequiredService<WorkloadAddressAllocator>(),
+        sp.GetRequiredService<WorkloadPostStartVerifier>(),
+        sp.GetRequiredService<IWorkloadRegistry>(),
+        Path.Combine(managerDataRoot, "networkAccess"),
+        sp.GetService<ILogger<EgressTopologyManager>>(),
+        envoySocketHostDir: envoySocketDir,
+        hookStateDirectory: hookStateDir,
+        windowsDecisionEndpointIp: windowsPodmanDevEgress?.DecisionEndpointAddress.ToString(),
+        windowsEnvoyCertificateDirectory: windowsPodmanDevEgress?.EnvoyCertificateDirectory,
+        windowsPodmanMachineName: windowsPodmanDevEgress?.PodmanMachineName,
+        windowsPodmanHookStateDirectory: windowsPodmanDevEgress?.RemoteHookStateDirectory,
+        desiredStateStore: sp.GetRequiredService<WorkspaceDesiredStateStore>(),
+        imageCompatibilityStore: sp.GetRequiredService<ImageCompatibilityStore>(),
+        policyStore: sp.GetRequiredService<NetworkAccessPolicyStore>(),
+        useDevelopmentSelinuxDomain: EgressTopologyManager.ShouldUseEnvoySelinuxDomain(
+            OperatingSystem.IsLinux(), builder.Environment.IsDevelopment(),
+            Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"),
+            Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX")),
+        imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>()));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
+builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
+builder.Services.AddSingleton<WorkloadLaunchGate>();
+builder.Services.AddManagerNetworkAccessController();
+
+if (OperatingSystem.IsLinux())
+{
+    builder.Services.AddSingleton<IHostedService>(sp =>
+        EnvoyAuthorizationHost.Create(
+            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
+                SocketPath = Path.Combine(socketRoot, "networkaccess-envoy", "envoy.sock"),
+            }));
+}
+else if (OperatingSystem.IsWindows() && windowsPodmanDevEgress is not null)
+{
+    builder.Services.AddSingleton<IHostedService>(sp =>
+        EnvoyAuthorizationHost.Create(
+            sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
+            new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.TcpMtls,
+                LockFilePath = Path.Combine(managerDataRoot, "networkAccess", "networkaccess.lock"),
+                TcpBindAddress = windowsPodmanDevEgress.DecisionEndpointAddress,
+                TcpPort = 50051,
+                ServerCertificate = windowsPodmanDevEgress.ServerCertificate,
+                CaCertificate = windowsPodmanDevEgress.CaCertificate,
+            }));
+}
+
 builder.Services.AddSingleton<PodmanImageArchiveStore>();
 builder.Services.AddSingleton<IContainerTool, PodmanContainerTool>();
 builder.Services.AddSingleton<IManagerRuntimeAdapter, ManagerRuntimeAdapter>();
@@ -65,7 +172,10 @@ builder.Services.AddSingleton<IHostedService>(sp => new WorkspaceContainerSuperv
     sp.GetRequiredService<WorkspaceReadinessGate>(),
     sp.GetRequiredService<WorkspaceExecTracker>(),
     sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
-    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>()));
+    sp.GetRequiredService<ILogger<WorkspaceContainerSupervisorWorker>>(),
+    socketRoot,
+    sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>()));
+
 builder.Services.AddGrpc(options =>
 {
     options.MaxReceiveMessageSize = GrpcMaxMessageSizeBytes;
@@ -77,14 +187,6 @@ KautukaMaintenanceMode.SuppressApplicationHostedServices(
     builder.Services,
     typeof(ManagerRuntimeHealthWarmWorker));
 
-// -----------------------------------------------------------------------
-// Resolve canonical shared data root.
-// All mutable state is anchored through the shared host path policy.
-// -----------------------------------------------------------------------
-string managerDataRoot = KautukaHostPathPolicy.ResolveServiceStateRoot(builder.Configuration, "manager");
-managerDataRoot = Path.GetFullPath(managerDataRoot);
-KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
-
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
     managerDataRoot,
     "Manager",
@@ -95,6 +197,9 @@ var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
         new LocalMtlsClientCertificate(
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCommonName,
             Kautuka.Manager.Protos.ManagerClientIdentities.UpdateServiceCertificateFileName),
+        new LocalMtlsClientCertificate(
+            Kautuka.Manager.Protos.ManagerClientIdentities.ChannelHostCommonName,
+            Kautuka.Manager.Protos.ManagerClientIdentities.ChannelHostCertificateFileName),
     ]);
 
 builder.WebHost.ConfigureKestrel(options =>

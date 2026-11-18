@@ -26,7 +26,9 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     WorkspaceReadinessGate readinessGate,
     WorkspaceExecTracker execTracker,
     IOptions<ManagerContainerStartupOptions> startupOptions,
-    ILogger<WorkspaceContainerSupervisorWorker> logger) : BackgroundService
+    ILogger<WorkspaceContainerSupervisorWorker> logger,
+    string socketRoot,
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : BackgroundService
 {
     /// <summary>
     /// Maximum time between drift audits when no exec activity is observed.
@@ -34,6 +36,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     /// </summary>
     private static readonly TimeSpan driftAuditInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan recoveryRetryInterval = TimeSpan.FromSeconds(10);
+    private readonly long managerStartedTimestamp = Stopwatch.GetTimestamp();
+    private bool developmentSocketCheckCompleted;
 
     // Tracks every container spawned during reconcile so StopAsync can shut them all down.
     private readonly ConcurrentDictionary<string, byte> trackedContainers = new(StringComparer.OrdinalIgnoreCase);
@@ -86,7 +90,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     {
         using var triggerCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        TimeSpan nextDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        TimeSpan normalDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        TimeSpan nextDelay = GetNextReconcileDelay(normalDelay);
         if (!readinessGate.IsReady)
         {
             LogRecoveryRetryScheduled(logger, (int)nextDelay.TotalSeconds);
@@ -106,6 +111,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
         return trigger;
     }
+
+    internal TimeSpan GetNextReconcileDelay(TimeSpan normalDelay)
+        => ApplianceHostExposureAssert.BoundNextReconcileDelay(
+            runtimePaths.RequireSidecars,
+            developmentSocketCheckCompleted,
+            Stopwatch.GetElapsedTime(managerStartedTimestamp),
+            normalDelay);
 
     private static WorkspaceReconcileTriggerKind ResolveReconcileTrigger(
         Task completed,
@@ -200,6 +212,15 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             logger.LogWarning("Workspace sidecars are not ready; continuing because strict sidecar mode is disabled.");
         }
 
+        if (egressTopologyManager is not null)
+        {
+            if (!egressTopologyManager.IsPackageProxyRegistered)
+            {
+                egressTopologyManager.SetPackageProxyReady(false);
+                logger.LogWarning("Package proxy is unavailable or not registered. Package fetches will fail closed until it is healthy.");
+            }
+        }
+
         ManagedContainerReconcileResult sidecarOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
             "sidecar",
             sidecarSupervisor.ManagedContainerNames,
@@ -210,7 +231,16 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             return;
         }
 
-        ApplianceHostExposureAssert.LogFindings(logger);
+        // The launcher starts Manager before UpdateService and Gateway. Keep the
+        // production checks immediate, but give Development's later services one minute.
+        bool warnForMissingSockets = ApplianceHostExposureAssert.ShouldWarnForMissingSockets(
+            runtimePaths.RequireSidecars,
+            Stopwatch.GetElapsedTime(managerStartedTimestamp));
+        ApplianceHostExposureAssert.LogFindings(logger, socketRoot, warnForMissingSockets);
+        if (!runtimePaths.RequireSidecars && warnForMissingSockets)
+        {
+            developmentSocketCheckCompleted = true;
+        }
 
         if (!hasLiveDesiredState)
         {
@@ -258,7 +288,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         ManagedContainerReconcileResult connectorOrphanResult = await runtimeAdapter.RemoveOrphanedManagedContainersAsync(
             "connector",
             desiredConnectorNames,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            connectorExecutionService.IsTrackedContainerName).ConfigureAwait(false);
         if (!connectorOrphanResult.Succeeded)
         {
             MarkFailed(snapshot, connectorOrphanResult.FailureClass ?? "connector_orphan_reconcile_failed");
@@ -344,6 +375,13 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
     private void SignalRuntimeReady()
     {
+        if (egressTopologyManager is not null && !egressTopologyManager.IsStartupGateOpen)
+        {
+            readinessGate.Reset();
+            logger.LogError("Network access control self-test failed; refusing to open WorkspaceReadinessGate.");
+            return;
+        }
+
         if (readinessGate.IsReady)
         {
             return;

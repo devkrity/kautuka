@@ -9,6 +9,12 @@ namespace Kautuka.Gateway.Domain.Stores;
 /// </summary>
 internal static class ToolApprovalSchemaCompat
 {
+    public static void EnsureToolExecutionColumns(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "tool_approval_requests")) return;
+        EnsureColumn(connection, "execution_started_at", "TEXT");
+        EnsureColumn(connection, "execution_result_json", "TEXT");
+    }
     public static void EnsureAgentDefinitionRevisionColumn(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
