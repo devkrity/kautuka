@@ -561,12 +561,15 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
     private sealed class InProcessManagerServiceClient(WorkspaceGrpcService grpc, Func<bool> failPrivilegeSync) : ManagerService.ManagerServiceClient
     {
         private static readonly TestServerCallContext ctx = new();
+        private static readonly ManagerClientAuthorizationInterceptor limitsInterceptor = new();
+        private static readonly TestServerCallContext getLimitsContext = new("GetApprovalLimits", ManagerClientIdentities.GatewayCommonName);
+        private static readonly TestServerCallContext setLimitsContext = new("SetApprovalLimits", ManagerClientIdentities.GatewayCommonName);
 
         public override AsyncUnaryCall<NetworkAccessApprovalLimitsMessage> GetApprovalLimitsAsync(NetworkAccessActorMessage request, CallOptions options)
-            => Wrap(grpc.GetApprovalLimits(request, ctx));
+            => Wrap(limitsInterceptor.UnaryServerHandler(request, getLimitsContext, grpc.GetApprovalLimits));
 
         public override AsyncUnaryCall<NetworkAccessApprovalLimitsMessage> SetApprovalLimitsAsync(NetworkAccessSetApprovalLimitsRequest request, CallOptions options)
-            => Wrap(grpc.SetApprovalLimits(request, ctx));
+            => Wrap(limitsInterceptor.UnaryServerHandler(request, setLimitsContext, grpc.SetApprovalLimits));
 
         public override AsyncUnaryCall<NetworkAccessListRequestsResponse> ListRequestsAsync(NetworkAccessListRequestsRequest request, CallOptions options)
             => failPrivilegeSync() ? throw new RpcException(new Status(StatusCode.Unavailable, "synthetic manager outage")) : Wrap(grpc.ListRequests(request, ctx));
@@ -630,10 +633,23 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 
     private sealed class TestServerCallContext : ServerCallContext
     {
+        private readonly string method;
+        public TestServerCallContext(string method = "Test", string? certificateName = null)
+        {
+            this.method = method;
+            var http = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+            if (certificateName is not null)
+            {
+                using var rsa = System.Security.Cryptography.RSA.Create(2048);
+                var request = new System.Security.Cryptography.X509Certificates.CertificateRequest($"CN={certificateName}", rsa, System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+                http.Connection.ClientCertificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(1));
+            }
+            state["__HttpContext"] = http;
+        }
         private readonly Metadata headers = [];
         private readonly Metadata trailers = [];
         private readonly Dictionary<object, object> state = [];
-        protected override string MethodCore => "/kautuka.manager.v1.ManagerService/Test";
+        protected override string MethodCore => "/kautuka.manager.v1.ManagerService/" + method;
         protected override string HostCore => "localhost";
         protected override string PeerCore => "inproc";
         protected override DateTime DeadlineCore => DateTime.MaxValue;

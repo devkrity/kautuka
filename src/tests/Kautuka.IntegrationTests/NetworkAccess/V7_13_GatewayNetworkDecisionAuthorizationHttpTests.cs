@@ -1,6 +1,10 @@
 using System.Net;
 using System.Text.Json;
 
+using Grpc.Core;
+
+using Kautuka.Manager.Grpc;
+using Kautuka.Manager.Protos;
 using Kautuka.NetworkAccessController;
 
 namespace Kautuka.IntegrationTests.NetworkAccess;
@@ -155,9 +159,32 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
         Assert.Equal(new NetworkAccessApprovalLimits(100, 10), fixture.PolicyStore.GetApprovalLimits(new NetworkAccessActor("admin", true)));
         using JsonDocument invite = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" }, admin);
         string alice = await LoginAsync(fixture, "alice");
+        using (HttpResponseMessage readDenied = await fixture.SendRawJsonAsync(HttpMethod.Get, "/api/settings/system/network-access", new { }, alice))
+            Assert.Equal(HttpStatusCode.Forbidden, readDenied.StatusCode);
         using HttpResponseMessage denied = await fixture.SendRawJsonAsync(HttpMethod.Put, "/api/settings/system/network-access", new { global = 200, perUser = 20 }, alice);
         Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
         Assert.Equal(new NetworkAccessApprovalLimits(100, 10), fixture.PolicyStore.GetApprovalLimits(new NetworkAccessActor("admin", true)));
+    }
+
+    [Theory]
+    [InlineData("GetApprovalLimits")]
+    [InlineData("SetApprovalLimits")]
+    public async Task ApprovalLimitsInterceptorRejectsNonGatewayCertificates(string method)
+    {
+        var interceptor = new ManagerClientAuthorizationInterceptor();
+        foreach (string name in new[] { ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.UpdateServiceCommonName, "unknown-client" })
+        {
+            var ctx = new TestServerCallContext(method, name);
+            RpcException error = await Assert.ThrowsAsync<RpcException>(() => interceptor.UnaryServerHandler(
+                new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true }, ctx,
+                static (_, _) => Task.FromResult(new NetworkAccessApprovalLimitsMessage())));
+            Assert.Equal(StatusCode.PermissionDenied, error.StatusCode);
+        }
+        var missing = new TestServerCallContext(method);
+        RpcException unauthenticated = await Assert.ThrowsAsync<RpcException>(() => interceptor.UnaryServerHandler(
+            new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true }, missing,
+            static (_, _) => Task.FromResult(new NetworkAccessApprovalLimitsMessage())));
+        Assert.Equal(StatusCode.Unauthenticated, unauthenticated.StatusCode);
     }
     [Fact]
     public async Task RequestsResolveUserScopedConnectorToCatalogueName()

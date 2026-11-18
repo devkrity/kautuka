@@ -72,6 +72,8 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "SetUserPrivileges",
         servicePrefix + "GetBrake",
         servicePrefix + "SetBrake",
+        servicePrefix + "GetApprovalLimits",
+        servicePrefix + "SetApprovalLimits",
         servicePrefix + "GetNetworkAccessStatus",
         servicePrefix + "GetImageCompatibility",
         servicePrefix + "SetImageCompatibility",
