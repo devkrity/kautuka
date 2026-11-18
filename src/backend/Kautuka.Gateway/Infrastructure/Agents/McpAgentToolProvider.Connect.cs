@@ -243,68 +243,6 @@ internal sealed partial class McpAgentToolProvider
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 
-    private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListContainerEntriesAsync(
-        McpServerDefinition serverDef,
-        ResolvedAgentConnectorBinding binding,
-        Dictionary<string, string> env,
-        AgentToolContext context,
-        CancellationToken ct)
-    {
-        ToolPolicyDecision executionDecision = toolExecutionPolicyService.EvaluateConnectorExposure(
-            context.AgentDefinition,
-            binding.ExecutionContext);
-
-        if (!executionDecision.Allowed)
-        {
-            throw new InvalidOperationException(
-                $"Connector execution denied by policy ({executionDecision.ReasonCode}): {executionDecision.Message}");
-        }
-
-        bool allowInternalSystemConnector = serverDef.IsInternalSystemConnector;
-        string scopedConnectorId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(context.UserId, serverDef.Id);
-        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(context);
-        var runtime = new ManagerRuntimeSettingsMessage();
-        var listRequest = new WorkspaceMcpContainerCallRequest
-        {
-            Runtime = runtime,
-            ConnectorId = scopedConnectorId,
-            TimeoutSeconds = serverDef.ReadinessTimeoutSeconds ?? 30,
-            AllowInternalSystemConnector = allowInternalSystemConnector,
-            ExecutionContext = binding.ExecutionContext,
-        };
-        if (workspaceContext is not null)
-        {
-            listRequest.WorkspaceContext = workspaceContext;
-        }
-        listRequest.Environment.AddRange(env.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
-
-        WorkspaceMcpContainerListToolsResponse listResponse = await workspaceGrpcService
-            .ListMcpContainerToolsAsync(listRequest, ct)
-            .ConfigureAwait(false);
-
-        if (!listResponse.Ok)
-        {
-            throw new InvalidOperationException($"Container MCP connector '{serverDef.Id}' tool listing failed: {listResponse.Message}");
-        }
-
-        var entries = new List<AgentToolSurfaceEntry>(listResponse.Tools.Count);
-        foreach (WorkspaceMcpToolMessage tool in listResponse.Tools)
-        {
-            string toolName = tool.Name;
-            string description = string.IsNullOrWhiteSpace(tool.Description)
-                ? $"Container MCP tool '{toolName}' routed via Kautuka.Manager."
-                : tool.Description;
-            entries.Add(AgentToolSurfaceEntry.Describe(
-                AgentToolSurfaceSources.Mcp,
-                serverDef.Id,
-                toolName,
-                description,
-                tool.JsonSchema));
-        }
-
-        return entries;
-    }
-
     private static string? ResolveHostArtifactDirectory(AgentToolContext context)
     {
         string path = context.WorkspaceTool.DescribeAgentWorkspace(context.AgentId, context.UserId).HostWorkspacePath;

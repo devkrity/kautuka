@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -113,40 +112,6 @@ public sealed class WorkloadAddressAllocator
         int subnetOctet = 1 + (index / UsableHostsPerSubnet);
         int hostOctet = 1 + (index % UsableHostsPerSubnet);
         return string.Create(CultureInfo.InvariantCulture, $"10.247.{subnetOctet}.{hostOctet}");
-    }
-
-    /// <summary>
-    /// Computes the 0-based index for a valid workload IP (10.247.1.1 to 10.247.255.254).
-    /// </summary>
-    public static bool TryGetIndexFromIp(string? ip, out int index)
-    {
-        index = -1;
-        if (string.IsNullOrWhiteSpace(ip) || !IPAddress.TryParse(ip.Trim(), out IPAddress? parsed))
-        {
-            return false;
-        }
-
-        byte[] bytes = parsed.GetAddressBytes();
-        if (bytes.Length != 4 || bytes[0] != 10 || bytes[1] != 247)
-        {
-            return false;
-        }
-
-        int subnetOctet = bytes[2];
-        int hostOctet = bytes[3];
-
-        if (subnetOctet < 1 || subnetOctet > 255)
-        {
-            return false; // 10.247.0.0/24 is reserved for egress pod and package proxy
-        }
-
-        if (hostOctet < 1 || hostOctet > 254)
-        {
-            return false; // .0 and .255 are network and broadcast addresses
-        }
-
-        index = ((subnetOctet - 1) * UsableHostsPerSubnet) + (hostOctet - 1);
-        return true;
     }
 
     private void LoadCursor()

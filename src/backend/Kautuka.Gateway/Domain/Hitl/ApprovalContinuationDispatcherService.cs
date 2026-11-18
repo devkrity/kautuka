@@ -838,9 +838,6 @@ internal static partial class ApprovalContinuationDispatcherServiceLog
     [LoggerMessage(EventId = 3, Level = LogLevel.Information, Message = "Dequeued approval continuation request {RequestId} for session {SessionId}, target {TargetType}:{TargetId}; approved={Approved}, stopRun={StopRun}")]
     public static partial void DispatchDequeued(ILogger logger, string requestId, string sessionId, string targetType, string targetId, bool approved, bool stopRun);
 
-    [LoggerMessage(EventId = 4, Level = LogLevel.Information, Message = "Using stop-run short circuit for approval continuation request {RequestId} in session {SessionId}")]
-    public static partial void DispatchStopRun(ILogger logger, string requestId, string sessionId);
-
     [LoggerMessage(EventId = 6, Level = LogLevel.Information, Message = "Using direct continuation for approval request {RequestId} in session {SessionId}, target {TargetType}:{TargetId}")]
     public static partial void DispatchUsingDirectContinuation(ILogger logger, string requestId, string sessionId, string targetType, string targetId);
 

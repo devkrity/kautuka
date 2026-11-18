@@ -143,38 +143,6 @@ public sealed class ImageCompatibilityStore
         }
     }
 
-    public ImageCompatRequest RecordPendingRequest(
-        string imageDigest,
-        string connectorId,
-        string? connectorDisplayName,
-        string failureReason)
-    {
-        string normalizedDigest = ValidateAndNormalizeDigest(imageDigest);
-        ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
-        lock (gate)
-        {
-            ImageCompatState current = Load();
-            DateTimeOffset now = DateTimeOffset.UtcNow;
-            ImageCompatRequest? existing = current.PendingRequests.FirstOrDefault(
-                r => string.Equals(r.ImageDigest, normalizedDigest, StringComparison.Ordinal));
-            var request = new ImageCompatRequest(
-                normalizedDigest,
-                connectorId.Trim(),
-                string.IsNullOrWhiteSpace(connectorDisplayName) ? existing?.ConnectorDisplayName : connectorDisplayName.Trim(),
-                string.IsNullOrWhiteSpace(failureReason) ? "Container requires compatibility mode." : failureReason.Trim(),
-                existing?.FirstSeenUtc ?? now,
-                now);
-
-            ImageCompatRequest[] nextPending =
-            [
-                .. current.PendingRequests.Where(r => !string.Equals(r.ImageDigest, normalizedDigest, StringComparison.Ordinal)),
-                request,
-            ];
-            Save(current with { PendingRequests = nextPending });
-            return request;
-        }
-    }
-
     public static string ValidateAndNormalizeDigest(string? imageDigest)
     {
         if (string.IsNullOrWhiteSpace(imageDigest))
