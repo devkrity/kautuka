@@ -29,7 +29,7 @@ internal static class LiveContainerSpec
             context.ContainerWorkspacePath,
             MountReadOnly: false,
             PidsLimit: 256,
-            ["/tmp", "/home/node/.kautuka"],
+            ["/tmp", "/home/node"],
             env,
             currentImageId);
     }

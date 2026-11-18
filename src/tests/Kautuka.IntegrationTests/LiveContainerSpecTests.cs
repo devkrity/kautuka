@@ -10,6 +10,16 @@ namespace Kautuka.IntegrationTests;
 public sealed class LiveContainerSpecTests
 {
     [Fact]
+    public void SandboxAcceptsActualHomeTmpfsAndRejectsMissingHomeTmpfs()
+    {
+        JsonNode container = JsonNode.Parse(Inspect())![0]!;
+        container["HostConfig"]!["Tmpfs"] = new JsonObject { ["/tmp"] = "rw,noexec,nosuid", ["/home/node"] = "rw,nodev,nosuid,mode=1777" };
+        LiveContainerExpectation expected = LiveContainerSpec.ForSandbox(Sandbox(), "sha256:current");
+        Assert.Null(LiveContainerSpec.DescribeDrift(container.ToJsonString(), expected));
+        ((JsonObject)container["HostConfig"]!["Tmpfs"]!).Remove("/home/node");
+        Assert.Equal("its temporary mounts do not match the spec", LiveContainerSpec.DescribeDrift(container.ToJsonString(), expected));
+    }
+    [Fact]
     public void ConnectorImageIdAcceptsPodmanBareSha256AndRejectsAnotherImage()
     {
         string imageId = new('a', 64);
@@ -285,7 +295,7 @@ public sealed class LiveContainerSpecTests
                     Tmpfs = new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["/tmp"] = "rw,noexec,nosuid",
-                        ["/home/node/.kautuka"] = "rw,nodev,nosuid,mode=1777",
+                        ["/home/node"] = "rw,nodev,nosuid,mode=1777",
                     },
                 },
             },
