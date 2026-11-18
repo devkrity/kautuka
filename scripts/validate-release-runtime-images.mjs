@@ -21,8 +21,8 @@ export function validateReleaseRuntimeImages(runtimeImages, components, selected
     }
   }
 
-  const expectedSidecarIds = ['openobserve', 'git-pkgs-proxy', 'envoy', 'coredns'];
-  if (sidecarImages.length !== expectedSidecarIds.length || !expectedSidecarIds.every((id) => componentsById.has(id))) {
+  const expectedSidecarIds = ['openobserve', 'git-pkgs-proxy', 'egress-boundary', 'envoy', 'coredns'];
+  if (sidecarImages.length !== expectedSidecarIds.length || !expectedSidecarIds.every((id) => sidecarImages.filter((image) => image.id === id).length === 1)) {
     throw new Error('Runtime image inventory changed; review and update the third-party component catalog.');
   }
 

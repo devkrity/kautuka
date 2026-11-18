@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { validateReleaseRuntimeImages } from './validate-release-runtime-images.mjs';
 
 const digest = 'a'.repeat(64);
@@ -9,18 +11,20 @@ const runtimeImages = [
   { id: 'kautuka-base', image: baseImage, archive: 'kautuka-base.tar' },
   { id: 'openobserve', image: 'ghcr.io/devkrity/kautuka-observability@sha256:openobserve', archive: 'openobserve.tar' },
   { id: 'git-pkgs-proxy', image: 'ghcr.io/devkrity/kautuka-package-proxy@sha256:proxy', archive: 'git-pkgs-proxy.tar' },
+  { id: 'egress-boundary', image: 'ghcr.io/devkrity/kautuka-egress-boundary@sha256:boundary', archive: 'egress-boundary.tar' },
   { id: 'envoy', image: 'docker.io/envoyproxy/envoy@sha256:envoy', archive: null },
   { id: 'coredns', image: 'docker.io/coredns/coredns@sha256:coredns', archive: null },
 ];
 const components = [
   { id: 'openobserve', image: runtimeImages[1].image },
   { id: 'git-pkgs-proxy', image: runtimeImages[2].image },
-  { id: 'envoy', image: runtimeImages[3].image },
-  { id: 'coredns', image: runtimeImages[4].image },
+  { id: 'egress-boundary', image: runtimeImages[3].image },
+  { id: 'envoy', image: runtimeImages[4].image },
+  { id: 'coredns', image: runtimeImages[5].image },
 ];
 
 const sidecars = validateReleaseRuntimeImages(runtimeImages, components, baseImage);
-assert.deepEqual(sidecars.map((image) => image.id), ['openobserve', 'git-pkgs-proxy', 'envoy', 'coredns'],
+assert.deepEqual(sidecars.map((image) => image.id), ['openobserve', 'git-pkgs-proxy', 'egress-boundary', 'envoy', 'coredns'],
   'the pinned base appliance image is tracked separately from cataloged sidecars');
 
 assert.throws(
@@ -44,4 +48,17 @@ assert.throws(
   'duplicate base image entries must be rejected',
 );
 
-console.log('Release runtime image inventory tests passed: pinned base-image binding, sidecar inventory, and fail-closed mismatch handling.');
+
+const actualRuntime = JSON.parse(readFileSync(fileURLToPath(new URL('../src/backend/Kautuka.Manager/runtime-images.json', import.meta.url)), 'utf8'));
+const actualCatalog = JSON.parse(readFileSync(fileURLToPath(new URL('../compliance/third-party-components.json', import.meta.url)), 'utf8'));
+const actualBase = actualRuntime.images.find((image) => image.id === 'kautuka-base').image;
+const actualSidecars = validateReleaseRuntimeImages(actualRuntime.images, actualCatalog.components, actualBase);
+assert(actualSidecars.some((image) => image.id === 'egress-boundary'), 'the published boundary image must have compliance evidence');
+assert.throws(
+  () => validateReleaseRuntimeImages(actualRuntime.images, actualCatalog.components.map((component) =>
+    component.id === 'egress-boundary' ? { ...component, image: 'stale' } : component), actualBase),
+  /catalog is missing or stale for runtime image egress-boundary/u,
+  'a stale boundary digest must fail the release check',
+);
+
+console.log('Release runtime image inventory tests passed: actual catalog and fail-closed mismatch handling.');

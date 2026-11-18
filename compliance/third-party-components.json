@@ -86,6 +86,15 @@
       "notes": "The Windows installer embeds the loader DLL from this package. The WebView2 Runtime is not bundled; users rely on the installed Windows runtime."
     },
     {
+      "id": "egress-boundary",
+      "version": "digest-pinned",
+      "licenseExpression": "NOASSERTION",
+      "image": "ghcr.io/devkrity/kautuka-egress-boundary@sha256:fdf6b7b7e83dfafe5b390aa2e8d63e9d84f951bbd394c43c5984a225cb97c4e1",
+      "source": "https://github.com/devkrity/kautuka/tree/main/src/images/kautuka-egress-boundary",
+      "licenseFiles": [],
+      "notes": "Kautuka-built Fedora image. Package licenses are recorded in the generated kautuka-egress-boundary-image.spdx.json; corresponding Fedora source RPMs are staged with the release."
+    },
+    {
       "id": "envoy",
       "version": "1.40.2",
       "licenseExpression": "Apache-2.0",
