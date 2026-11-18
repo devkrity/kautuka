@@ -132,6 +132,11 @@ assert_packed_appliance_network_seal() {
     exit 1
   }
 
+  printf '%s\n' "$sockets_conf" | grep -Fqx 'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -' || {
+    echo 'error: packed appliance is missing the Manager-owned Envoy authorization socket directory' >&2
+    return 1
+  }
+
   if [[ -n "$kautuka_uid" ]]; then
     local restart_dropin
     restart_dropin="$(tar -xOf "$rootfs_output" "./etc/systemd/system/user@${kautuka_uid}.service.d/20-kautuka-restart.conf" 2>/dev/null || true)"
@@ -1270,7 +1275,8 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
         '# bind() give the socket that client group instead of the service own group, which' \
         '# is what lets the socket itself be 0660 rather than world-writable.' \
         'd /run/kautuka 0755 root root -' \
-        'f /run/kautuka-db-writer.lock 0644 root root -'
+        'f /run/kautuka-db-writer.lock 0644 root root -' \
+        'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -'
 
       # service_key:owner:traversal_group
       local entry

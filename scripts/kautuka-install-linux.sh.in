@@ -1138,6 +1138,7 @@ grant_socket_group_membership() {
 # 0700 so the system-scope services could never traverse into it.
 install_socket_runtime_dirs() {
     local service_user="$1"
+    local service_group="${2:-$1}"
     local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'
 
     install -d -m 0755 /usr/lib/tmpfiles.d
@@ -1158,6 +1159,7 @@ install_socket_runtime_dirs() {
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
             'd /run/kautuka 0755 root root -' \
             'f /run/kautuka-db-writer.lock 0644 root root -'
+        printf 'd /run/kautuka/networkaccess-envoy 0710 %s %s -\n' "$service_user" "$service_group"
 
         local entry
         local service_key
@@ -2802,7 +2804,7 @@ PY
     usermod --append --groups "$service_group" kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-credentials
-    install_socket_runtime_dirs "$service_user"
+    install_socket_runtime_dirs "$service_user" "$service_group"
     if id -nG kautuka-channelhost | tr ' ' '\n' | grep -Fxq "$service_group"; then
         fail "kautuka-channelhost must not belong to the broad appliance group: $service_group"
     fi

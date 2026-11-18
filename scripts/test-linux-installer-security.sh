@@ -513,6 +513,7 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
     || { echo "sub-ID removal mishandled an unterminated final record" >&2; cat "$removal_file" >&2; exit 1; }
   rm -f "$boundary_file" "$boundary_before_file" "$removal_file"
   [[ "$(get_service_user_home kautuka)" == /var/lib/kautuka ]] || { echo "passwd home parsing failed" >&2; exit 1; }
+  grep -q "^d /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
 '; then
