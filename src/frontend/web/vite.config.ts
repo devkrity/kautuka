@@ -204,6 +204,9 @@ export default defineConfig({
           if (id.includes('react-router')) {
             return 'router-vendor';
           }
+          if (id.includes('/sonner/')) {
+            return 'toast-vendor';
+          }
           if (id.includes('lucide-react')) {
             return 'icons-vendor';
           }
