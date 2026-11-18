@@ -77,6 +77,7 @@ Each concern has one canonical explanation. Other pages link to it rather than r
 - [ADR 0004: Channel Gateway productization gate](adr/0004-channel-gateway-productization.md)
 - [ADR 0005: Channel runtime projection and verification](adr/0005-channel-runtime-projection-and-verification.md)
 - [ADR 0006: AG-UI interoperability boundary and one product UX](adr/0006-ag-ui-interoperability-and-product-ux.md) — **superseded**; retained for historical rationale only
+- [Temporary picomatch audit exception](adr/picomatch-temporary-audit-exception.md)
 - [ADR template](adr/template.md)
 - [Manifest host activation](plans/manifest-host.md)
 - [Package admission and isolation](plans/package-admission.md)

@@ -10,6 +10,8 @@ allowBuilds:
 
 overrides:
   esbuild: 0.28.1
+  # GHSA-fc5q-39xc-vjpf: patched locally until the fixed release is available.
+  picomatch@>=4.0.0 <4.0.8: 4.0.7
   undici: ^8.12.2
   uuid: ^14.0.0
   nanoid: ^3.3.18
@@ -65,3 +67,4 @@ minimumReleaseAgeExclude:
 
 patchedDependencies:
   '@devkrity/narad@0.1.0': patches/@devkrity__narad@0.1.0.patch
+  picomatch@4.0.7: patches/picomatch@4.0.7.patch
