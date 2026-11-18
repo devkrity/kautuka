@@ -212,6 +212,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
     }
 
+    public static bool ShouldUseEnvoySelinuxDomain(bool isLinux, bool isDevelopment, string? installedSetting, string? developmentSetting)
+        => isLinux && (string.Equals(installedSetting, "1", StringComparison.Ordinal)
+            || (isDevelopment && string.Equals(developmentSetting, "1", StringComparison.Ordinal)));
+
     public bool IsStartupGateOpen
     {
         get

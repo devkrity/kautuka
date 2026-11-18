@@ -287,6 +287,9 @@ jobs:
       - name: Verify Linux installer image preparation
         run: bash ./scripts/test-linux-installer-images.sh
 
+      - name: Verify Envoy SELinux policy installation
+        run: bash ./scripts/test-linux-installer-envoy-selinux.sh
+
       - name: Verify Linux GitHub Release discovery
         run: node ./scripts/test-linux-github-release-discovery.mjs
 

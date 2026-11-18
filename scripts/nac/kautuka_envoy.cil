@@ -1,4 +1,4 @@
-; Development Envoy uses the standard confined-container templates.
+; Envoy uses the standard confined-container templates.
 (block kautuka_envoy
   (blockinherit container)
   (blockinherit net_container)

@@ -127,6 +127,9 @@ jobs:
       - name: Test Linux installer NAC hook payload
         run: bash ./scripts/test-linux-installer-nac-hook.sh
 
+      - name: Test Envoy SELinux policy installation
+        run: bash ./scripts/test-linux-installer-envoy-selinux.sh
+
       - name: Test Linux installer trust and socket provisioning
         run: bash ./scripts/test-linux-installer-security.sh
 

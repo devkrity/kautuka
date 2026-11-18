@@ -1356,6 +1356,16 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void InstalledEnvoyUsesDedicatedSelinuxDomainOnlyWhenConfiguredOnLinux()
+    {
+        Assert.True(EgressTopologyManager.ShouldUseEnvoySelinuxDomain(true, false, "1", null));
+        Assert.False(EgressTopologyManager.ShouldUseEnvoySelinuxDomain(false, false, "1", null));
+        Assert.False(EgressTopologyManager.ShouldUseEnvoySelinuxDomain(true, false, null, "1"));
+        Assert.True(EgressTopologyManager.ShouldUseEnvoySelinuxDomain(true, true, null, "1"));
+        Assert.False(EgressTopologyManager.ShouldUseEnvoySelinuxDomain(true, false, null, null));
+    }
+
+    [Fact]
     public void DevelopmentEnvoyUsesItsOwnSelinuxDomainOnlyWhenRequested()
     {
         string envoy = Path.Combine(tempDir, "envoy.yaml");

@@ -566,6 +566,29 @@ ensure_nac_prerequisites() {
     command -v pasta >/dev/null 2>&1 || command -v slirp4netns >/dev/null 2>&1 || fail "pasta or slirp4netns is required for rootless container networking. Please install pasta or slirp4netns."
 }
 
+install_envoy_selinux_policy() {
+    local policy_file="$1" templates="${2:-/usr/share/udica/templates}"
+    envoy_selinux_enabled=false
+    if ! command -v getenforce >/dev/null 2>&1; then return 0; fi
+    case "$(getenforce)" in Enforcing|Permissive) ;; *) return 0 ;; esac
+    [[ -r "$policy_file" ]] || { echo 'error: the Envoy SELinux policy is missing from the release.' >&2; return 1; }
+    if [[ ! -r "$templates/base_container.cil" || ! -r "$templates/net_container.cil" ]]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y udica; fi
+    fi
+    [[ -r "$templates/base_container.cil" && -r "$templates/net_container.cil" ]] || {
+        echo 'error: SELinux is enabled but udica policy templates are unavailable.' >&2; return 1;
+    }
+    command -v semodule >/dev/null 2>&1 || { echo 'error: SELinux policy installation requires semodule.' >&2; return 1; }
+    local installed_modules
+    installed_modules="$(semodule -l)" || return 1
+    local policy_inputs=()
+    if ! printf '%s\n' "$installed_modules" | grep -Eq '^base_container([[:space:]]|$)'; then policy_inputs+=("$templates/base_container.cil"); fi
+    if ! printf '%s\n' "$installed_modules" | grep -Eq '^net_container([[:space:]]|$)'; then policy_inputs+=("$templates/net_container.cil"); fi
+    policy_inputs+=("$policy_file")
+    semodule -i "${policy_inputs[@]}" || return 1
+    envoy_selinux_enabled=true
+}
+
 ensure_rootless_podman_ready() {
     local service_user="$1"
     local service_group="$2"
@@ -785,6 +808,8 @@ write_manager_user_unit() {
     local unit_path="$1"
     local install_root="$2"
     local visible_root="$3"
+    local selinux_env=''
+    if [[ "${4:-false}" == 'true' ]]; then selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'; fi
 
     cat > "$unit_path" <<EOF
 [Unit]
@@ -799,6 +824,7 @@ ExecStart=${install_root}/current/kautuka-manager
 Environment=Kautuka__Mode=prod
 Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${visible_root}/logs/manager
+${selinux_env}
 Restart=always
 RestartSec=5
 Delegate=yes
@@ -2865,6 +2891,8 @@ PY
     chmod +x "$version_root/kautuka-manager"
 
     local hooks_dir="$service_home/.config/containers/hooks.d"
+    local envoy_selinux_enabled=false
+    install_envoy_selinux_policy "$version_root/scripts/kautuka_envoy.cil"
     install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
     chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
     chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
@@ -2886,7 +2914,7 @@ PY
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
 
-    write_manager_user_unit "$unit_path" "$install_root" "$visible_root"
+    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled"
     chmod 0644 "$unit_path"
     chown -R "$service_user:$service_group" "$unit_dir"
 

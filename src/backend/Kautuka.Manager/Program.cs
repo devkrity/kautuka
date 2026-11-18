@@ -106,9 +106,10 @@ builder.Services.AddSingleton(sp =>
         desiredStateStore: sp.GetRequiredService<WorkspaceDesiredStateStore>(),
         imageCompatibilityStore: sp.GetRequiredService<ImageCompatibilityStore>(),
         policyStore: sp.GetRequiredService<NetworkAccessPolicyStore>(),
-        useDevelopmentSelinuxDomain: builder.Environment.IsDevelopment()
-            && OperatingSystem.IsLinux()
-            && Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX") == "1",
+        useDevelopmentSelinuxDomain: EgressTopologyManager.ShouldUseEnvoySelinuxDomain(
+            OperatingSystem.IsLinux(), builder.Environment.IsDevelopment(),
+            Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"),
+            Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX")),
         imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>()));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();

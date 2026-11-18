@@ -2,6 +2,8 @@
 
 On SELinux-enforcing Linux development hosts, run `bash scripts/nac/install-dev-selinux-policy.sh` once before starting the development stack. The launcher selects the confined Envoy-specific domain so Envoy can reach Manager's authorization socket; Envoy uses the egress pod's SELinux level to access shared memory, and other containers keep their existing SELinux domain.
 
+On an installed Linux system with SELinux enabled, the installer installs that dedicated Envoy policy and selects its domain for the Manager service. The installer requires the `udica` policy templates; on Fedora it installs `udica` if they are missing. Other containers retain their existing confinement.
+
 macOS NAC is experimental and unverified. A real Mac with Podman Machine is still required to verify its network authorization path.
 
 The Windows Podman Machine development authorization certificates have 30-day leaf lifetimes and are created at Manager startup. They are not renewed while Manager remains running; restart the development stack before expiry.
