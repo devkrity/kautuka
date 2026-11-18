@@ -137,6 +137,15 @@ assert_packed_appliance_network_seal() {
     return 1
   }
 
+  local hook_root='./var/lib/kautuka/.config/containers'
+  local hook_file
+  for hook_file in hooks.d/kautuka_hook.py hooks.d/kautuka_workload.nft.json.tmpl hooks.d/kautuka_package_proxy.nft.json.tmpl hooks.d/kautuka_hook.json containers.conf.d/99-kautuka-hooks.conf; do
+    tar -xOf "$rootfs_output" "$hook_root/$hook_file" >/dev/null || {
+      echo "error: packed appliance is missing NAC hook configuration: $hook_file" >&2
+      return 1
+    }
+  done
+
   if [[ -n "$kautuka_uid" ]]; then
     local restart_dropin
     restart_dropin="$(tar -xOf "$rootfs_output" "./etc/systemd/system/user@${kautuka_uid}.service.d/20-kautuka-restart.conf" 2>/dev/null || true)"
@@ -978,6 +987,25 @@ else
   printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
 fi
 
+stage_nac_hook_for_rootfs() {
+  local root="$1" payload="$2" uid="$3" gid="$4"
+  local hook_dir="$root/var/lib/kautuka/.config/containers/hooks.d"
+  local conf_dir="$root/var/lib/kautuka/.config/containers/containers.conf.d"
+  local file
+  for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
+    [[ -f "$payload/scripts/$file" ]] || { echo "error: required NAC hook payload is missing: $file" >&2; return 1; }
+  done
+  sudo install -d -m 0755 -o "$uid" -g "$gid" "$root/var/lib/kautuka/.config" "$root/var/lib/kautuka/.config/containers" "$hook_dir" "$conf_dir"
+  sudo install -m 0755 -o "$uid" -g "$gid" "$payload/scripts/kautuka_hook.py" "$hook_dir/kautuka_hook.py"
+  for file in kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
+    sudo install -m 0644 -o "$uid" -g "$gid" "$payload/scripts/$file" "$hook_dir/$file"
+  done
+  printf '[engine]\nhooks_dir = ["/var/lib/kautuka/.config/containers/hooks.d", { append = true }]\n' | sudo tee "$conf_dir/99-kautuka-hooks.conf" >/dev/null
+  printf '%s\n' '{"version":"1.0.0","hook":{"path":"/var/lib/kautuka/.config/containers/hooks.d/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' | sudo tee "$hook_dir/kautuka_hook.json" >/dev/null
+  sudo chown "$uid:$gid" "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
+  sudo chmod 0644 "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
+}
+
 prewarm_rootfs() {
   local rootfs_input="$1"
   local rootfs_output="$2"
@@ -1336,6 +1364,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   sudo mkdir -p "$version_root" "$visible_root/logs/manager" "$visible_root/workspaces" "$visible_root/oci-images" "$internal_state_root/manager" "$wants_dir" "$linger_dir" "$user_unit_dir/kautuka.target.wants" "$rootfs_dir/etc/kautuka"
   sudo cp -a "$manager_content_root/." "$version_root/"
   sudo chmod +x "$version_root/kautuka-manager"
+  stage_nac_hook_for_rootfs "$rootfs_dir" "$manager_content_root" "$kautuka_uid" "$kautuka_gid"
   sudo ln -sfn "versions/$version" "$current_link"
   sudo touch "$linger_dir/kautuka"
   stage_oci_image_archives "$rootfs_dir"
