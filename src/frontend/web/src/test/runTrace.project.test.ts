@@ -5,6 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { projectAuthorityTrace } from '@/features/chat/api/runTrace';
 
 describe('projectAuthorityTrace', () => {
+  it.each(['failed', 'error'])('shows a tool with outcome %s as failed', (outcome) => {
+    const { spans } = projectAuthorityTrace([
+      { type: 'tool.call.started', eventId: 'start', timestamp: '2026-08-05T00:00:01.000Z', rootRunId: 'run-1', runId: 'run-1', toolCallId: 'tool-1', toolName: 'fetch' },
+      { type: 'tool.call.finished', eventId: 'end', timestamp: '2026-08-05T00:00:02.000Z', rootRunId: 'run-1', runId: 'run-1', toolCallId: 'tool-1', outcome },
+    ], 'run-1');
+    expect(spans.find((span) => span.id === 'tool-1')?.status).toBe('failed');
+  });
+
   it('projects tool durations and terminal token usage from public authority events', () => {
     const { spans, summary } = projectAuthorityTrace(
       [

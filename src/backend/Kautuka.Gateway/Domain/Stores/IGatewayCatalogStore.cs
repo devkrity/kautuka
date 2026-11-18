@@ -43,6 +43,8 @@ internal interface IGatewayCatalogStore
     GatewayMcpServer SaveMcpServerDiscovery(string serverId, int? toolCount, IReadOnlyList<string>? toolNames);
     Task<GatewayMcpServer> SaveMcpServerDiscoveryAsync(string serverId, int? toolCount, IReadOnlyList<string>? toolNames, CancellationToken cancellationToken = default)
         => Task.FromResult(SaveMcpServerDiscovery(serverId, toolCount, toolNames));
+    Task<GatewayMcpServer> SaveVerifiedLocalToolsAsync(string serverId, string expectedUpdatedAt, IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition> definitions, string? digest, string imageDigest, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException();
     bool DeleteMcpServer(string serverId);
     Task<bool> DeleteMcpServerAsync(string serverId, CancellationToken cancellationToken = default)
         => Task.FromResult(DeleteMcpServer(serverId));

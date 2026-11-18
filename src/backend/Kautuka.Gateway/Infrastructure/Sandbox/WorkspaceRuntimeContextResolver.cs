@@ -73,7 +73,8 @@ internal sealed class WorkspaceRuntimeContextResolver(
                     ResolveConnectorEnvironment(server, platformConfiguration.Kautuka.Sandbox.ContainerEnvironment),
                     server.ReadinessTimeoutSeconds ?? 30,
                     server.JitCooldownSeconds ?? 600,
-                    server.McpProtocolVersion)))];
+                    server.McpProtocolVersion,
+                    server.Scope)))];
         WorkspaceSandboxConnectorBindingsPayload[] sandboxConnectorBindings = [.. platformConfiguration.Agents
             .Select(agent => ResolveSandboxConnectorBindings(platformConfiguration, agent, workspaceByAgentId[agent.Id], activeUserIds))];
 
@@ -410,7 +411,8 @@ internal sealed class WorkspaceRuntimeContextResolver(
             sandboxImage,
             sandbox.DefaultTimeout,
             baseCapabilities,
-            BuildResolvedContainerEnvironment(sandbox.ContainerEnvironment));
+            BuildResolvedContainerEnvironment(sandbox.ContainerEnvironment))
+        { AgentId = agentId };
     }
 
     private ManagerRuntimeSettingsPayload ResolveRuntimeSettings(PlatformConfiguration configuration)
@@ -461,7 +463,9 @@ internal sealed class WorkspaceRuntimeContextResolver(
     {
         if (!IsSharedSystemAgent(configuration, agentId))
         {
-            yield return ResolveAgentWorkspace(configuration, agentId, null);
+            string? ownerUserId = configuration.Agents.FirstOrDefault(agent =>
+                string.Equals(agent.Id, agentId, StringComparison.Ordinal))?.OwnerUserId;
+            yield return ResolveAgentWorkspace(configuration, agentId, ownerUserId);
             yield break;
         }
 
@@ -538,7 +542,8 @@ internal sealed record WorkspaceMcpContainerConnectorPayload(
     IReadOnlyList<KeyValuePair<string, string>> Environment,
     int ReadinessTimeoutSeconds,
     int JitCooldownSeconds,
-    string? McpProtocolVersion = null);
+    string? McpProtocolVersion = null,
+    string CatalogScope = "user");
 
 internal sealed record WorkspaceDesiredStatePayload(
     ManagerRuntimeSettingsPayload RuntimeSettings,

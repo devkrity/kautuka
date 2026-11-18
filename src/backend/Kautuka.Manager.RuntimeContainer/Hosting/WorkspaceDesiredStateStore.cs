@@ -5,6 +5,7 @@ using System.Threading.Channels;
 
 using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Configuration;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
@@ -27,6 +28,7 @@ public sealed class WorkspaceDesiredStateStore
     private IReadOnlyList<ContainerContext> desiredWorkspaces = [];
     private IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> desiredContainerConnectors = [];
     private IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> desiredSandboxConnectorBindings = [];
+    private readonly HashSet<string> quarantinedWorkloadIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, WorkspaceMcpContainerRuntimeStatus> connectorStatuses = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<WorkspaceDesiredStateStore> logger;
     private readonly string? statePath;
@@ -70,6 +72,48 @@ public sealed class WorkspaceDesiredStateStore
     }
 
     public ChannelReader<WorkspaceReconcileTriggerKind> Updates => updateChannel.Reader;
+
+    public void QuarantineWorkload(string containerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        lock (sync)
+        {
+            quarantinedWorkloadIds.Add(containerId.Trim());
+            PersistState();
+        }
+    }
+
+    public bool IsWorkloadQuarantined(string containerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
+        lock (sync) return quarantinedWorkloadIds.Contains(containerId.Trim());
+    }
+
+    internal void ForgetQuarantinedWorkloads(IEnumerable<string> containerIds)
+    {
+        ArgumentNullException.ThrowIfNull(containerIds);
+        lock (sync)
+        {
+            var removed = new List<string>();
+            foreach (string containerId in containerIds)
+            {
+                if (quarantinedWorkloadIds.Remove(containerId)) removed.Add(containerId);
+            }
+
+            if (removed.Count == 0) return;
+            try { PersistState(); }
+            catch
+            {
+                quarantinedWorkloadIds.UnionWith(removed);
+                throw;
+            }
+        }
+    }
+
+    public IReadOnlyList<string> QuarantinedWorkloadIds
+    {
+        get { lock (sync) return [.. quarantinedWorkloadIds]; }
+    }
 
     public WorkspaceDesiredStateApplyResult ApplyDesiredState(
         long nextDesiredStateVersion,
@@ -129,12 +173,20 @@ public sealed class WorkspaceDesiredStateStore
             IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> previousConnectors = [.. desiredContainerConnectors];
             long previousAcceptedVersion = acceptedDesiredStateVersion;
             runtimeSettings = nextRuntimeSettings;
-            desiredWorkspaces = EnrichDesiredWorkspaces(nextDesiredStateVersion, nextDesiredWorkspaces, nextSandboxConnectorBindings);
-            desiredContainerConnectors = [.. nextContainerConnectors.Select(connector => connector with
-            {
-                DesiredStateVersion = nextDesiredStateVersion,
-                SpecFingerprint = ConnectorContainerSpecBuilder.ComputeFingerprint(connector),
-            })];
+            desiredWorkspaces = EnrichDesiredWorkspaces(
+                nextDesiredStateVersion,
+                nextRuntimeSettings.Workspace.BaseRoot,
+                nextDesiredWorkspaces,
+                nextSandboxConnectorBindings);
+            desiredContainerConnectors = [.. nextContainerConnectors.Select(connector =>
+                connector with
+                {
+                    DesiredStateVersion = nextDesiredStateVersion,
+                    // Runtime identity (user, agent, execution context, and compatibility profile)
+                    // is only available when the connector is launched. The service computes the
+                    // expected fingerprint from that resolved context before inspecting a container.
+                    SpecFingerprint = string.Empty,
+                })];
             desiredSandboxConnectorBindings = [.. nextSandboxConnectorBindings];
             acceptedPublisherEpoch = publisherEpoch;
             acceptedContentHash = contentHash;
@@ -456,6 +508,10 @@ public sealed class WorkspaceDesiredStateStore
         desiredWorkspaces = persisted.DesiredWorkspaces;
         desiredContainerConnectors = persisted.DesiredContainerConnectors;
         desiredSandboxConnectorBindings = persisted.DesiredSandboxConnectorBindings;
+        // Container names can be reused; only an immutable inspected ID can safely
+        // identify the same quarantined workload after a restart.
+        quarantinedWorkloadIds.UnionWith((persisted.QuarantinedWorkloadIds ?? [])
+            .Where(WorkloadPostStartVerifier.IsCanonicalContainerId));
         acceptedPublisherEpoch = persisted.PublisherEpoch;
         acceptedContentHash = persisted.ContentHash;
         acceptedDesiredStateVersion = persisted.AcceptedVersion;
@@ -497,7 +553,8 @@ public sealed class WorkspaceDesiredStateStore
             lifecyclePhase,
             reconcileAttemptCount,
             lastFailureClass,
-            [.. pendingPreviousConnectors]);
+            [.. pendingPreviousConnectors],
+            [.. quarantinedWorkloadIds]);
         byte[] payload = JsonSerializer.SerializeToUtf8Bytes(
             persisted,
             WorkspaceDesiredStateJsonContext.Default.PersistedWorkspaceDesiredState);
@@ -552,6 +609,7 @@ public sealed class WorkspaceDesiredStateStore
 
     private static IReadOnlyList<ContainerContext> EnrichDesiredWorkspaces(
         long desiredStateVersion,
+        string? workspaceBaseRoot,
         IReadOnlyList<ContainerContext> workspaces,
         IReadOnlyList<WorkspaceSandboxConnectorBindingsDefinition> bindings)
     {
@@ -567,6 +625,7 @@ public sealed class WorkspaceDesiredStateStore
             {
                 DesiredStateVersion = desiredStateVersion,
                 SpecFingerprint = WorkspaceContainerSpecFingerprint.Compute(workspace, connectorIds),
+                WorkspaceBaseRoot = workspaceBaseRoot,
             };
         })];
     }
@@ -601,6 +660,8 @@ public sealed record WorkspaceMcpContainerConnectorDefinition(
     public long DesiredStateVersion { get; init; }
 
     public string SpecFingerprint { get; init; } = string.Empty;
+
+    public string CatalogScope { get; init; } = "user";
 }
 
 public sealed record WorkspaceSandboxConnectorBindingsDefinition(
@@ -719,7 +780,8 @@ internal sealed record PersistedWorkspaceDesiredState(
     WorkspaceDesiredStateLifecyclePhase LifecyclePhase,
     int ReconcileAttemptCount,
     string? LastFailureClass,
-    WorkspaceMcpContainerConnectorDefinition[] PendingPreviousConnectors);
+    WorkspaceMcpContainerConnectorDefinition[] PendingPreviousConnectors,
+    string[]? QuarantinedWorkloadIds = null);
 
 [JsonSerializable(typeof(WorkspaceDesiredStateContent))]
 [JsonSerializable(typeof(PersistedWorkspaceDesiredState))]

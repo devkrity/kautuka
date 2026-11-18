@@ -33,6 +33,16 @@ internal static class SqliteGatewaySchemaBootstrapper
         if (ReadSchema(connection).Count != 0)
         {
             string? schemaId = ReadGatewaySchemaId(connection);
+            if (schemaId is null && HasExactCurrentSchemaWithoutMarker(connection))
+            {
+                CreateSchemaMarker(connection, SchemaId);
+                schemaId = SchemaId;
+            }
+            else if (schemaId is null && HasExactLegacySchemaWithoutMarker(connection))
+            {
+                UpgradeUnmarkedLegacySchema(connection);
+                return;
+            }
             if (schemaId is null
                 || (!string.Equals(schemaId, SchemaId, StringComparison.Ordinal)
                     && !priorSupportedSchemaIds.Contains(schemaId)
@@ -71,6 +81,106 @@ internal static class SqliteGatewaySchemaBootstrapper
         ValidateExisting(connection);
     }
 
+    private static bool HasExactCurrentSchemaWithoutMarker(SqliteConnection connection)
+    {
+        IReadOnlyDictionary<SchemaObjectKey, string> expected = CreateExpectedSchema();
+        return MatchesSchemaWithoutMarker(connection, expected);
+    }
+
+    private static bool HasExactLegacySchemaWithoutMarker(SqliteConnection connection)
+    {
+        using var expectedConnection = new SqliteConnection("Data Source=:memory:");
+        expectedConnection.Open();
+        using SqliteCommand command = expectedConnection.CreateCommand();
+#pragma warning disable CA2100 // Fixed, versioned embedded schema; no external input.
+        command.CommandText = SqliteEmbeddedSql.GatewayLegacy20261010;
+#pragma warning restore CA2100
+        command.ExecuteNonQuery();
+        return MatchesSchemaWithoutMarker(connection, ReadSchema(expectedConnection), exactText: true);
+    }
+
+    private static bool MatchesSchemaWithoutMarker(SqliteConnection connection, IReadOnlyDictionary<SchemaObjectKey, string> expected, bool exactText = false)
+    {
+        IReadOnlyDictionary<SchemaObjectKey, string> actual = ReadSchema(connection);
+        var markerKey = new SchemaObjectKey("table", "gateway_schema");
+        if (!expected.ContainsKey(markerKey) || actual.Count != expected.Count - 1)
+        {
+            return false;
+        }
+
+        foreach ((SchemaObjectKey key, string expectedSql) in expected)
+        {
+            if (key == markerKey)
+            {
+                continue;
+            }
+
+            if (!actual.TryGetValue(key, out string? actualSql)
+                || !(exactText
+                    ? string.Equals(expectedSql, actualSql, StringComparison.Ordinal)
+                    : string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void UpgradeUnmarkedLegacySchema(SqliteConnection connection)
+    {
+        // Keep the source exclusively locked from the snapshot through replacement so
+        // another writer cannot make changes that the completed backup would overwrite.
+        using SqliteCommand modeCommand = connection.CreateCommand();
+        modeCommand.CommandText = "PRAGMA locking_mode";
+        string previousMode = Convert.ToString(modeCommand.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) ?? "normal";
+        try
+        {
+            Execute(connection, "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+            if (!HasExactLegacySchemaWithoutMarker(connection))
+            {
+                throw new InvalidOperationException("Gateway schema changed while the unmarked legacy upgrade was starting; no changes were made.");
+            }
+
+            using var staged = new SqliteConnection("Data Source=:memory:");
+            staged.Open();
+            connection.BackupDatabase(staged);
+            CreateSchemaMarker(staged, "gateway-2026-10-10.1");
+            ApplyCompatibleUpgrades(staged);
+            ValidateExisting(staged);
+            AdvanceGatewaySchemaId(staged);
+            staged.BackupDatabase(connection);
+        }
+        finally
+        {
+            if (string.Equals(previousMode, "normal", StringComparison.OrdinalIgnoreCase))
+            {
+                Execute(connection, "PRAGMA locking_mode=NORMAL; BEGIN; COMMIT;");
+            }
+        }
+    }
+
+    private static void CreateSchemaMarker(SqliteConnection connection, string schemaId)
+    {
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        try
+        {
+            using SqliteCommand command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText =
+                "CREATE TABLE gateway_schema (schema_id TEXT PRIMARY KEY, created_at TEXT NOT NULL); " +
+                "INSERT INTO gateway_schema(schema_id, created_at) VALUES ($schemaId, CURRENT_TIMESTAMP)";
+            command.Parameters.AddWithValue("$schemaId", schemaId);
+            command.ExecuteNonQuery();
+            transaction.Commit();
+        }
+        catch
+        {
+            transaction.Rollback();
+            throw;
+        }
+    }
+
     public static void ValidateExisting(SqliteConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
@@ -85,7 +195,8 @@ internal static class SqliteGatewaySchemaBootstrapper
             {
                 differences.Add($"missing {key.Type} '{key.Name}'");
             }
-            else if (!string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal))
+            else if (!string.Equals(NormalizeSql(expectedSql), NormalizeSql(actualSql), StringComparison.Ordinal)
+                && !(key.Type == "table" && key.Name == "tool_approval_requests" && ApprovalColumnsMatchIgnoringOrder(expectedSql, actualSql)))
             {
                 differences.Add($"incompatible {key.Type} '{key.Name}'");
             }
@@ -116,6 +227,20 @@ internal static class SqliteGatewaySchemaBootstrapper
             "Back up any required data, then explicitly reset or reprovision the Gateway database before restarting.");
     }
 
+    private static bool ApprovalColumnsMatchIgnoringOrder(string expectedSql, string actualSql)
+    {
+        static string[] Parts(string sql)
+        {
+            string normalized = NormalizeSql(sql);
+            int start = normalized.IndexOf('(', StringComparison.Ordinal);
+            int end = normalized.LastIndexOf(')');
+            if (start < 0 || end <= start || normalized[(end + 1)..].TrimEnd(';').Length != 0) return [];
+            return [.. normalized[(start + 1)..end].Split(',').Order(StringComparer.Ordinal)];
+        }
+        string[] expected = Parts(expectedSql);
+        return expected.Length > 0 && expected.SequenceEqual(Parts(actualSql), StringComparer.Ordinal);
+    }
+
     private static void ApplyCompatibleUpgrades(SqliteConnection connection)
     {
         UpgradeMcpServers(connection);
@@ -124,6 +249,7 @@ internal static class SqliteGatewaySchemaBootstrapper
         MovePreviousWorkflowJournalToCurrent(connection);
         EnsureWorkflowTables(connection);
         Domain.Stores.ToolApprovalSchemaCompat.EnsureWorkflowReviewColumns(connection);
+        Domain.Stores.ToolApprovalSchemaCompat.EnsureToolExecutionColumns(connection);
         Domain.Channels.ChannelInteractionSchemaCompat.EnsureInteractionGroupColumn(connection);
         SqliteGatewaySchemaSeeder.EnsureBuiltinProviderCatalogRows(connection, transaction: null);
         Domain.Stores.ExternalLoginSchemaCompat.EnsureIdentityColumns(connection);

@@ -65,11 +65,16 @@ public sealed partial class AuthEndpointActivationTests
 
     private sealed class ManagementPublisher : IWorkspaceDesiredStatePublisher
     {
-        public int Publications { get; private set; }
+        private int publications;
+
+        public int Publications => Volatile.Read(ref publications);
 
         public DesiredStatePublishResult TryPublishCurrent(string reason)
         {
-            Publications++;
+            if (string.Equals(reason, "gateway-rehydrate-response", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref publications);
+            }
             return DesiredStatePublishResult.Succeeded;
         }
     }

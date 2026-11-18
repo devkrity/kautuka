@@ -6,6 +6,7 @@ import type { ConnectorTestPayload } from '../api/connectors';
 import { useTestConnector } from '../api/queries';
 import type { ConnectorTestResult } from '../schemas/connectorSchema';
 import type { ConnectorDraft } from '../types/connectorDraft';
+import { apiError } from '@/features/settings';
 
 interface ConnectorFormModalProps {
   draft: ConnectorDraft;
@@ -13,6 +14,7 @@ interface ConnectorFormModalProps {
   onSave: (draft: ConnectorDraft, credValues: Record<string, string>) => void;
   onClose: () => void;
   saving: boolean;
+  saveStatus?: string;
   saveLabel?: string;
   onToolCountSaved?: (toolCount: number, toolNames: string[] | null) => void;
 }
@@ -30,6 +32,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
   onSave,
   onClose,
   saving,
+  saveStatus,
   saveLabel,
   onToolCountSaved,
 }) => {
@@ -179,25 +182,32 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
 
   const buildTestPayload = (): ConnectorTestPayload => {
     const testEnvEntries = new Map(Object.entries(testEnv));
+    const isHttpTransport = draft.transport === 'http';
+    const isContainerTransport = draft.transport === 'container';
+    const isLocalTransport = !isHttpTransport && !isContainerTransport;
 
     return {
       id: draft.id || null,
       transport: draft.transport,
-      httpUrl: draft.httpUrl || null,
-      localCommand: draft.localCommand || null,
-      localArgs: draft.localArgs
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      containerImage: draft.containerImage || null,
-      containerCommand: draft.containerCommand || null,
-      containerArgs: draft.containerArgs
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean),
-      containerSidecarName: draft.containerSidecarName || null,
-      bundlePath: draft.bundlePath || null,
-      serverType: draft.serverType || null,
+      httpUrl: isHttpTransport ? draft.httpUrl || null : null,
+      localCommand: isLocalTransport ? draft.localCommand || null : null,
+      localArgs: isLocalTransport
+        ? draft.localArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+      containerImage: isContainerTransport ? draft.containerImage || null : null,
+      containerCommand: isContainerTransport ? draft.containerCommand || null : null,
+      containerArgs: isContainerTransport
+        ? draft.containerArgs
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+      containerSidecarName: isContainerTransport ? draft.containerSidecarName || null : null,
+      bundlePath: !isHttpTransport ? draft.bundlePath || null : null,
+      serverType: !isHttpTransport ? draft.serverType || null : null,
       readinessTimeoutSeconds: Number.parseInt(draft.readinessTimeoutSeconds, 10) || null,
       jitCooldownSeconds: Number.parseInt(draft.jitCooldownSeconds, 10) || null,
       healthcheckUrl: draft.healthcheckUrl || null,
@@ -231,7 +241,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
       onError: (err) => {
         setTestResult({
           success: false,
-          message: err instanceof Error ? err.message : 'Test request failed.',
+          message: apiError(err),
           toolCount: null,
           packageChecked: null,
           toolNames: null,
@@ -742,45 +752,56 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
         )}
 
         {/* footer */}
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={testing || saving || invalidRows}
-            onClick={handleTest}
-          >
-            {testing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <FlaskConical className="h-3.5 w-3.5" />
-            )}
-            {testing ? 'Testing…' : 'Test connection'}
-          </Button>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={onClose}>
-              Cancel
-            </Button>
+        <div className="border-t border-border px-4 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <Button
               type="button"
+              variant="outline"
               size="sm"
-              disabled={
-                saving || invalidRows || (isNew && (!draft.name.trim() || !draft.id.trim()))
-              }
-              onClick={() =>
-                onSave(
-                  draft,
-                  Object.fromEntries(
-                    Object.entries(credValues).filter(
-                      ([key, value]) => declaredEnvKeys.includes(key) && value.trim().length > 0
+              disabled={testing || saving || invalidRows}
+              onClick={handleTest}
+            >
+              {testing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FlaskConical className="h-3.5 w-3.5" />
+              )}
+              {testing ? 'Testing…' : 'Test connection'}
+            </Button>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={
+                  saving || invalidRows || (isNew && (!draft.name.trim() || !draft.id.trim()))
+                }
+                onClick={() =>
+                  onSave(
+                    draft,
+                    Object.fromEntries(
+                      Object.entries(credValues).filter(
+                        ([key, value]) => declaredEnvKeys.includes(key) && value.trim().length > 0
+                      )
                     )
                   )
-                )
-              }
-            >
-              {saveButtonLabel}
-            </Button>
+                }
+              >
+                {saveButtonLabel}
+              </Button>
+            </div>
           </div>
+          {saving && (
+            <p
+              role="status"
+              className="mt-2 flex items-center justify-end gap-2 text-sm text-muted-foreground"
+            >
+              <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+              {saveStatus ?? 'Saving connector settings. This may take a few minutes.'}
+            </p>
+          )}
         </div>
       </DialogContent>
     </Dialog>

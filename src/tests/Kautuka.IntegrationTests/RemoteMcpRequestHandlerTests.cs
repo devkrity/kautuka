@@ -17,7 +17,7 @@ public sealed class RemoteMcpRequestHandlerTests
     {
         var inner = new RejectedHandler(status);
         var context = CreateContext((keys, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = "synthetic-secret" }));
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         using var request = new HttpRequestMessage(HttpMethod.Get, context.Endpoint);
         RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(() => client.SendAsync(request, TestContext.Current.CancellationToken));
         Assert.Contains(expected, error.Message, StringComparison.Ordinal);
@@ -39,7 +39,7 @@ public sealed class RemoteMcpRequestHandlerTests
             PreferIpv4 = true,
             Headers = [new("x-api-key", CredentialKey: "api-key")],
         };
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, new RejectedHandler(403)));
+        using var client = new HttpClient(CreateHandler(context, new RejectedHandler(403)));
         RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
             () => client.GetAsync(endpoint, TestContext.Current.CancellationToken));
         Assert.Contains("Exa free access was refused on this network", error.Message, StringComparison.Ordinal);
@@ -55,7 +55,7 @@ public sealed class RemoteMcpRequestHandlerTests
         {
             Revalidate = _ => { calls++; return Task.CompletedTask; },
         };
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, new RecordingHandler()));
+        using var client = new HttpClient(CreateHandler(context, new RecordingHandler()));
         using HttpResponseMessage response = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(1, calls);
@@ -72,7 +72,7 @@ public sealed class RemoteMcpRequestHandlerTests
             return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>());
         }) with
         { RequiresCredentialReentry = true };
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         RemoteMcpConfigurationException error = await Assert.ThrowsAsync<RemoteMcpConfigurationException>(
             () => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
 
@@ -104,7 +104,7 @@ public sealed class RemoteMcpRequestHandlerTests
             Assert.Equal([expectedKey], keys);
             return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [expectedKey] = "secret-value" });
         });
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         Assert.Equal(0, resolves);
         using var request = new HttpRequestMessage(HttpMethod.Post, context.Endpoint);
         using HttpResponseMessage response = await client.SendAsync(request, TestContext.Current.CancellationToken);
@@ -121,15 +121,15 @@ public sealed class RemoteMcpRequestHandlerTests
     {
         var inner = new RecordingHandler();
         RemoteMcpRequestContext optional = CreateContext((_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()));
-        using (var client = new HttpClient(new RemoteMcpRequestHandler(optional, inner)))
+        using (var client = new HttpClient(CreateHandler(optional, inner)))
         using (HttpResponseMessage response = await client.GetAsync(optional.Endpoint, TestContext.Current.CancellationToken))
             Assert.Null(inner.Authorization);
         int sends = inner.Sends;
         var required = optional with { Credentials = [new("api-key", "API key", true)] };
-        using (var client = new HttpClient(new RemoteMcpRequestHandler(required, inner)))
+        using (var client = new HttpClient(CreateHandler(required, inner)))
             await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(required.Endpoint, TestContext.Current.CancellationToken));
         var failed = optional with { Resolve = (_, _) => throw new RpcException(new Status(StatusCode.Unavailable, "sensitive-detail")) };
-        using (var client = new HttpClient(new RemoteMcpRequestHandler(failed, inner)))
+        using (var client = new HttpClient(CreateHandler(failed, inner)))
         {
             HttpRequestException error = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(failed.Endpoint, TestContext.Current.CancellationToken));
             Assert.DoesNotContain("sensitive-detail", error.Message, StringComparison.Ordinal);
@@ -143,7 +143,7 @@ public sealed class RemoteMcpRequestHandlerTests
         int calls = 0;
         var inner = new RecordingHandler();
         var context = CreateContext((keys, _) => { calls++; return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = new string('x', 8193) }); });
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(new Uri("https://other.example/mcp"), TestContext.Current.CancellationToken));
         Assert.Equal(0, calls);
         HttpRequestException error = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
@@ -156,7 +156,7 @@ public sealed class RemoteMcpRequestHandlerTests
     {
         var context = CreateContext((keys, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = "secret" }));
         var inner = new FailureHandler();
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         using var redirect = new HttpRequestMessage(HttpMethod.Get, context.Endpoint);
         HttpRequestException error = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.SendAsync(redirect, TestContext.Current.CancellationToken));
         Assert.Contains("redirect", error.Message, StringComparison.OrdinalIgnoreCase);
@@ -172,13 +172,13 @@ public sealed class RemoteMcpRequestHandlerTests
     {
         var inner = new RecordingHandler();
         var optional = CreateContext((keys, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = "   " }));
-        using (var client = new HttpClient(new RemoteMcpRequestHandler(optional, inner)))
+        using (var client = new HttpClient(CreateHandler(optional, inner)))
         using (HttpResponseMessage response = await client.GetAsync(optional.Endpoint, TestContext.Current.CancellationToken))
             Assert.Null(inner.Authorization);
         int count = inner.Sends;
         RemoteMcpHeader[] headers = [.. Enumerable.Range(0, 5).Select(i => new RemoteMcpHeader($"X-{i}", CredentialKey: "api-key"))];
         var oversized = optional with { Headers = headers, Resolve = (keys, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = new string('x', 8192) }) };
-        using var rejected = new HttpClient(new RemoteMcpRequestHandler(oversized, inner));
+        using var rejected = new HttpClient(CreateHandler(oversized, inner));
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => rejected.GetAsync(oversized.Endpoint, TestContext.Current.CancellationToken));
         Assert.Equal(count, inner.Sends);
     }
@@ -200,7 +200,7 @@ public sealed class RemoteMcpRequestHandlerTests
         {
             Revalidate = _ => { checks++; if (!allowed) throw new HttpRequestException("Policy changed."); return Task.CompletedTask; },
         };
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, inner));
+        using var client = new HttpClient(CreateHandler(context, inner));
         using HttpResponseMessage first = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
         Assert.Equal(1, checks);
         allowed = false;
@@ -212,7 +212,7 @@ public sealed class RemoteMcpRequestHandlerTests
         {
             Resolve = (_, _) => { allowed = false; return Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()); },
         };
-        using var second = new HttpClient(new RemoteMcpRequestHandler(duringResolution, inner));
+        using var second = new HttpClient(CreateHandler(duringResolution, inner));
         await Assert.ThrowsAnyAsync<HttpRequestException>(() => second.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
         Assert.Equal(1, inner.Sends);
     }
@@ -221,7 +221,7 @@ public sealed class RemoteMcpRequestHandlerTests
     public async Task ScreensCredentialEchoFromActualResponse()
     {
         var context = CreateContext((keys, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string> { [keys[0]] = "secret\"value" }));
-        using var client = new HttpClient(new RemoteMcpRequestHandler(context, new EchoHandler()));
+        using var client = new HttpClient(CreateHandler(context, new EchoHandler()));
         using HttpResponseMessage response = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
         string body = await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken);
         Assert.DoesNotContain("secret", body, StringComparison.Ordinal);
@@ -242,7 +242,7 @@ public sealed class RemoteMcpRequestHandlerTests
         {
             CreateLease = () => tracker.Acquire("one", "user", "agent", includeSystem: false),
         };
-        var handler = new RemoteMcpRequestHandler(context, new StreamingHandler());
+        var handler = CreateHandler(context, new StreamingHandler());
         using var client = new HttpClient(handler);
         using HttpResponseMessage response = await client.GetAsync(context.Endpoint, HttpCompletionOption.ResponseHeadersRead, TestContext.Current.CancellationToken);
         using Stream stream = await response.Content.ReadAsStreamAsync(TestContext.Current.CancellationToken);
@@ -282,6 +282,17 @@ public sealed class RemoteMcpRequestHandlerTests
     private static RemoteMcpRequestContext CreateContext(Func<IReadOnlyList<string>, CancellationToken, Task<IReadOnlyDictionary<string, string>>> resolve)
         => new(new Uri("https://example.com/mcp"), "one", "user", false,
             [new("api-key", "API key", false)], [new("X-Mode", "free"), new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")], resolve, CredentialNamespace: "namespace-one");
+
+    private static RemoteMcpRequestHandler CreateHandler(RemoteMcpRequestContext context, HttpMessageHandler inner)
+        => new(context, new AllowAllTestChecker(), inner);
+
+    private sealed class AllowAllTestChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+    {
+        public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
+            Kautuka.NetworkAccess.Client.OutboundTarget target,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("test_allowed"));
+    }
 
     private sealed class RecordingHandler : HttpMessageHandler
     {

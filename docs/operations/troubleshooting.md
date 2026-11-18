@@ -15,9 +15,15 @@
 - Manager reloads accepted desired state; inspect its accepted/reconciled version and safe failure rather than only container presence.
 - Cold MCP materialization can be long-running. Preserve cancellation/deadline diagnostics and inspect bounded stderr head/tail.
 
+## Egress topology shutdown
+
+Manager's hosted-service stop and dependency-injection container disposal both dispose the same `EgressTopologyManager` singleton. Disposal is idempotent: concurrent callers share one cleanup task, which cancels and awaits the reconcile loop before releasing its cancellation source. A shutdown `ObjectDisposedException` from that source indicates a regression; verify the focused `V7_20_EgressTopologyManagerDisposalIsSafeWhenHostedServiceAndDiDisposeIt` test.
+
 ## Failed schema migration
 
 Treat a failed migration as an integrity boundary, not a normal retry.
+
+Gateway startup can restore a missing marker when the database exactly matches the current schema. It can also upgrade the exact recorded `gateway-2026-10-10.1` schema without a marker: the upgrade is validated on a copy before replacing the original. Other unmarked legacy databases and unrecognized or partially modified schemas fail closed; preserve the database for recovery and do not add a marker manually.
 
 1. Stop only the service whose startup reports the migration failure; do not delete or edit its database, journal, or migration marker.
 2. Preserve the release version, schema version, sanitized error code, database checksum/size, and the exact migration identifier. Do not copy rows containing credentials, prompts, or provider payloads.
@@ -25,6 +31,10 @@ Treat a failed migration as an integrity boundary, not a normal retry.
 4. Re-run the released migration/rollback procedure for that exact version. Never apply ad-hoc SQL or mark a migration complete by hand.
 5. Before reopening traffic, run the relevant schema/contract suite and check that canonical root sequences, waits, invocation links, and ChannelHost delivery records are intact.
 6. Escalate any partial or unclassifiable migration result with the preserved evidence; it requires an engineering recovery decision.
+
+## Local update status cannot connect to port 20300
+
+The local development launcher does not start the optional release-feed server on port `20300`. Development Manager and UpdateService configurations therefore leave release and catalog feed URLs unset. Start `scripts/serve-release-smoke.mjs` only when intentionally testing a local release feed; otherwise the update service skips feed refresh.
 
 ## Browser failures
 

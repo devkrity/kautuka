@@ -50,6 +50,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
                     ContainerCommand = "npx",
                     ContainerArgs = ["-y", "@modelcontextprotocol/server-filesystem"],
                     Enabled = true,
+                    Scope = GatewayOwnershipScopes.System,
                 },
             ]);
 
@@ -61,6 +62,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         WorkspaceDesiredStatePayload payload = resolver.ResolveDesiredState();
         WorkspaceMcpContainerConnectorPayload connector = Assert.Single(payload.ContainerConnectors, item =>
             string.Equals(item.ServerId, "filesystem", StringComparison.Ordinal));
+        Assert.Equal(GatewayOwnershipScopes.System, connector.CatalogScope);
 
         Dictionary<string, string> environment = connector.Environment.ToDictionary(static pair => pair.Key, static pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         Assert.Equal("http://kautuka-pkgs-proxy:20101/npm/", environment["NPM_CONFIG_REGISTRY"]);
@@ -370,6 +372,45 @@ public sealed class WorkspaceDesiredStatePublicationTests
             item.ScopeId.Contains("agent-alpha", StringComparison.Ordinal));
 
         Assert.Equal(["user-a::own-bundle"], binding.ConnectorIds);
+    }
+
+    [Fact]
+    public void ResolveDesiredStateCreatesSystemScopedConnectorInstancesPerUser()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        var database = new KautukaDatabase(configuration);
+        database.EnsureReady();
+        var users = new SqliteGatewayUserCommandRepository(database);
+        users.Upsert(new GatewayUser("user-a", "a", "Testing1", "user", true, null, null));
+        users.Upsert(new GatewayUser("user-b", "b", "Testing1", "user", true, null, null));
+
+        PlatformConfiguration platformConfiguration = CreatePlatformConfiguration(
+            mcpServers:
+            [
+                new McpServerDefinition
+                {
+                    Id = "shared-provider",
+                    Name = "Shared Provider",
+                    Transport = McpTransport.Container,
+                    ContainerImage = "ghcr.io/example/shared-provider:latest",
+                    Enabled = true,
+                    Scope = GatewayOwnershipScopes.System,
+                },
+            ]);
+        var resolver = new WorkspaceRuntimeContextResolver(
+            new StaticPlatformConfigurationProvider(platformConfiguration),
+            configuration,
+            database);
+
+        WorkspaceDesiredStatePayload payload = resolver.ResolveDesiredState();
+        WorkspaceMcpContainerConnectorPayload[] instances = [.. payload.ContainerConnectors
+            .Where(connector => connector.ServerId == "shared-provider")];
+
+        Assert.Equal(
+            ["system::shared-provider", "user-a::shared-provider", "user-b::shared-provider"],
+            instances.Select(static connector => connector.ConnectorId).Order(StringComparer.Ordinal));
+        Assert.All(instances, connector => Assert.Equal(GatewayOwnershipScopes.System, connector.CatalogScope));
     }
 
     [Fact]
@@ -1583,6 +1624,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         ];
 
         Assert.Equal(2, notes.Length);
+        Assert.All(notes, workspace => Assert.Equal("user-ash", workspace.UserId));
         Assert.DoesNotContain(notes, workspace => workspace.HostWorkspacePath.EndsWith(Path.Combine("agents", "ash-notes"), StringComparison.OrdinalIgnoreCase));
         Assert.Contains(notes, workspace => workspace.ScopeId.Contains("agent-a", StringComparison.Ordinal));
         Assert.Contains(notes, workspace => workspace.ScopeId.Contains("agent-b", StringComparison.Ordinal));
@@ -1762,6 +1804,7 @@ public sealed class WorkspaceDesiredStatePublicationTests
         var provider = new SqlitePlatformConfigurationProvider(database, new SqliteAgentDefinitionStore(configuration, database));
         var resolver = new WorkspaceRuntimeContextResolver(provider, configuration, database);
         WorkspaceRuntimeContext first = resolver.ResolveAgentWorkspace("agent-a");
+        Assert.Equal("agent-a", first.AgentId);
         Assert.EndsWith(Path.Combine("agents", "user-ash-agent-a"), first.HostWorkspacePath, StringComparison.OrdinalIgnoreCase);
         Directory.CreateDirectory(first.HostWorkspacePath);
         File.WriteAllText(Path.Combine(first.HostWorkspacePath, "kept.txt"), "kept-note");
@@ -2909,13 +2952,14 @@ public sealed class WorkspaceDesiredStatePublicationTests
         Assert.True(catalog.TryGetMcpServer("kautuka-m365-mail", out _));
         Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-google-mail");
         Assert.Single(catalog.ListMcpServers(), server => server.Id == "kautuka-m365-mail");
+        Assert.All(catalog.ListMcpServers().Where(server => server.Id is "kautuka-google-mail" or "kautuka-m365-mail"), server => Assert.False(server.IsInternalSystemConnector));
         GatewayState reloaded = CreateState(temp.SqlitePath);
         Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-google-mail");
         Assert.Contains(reloaded.McpServers.Values, server => server.Id == "kautuka-m365-mail");
     }
 
     [Fact]
-    public async Task SaveSystemMcpServerAsyncMarksConnectorAsInternalSystem()
+    public async Task SaveSystemMcpServerAsyncDoesNotMarkConnectorAsInternalSystem()
     {
         using var temp = new TemporaryGatewayStateDirectory();
         GatewayState state = CreateState(temp.SqlitePath);
@@ -2949,12 +2993,12 @@ public sealed class WorkspaceDesiredStatePublicationTests
             },
             TestContext.Current.CancellationToken).ConfigureAwait(true);
 
-        Assert.True(saved.IsInternalSystemConnector);
+        Assert.False(saved.IsInternalSystemConnector);
         Assert.False(saved.Enabled);
         Assert.Contains("connector-save", publisher.Reasons);
         Assert.True(store.TryGetMcpServer("kautuka-web-tools", out GatewayMcpServer? persisted));
         Assert.NotNull(persisted);
-        Assert.True(persisted!.IsInternalSystemConnector);
+        Assert.False(persisted!.IsInternalSystemConnector);
     }
 
     [Fact]

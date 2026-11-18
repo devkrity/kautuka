@@ -24,12 +24,16 @@ export function useInstallCatalogRecommendation(targetKey: 'connectors' | 'skill
   return useMutation({
     mutationFn: async (recommendation: CatalogRecommendationItem) =>
       settingsAdmin.installCatalogRecommendation(recommendation.kind, recommendation.id),
-    onSuccess: async (_, recommendation) => {
+    onSuccess: async (response, recommendation) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: [targetKey] }),
         queryClient.invalidateQueries({ queryKey: ['catalog-recommendations'] }),
       ]);
-      toast.success(`Installed ${recommendation.title}.`);
+      if (response.data.networkApprovalRequired) {
+        toast.info(`Installed ${recommendation.title}. Approve its network request, then test the connection to discover its tools.`);
+      } else {
+        toast.success(`Installed ${recommendation.title}.`);
+      }
     },
     onError: () => {
       toast.error('Hosted catalog is currently unreachable. Check again later.');

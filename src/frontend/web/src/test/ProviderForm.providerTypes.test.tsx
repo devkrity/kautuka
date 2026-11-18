@@ -40,6 +40,13 @@ describe('ProviderForm — dynamic provider types', () => {
     vi.restoreAllMocks();
   });
 
+  it('explains the network access granted when saving a provider', async () => {
+    vi.spyOn(SettingsAdminModule.settingsAdmin, 'listProviderTypes').mockResolvedValue({ data: { providerTypes: PROVIDER_TYPES } } as never);
+    render(<ProviderForm editingId="" form={{ ...DEFAULT_FORM, type: 'ollama', base_url: 'http://192.168.1.13:11434' }} saving={false} onChange={vi.fn()} onCancel={vi.fn()} onSave={vi.fn()} />);
+    expect(screen.getByText(/saving allows everyone using Kautuka/i)).toBeInTheDocument();
+    expect(screen.getByText(/local address may give access to a service/i)).toBeInTheDocument();
+  });
+
   it('fetches provider types on mount and populates the type dropdown', async () => {
     const listProviderTypesSpy = vi.spyOn(SettingsAdminModule.settingsAdmin, 'listProviderTypes');
     listProviderTypesSpy.mockResolvedValue({ data: { providerTypes: PROVIDER_TYPES } } as never);

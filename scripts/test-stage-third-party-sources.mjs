@@ -35,7 +35,11 @@ set -euo pipefail
 args=("$@")
 joined=" $* "
 if [[ "$joined" == *" /bin/cat "* ]]; then
-  printf 'fixture-1.0-1.src.rpm\\n'
+  if [[ "$joined" == *"kautuka-egress-boundary@sha256:"* ]]; then
+    printf 'boundaryfixture-1.0-1.src.rpm\\n'
+  else
+    printf 'fixture-1.0-1.src.rpm\\n'
+  fi
   exit 0
 fi
 for arg in "${'${args[@]}'}"; do
@@ -67,6 +71,7 @@ exit 1
     '--release-dir', release,
     '--wsl-rootfs', rootfs,
     '--base-image', `ghcr.io/devkrity/kautuka-base@sha256:${'a'.repeat(64)}`,
+    '--boundary-image', `ghcr.io/devkrity/kautuka-egress-boundary@sha256:${'b'.repeat(64)}`,
   ];
   const command = `cd ${quote(toMsysPath(root))} && bash ./scripts/stage-third-party-sources.sh ${args.map(quote).join(' ')}`;
   const gitBash = 'C:/Program Files/Git/bin/bash.exe';
@@ -92,6 +97,7 @@ exit 1
   if (!curlUrls.includes(fedoraSourceUrl)) throw new Error('staging did not fall back to the exact Fedora Koji source RPM URL');
   const sourceChecksums = await readFile(path.join(sourceDir, 'Fedora-SOURCE-RPMS.sha256'), 'utf8');
   if (!sourceChecksums.includes('fixture-1.0-1.src.rpm')) throw new Error('Fedora source checksum manifest omitted the Koji-fetched RPM');
+  if (!sourceChecksums.includes('boundaryfixture-1.0-1.src.rpm')) throw new Error('Fedora source checksum manifest omitted the boundary image RPM');
   console.log('mocked source staging selected and checksummed exact upstream source snapshots and exercised Fedora Koji fallback');
 } finally {
   await rm(temp, { recursive: true, force: true });

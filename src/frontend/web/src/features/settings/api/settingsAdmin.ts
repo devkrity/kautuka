@@ -211,5 +211,5 @@ export const settingsAdmin = {
   getCatalogRecommendations: () =>
     apiClient.get<CatalogRecommendationsResponse>('/catalog/recommendations'),
   installCatalogRecommendation: (kind: string, id: string) =>
-    apiClient.post('/catalog/recommendations/' + kind + '/' + id + '/install', {}),
+    apiClient.post<{ saved: boolean; networkApprovalRequired: boolean }>('/catalog/recommendations/' + kind + '/' + id + '/install', {}),
 };

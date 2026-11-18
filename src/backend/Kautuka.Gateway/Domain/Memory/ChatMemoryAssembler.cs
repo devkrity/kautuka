@@ -94,6 +94,16 @@ internal sealed partial class ChatMemoryAssembler(
             return new Dictionary<string, GatewayMemoryFact>(StringComparer.Ordinal);
         }
 
+        using IDisposable? nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.Current is null
+            ? Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: !string.IsNullOrWhiteSpace(actingUserId)
+                    ? actingUserId
+                    : (!string.IsNullOrWhiteSpace(agent.OwnerUserId) ? agent.OwnerUserId : "system"),
+                agentId: agent.Id,
+                purpose: "memory-retrieval",
+                service: "ai-model")
+            : null;
+
         GeneratedEmbeddings<Embedding<float>> generated;
         try
         {

@@ -10,6 +10,7 @@ using Kautuka.Gateway.Domain.Channels;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccessController;
 using Kautuka.Protos;
 
 using Microsoft.AspNetCore.Builder;
@@ -686,6 +687,8 @@ public sealed class PersonaSettingsEndpointsTests
             RemoveHostedService<ChannelHostOutboxWorker>(builder.Services);
             RemoveHostedService<ChannelHostIngressWorker>(builder.Services);
             RemoveHostedService<AutopilotSchedulerService>(builder.Services);
+            RemoveHostedService<GatewayUserRolePrivilegesStartupSyncService>(builder.Services);
+            builder.Services.AddSingleton(new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json")));
             builder.Services.AddSingleton<IManagerGrpcService, TestWorkspaceGrpcService>();
             builder.Services.RemoveAll<CredentialResolverService>();
             builder.Services.AddSingleton(
@@ -805,8 +808,9 @@ public sealed class PersonaSettingsEndpointsTests
             }
         }
 
-        private sealed class TestWorkspaceGrpcService : IManagerGrpcService
+        private sealed class TestWorkspaceGrpcService(NetworkAccessPolicyStore rules) : IManagerGrpcService
         {
+            public ManagerService.ManagerServiceClient Client { get; } = ProviderModelFixture.CreateTestManager(rules).Client;
             private static WorkspaceContextResponse SuccessWorkspaceContext()
                 => new()
                 {

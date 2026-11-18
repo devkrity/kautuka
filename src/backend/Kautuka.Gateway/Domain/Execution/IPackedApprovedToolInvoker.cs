@@ -7,6 +7,8 @@ namespace Kautuka.Gateway.Domain.Execution;
 /// </summary>
 internal interface IPackedApprovedToolInvoker
 {
+    ValueTask<string> InvokePinnedAsync(string agentId, string sessionId, string? userId, string toolName, string? argumentsJson, EffectiveToolingSnapshot? snapshot, CancellationToken cancellationToken, string? connectorId = null)
+        => InvokeAsync(agentId, sessionId, userId, toolName, argumentsJson, cancellationToken);
     ValueTask<string> InvokeAsync(
         string agentId,
         string sessionId,

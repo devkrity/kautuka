@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
+using Kautuka.Hosting.Hosting;
+
 using Microsoft.Extensions.Logging;
 
 namespace Kautuka.Manager.RuntimeContainer.Configuration;
@@ -154,21 +156,40 @@ public static class WorkspaceSidecarCatalogLoader
             return resolved;
         }
 
-        if (!OperatingSystem.IsWindows())
+        return ResolveVolumeHostPath(baseDirectory, runtimePaths.HostMode, runtimePaths.SharedDataRoot, resolved);
+    }
+
+    internal static string ResolveVolumeHostPath(
+        string baseDirectory,
+        KautukaHostMode hostMode,
+        string sharedDataRoot,
+        string hostPath)
+    {
+        string resolved = ResolveRelativePath(baseDirectory, hostPath) ?? hostPath;
+        if (string.IsNullOrWhiteSpace(resolved) || !Path.IsPathRooted(resolved))
         {
-            return Path.GetFullPath(resolved);
+            return resolved;
         }
 
         string normalizedResolved = Path.GetFullPath(resolved);
+        if (!OperatingSystem.IsWindows()
+            && (!OperatingSystem.IsLinux() || hostMode != KautukaHostMode.Dev))
+        {
+            return normalizedResolved;
+        }
+
         string normalizedProdRoot = Path.GetFullPath(prodSharedStateRoot);
-        string normalizedSharedRoot = Path.GetFullPath(runtimePaths.SharedDataRoot);
-        if (string.Equals(normalizedSharedRoot, normalizedProdRoot, StringComparison.OrdinalIgnoreCase))
+        string normalizedSharedRoot = Path.GetFullPath(sharedDataRoot);
+        StringComparison pathComparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(normalizedSharedRoot, normalizedProdRoot, pathComparison))
         {
             return normalizedResolved;
         }
 
         string prodPrefix = normalizedProdRoot + Path.DirectorySeparatorChar;
-        if (normalizedResolved.StartsWith(prodPrefix, StringComparison.OrdinalIgnoreCase))
+        if (normalizedResolved.StartsWith(prodPrefix, pathComparison))
         {
             string relativeSuffix = normalizedResolved[prodPrefix.Length..];
             string mappedPath = Path.GetFullPath(Path.Combine(normalizedSharedRoot, relativeSuffix));
@@ -176,7 +197,7 @@ public static class WorkspaceSidecarCatalogLoader
             return mappedPath;
         }
 
-        if (string.Equals(normalizedResolved, normalizedProdRoot, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(normalizedResolved, normalizedProdRoot, pathComparison))
         {
             Directory.CreateDirectory(normalizedSharedRoot);
             return normalizedSharedRoot;

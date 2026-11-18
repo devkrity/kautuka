@@ -13,6 +13,7 @@ using Kautuka.Gateway.Domain.Sessions;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Telemetry.Telemetry;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -21,6 +22,31 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ChatGatewayServiceUsageTests
 {
+    [Fact]
+    public async Task BackgroundMemoryExtractionUsesOriginalSessionNetworkIdentity()
+    {
+        var extractor = new ScopeCapturingFactExtractor();
+        var service = CreateService(new CapturingUsageQueue(), factExtractor: extractor,
+            configureState: state => state.Sessions["session-memory"] = CreateSession("session-memory", 0));
+        bool success = await service.ProcessMemoryExtractionAsync(
+            new MemoryExtractionJob("job", "agent", "agent-a", "session-memory", "hello", "hi", 0),
+            TestContext.Current.CancellationToken);
+        Assert.True(success);
+        Assert.Equal("user-1", extractor.Scope?.UserId);
+        Assert.Equal("agent-a", extractor.Scope?.AgentId);
+    }
+
+    private sealed class ScopeCapturingFactExtractor : IMemoryFactExtractor
+    {
+        public NetworkAccessScope? Scope { get; private set; }
+        public Task<IReadOnlyList<GatewayMemoryFact>> ExtractAsync(Microsoft.Extensions.AI.IChatClient? client,
+            string targetType, string targetId, string ownerUserId, string userMessage, string assistantMessage,
+            DateTimeOffset timestamp, CancellationToken cancellationToken = default)
+        {
+            Scope = NetworkAccessContext.Current;
+            return Task.FromResult<IReadOnlyList<GatewayMemoryFact>>([]);
+        }
+    }
     [Fact]
     public async Task StreamChatAsyncPersistsPausedAssistantMessageWhenApprovalPausesAfterToolCall()
     {
@@ -994,7 +1020,9 @@ public sealed class ChatGatewayServiceUsageTests
         IAgentFilePathAuthorizationService? agentFilePathAuthorizationService = null,
         IPlatformConfigurationProvider? configurationProvider = null,
         ISessionCompactionService? sessionCompactionService = null,
-        IGatewayCatalogStore? catalog = null)
+        IGatewayCatalogStore? catalog = null,
+        IMemoryFactExtractor? factExtractor = null,
+        Action<GatewayState>? configureState = null)
     {
         IConfiguration configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -1014,13 +1042,14 @@ public sealed class ChatGatewayServiceUsageTests
             new SqliteAgentRuntimeRunRepository(agentStoreDatabase),
             new SqliteAgentMemoryFactRepository(agentStoreDatabase),
             new GatewayMemoryStore());
+        configureState?.Invoke(state);
 
         return new ChatGatewayService(
             sessionStore ?? new FakeSessionStore(),
             sessionLifecycleService ?? new FakeSessionLifecycleService(),
             agentChatService ?? new FakeAgentChatService(AsyncEnumerable.Empty<GatewayChatStreamEvent>()),
             NullLogger<ChatGatewayService>.Instance,
-            new NoOpFactExtractor(),
+            factExtractor ?? new NoOpFactExtractor(),
             new NoOpChatMemoryAssembler(),
             new NoOpAgentMemoryEmbeddingService(),
             new PassthroughMemoryScopePolicy(),

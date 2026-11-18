@@ -1,0 +1,21 @@
+table inet kautuka_workload
+delete table inet kautuka_workload
+table inet kautuka_workload {
+  chain input { type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    counter drop comment "input_drop"
+  }
+  chain output { type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+    meta nfproto ipv6 counter drop comment "ipv6_drop"
+    oifname != "lo" ip saddr != 10.247.1.20 counter drop comment "spoof_drop"
+    ip daddr 10.247.0.2 tcp dport 15001 accept
+    ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept
+    ip daddr 10.247.0.0/16 counter drop comment "wl_net_drop"
+    ip daddr { 169.254.0.0/16, 168.63.129.16 } counter drop comment "meta_drop"
+    meta l4proto udp counter drop comment "udp_drop"
+    meta l4proto tcp accept
+    counter drop comment "final_drop"
+  }
+}

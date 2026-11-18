@@ -17,6 +17,7 @@ using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Endpoints.Catalog;
 using Kautuka.Gateway.Infrastructure.Catalog;
 using Kautuka.Gateway.Infrastructure.Updates;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.UpdateService.Protos;
 
 using Microsoft.AspNetCore.Builder;
@@ -31,6 +32,141 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class GatewayOnboardingEndpointTests
 {
+    [Theory]
+    [InlineData(3, true)]
+    [InlineData(4, false)]
+    public async Task CatalogueDownloadLimitsRedirects(int redirects, bool expectedSuccess)
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", "https://catalog.test/0", Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectChainHandler(redirects, bundle);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(transport));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Equal(expectedSuccess ? HttpStatusCode.OK : HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal(expectedSuccess, transport.TargetReached);
+    }
+
+    private sealed class RedirectChainHandler(int redirects, byte[] bundle) : HttpMessageHandler
+    {
+        public bool TargetReached { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int hop = int.Parse(request.RequestUri!.AbsolutePath.TrimStart('/'), System.Globalization.CultureInfo.InvariantCulture);
+            if (hop < redirects)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+                response.Headers.Location = new Uri($"https://catalog.test/{hop + 1}");
+                return Task.FromResult(response);
+            }
+            TargetReached = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bundle) });
+        }
+    }
+
+    [Fact]
+    public async Task CatalogueDownloadRejectsHttpsDowngradeBeforeContactingTarget()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        const string original = "https://catalog.test/bundle";
+        const string target = "http://release.test/bundle";
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", original, Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectArtifactHandler(original, target, bundle);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(transport));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.False(transport.TargetReached);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CatalogueDownloadFollowsOnlyNetworkApprovedRedirects(bool allowTarget)
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        const string original = "https://catalog.test/bundle";
+        const string target = "https://release.test/bundle";
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", original, Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectArtifactHandler(original, target, bundle);
+        var checker = new RedirectChecker(allowTarget);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(new NetworkAccessCheckHandler(checker, transport)));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Contains(checker.Targets, item => item.Host == "catalog.test" && item.UserId == "user-1");
+        Assert.Contains(checker.Targets, item => item.Host == "release.test" && item.UserId == "user-1");
+        Assert.Equal(allowTarget ? HttpStatusCode.OK : HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal(allowTarget, transport.TargetReached);
+    }
+
+    private sealed class RedirectChecker(bool allowTarget) : INetworkAccessChecker
+    {
+        public List<OutboundTarget> Targets { get; } = [];
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Targets.Add(target);
+            return Task.FromResult(target.Host == "release.test" && !allowTarget
+                ? NetworkAccessCheckResult.CreateDenied("test") : NetworkAccessCheckResult.CreateAllowed("test"));
+        }
+    }
+
+    private sealed class RedirectArtifactHandler(string original, string target, byte[] bundle) : HttpMessageHandler
+    {
+        public bool TargetReached { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri?.ToString() == original)
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Redirect);
+                redirect.Headers.Location = new Uri(target);
+                return Task.FromResult(redirect);
+            }
+            TargetReached = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bundle) });
+        }
+    }
     [Fact]
     public async Task CatalogRecommendationsDoNotMutateSeededMarkitdownConnectorAsync()
     {
@@ -110,9 +246,12 @@ public sealed class GatewayOnboardingEndpointTests
         Assert.Equal(["markitdown"], catalogStore.ListMcpServers().Select(static server => server.Id).OrderBy(static id => id).ToArray());
     }
 
-    [Fact]
-    public async Task CatalogRecommendationInstallImportsConnectorAsync()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CatalogRecommendationInstallImportsConnectorAsync(bool needsNetworkApproval)
     {
+        var connectorTest = new RecordingMcpConnectorTestService { NeedsNetworkApproval = needsNetworkApproval };
         using var temp = new TemporaryGatewayStateDirectory();
         IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
         GatewayState state = CreateState(configuration);
@@ -151,7 +290,7 @@ public sealed class GatewayOnboardingEndpointTests
                     [artifactUrl] = bundleBytes,
                 })));
                 services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
-                services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+                services.AddSingleton<IMcpConnectorTestService>(connectorTest);
                 services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
                 services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
             }).ConfigureAwait(true);
@@ -169,6 +308,19 @@ public sealed class GatewayOnboardingEndpointTests
         Assert.NotNull(connector);
         Assert.Equal("Kautuka Web Tools", connector!.Name);
         Assert.True(connector.Enabled);
+        Assert.Equal("user-1", connectorTest.LastRequest?.UserId);
+        Assert.True(connectorTest.LastRequest?.SaveDiscovery);
+        if (needsNetworkApproval)
+        {
+            Assert.True(json?["networkApprovalRequired"]?.GetValue<bool>());
+            Assert.Null(connector.LocalToolDefinitions);
+        }
+        else
+        {
+            Assert.Equal("sha256:" + new string('a', 64), connector.LocalImageDigest);
+            Assert.Equal(new string('b', 64), connector.LocalArtifactDigest);
+            Assert.Equal("open_page", Assert.Single(connector.LocalToolDefinitions!).Name);
+        }
     }
 
     [Fact]
@@ -531,13 +683,21 @@ public sealed class GatewayOnboardingEndpointTests
 
     private sealed class RecordingMcpConnectorTestService : IMcpConnectorTestService
     {
+        public GatewayConnectorTestRequest? LastRequest { get; private set; }
+        public bool NeedsNetworkApproval { get; init; }
         public Task<McpConnectorTestResult> TestAsync(GatewayConnectorTestRequest request, CancellationToken ct)
-            => Task.FromResult(new McpConnectorTestResult(
+        {
+            LastRequest = request;
+            if (NeedsNetworkApproval) return Task.FromResult(new McpConnectorTestResult(false, "Network approval required.", NetworkApprovalRequired: true));
+            return Task.FromResult(new McpConnectorTestResult(
                 true,
                 "Connector validated.",
                 ToolCount: 2,
                 PackageChecked: request.BundlePath,
-                ToolNames: ["open_page", "extract_text"]));
+                ToolNames: ["open_page", "extract_text"],
+                ToolDefinitions: [new ConnectorToolDefinition("open_page", "Open a page", "{\"type\":\"object\"}")],
+                ImageDigest: "sha256:" + new string('a', 64), SourceDigest: new string('b', 64)));
+        }
     }
 
     private sealed class StaticHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory

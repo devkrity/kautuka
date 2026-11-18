@@ -35,6 +35,7 @@ internal static class BackgroundWorkDeliveryCatalog
         new("ChannelHostOwnerTargetSyncDispatcherService", BackgroundWorkGuarantee.RecoverableDerived, 256, "reject when full", "five-minute authoritative reconciliation"),
         new("ChannelHostOwnerTargetReconciliationService", BackgroundWorkGuarantee.RecoverableDerived, 0, "periodic scan", "rebuild from owned agents"),
         new("WorkspaceDesiredStateStartupService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "repeat on restart"),
+        new("GatewayUserRolePrivilegesStartupSyncService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass; abort startup on Manager failure", "repeat on restart to repair persisted role privilege records"),
         new("BuiltInMcpPackageBootstrapService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),
         new("BuiltInSkillPackageBootstrapService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),
         new("BuiltInConnectorCatalogService", BackgroundWorkGuarantee.RecoverableDerived, 0, "single startup pass", "idempotent reinstall on restart"),

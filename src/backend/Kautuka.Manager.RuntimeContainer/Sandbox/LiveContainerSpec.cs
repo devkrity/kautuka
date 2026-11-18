@@ -17,19 +17,19 @@ internal sealed record LiveContainerExpectation(
 
 internal static class LiveContainerSpec
 {
-    internal static LiveContainerExpectation ForSandbox(ContainerContext context, string? currentImageId)
+    internal static LiveContainerExpectation ForSandbox(ContainerContext context, string? currentImageId, string networkName = "kautuka-workload")
     {
         ArgumentNullException.ThrowIfNull(context);
         string[] env = [.. context.ContainerEnvironment
             .Where(static pair => !string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
             .Select(static pair => pair.Key + "=" + pair.Value)];
         return new LiveContainerExpectation(
-            "kautuka-sandbox",
+            networkName,
             context.HostWorkspacePath,
             context.ContainerWorkspacePath,
             MountReadOnly: false,
             PidsLimit: 256,
-            ["/tmp", "/home/node/.kautuka"],
+            ["/tmp", "/home/node"],
             env,
             currentImageId);
     }
@@ -37,22 +37,25 @@ internal static class LiveContainerSpec
     internal static LiveContainerExpectation ForConnector(
         ContainerContext? mountedWorkspace,
         IReadOnlyList<string> envAssignments,
-        string? currentImageId)
+        string? currentImageId,
+        string networkName = "kautuka-workload")
         => ForConnector(
             mountedWorkspace?.HostWorkspacePath,
             mountedWorkspace?.ContainerWorkspacePath ?? string.Empty,
             mountedWorkspace is not null,
             envAssignments,
-            currentImageId);
+            currentImageId,
+            networkName);
 
     internal static LiveContainerExpectation ForConnector(
         string? hostMountPath,
         string containerMountPath,
         bool mountReadOnly,
         IReadOnlyList<string> envAssignments,
-        string? currentImageId)
+        string? currentImageId,
+        string networkName = "kautuka-workload")
         => new(
-            "kautuka-sandbox",
+            networkName,
             hostMountPath,
             containerMountPath,
             mountReadOnly,
@@ -74,7 +77,7 @@ internal static class LiveContainerSpec
         if (!string.IsNullOrWhiteSpace(expected.CurrentImageId))
         {
             string imageId = container.TryGetProperty("Image", out JsonElement image) ? image.GetString() ?? string.Empty : string.Empty;
-            if (!string.Equals(imageId, expected.CurrentImageId, StringComparison.Ordinal))
+            if (!ImageIdsMatch(imageId, expected.CurrentImageId))
             {
                 return "its image is not the image that tag points at now";
             }
@@ -147,6 +150,19 @@ internal static class LiveContainerSpec
         }
 
         return null;
+    }
+
+    private static bool ImageIdsMatch(string actual, string expected)
+    {
+        if (string.Equals(actual, expected, StringComparison.Ordinal)) return true;
+        ReadOnlySpan<char> actualHex = actual.AsSpan();
+        ReadOnlySpan<char> expectedHex = expected.AsSpan();
+        if (actualHex.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) actualHex = actualHex[7..];
+        if (expectedHex.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)) expectedHex = expectedHex[7..];
+        return actualHex.Length == 64 && expectedHex.Length == 64
+            && actualHex.ToString().All(Uri.IsHexDigit)
+            && expectedHex.ToString().All(Uri.IsHexDigit)
+            && actualHex.Equals(expectedHex, StringComparison.OrdinalIgnoreCase);
     }
 
     internal static string? DescribeSidecarDrift(
@@ -475,15 +491,22 @@ internal static class LiveContainerSpec
             && value.ValueKind == JsonValueKind.String
             && string.Equals(value.GetString(), "host", StringComparison.OrdinalIgnoreCase);
 
-    private static bool CapDropIncludesAll(JsonElement container, JsonElement host)
+    internal static bool CapDropIncludesAll(
+        JsonElement container,
+        JsonElement host,
+        IReadOnlySet<string>? allowedCapabilities = null)
     {
         // Podman expands --cap-drop ALL into its default capability names. Its
         // resolved sets are authoritative; an empty Go slice can serialize as null.
+        allowedCapabilities ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool hasEffective = container.TryGetProperty("EffectiveCaps", out JsonElement effective);
         bool hasBounding = container.TryGetProperty("BoundingCaps", out JsonElement bounding);
         if (hasEffective || hasBounding)
         {
-            return hasEffective && hasBounding && IsEmptyCapabilitySet(effective) && IsEmptyCapabilitySet(bounding);
+            return hasEffective
+                && hasBounding
+                && CapabilitySetContainsOnlyAllowed(effective, allowedCapabilities)
+                && CapabilitySetContainsOnlyAllowed(bounding, allowedCapabilities);
         }
 
         if (!host.TryGetProperty("CapDrop", out JsonElement capDrop) || capDrop.ValueKind != JsonValueKind.Array)
@@ -502,9 +525,29 @@ internal static class LiveContainerSpec
         return false;
     }
 
-    private static bool IsEmptyCapabilitySet(JsonElement value)
-        => value.ValueKind == JsonValueKind.Null
-            || (value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 0);
+    private static bool CapabilitySetContainsOnlyAllowed(JsonElement value, IReadOnlySet<string> allowed)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            return allowed.Count == 0;
+        }
+
+        if (value.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (JsonElement capability in value.EnumerateArray())
+        {
+            string? name = capability.ValueKind == JsonValueKind.String ? capability.GetString() : null;
+            if (string.IsNullOrWhiteSpace(name) || !allowed.Contains(name))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool CapAddIsPresent(JsonElement host)
         => host.TryGetProperty("CapAdd", out JsonElement capAdd)

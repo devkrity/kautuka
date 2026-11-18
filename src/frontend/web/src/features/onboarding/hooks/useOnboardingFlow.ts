@@ -400,34 +400,27 @@ export function useOnboardingFlow() {
     }
 
     try {
-      setSaving(true);
       setError(null);
       setProviderValidation(null);
 
-      const providerTest = await settingsAdmin.testProvider({
-        id: providerId,
-        type: providerType,
-        settings: {
-          ...settings,
-          default_model: providerModel,
-        },
-      });
-
-      const validation: ProviderTestResult = {
-        success: Boolean(providerTest.data.success),
-        message:
-          typeof providerTest.data.message === 'string'
-            ? providerTest.data.message
-            : 'Provider validation failed.',
-      };
-
-      setProviderValidation(validation);
-
-      if (!validation.success) {
-        setError(validation.message);
-        return;
+      setSaving(true);
+      try {
+        await saveProviderAndContinue(providerId, providerType, settings, providerModel);
+      } finally {
+        setSaving(false);
       }
+    } catch (err) {
+      setError(apiError(err));
+      setProviderValidation(null);
+    }
+  };
 
+  const saveProviderAndContinue = async (
+    providerId: string,
+    providerType: string,
+    settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
+    providerModel: string
+  ) => {
       await settingsAdmin.saveProvider({
         id: providerId,
         type: providerType,
@@ -527,12 +520,6 @@ export function useOnboardingFlow() {
       await queryClient.invalidateQueries({ queryKey: ['system-setup-status'] });
       await queryClient.refetchQueries({ queryKey: ['system-setup-status'] });
       goNext(WIZARD_STAGES.recommendations);
-    } catch (err) {
-      setError(apiError(err));
-      setProviderValidation(null);
-    } finally {
-      setSaving(false);
-    }
   };
 
   const saveTelegramSetup = async () => {

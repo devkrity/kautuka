@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <PublishAot>true</PublishAot>
     <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
-    <NoWarn>$(NoWarn);CA1515;CA1848;CA1873;CA1031;CA1822;CA1054;CA1056</NoWarn>
+    <NoWarn>$(NoWarn);CA1515;CA1848;CA1873;CA1031;CA1822;CA1054;CA1056;CA1308</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +16,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\Kautuka.Hosting\Kautuka.Hosting.csproj" />
     <ProjectReference Include="..\..\shared\Kautuka.Manager.Protos\Kautuka.Manager.Protos.csproj" />
+    <ProjectReference Include="..\Kautuka.NetworkAccessController\Kautuka.NetworkAccessController.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,8 +24,22 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="..\Kautuka.Manager\runtime-images.json" LogicalName="Kautuka.RuntimeImages.json" />
+    <EmbeddedResource Include="Hosting\NetworkAccess\*.tmpl" Exclude="Hosting\NetworkAccess\kautuka_workload.nft.json.tmpl" />
+    <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_workload.nft.json.tmpl">
+      <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_workload.nft.json.tmpl</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_package_proxy.nft.json.tmpl">
+      <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_package_proxy.nft.json.tmpl</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>Kautuka.IntegrationTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Kautuka.NetworkAccess.Acceptance</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 

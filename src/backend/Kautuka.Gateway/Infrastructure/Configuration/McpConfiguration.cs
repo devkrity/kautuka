@@ -126,4 +126,10 @@ internal sealed class McpServerDefinition
 
     /// <summary>Last known tool names, populated when an admin runs Test Connection. Null if never tested.</summary>
     public IReadOnlyList<string>? ToolNames { get; init; }
+
+    public IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition>? LocalToolDefinitions { get; init; }
+
+    public string? LocalArtifactDigest { get; init; }
+
+    public string? LocalImageDigest { get; init; }
 }

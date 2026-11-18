@@ -1,0 +1,227 @@
+import React from 'react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { formatDestinationDisplay } from '../destinationScope';
+import type { NetworkAccessRuleDto } from '../networkAccess';
+
+export function getRuleScopeSentence(rule: NetworkAccessRuleDto): string {
+  const user = rule.userDisplayName || rule.userId || 'User';
+  const agent = rule.agentDisplayName || rule.agentId || 'Agent';
+  const connector = rule.connectorDisplayName || rule.connectorId || 'Connector';
+
+  if (rule.destKind === 'any-public') {
+    return `${user}'s ${connector} can reach any public website`;
+  }
+  if (rule.scopeKind === 'agent') {
+    return `${user}'s ${agent}`;
+  }
+  if (rule.scopeKind === 'user') {
+    if (rule.connectorDisplayName || rule.connectorId) {
+      return `Only ${user}, using ${connector}`;
+    }
+    return `All of ${user}'s activity`;
+  }
+  if (rule.scopeKind === 'system') {
+    return 'Everyone (systemwide)';
+  }
+  return `${user}'s ${agent}`;
+}
+
+interface RulesListProps {
+  rules: NetworkAccessRuleDto[];
+  expectedRevision: number;
+  currentUser?: { id?: string; displayName?: string | null; role?: string };
+  onDeleteRule: (ruleId: string, expectedRevision: number) => Promise<unknown>;
+  onEditRule?: (rule: NetworkAccessRuleDto) => void;
+  canManageOwn?: boolean;
+  onBlockSeedRule?: (rule: NetworkAccessRuleDto) => Promise<unknown>;
+  disabled?: boolean;
+}
+
+export function RulesList({
+  rules,
+  expectedRevision,
+  currentUser,
+  onDeleteRule,
+  onEditRule,
+  canManageOwn = false,
+  onBlockSeedRule,
+  disabled = false,
+}: RulesListProps) {
+  const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
+  const [activeTab, setActiveTab] = React.useState<'allowed' | 'blocked' | 'seed'>('allowed');
+  const [submittingRuleId, setSubmittingRuleId] = React.useState<string | null>(null);
+  const [confirmation, setConfirmation] = React.useState<{ rule: NetworkAccessRuleDto; action: 'remove' | 'block' } | null>(null);
+
+  // Group rules:
+  // - seed: source === 'seed'
+  // - allowed: source !== 'seed' && allowed === true
+  // - blocked: source !== 'seed' && allowed === false
+  // Paused rules are typically in allowed or blocked, shown with paused message
+  const seedRules = rules.filter((r) => r.source === 'seed');
+  const allowedRules = rules.filter((r) => r.source !== 'seed' && r.allowed);
+  const blockedRules = rules.filter((r) => r.source !== 'seed' && !r.allowed);
+
+  const handleDelete = async (ruleId: string) => {
+    setSubmittingRuleId(ruleId);
+    try {
+      await onDeleteRule(ruleId, expectedRevision);
+    } finally {
+      setSubmittingRuleId(null);
+    }
+  };
+
+  const handleBlockSeed = async (rule: NetworkAccessRuleDto) => {
+    if (!onBlockSeedRule) return;
+    setSubmittingRuleId(rule.id);
+    try {
+      await onBlockSeedRule(rule);
+    } finally {
+      setSubmittingRuleId(null);
+    }
+  };
+
+  const renderRuleItem = (rule: NetworkAccessRuleDto, isSeed: boolean = false) => {
+    const scopeSentence = getRuleScopeSentence(rule);
+    const destDisplay =
+      rule.destKind === 'any-public'
+        ? 'Any public website'
+        : formatDestinationDisplay(rule.destination, rule.port);
+
+    return (
+      <article
+        key={rule.id}
+        data-testid={`rule-row-${rule.id}`}
+        className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-border bg-card p-3.5 shadow-sm"
+      >
+        <div className="space-y-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-sm text-foreground break-all">
+              {destDisplay}
+            </span>
+
+            {rule.paused && (
+              <Badge variant="outline" className="text-xs">Paused</Badge>
+            )}
+
+            {rule.openInternetBadge && (
+              <Badge variant="attention" className="text-xs">
+                Open internet
+              </Badge>
+            )}
+
+            {rule.allowLan && (
+              <Badge variant="outline" className="text-xs">
+                Local network included
+              </Badge>
+            )}
+
+            {isSeed && (
+              <Badge variant="secondary" className="text-xs">
+                Built in
+              </Badge>
+            )}
+            {!isSeed && rule.protectedFromUser && (
+              <Badge variant="outline" className="text-xs">Set by an administrator</Badge>
+            )}
+          </div>
+
+          <p className="text-sm text-muted-foreground">{scopeSentence}</p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {!isSeed && onEditRule && (isAdmin || (canManageOwn && rule.userId === currentUser?.id && !rule.protectedFromUser)) && (
+            <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onEditRule(rule)}>Edit</Button>
+          )}
+          {isSeed ? (
+            // Built in (seed) rules cannot be deleted; can only be blocked by admin
+            isAdmin && rule.allowed && onBlockSeedRule && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={disabled || submittingRuleId === rule.id}
+                onClick={() => setConfirmation({ rule, action: 'block' })}
+              >
+                Block
+              </Button>
+            )
+          ) : !isAdmin && canManageOwn && rule.userId === currentUser?.id && rule.protectedFromUser && rule.allowed && rule.destKind !== 'any-public' && onBlockSeedRule ? (
+            <Button type="button" variant="outline" size="sm" disabled={disabled || submittingRuleId === rule.id} onClick={() => setConfirmation({ rule, action: 'block' })}>Block</Button>
+          ) : (isAdmin || (canManageOwn && rule.userId === currentUser?.id && !rule.protectedFromUser)) ? (
+            // Normal rule: Remove button
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={disabled || submittingRuleId === rule.id}
+              onClick={() => setConfirmation({ rule, action: 'remove' })}
+            >
+              Remove
+            </Button>
+          ) : null}
+        </div>
+      </article>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
+        <TabsList className="grid grid-cols-3 w-full max-w-md">
+          <TabsTrigger value="allowed">Allowed ({allowedRules.length})</TabsTrigger>
+          <TabsTrigger value="blocked">Blocked ({blockedRules.length})</TabsTrigger>
+          <TabsTrigger value="seed">Built in ({seedRules.length})</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="allowed" className="space-y-2.5 pt-2">
+          {allowedRules.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4">No allowed rules yet.</p>
+          ) : (
+            allowedRules.map((rule) => renderRuleItem(rule, false))
+          )}
+        </TabsContent>
+
+        <TabsContent value="blocked" className="space-y-2.5 pt-2">
+          {blockedRules.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4">No blocked rules.</p>
+          ) : (
+            blockedRules.map((rule) => renderRuleItem(rule, false))
+          )}
+        </TabsContent>
+
+        <TabsContent value="seed" className="space-y-2.5 pt-2">
+          <p className="text-xs text-muted-foreground mb-2">
+            Built-in permissions keep Kautuka services working. Built-in rules cannot be deleted,
+            but administrators can block them.
+          </p>
+          {seedRules.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-4">No built-in rules found.</p>
+          ) : (
+            seedRules.map((rule) => renderRuleItem(rule, true))
+          )}
+        </TabsContent>
+      </Tabs>
+      <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{confirmation?.action === 'block' ? (confirmation.rule.source === 'seed' ? 'Block built-in permission?' : 'Block access?') : 'Remove network rule?'}</DialogTitle>
+            <DialogDescription>
+              {confirmation?.action === 'block' ? 'Block access to ' : 'Remove the rule for '}{confirmation?.rule.destination}?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmation(null)} disabled={Boolean(submittingRuleId)}>Cancel</Button>
+            <Button type="button" variant="destructive" disabled={Boolean(submittingRuleId)} onClick={() => {
+              if (!confirmation) return;
+              const { rule, action } = confirmation;
+              void (action === 'block' ? handleBlockSeed(rule) : handleDelete(rule.id)).then(() => setConfirmation(null)).catch(() => { /* Parent reports the error. */ });
+            }}>{confirmation?.action === 'block' ? 'Confirm block' : 'Confirm removal'}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

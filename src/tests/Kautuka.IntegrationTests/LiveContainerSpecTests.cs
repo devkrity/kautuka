@@ -9,6 +9,25 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class LiveContainerSpecTests
 {
+    [Fact]
+    public void SandboxAcceptsActualHomeTmpfsAndRejectsMissingHomeTmpfs()
+    {
+        JsonNode container = JsonNode.Parse(Inspect())![0]!;
+        container["HostConfig"]!["Tmpfs"] = new JsonObject { ["/tmp"] = "rw,noexec,nosuid", ["/home/node"] = "rw,nodev,nosuid,mode=1777" };
+        LiveContainerExpectation expected = LiveContainerSpec.ForSandbox(Sandbox(), "sha256:current");
+        Assert.Null(LiveContainerSpec.DescribeDrift(container.ToJsonString(), expected));
+        ((JsonObject)container["HostConfig"]!["Tmpfs"]!).Remove("/home/node");
+        Assert.Equal("its temporary mounts do not match the spec", LiveContainerSpec.DescribeDrift(container.ToJsonString(), expected));
+    }
+    [Fact]
+    public void ConnectorImageIdAcceptsPodmanBareSha256AndRejectsAnotherImage()
+    {
+        string imageId = new('a', 64);
+        LiveContainerExpectation expected = LiveContainerSpec.ForConnector(Sandbox(), ["TOKEN=secret"], "sha256:" + imageId);
+        Assert.Null(LiveContainerSpec.DescribeDrift(Inspect(imageId: imageId, mount: "/tmp/kautuka/alpha:/workspace:ro", pidsLimit: 128), expected));
+        Assert.Equal("its image is not the image that tag points at now",
+            LiveContainerSpec.DescribeDrift(Inspect(imageId: new string('b', 64), mount: "/tmp/kautuka/alpha:/workspace:ro", pidsLimit: 128), expected));
+    }
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -140,7 +159,7 @@ public sealed class LiveContainerSpecTests
 
     [Theory]
     [InlineData("bridge")]
-    [InlineData("kautuka-sandbox")]
+    [InlineData("kautuka-workload")]
     public void NamedNetworkAttachmentIsAcceptedForSandboxAndConnector(string mode)
     {
         string inspect = Inspect(networkMode: mode);
@@ -161,11 +180,11 @@ public sealed class LiveContainerSpecTests
     }
 
     [Theory]
-    [InlineData("host", "kautuka-sandbox", null, "its network is host")]
-    [InlineData("none", "kautuka-sandbox", null, "its network is none")]
+    [InlineData("host", "kautuka-workload", null, "its network is host")]
+    [InlineData("none", "kautuka-workload", null, "its network is none")]
     [InlineData("bridge", "podman", null, "its network attachments do not match the spec")]
-    [InlineData("bridge", "kautuka-sandbox", "podman", "its network attachments do not match the spec")]
-    [InlineData("kautuka-sandbox", "podman", null, "its network attachments do not match the spec")]
+    [InlineData("kautuka-workload", "podman", null, "its network attachments do not match the spec")]
+    [InlineData("bridge", "kautuka-workload", "podman", "its network attachments do not match the spec")]
     [InlineData("bridge", null, null, "its network attachments do not match the spec")]
     public void IncorrectOrMissingNetworkAttachmentsRemainDrift(string mode, string? network, string? extraNetwork, string drift)
     {
@@ -174,7 +193,8 @@ public sealed class LiveContainerSpecTests
             LiveContainerSpec.ForSandbox(Sandbox(), "sha256:current")));
         Assert.Equal(drift, LiveContainerSpec.DescribeSidecarDrift(
             SidecarInspect(network: network, networkMode: mode, extraNetwork: extraNetwork),
-            "example/sidecar:1", [new(8080, 80, "127.0.0.1")], "sha256:sidecar"));
+            "example/sidecar:1", [new(8080, 80, "127.0.0.1")], "sha256:sidecar",
+            expectedNetwork: mode == "kautuka-workload" ? "kautuka-workload" : "kautuka-sandbox"));
     }
 
     private static object? NetworkSettings(string? network, string? extraNetwork)
@@ -214,7 +234,7 @@ public sealed class LiveContainerSpecTests
 
     private static string Inspect(
         string imageId = "sha256:current",
-        string? network = "kautuka-sandbox",
+        string? network = "kautuka-workload",
         string mount = "/tmp/kautuka/alpha:/workspace",
         string env = "TOKEN=secret",
         string? injected = null,
@@ -275,7 +295,7 @@ public sealed class LiveContainerSpecTests
                     Tmpfs = new Dictionary<string, string>(StringComparer.Ordinal)
                     {
                         ["/tmp"] = "rw,noexec,nosuid",
-                        ["/home/node/.kautuka"] = "rw,nodev,nosuid,mode=1777",
+                        ["/home/node"] = "rw,nodev,nosuid,mode=1777",
                     },
                 },
             },

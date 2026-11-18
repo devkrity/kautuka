@@ -1,6 +1,7 @@
 using Grpc.Core;
 
 using Kautuka.Manager.Protos;
+using Kautuka.NetworkAccess.Client;
 
 using ModelContextProtocol.Client;
 
@@ -21,13 +22,16 @@ internal sealed class McpConnectorTestService(
             return new McpConnectorTestResult(false, "Too many connector probes are already running.");
         }
 
-        try
+        using (NetworkAccessContext.BeginScope(userId: request.UserId, connectorId: request.Id, purpose: "connector-test", service: "connector-probe"))
         {
-            return await TestCoreAsync(request, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            probeSlots.Release();
+            try
+            {
+                return await TestCoreAsync(request, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                probeSlots.Release();
+            }
         }
     }
 
@@ -115,6 +119,8 @@ internal sealed class McpConnectorTestService(
                 BundlePath = string.IsNullOrWhiteSpace(request.BundlePath) ? string.Empty : request.BundlePath.Trim(),
                 ServerType = string.IsNullOrWhiteSpace(request.ServerType) ? string.Empty : request.ServerType.Trim(),
                 McpProtocolVersion = string.IsNullOrWhiteSpace(request.McpProtocolVersion) ? string.Empty : request.McpProtocolVersion.Trim(),
+                UserId = request.UserId ?? string.Empty,
+                SaveDiscovery = request.SaveDiscovery,
             };
             probeRequest.Args.AddRange(args);
             probeRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
@@ -122,12 +128,13 @@ internal sealed class McpConnectorTestService(
             WorkspaceMcpProbeResponse response = await workspaceGrpcService.ProbeMcpContainerAsync(probeRequest, cancellationToken: ct).ConfigureAwait(false);
             if (!response.Ok)
             {
-                return new McpConnectorTestResult(false, response.Message);
+                return new McpConnectorTestResult(false, response.Message, NetworkApprovalRequired: response.NetworkApprovalRequired);
             }
 
             IReadOnlyList<string> toolNames = response.Tools.Select(static t => t.Name).ToList();
             IReadOnlyDictionary<string, string?> toolDescriptions = response.Tools.ToDictionary(static t => t.Name, static t => (string?)t.Description);
-            return new McpConnectorTestResult(true, $"Connected. {response.ToolCount} tool(s) available.", response.ToolCount, ToolNames: toolNames, ToolDescriptions: toolDescriptions);
+            return new McpConnectorTestResult(true, $"Connected. {response.ToolCount} tool(s) available.", response.ToolCount, ToolNames: toolNames, ToolDescriptions: toolDescriptions,
+                ToolDefinitions: response.Tools.Select(static t => new ConnectorToolDefinition(t.Name, t.Description, t.JsonSchema)).ToArray(), ImageDigest: response.ImageDigest, SourceDigest: response.SourceDigest);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -180,6 +187,8 @@ internal sealed class McpConnectorTestService(
                 Image = mapped.ContainerImage,
                 Command = mapped.ContainerCommand,
                 TimeoutSeconds = ClampProbeTimeoutSeconds(request.ReadinessTimeoutSeconds),
+                UserId = request.UserId ?? string.Empty,
+                SaveDiscovery = request.SaveDiscovery,
             };
             probRequest.Args.AddRange(mapped.ContainerArgs);
             probRequest.Environment.AddRange(probeEnvironment.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
@@ -190,7 +199,7 @@ internal sealed class McpConnectorTestService(
                 string failureMessage = package is not null
                     ? $"Package '{package}' container probe failed: {response.Message}"
                     : $"Container probe failed: {response.Message}";
-                return new McpConnectorTestResult(false, failureMessage, PackageChecked: package);
+                return new McpConnectorTestResult(false, failureMessage, PackageChecked: package, NetworkApprovalRequired: response.NetworkApprovalRequired);
             }
 
             IReadOnlyList<string> toolNames = response.Tools.Select(static t => t.Name).ToList();
@@ -204,7 +213,8 @@ internal sealed class McpConnectorTestService(
                 response.ToolCount,
                 PackageChecked: package,
                 ToolNames: toolNames,
-                ToolDescriptions: toolDescriptions);
+                ToolDescriptions: toolDescriptions,
+                ToolDefinitions: response.Tools.Select(static t => new ConnectorToolDefinition(t.Name, t.Description, t.JsonSchema)).ToArray(), ImageDigest: response.ImageDigest, SourceDigest: response.SourceDigest);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

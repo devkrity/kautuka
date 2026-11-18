@@ -61,6 +61,8 @@ public sealed class WorkspaceDesiredStateStoreTests
             Assert.True(applied.Accepted);
             Assert.True(store.TryResolveWorkspace("agent", "shared-brain", "user-ash", out ContainerContext? resolvedAsh));
             Assert.True(store.TryResolveWorkspace("agent", "shared-brain", "user-bee", out ContainerContext? resolvedBee));
+            Assert.Equal(root, resolvedAsh!.WorkspaceBaseRoot);
+            Assert.Equal(root, resolvedBee!.WorkspaceBaseRoot);
             Assert.EndsWith(Path.Combine("shared-brain", "user-ash"), resolvedAsh!.HostWorkspacePath, StringComparison.OrdinalIgnoreCase);
             Assert.EndsWith(Path.Combine("shared-brain", "user-bee"), resolvedBee!.HostWorkspacePath, StringComparison.OrdinalIgnoreCase);
             foreach (string? missingUser in new string?[] { "user-missing", null, "", " ", "USER-ASH" })

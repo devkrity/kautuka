@@ -152,6 +152,11 @@ internal sealed class ConnectorOAuthService(
             return new ConnectorOAuthCompleteResponse("rejected", "The sign-in response was not accepted.");
         }
 
+        using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: userId,
+            connectorId: session.ConnectorId,
+            purpose: "connector-oauth",
+            service: "connector-auth");
         ConnectorTokenResult exchanged = await ExchangeCodeAsync(
             profile,
             code!,
@@ -210,6 +215,11 @@ internal sealed class ConnectorOAuthService(
             return new ConnectorOAuthDisconnectResponse(false, "Mailbox sign-in is unavailable. Please try again.", profile.RevokeUrl);
         if (UsesBroker(profile) && mailCoordinator is not null && endpoint.Host is not null)
         {
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: userId,
+                connectorId: profile.Id,
+                purpose: "connector-oauth",
+                service: "connector-auth");
             try
             {
                 await mailCoordinator.DisconnectAsync(new Uri(endpoint.Host), userId, profile.Id, cancellationToken).ConfigureAwait(false);
@@ -236,6 +246,11 @@ internal sealed class ConnectorOAuthService(
             && !IsBrokerRefreshEnvelope(currentRefreshToken);
         try
         {
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: userId,
+                connectorId: profile.Id,
+                purpose: "connector-oauth",
+                service: "connector-auth");
             if (!legacyHostedCredential && !await RevokeBrokerKeyAsync(profile, userId, cancellationToken).ConfigureAwait(false))
             {
                 return new ConnectorOAuthDisconnectResponse(
@@ -296,6 +311,11 @@ internal sealed class ConnectorOAuthService(
         if (UsesBroker(profile) && mailCoordinator is not null && endpoint.Host is not null)
         {
             if (string.IsNullOrWhiteSpace(userId)) throw new InvalidOperationException(ConnectorAuthProfile.SignInRequiredMessage);
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: userId,
+                connectorId: connectorId,
+                purpose: "connector-oauth-refresh",
+                service: "connector-auth");
             BrokerMailRefreshResult? result = await mailCoordinator.RefreshAsync(new Uri(endpoint.Host), userId, profile.Id, cancellationToken).ConfigureAwait(false);
             if (result is null) throw new InvalidOperationException("Mail sign-in is still being refreshed. Try again shortly.");
             environment[profile.AccessTokenEnvironmentKey] = result.AccessToken;
@@ -322,6 +342,11 @@ internal sealed class ConnectorOAuthService(
             throw new InvalidOperationException(profile.ConfigurationMessage);
         }
 
+        using IDisposable refreshNacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+            userId: userId,
+            connectorId: connectorId,
+            purpose: "connector-oauth-refresh",
+            service: "connector-auth");
         ConnectorTokenResult refreshed = await RefreshAsync(profile, userId, refreshToken, cancellationToken).ConfigureAwait(false);
         if (!refreshed.Success || string.IsNullOrWhiteSpace(refreshed.AccessToken))
         {

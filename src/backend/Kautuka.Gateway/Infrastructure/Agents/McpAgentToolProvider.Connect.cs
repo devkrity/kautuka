@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Execution;
+
 using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Connectors;
@@ -15,15 +17,23 @@ internal sealed partial class McpAgentToolProvider
 
     private async Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)> ConnectSafeAsync(
         McpServerDefinition serverDef,
-        ResolvedAgentConnectorBinding binding,
         AgentToolContext context,
         CancellationToken ct)
     {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(TimeSpan.FromSeconds(10));
         try
         {
-            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, binding, context, ct).ConfigureAwait(false);
+            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+            foreach (AgentToolSurfaceEntry entry in entries)
+                entry.ExecutionConfigHash = AgentToolingFingerprint.ConnectorExecutionHash(serverDef);
             McpAgentToolProviderLog.ConnectorToolsLoaded(logger, serverDef.Id, entries.Count);
             return (serverDef.Id, entries);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            McpAgentToolProviderLog.LoadToolsFailed(logger, new TimeoutException("Remote connector discovery timed out."), serverDef.Id, "Remote connector discovery timed out.", noInnerMessage);
+            return (serverDef.Id, null);
         }
         catch (Exception ex) when (serverDef.Transport == McpTransport.Http && ex is not OperationCanceledException)
         {
@@ -59,34 +69,50 @@ internal sealed partial class McpAgentToolProvider
 
     private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListSurfaceEntriesAsync(
         McpServerDefinition serverDef,
-        ResolvedAgentConnectorBinding binding,
         AgentToolContext context,
         CancellationToken ct)
     {
         if (serverDef.Transport == McpTransport.Container)
         {
-            Dictionary<string, string> env = await ResolveEnvAsync(serverDef, context.UserId ?? string.Empty, ct).ConfigureAwait(false);
-            ValidateRequiredEnv(serverDef, env);
-            env = await PrepareConnectorAuthEnvironmentAsync(serverDef, context.UserId, env, exchangeAccessToken: false, ct).ConfigureAwait(false);
-            return await ListContainerEntriesAsync(serverDef, binding, env, context, ct).ConfigureAwait(false);
+            if (serverDef.LocalToolDefinitions is null || string.IsNullOrWhiteSpace(serverDef.LocalImageDigest)
+                || (!string.IsNullOrWhiteSpace(serverDef.BundlePath) && string.IsNullOrWhiteSpace(serverDef.LocalArtifactDigest))
+                || !string.Equals(serverDef.LocalArtifactDigest, serverDef.RuntimeArtifactSourceDigest, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Connector '{serverDef.Name}' needs Test connection before its tools can be used.");
+            }
+            return [.. serverDef.LocalToolDefinitions.Select(tool =>
+            {
+                AgentToolSurfaceEntry entry = AgentToolSurfaceEntry.Describe(AgentToolSurfaceSources.Mcp, serverDef.Id, tool.Name, tool.Description, tool.JsonSchema);
+                entry.ArtifactDigest = serverDef.LocalArtifactDigest;
+                entry.ImageDigest = serverDef.LocalImageDigest;
+                entry.ExecutionConfigHash = AgentToolingFingerprint.ConnectorExecutionHash(serverDef);
+                return entry;
+            })];
         }
 
         if (serverDef.Transport == McpTransport.Http)
         {
+            string? endpointHash = null;
             McpClient client = await CreateHttpClientAsync(
                 serverDef,
                 context.UserId,
                 context,
-                ct).ConfigureAwait(false);
+                ct,
+                captureEndpoint: endpoint => endpointHash = AgentToolingFingerprint.EndpointHash(endpoint)).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
                 IList<McpClientTool> listed = await client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
-                return [.. listed.Select(tool => AgentToolSurfaceEntry.Describe(
-                    AgentToolSurfaceSources.Mcp,
-                    serverDef.Id,
-                    tool.Name,
-                    tool.Description ?? string.Empty,
-                    tool.JsonSchema))];
+                return [.. listed.Select(tool =>
+                {
+                    AgentToolSurfaceEntry entry = AgentToolSurfaceEntry.Describe(
+                        AgentToolSurfaceSources.Mcp,
+                        serverDef.Id,
+                        tool.Name,
+                        tool.Description ?? string.Empty,
+                        tool.JsonSchema);
+                    entry.EffectiveEndpointHash = endpointHash;
+                    return entry;
+                })];
             }
         }
 
@@ -153,15 +179,22 @@ internal sealed partial class McpAgentToolProvider
         McpServerDefinition serverDef,
         string? userId,
         AgentToolContext toolContext,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? expectedEndpointHash = null,
+        Action<Uri>? captureEndpoint = null,
+        string? expectedExecutionHash = null)
     {
         string userRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: false);
         string combinedRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: true);
         PlatformConfiguration snapshot = configProvider.GetCurrent();
         McpServerDefinition storedDefinition = snapshot.McpServers.FirstOrDefault(candidate => candidate.Id == serverDef.Id)
             ?? throw new HttpRequestException("Remote MCP connector is unavailable.");
+        if (expectedExecutionHash is not null && !string.Equals(expectedExecutionHash, AgentToolingFingerprint.ConnectorExecutionHash(storedDefinition), StringComparison.Ordinal))
+            throw new InvalidOperationException("The connector configuration changed. Start a new run.");
         string fingerprint = AgentToolingFingerprint.Compute(toolContext.AgentDefinition, snapshot);
         serverDef = await ResolveHttpUrlOverrideAsync(storedDefinition, userId, ct).ConfigureAwait(false);
+        if (expectedEndpointHash is not null && !string.Equals(expectedEndpointHash, AgentToolingFingerprint.EndpointHash(serverDef.HttpUrl), StringComparison.Ordinal))
+            throw new InvalidOperationException("The connector endpoint changed. Start a new run.");
         bool personalDestination = IsPersonalHttpDestination(storedDefinition, serverDef);
         bool includeSystem = IncludeSystemCredentials(serverDef, personalDestination);
         string revision = includeSystem ? combinedRevision : userRevision;
@@ -182,6 +215,7 @@ internal sealed partial class McpAgentToolProvider
             IsAdminUser(userId ?? string.Empty));
 
         Uri approvedEndpoint = serverDef.HttpUrl;
+        captureEndpoint?.Invoke(approvedEndpoint);
         async Task RevalidateAsync(CancellationToken token)
         {
             PlatformConfiguration current = configProvider.GetCurrent();
@@ -209,83 +243,14 @@ internal sealed partial class McpAgentToolProvider
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 
-    private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListContainerEntriesAsync(
-        McpServerDefinition serverDef,
-        ResolvedAgentConnectorBinding binding,
-        Dictionary<string, string> env,
-        AgentToolContext context,
-        CancellationToken ct)
-    {
-        ToolPolicyDecision executionDecision = toolExecutionPolicyService.EvaluateConnectorExposure(
-            context.AgentDefinition,
-            binding.ExecutionContext);
-
-        if (!executionDecision.Allowed)
-        {
-            throw new InvalidOperationException(
-                $"Connector execution denied by policy ({executionDecision.ReasonCode}): {executionDecision.Message}");
-        }
-
-        bool allowInternalSystemConnector = serverDef.IsInternalSystemConnector;
-        string scopedConnectorId = WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(context.UserId, serverDef.Id);
-        WorkspaceContextMessage? workspaceContext = ResolveWorkspaceContext(binding, context);
-        var runtime = new ManagerRuntimeSettingsMessage();
-        var listRequest = new WorkspaceMcpContainerCallRequest
-        {
-            Runtime = runtime,
-            ConnectorId = scopedConnectorId,
-            TimeoutSeconds = serverDef.ReadinessTimeoutSeconds ?? 30,
-            AllowInternalSystemConnector = allowInternalSystemConnector,
-            ExecutionContext = binding.ExecutionContext,
-        };
-        if (workspaceContext is not null)
-        {
-            listRequest.WorkspaceContext = workspaceContext;
-        }
-        listRequest.Environment.AddRange(env.Select(static kv => new WorkspaceKvPair { Key = kv.Key, Value = kv.Value }));
-
-        WorkspaceMcpContainerListToolsResponse listResponse = await workspaceGrpcService
-            .ListMcpContainerToolsAsync(listRequest, ct)
-            .ConfigureAwait(false);
-
-        if (!listResponse.Ok)
-        {
-            throw new InvalidOperationException($"Container MCP connector '{serverDef.Id}' tool listing failed: {listResponse.Message}");
-        }
-
-        var entries = new List<AgentToolSurfaceEntry>(listResponse.Tools.Count);
-        foreach (WorkspaceMcpToolMessage tool in listResponse.Tools)
-        {
-            string toolName = tool.Name;
-            string description = string.IsNullOrWhiteSpace(tool.Description)
-                ? $"Container MCP tool '{toolName}' routed via Kautuka.Manager."
-                : tool.Description;
-            entries.Add(AgentToolSurfaceEntry.Describe(
-                AgentToolSurfaceSources.Mcp,
-                serverDef.Id,
-                toolName,
-                description,
-                tool.JsonSchema));
-        }
-
-        return entries;
-    }
-
     private static string? ResolveHostArtifactDirectory(AgentToolContext context)
     {
         string path = context.WorkspaceTool.DescribeAgentWorkspace(context.AgentId, context.UserId).HostWorkspacePath;
         return string.IsNullOrWhiteSpace(path) ? null : path;
     }
 
-    private static WorkspaceContextMessage? ResolveWorkspaceContext(
-        ResolvedAgentConnectorBinding binding,
-        AgentToolContext context)
+    private static WorkspaceContextMessage? ResolveWorkspaceContext(AgentToolContext context)
     {
-        if (binding.ExecutionContext == WorkspaceMcpExecutionContext.Isolated)
-        {
-            return null;
-        }
-
         return ToMessage(context.WorkspaceTool.DescribeAgentWorkspace(context.AgentId, context.UserId));
     }
 
@@ -295,6 +260,7 @@ internal sealed partial class McpAgentToolProvider
         {
             ScopeType = workspace.ScopeType,
             ScopeId = workspace.ScopeId,
+            AgentId = workspace.AgentId ?? string.Empty,
             UserId = workspace.UserId ?? string.Empty,
             HostWorkspacePath = workspace.HostWorkspacePath,
             ContainerWorkspacePath = workspace.ContainerWorkspacePath,

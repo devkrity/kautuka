@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kautuka-Apply-Protocol: 5
+# Kautuka-Apply-Protocol: 6
 set -euo pipefail
 
 # Root helper invoked by UpdateService. It deploys or retargets one release.
@@ -917,6 +917,37 @@ for path, required in needs.values():
 PY
 }
 
+verify_nac_hook_compatibility() {
+    local candidate="$1" service_home="$2"
+    local hooks_dir="$service_home/.config/containers/hooks.d" file
+    for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
+        if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! cmp -s "$candidate/scripts/$file" "$hooks_dir/$file"; then
+            echo 'error: the installed NAC hook differs from this release; run the current signed Linux installer before updating.' >&2
+            return 1
+        fi
+    done
+    if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | cmp -s - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+        echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
+        return 1
+    fi
+    if ! python3 - "$hooks_dir/kautuka_hook.json" "$hooks_dir/kautuka_hook.py" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as source:
+        hook = json.load(source)
+    valid = (hook.get('version') == '1.0.0' and hook.get('hook', {}).get('path') == sys.argv[2]
+             and hook.get('hook', {}).get('timeout') == 45 and hook.get('when', {}).get('always') is True
+             and 'createRuntime' in hook.get('stages', []))
+except (OSError, ValueError, TypeError, AttributeError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+    then
+        echo 'error: NAC hook registration is missing or incompatible; run the current signed Linux installer before updating.' >&2
+        return 1
+    fi
+}
+
 stage_version_roots() {
     local artifact_path="$1"
     local target_version="$2"
@@ -938,14 +969,19 @@ stage_version_roots() {
     # extraction. Do not read it back from a service-writable version root.
     [[ -f "$manager_source/kautuka-apply-release" \
         && ! -L "$manager_source/kautuka-apply-release" \
-        && "$(head -n 2 "$manager_source/kautuka-apply-release" | tail -n 1)" == '# Kautuka-Apply-Protocol: 5' ]] || {
-        echo 'error: signed target bundle lacks the required safe-state-recovery-v5 apply/admission protocol' >&2
+        && "$(head -n 2 "$manager_source/kautuka-apply-release" | tail -n 1)" == '# Kautuka-Apply-Protocol: 6' ]] || {
+        echo 'error: signed target bundle lacks the required safe-state-recovery-v6 apply/admission protocol' >&2
         exit 1
     }
-    grep -Fq 'safe-state-recovery-v5' "$manager_source/kautuka-apply-release" || {
-        echo 'error: signed target bundle lacks the required safe-state-recovery-v5 apply/admission protocol' >&2
+    grep -Fq 'safe-state-recovery-v6' "$manager_source/kautuka-apply-release" || {
+        echo 'error: signed target bundle lacks the required safe-state-recovery-v6 apply/admission protocol' >&2
         exit 1
     }
+    local nac_service_home
+    nac_service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+    [[ -n "$nac_service_home" ]] || { echo 'error: Kautuka service home is unavailable; run the current signed Linux installer.' >&2; return 1; }
+    verify_nac_hook_compatibility "$manager_source" "$nac_service_home" || return 1
+
     [[ -f "$extract_root/services/webhost/.maintenance-page-v1" \
         && ! -L "$extract_root/services/webhost/.maintenance-page-v1" \
         && "$(cat "$extract_root/services/webhost/.maintenance-page-v1")" == 'kautuka-maintenance-page-v1' ]] || {
@@ -1506,7 +1542,7 @@ if [[ "$capabilities" == 'true' ]]; then
     [[ -f "$recovery_tool" && ! -L "$recovery_tool" ]] || { echo 'error: database recovery engine is not installed' >&2; exit 1; }
     assert_database_writer_lock_ready || exit 1
     assert_maintenance_webhost || exit 1
-    printf '%s\n' 'safe-state-recovery-v5'
+    printf '%s\n' 'safe-state-recovery-v6'
     exit 0
 fi
 

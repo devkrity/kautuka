@@ -102,26 +102,53 @@ internal static partial class GatewaySettingsEndpointMappings
             return Results.Json(new GatewayUsersResponse(items), KautukaJsonContext.Default.GatewayUsersResponse);
         });
 
-        app.MapPost("/api/settings/users/invite", (JsonElement body, IGatewayUserStore users, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapPost("/api/settings/users/invite", async (
+            JsonElement body,
+            IGatewayUserStore users,
+            IGatewayAuthGuard auth,
+            IManagerGrpcService managerService,
+            ILoggerFactory loggerFactory,
+            HttpContext context,
+            CancellationToken cancellationToken) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? actor);
+            if (unauthorized is not null || actor is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
             GatewayUserListItem? user = users.InviteUser(body, out string? error);
-            return user is null
-                ? Results.Json(new GatewayErrorResponse(error ?? "Unable to invite user."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest)
-                : Results.Json(new GatewayUserResponse(user, users.IssuedInviteCode(user.Id)), KautukaJsonContext.Default.GatewayUserResponse);
+            if (user is null)
+            {
+                return Results.Json(new GatewayErrorResponse(error ?? "Unable to invite user."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            bool isInvitedAdmin = string.Equals(user.Role, "admin", StringComparison.OrdinalIgnoreCase);
+            await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                managerService,
+                actorUserId: actor.Id,
+                targetUserId: user.Id,
+                targetIsAdmin: isInvitedAdmin,
+                loggerFactory.CreateLogger("Kautuka.Gateway.Settings.Users"),
+                cancellationToken).ConfigureAwait(false);
+
+            return Results.Json(new GatewayUserResponse(user, users.IssuedInviteCode(user.Id)), KautukaJsonContext.Default.GatewayUserResponse);
         });
 
-        app.MapPut("/api/settings/users/{userId}/role", (string userId, JsonElement body, IGatewayUserStore users, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapPut("/api/settings/users/{userId}/role", async (
+            string userId,
+            JsonElement body,
+            IGatewayUserStore users,
+            IGatewayAuthGuard auth,
+            IManagerGrpcService managerService,
+            ILoggerFactory loggerFactory,
+            HttpContext context,
+            CancellationToken cancellationToken) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? actor);
+            if (unauthorized is not null || actor is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
             GatewayUserRoleUpdateRequest request;
@@ -134,14 +161,52 @@ internal static partial class GatewaySettingsEndpointMappings
                 return Results.BadRequest(new GatewayErrorResponse("Invalid user role payload."));
             }
 
-            return users.UpdateRole(userId, request, out string? error)
-                ? Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse)
-                : Results.Json(
+            bool previousIsAdmin = users.TryGetUserById(userId, out GatewayUser? existingUser)
+                && string.Equals(existingUser?.Role, "admin", StringComparison.OrdinalIgnoreCase);
+
+            if (!users.UpdateRole(userId, request, out string? error))
+            {
+                return Results.Json(
                     new GatewayErrorResponse(error ?? "Unable to update user role."),
                     KautukaJsonContext.Default.GatewayErrorResponse,
                     statusCode: string.Equals(error, "User not found.", StringComparison.Ordinal)
                         ? StatusCodes.Status404NotFound
                         : StatusCodes.Status400BadRequest);
+            }
+
+            if (previousIsAdmin == request.IsAdmin)
+            {
+                return Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse);
+            }
+
+            try
+            {
+                await GatewayEndpointUtilities.TrySyncUserRolePrivilegesAsync(
+                    managerService,
+                    actorUserId: actor.Id,
+                    targetUserId: userId,
+                    targetIsAdmin: request.IsAdmin,
+                    loggerFactory.CreateLogger("Kautuka.Gateway.Settings.Users"),
+                    cancellationToken,
+                    failClosed: true).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or Grpc.Core.RpcException or OperationCanceledException)
+            {
+                if (!users.UpdateRole(userId, new GatewayUserRoleUpdateRequest { IsAdmin = previousIsAdmin }, out string? rollbackError))
+                {
+                    return Results.Json(
+                        new GatewayErrorResponse(rollbackError ?? "Unable to restore the user's previous role after privilege sync failed."),
+                        KautukaJsonContext.Default.GatewayErrorResponse,
+                        statusCode: StatusCodes.Status500InternalServerError);
+                }
+
+                return Results.Json(
+                    new GatewayErrorResponse("The role change was not saved because network access privileges could not be synchronized."),
+                    KautukaJsonContext.Default.GatewayErrorResponse,
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            return Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse);
         });
 
         app.MapPut("/api/settings/users/{userId}/active", (string userId, JsonElement body, IGatewayUserStore users, IGatewayAuthGuard auth, HttpContext context) =>

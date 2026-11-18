@@ -3,84 +3,154 @@ using System.Security.Cryptography;
 using System.Text;
 
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
 
 namespace Kautuka.Manager.RuntimeContainer.Hosting;
 
 internal static class ConnectorContainerSpecBuilder
 {
-    private const string nonRootUser = "65532:65532";
     internal const string SandboxNetworkName = "kautuka-sandbox";
+    internal const string WorkloadNetworkName = "kautuka-workload";
+
+    internal readonly record struct ConnectorIdentity(
+        string UserId,
+        string AgentId,
+        string Egress,
+        string Kind);
+
+    /// <summary>
+    /// Single source of truth for connector workload identity (v7-22). The owner comes only from the
+    /// workspace context; it is never guessed from the connector name. Internal system connectors remain
+    /// deny-all even when a user context is present; a non-internal connector with no owner also gets deny-all.
+    /// </summary>
+    internal static ConnectorIdentity ResolveIdentity(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        ContainerContext? workspaceContext,
+        string? purpose)
+    {
+        ArgumentNullException.ThrowIfNull(connector);
+        string userId = workspaceContext?.UserId ?? string.Empty;
+        string agentId = string.Equals(workspaceContext?.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            ? (workspaceContext?.AgentId ?? workspaceContext?.ScopeId ?? string.Empty)
+            : string.Empty;
+
+        if (connector.IsInternalSystemConnector)
+        {
+            return new ConnectorIdentity(
+                userId,
+                string.Empty,
+                "deny-all",
+                "system");
+        }
+
+        if (string.IsNullOrWhiteSpace(userId))
+        {
+            throw new InvalidOperationException("A user identity is required before starting a connector workload.");
+        }
+
+        if (string.IsNullOrWhiteSpace(agentId) && purpose is not ("probe" or "save-discovery"))
+        {
+            throw new InvalidOperationException("An agent identity is required before starting a connector workload.");
+        }
+
+        return new ConnectorIdentity(userId, agentId, "normal", "connector");
+    }
 
     public static List<string> BuildRun(
         WorkspaceMcpContainerConnectorDefinition connector,
         string containerName,
         WorkspaceMcpExecutionContext executionContext,
         ContainerContext? workspaceContext,
-        bool persistent)
+        bool persistent,
+        string allocatedIp,
+        bool isBraked,
+        string? purpose = null,
+        ImageCompatProfile? compatProfile = null,
+        ContainerContext? identityContext = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-        ContainerImageProvenancePolicy.EnsureTrusted(connector.Image, $"Connector '{connector.ConnectorId}'");
-        var arguments = new List<string> { "run" };
-        if (persistent)
-        {
-            arguments.Add("-d");
-        }
-        else
-        {
-            arguments.AddRange(["--rm", "-i"]);
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
 
-        arguments.AddRange([
-            "--user", nonRootUser,
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges",
-            "--pids-limit", "128",
-            "--cpus", "1",
-            "--memory", "536870912",
-            "--read-only",
-            // tmpfs pages are charged to the container's memory cgroup. Do not add a
-            // mount-level size option: crun on Podman Machine/WSL rejects sized tmpfs
-            // mounts with ENOSPC before the process starts.
-            "--tmpfs", "/tmp:rw,noexec,nosuid",
-            "--name", containerName,
-            "--label", "kautuka.managed=manager",
-            "--label", "kautuka.role=connector",
-            "--label", $"kautuka.desired-version={connector.DesiredStateVersion.ToString(CultureInfo.InvariantCulture)}",
-            "--label", $"kautuka.spec-fingerprint={connector.SpecFingerprint}",
-            // Isolation is a private container plus optional read-only agent-file
-            // mounts. Every connector still joins kautuka-sandbox so aardvark can
-            // resolve sidecar aliases (kautuka-pkgs-proxy) and public DNS.
-            "--network", SandboxNetworkName,
-            "--env", "HOME=/tmp",
-            "--env", "NPM_CONFIG_CACHE=/tmp/.npm",
-            "--env", "PIP_CACHE_DIR=/tmp/.pip",
-            "--env", "UV_CACHE_DIR=/tmp/.uv"]);
+        ConnectorIdentity identity = ResolveIdentity(connector, identityContext ?? workspaceContext, purpose);
+        string userId = identity.UserId;
+        string agentId = identity.AgentId;
+
+        string execContext = executionContext switch
+        {
+            WorkspaceMcpExecutionContext.Isolated => "isolated",
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles => "isolated-with-agent-files",
+            WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
+            _ => "isolated"
+        };
+
+        string egress = identity.Egress;
+        string effectiveIp = allocatedIp;
+
+        var envList = new List<KeyValuePair<string, string>>
+        {
+            new("HOME", "/tmp"),
+            new("NPM_CONFIG_CACHE", "/tmp/.npm"),
+            new("PIP_CACHE_DIR", "/tmp/.pip"),
+            new("UV_CACHE_DIR", "/tmp/.uv"),
+        };
 
         foreach (KeyValuePair<string, string> pair in ForwardedEnvironment(connector))
         {
-            arguments.Add("--env");
-            arguments.Add(pair.Key);
+            envList.Add(new KeyValuePair<string, string>(pair.Key, string.Empty));
         }
 
+        var mounts = new List<WorkloadMount>();
         if (workspaceContext is not null
             && executionContext == WorkspaceMcpExecutionContext.IsolatedWithAgentFiles)
         {
-            arguments.Add("--volume");
-            arguments.Add($"{workspaceContext.HostWorkspacePath}:{workspaceContext.ContainerWorkspacePath}:ro");
+            mounts.Add(new WorkloadMount(workspaceContext.HostWorkspacePath, workspaceContext.ContainerWorkspacePath, ReadOnly: true));
         }
 
-        arguments.Add(connector.Image);
-        if (persistent)
+        var cmdArgs = new List<string>();
+        string? command = null;
+        if (!persistent)
         {
-            arguments.AddRange(["sh", "-lc", "tail -f /dev/null"]);
-        }
-        else
-        {
-            AppendCommand(arguments, connector);
+            if (!string.IsNullOrWhiteSpace(connector.Command))
+            {
+                command = connector.Command;
+                cmdArgs.AddRange(BuildIndexPinnedArguments(connector));
+            }
+            else if (connector.Args.Count > 0)
+            {
+                cmdArgs.AddRange(connector.Args);
+            }
         }
 
+        var spec = new WorkloadContainerSpec(containerName, connector.Image, effectiveIp)
+        {
+            UserId = userId,
+            AgentId = agentId,
+            ConnectorId = connector.ConnectorId,
+            ExecContext = execContext,
+            Kind = identity.Kind,
+            Egress = egress,
+            Purpose = purpose,
+            Persistent = persistent,
+            DesiredStateVersion = connector.DesiredStateVersion,
+            SpecFingerprint = ComputeWorkloadFingerprint(connector, identity, executionContext, compatProfile),
+            ManagerRole = "connector",
+            StartupGateOpen = true,
+            IsBraked = isBraked,
+            Environment = envList,
+            Mounts = mounts,
+            AllowedMountRoots = workspaceContext?.WorkspaceBaseRoot is { } workspaceBaseRoot ? [workspaceBaseRoot] : [],
+            Command = command,
+            Args = cmdArgs,
+            PidsLimit = 128,
+            CpuLimit = 1,
+            MemoryLimit = "536870912",
+            CompatibilityProfile = compatProfile,
+            AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
+        };
+
+        var arguments = spec.Render().ToList();
         EnsureHostProcessArguments(arguments);
         return arguments;
     }
@@ -164,7 +234,14 @@ internal static class ConnectorContainerSpecBuilder
             || key.Equals("PIP_CONFIG_FILE", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static string ComputeFingerprint(WorkspaceMcpContainerConnectorDefinition connector)
+    public static string ComputeFingerprint(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        string? userId = null,
+        string? agentId = null,
+        string? execContext = null,
+        string? kind = null,
+        string? egress = null,
+        string? compat = null)
     {
         ArgumentNullException.ThrowIfNull(connector);
         var builder = new StringBuilder();
@@ -177,7 +254,14 @@ internal static class ConnectorContainerSpecBuilder
         Append(builder, connector.ServerType ?? string.Empty);
         Append(builder, connector.ReadinessTimeoutSeconds.ToString(CultureInfo.InvariantCulture));
         Append(builder, connector.JitCooldownSeconds.ToString(CultureInfo.InvariantCulture));
-        Append(builder, SandboxNetworkName);
+        Append(builder, WorkloadNetworkName);
+        Append(builder, userId ?? string.Empty);
+        Append(builder, agentId ?? string.Empty);
+        Append(builder, connector.ConnectorId);
+        Append(builder, execContext ?? "isolated");
+        Append(builder, kind ?? "connector");
+        Append(builder, egress ?? "normal");
+        Append(builder, compat ?? string.Empty);
         foreach (string argument in connector.Args)
         {
             Append(builder, argument);
@@ -190,6 +274,31 @@ internal static class ConnectorContainerSpecBuilder
         }
 
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    internal static string ComputeWorkloadFingerprint(
+        WorkspaceMcpContainerConnectorDefinition connector,
+        ConnectorIdentity identity,
+        WorkspaceMcpExecutionContext executionContext,
+        ImageCompatProfile? compatProfile = null)
+    {
+        string execContext = executionContext switch
+        {
+            WorkspaceMcpExecutionContext.Isolated => "isolated",
+            WorkspaceMcpExecutionContext.IsolatedWithAgentFiles => "isolated-with-agent-files",
+            WorkspaceMcpExecutionContext.AgentSandbox => "agent-sandbox",
+            _ => "isolated",
+        };
+        return ComputeFingerprint(
+            connector,
+            identity.UserId,
+            identity.AgentId,
+            execContext,
+            identity.Kind,
+            identity.Egress,
+            compatProfile is null
+                ? null
+                : $"{compatProfile.ImageDigest}:{string.Join(',', compatProfile.Relaxations.Order(StringComparer.Ordinal))}");
     }
 
     internal static void EnsureHostProcessArguments(IReadOnlyList<string> arguments)

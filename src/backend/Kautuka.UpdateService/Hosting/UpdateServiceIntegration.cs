@@ -436,7 +436,7 @@ public sealed class UpdateServiceIntegration(
 
         string capability = await RunApplyReleaseHelperAsync(["--capabilities"], cancellationToken).ConfigureAwait(false);
         if (!capability.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-                .Any(line => string.Equals(line.Trim(), "safe-state-recovery-v5", StringComparison.Ordinal)))
+                .Any(line => string.Equals(line.Trim(), "safe-state-recovery-v6", StringComparison.Ordinal)))
         {
             throw new InvalidOperationException("Installed apply-release helper does not support verified database snapshots and maintenance fencing. Run the current signed Linux installer bootstrap before updating.");
         }

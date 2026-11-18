@@ -171,7 +171,12 @@ internal sealed class AgentRuntimeFactory(
 
             AgentToolContext toolContext = WorkspaceTooling.BuildAgentToolContext(
                 workspaceTool, agentDef, agentId, sessionId, userId, stageTransitionId, effectiveSkillManifest: effectiveSkillManifest);
-            IReadOnlyList<AIFunction> tools = await toolCatalog.BuildToolsAsync(toolContext, ct).ConfigureAwait(false);
+            if (resumedBehavior is not null && resumedBehavior.Tooling.Definitions is null)
+                throw new InvalidOperationException("This run has no saved tool definitions. Start a new run.");
+            AgentRunToolSet toolSet = await toolCatalog.BuildRunToolsAsync(toolContext, resumedBehavior?.Tooling.Definitions, ct).ConfigureAwait(false);
+            if (resumedBehavior is not null && !string.Equals(resumedBehavior.Tooling.DefinitionsHash, toolSet.Hash, StringComparison.Ordinal))
+                throw new InvalidOperationException("The saved tool definitions changed. Start a new run.");
+            IReadOnlyList<AIFunction> tools = toolSet.Tools;
             tools = ApplyPersistedToolSurface(tools, resumedBehavior?.Tooling);
             if (requireApprovalForAllTools)
             {
@@ -219,7 +224,8 @@ internal sealed class AgentRuntimeFactory(
                 memoryFacts.Count,
                 tools,
                 invocation,
-                toolCallGuidance);
+                toolCallGuidance,
+                toolSet);
 
             var agentOptions = new ChatClientAgentOptions
             {
@@ -379,7 +385,8 @@ internal sealed class AgentRuntimeFactory(
         int memoryFactCount,
         IReadOnlyList<AIFunction> tools,
         ResolvedToolInvocationSettings invocation,
-        string toolCallGuidance)
+        string toolCallGuidance,
+        AgentRunToolSet toolSet)
     {
         string[] toolNames = [.. tools.Select(static tool => tool.Name).OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)];
 
@@ -413,7 +420,9 @@ internal sealed class AgentRuntimeFactory(
                 toolNames.Length > 0 ? "Auto" : "None",
                 invocation.AllowMultipleToolCalls,
                 invocation.AllowConcurrentInvocation,
-                invocation.MaxParallelTools));
+                invocation.MaxParallelTools,
+                toolSet.Catalogue,
+                toolSet.Hash));
     }
 
     private static EffectivePersonaProfile BuildPersonaProfile(JsonObject personaProfile)

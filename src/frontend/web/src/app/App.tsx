@@ -1,5 +1,6 @@
 import { Header } from '@/components/Header';
 import { ExecutionReadinessBanner } from '@/components/ExecutionReadinessBanner';
+import { NetworkPausedBanner } from '@/features/network-access';
 import { PageState } from '@/components/layout/PageState';
 import { StartupScreen } from '@/components/layout/StartupScreen';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -509,6 +510,7 @@ function AppShell() {
 
       <div className="flex min-w-0 min-h-0 flex-1 flex-col">
         <ExecutionReadinessBanner authenticated={authenticated} />
+        {authenticated && <NetworkPausedBanner />}
         {shouldShowUpdateBanner && updateStatus ? (
           <div className="px-3 pt-3 sm:px-6">
             <Alert variant="attention" className="shadow-sm">

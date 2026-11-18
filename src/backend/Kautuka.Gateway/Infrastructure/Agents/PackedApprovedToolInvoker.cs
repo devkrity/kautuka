@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.AI;
 
@@ -27,38 +28,48 @@ internal sealed class PackedApprovedToolInvoker(
         string toolName,
         string? argumentsJson,
         CancellationToken cancellationToken)
+        => await InvokePinnedAsync(agentId, sessionId, userId, toolName, argumentsJson, null, cancellationToken).ConfigureAwait(false);
+
+    public async ValueTask<string> InvokePinnedAsync(
+        string agentId, string sessionId, string? userId, string toolName, string? argumentsJson,
+        EffectiveToolingSnapshot? snapshot, CancellationToken cancellationToken, string? connectorId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentId);
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         ArgumentException.ThrowIfNullOrWhiteSpace(toolName);
 
-        PlatformConfiguration config = configProvider.GetCurrent();
-        AgentDefinition? agent = config.Agents.FirstOrDefault(candidate =>
-            string.Equals(candidate.Id, agentId, StringComparison.Ordinal));
-        if (agent is null)
+        AIFunction executable;
+        AIFunctionArguments arguments;
+        try
         {
-            throw new InvalidOperationException($"Agent '{agentId}' was not found for packed tool execution.");
-        }
+            PlatformConfiguration config = configProvider.GetCurrent();
+            AgentDefinition? agent = config.Agents.FirstOrDefault(candidate =>
+                string.Equals(candidate.Id, agentId, StringComparison.Ordinal));
+            if (agent is null)
+                throw new InvalidOperationException($"Agent '{agentId}' was not found for packed tool execution.");
 
-        IReadOnlyList<EffectiveSkillManifestEntry> skillManifest = skillManifestResolver.Resolve(config, agent, userId);
-        AgentToolContext toolContext = WorkspaceTooling.BuildAgentToolContext(
-            workspaceTool,
-            agent,
-            agentId,
-            sessionId,
-            userId,
-            stageTransitionId: null,
-            effectiveSkillManifest: skillManifest);
-        IReadOnlyList<AIFunction> tools = await toolCatalog.BuildToolsAsync(toolContext, cancellationToken).ConfigureAwait(false);
-        AIFunction? match = tools.FirstOrDefault(tool => string.Equals(tool.Name, toolName, StringComparison.Ordinal));
-        if (match is null)
+            IReadOnlyList<EffectiveSkillManifestEntry> skillManifest = skillManifestResolver.Resolve(config, agent, userId);
+            AgentToolContext toolContext = WorkspaceTooling.BuildAgentToolContext(
+                workspaceTool, agent, agentId, sessionId, userId, stageTransitionId: null, effectiveSkillManifest: skillManifest);
+            if (snapshot?.Definitions is null || string.IsNullOrWhiteSpace(snapshot.DefinitionsHash))
+                throw new InvalidOperationException("This run has no saved tool definitions. Start a new run.");
+            if (!snapshot.ToolNames.Contains(toolName, StringComparer.OrdinalIgnoreCase))
+                throw new InvalidOperationException("This tool was not available when the run started. Start a new run.");
+            AIFunction? match = await toolCatalog.BuildPinnedToolAsync(toolContext, snapshot.Definitions, snapshot.DefinitionsHash, toolName, connectorId, cancellationToken).ConfigureAwait(false);
+            if (match is null)
+            {
+                PackedApprovedToolInvokerLog.ToolNotFound(logger, agentId, sessionId, toolName);
+                return PackedToolApproval.CreateOutcomeResultJson(toolName, "error", $"Tool '{toolName}' was not found.");
+            }
+
+            executable = ConcurrencyLimitedAIFunction.UnwrapApprovalRequired(match);
+            arguments = ParseArguments(argumentsJson);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException and not NetworkAccessDeniedException)
         {
-            PackedApprovedToolInvokerLog.ToolNotFound(logger, agentId, sessionId, toolName);
-            return PackedToolApproval.CreateOutcomeResultJson(toolName, "error", $"Tool '{toolName}' was not found.");
+            PackedApprovedToolInvokerLog.ToolFailed(logger, ex, agentId, sessionId, toolName);
+            return PackedToolApproval.CreateOutcomeResultJson(toolName, "error", ex.Message);
         }
-
-        AIFunction executable = ConcurrencyLimitedAIFunction.UnwrapApprovalRequired(match);
-        AIFunctionArguments arguments = ParseArguments(argumentsJson);
         try
         {
             object? result = await executable.InvokeAsync(arguments, cancellationToken).ConfigureAwait(false);

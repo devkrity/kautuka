@@ -5,7 +5,10 @@ import { CatalogCard, CatalogIcon } from '@/components/layout/CatalogCard';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { StatePill } from '@/components/ui/state-pill';
-import { useConnectorCredentialStatus, useConnectorOAuth } from '../api/queries';
+import { apiError } from '@/features/settings';
+import { queryClient } from '@/lib/queryClient';
+import { connectorsQueryKeys } from '../api/queryKeys';
+import { useConnectorCredentialStatus, useConnectorOAuth, useTestConnector } from '../api/queries';
 import type { Connector } from '../schemas/connectorSchema';
 import { ConnectorSignInPanel, matchesConnectorOAuth } from './MailSignInPanel';
 
@@ -16,6 +19,32 @@ interface ConnectorCardProps {
   onEdit: (connector: Connector) => void;
   onDelete: (connector: Connector) => void;
   toggling: boolean;
+}
+
+function RefreshManagedTools({ connector }: { connector: Connector }) {
+  const test = useTestConnector();
+  const [message, setMessage] = React.useState('');
+  return (
+    <div className="space-y-1">
+      <Button type="button" variant="outline" size="sm" disabled={test.isPending} onClick={() => {
+        setMessage('');
+        test.mutate({
+          id: connector.id, transport: connector.transport, httpUrl: null, localCommand: null,
+          localArgs: [], containerImage: null, containerCommand: null, containerArgs: [],
+          containerSidecarName: null, bundlePath: null, serverType: null,
+          readinessTimeoutSeconds: null, jitCooldownSeconds: null, healthcheckUrl: null,
+          healthcheckIntervalMilliseconds: null, mcpProtocolVersion: null, envKeys: [], testEnv: {},
+        }, {
+          onSuccess: (result) => {
+            setMessage(result.message);
+            if (result.success) void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
+          },
+          onError: (error) => setMessage(apiError(error)),
+        });
+      }}>{test.isPending ? 'Refreshing tools…' : 'Refresh tools'}</Button>
+      {message ? <p role="status" className="text-sm text-muted-foreground">{message}</p> : null}
+    </div>
+  );
 }
 
 export const ConnectorCard: React.FC<ConnectorCardProps> = ({
@@ -45,7 +74,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
   );
   const hitlStats = useHitlStats({ mcpServerId: connector.id });
   const hitlTools = (connector.toolNames ?? []).filter((toolName) =>
-    (hitlStats.data?.items ?? []).some((item) => item.toolName === toolName)
+    managed || (hitlStats.data?.items ?? []).some((item) => item.toolName === toolName)
   );
 
   const credBadge = (() => {
@@ -111,7 +140,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           <Badge variant="muted">{scopeBadge}</Badge>
           {connector.toolCount != null ? (
             <Badge variant="info">{connector.toolCount} tools</Badge>
-          ) : null}
+          ) : !isHttp ? <Badge variant="attention">Tools not discovered</Badge> : null}
           {connector.requiresCredentialReentry ? (
             <Badge variant="attention">Key needs to be entered again</Badge>
           ) : null}
@@ -121,6 +150,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       description={connector.description}
       meta={
         <>
+          {!isHttp && connector.toolCount == null ? (
+            <p className="mt-1 text-sm text-muted-foreground">Test the connection to discover tools. If network approval is needed, check Network Access.</p>
+          ) : null}
           {connector.requiresCredentialReentry ? (
             <p role="alert" className="mt-1 text-sm text-destructive">
               {canManage
@@ -195,13 +227,15 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
       }
     >
       <ConnectorSignInPanel connectorId={connector.id} />
+      {managed && !isHttp ? <RefreshManagedTools connector={connector} /> : null}
       {hitlTools.length > 0 ? (
         <div
           role="region"
           tabIndex={0}
           className="workspace-scroll-bounded space-y-1 border-t border-border pt-2 pr-1"
-          aria-label={`${connector.name} function activity`}
+          aria-label={managed ? `${connector.name} tools` : `${connector.name} function activity`}
         >
+          {managed ? <p className="text-xs text-muted-foreground">Available tools</p> : null}
           {hitlTools.map((toolName) => (
             <div key={toolName} className="flex items-center justify-between gap-2">
               <span className="truncate font-mono text-[11px] text-foreground/75">{toolName}</span>

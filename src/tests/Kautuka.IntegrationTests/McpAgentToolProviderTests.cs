@@ -1,3 +1,5 @@
+using Kautuka.Gateway.Domain.Execution;
+
 using System.Text;
 
 using Grpc.Core;
@@ -9,6 +11,9 @@ using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Manager.Protos;
+using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Sandbox.Models;
+using Kautuka.NetworkAccessController;
 using Kautuka.Protos;
 
 using Microsoft.Extensions.Configuration;
@@ -20,6 +25,306 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class McpAgentToolProviderTests
 {
+    [Fact]
+    public void ConnectorExecutionHashIgnoresMetadataTimestampButTracksExecutionSettings()
+    {
+        McpServerDefinition Server(string updatedAt, string command) => new()
+        {
+            Id = "test",
+            Transport = McpTransport.Container,
+            ContainerImage = "example/image",
+            ContainerCommand = command,
+            ContainerArgs = ["--serve"],
+            UpdatedAt = updatedAt
+        };
+        string original = AgentToolingFingerprint.ConnectorExecutionHash(Server("before", "run"));
+        Assert.Equal(original, AgentToolingFingerprint.ConnectorExecutionHash(Server("after", "run")));
+        Assert.NotEqual(original, AgentToolingFingerprint.ConnectorExecutionHash(Server("after", "changed")));
+    }
+    [Fact]
+    public async Task RemoteDiscoveryStartsInParallelAndTimesOutEachConnector()
+    {
+        var agent = new AgentDefinition
+        {
+            Id = "agent-alpha",
+            Scope = "system",
+            McpBindings = [
+            new AgentMcpBindingDefinition { ConnectorId = "remote-a", Context = "OwnContext" },
+            new AgentMcpBindingDefinition { ConnectorId = "remote-b", Context = "OwnContext" }]
+        };
+        McpServerDefinition Remote(string id) => new()
+        {
+            Id = id,
+            Name = id,
+            Transport = McpTransport.Http,
+            HttpUrl = new Uri("https://example.com/mcp"),
+            Enabled = true,
+            Scope = "system"
+        };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [Remote("remote-a"), Remote("remote-b")] } };
+        var factory = new HangingMcpHttpClientFactory();
+        var provider = new McpAgentToolProvider(source, CreateNoOpCredentialResolver(), factory, new CapturingWorkspaceGrpcService(),
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        Task<AgentToolSurfaceContribution> discovery = provider.ContributeAsync(CreateContainerToolContext(agent, "user-alpha"), TestContext.Current.CancellationToken).AsTask();
+        await factory.BothStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        AgentToolSurfaceContribution result = await discovery.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+        Assert.Empty(result.Entries);
+        Assert.False(result.Complete);
+    }
+
+    private sealed class HangingMcpHttpClientFactory : IMcpHttpClientFactory
+    {
+        private int started;
+        public TaskCompletionSource BothStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<McpClient> CreateAsync(HttpClientTransportOptions transportOptions, bool allowPrivateDestination, RemoteMcpRequestContext context, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref started) == 2) BothStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException();
+        }
+    }
+    [Fact]
+    public async Task LocalToolsUseSavedDefinitionsWithoutContactingManager()
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var grpc = new CapturingWorkspaceGrpcService();
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "web", Context = "OwnContext" }] };
+        var server = new McpServerDefinition
+        {
+            Id = "web",
+            Name = "Web",
+            Transport = McpTransport.Container,
+            Enabled = true,
+            Scope = "system",
+            ContainerImage = "example/image@" + digest,
+            LocalImageDigest = digest,
+            LocalToolDefinitions = [new ConnectorToolDefinition("fetch", "Fetch a URL", "{\"type\":\"object\"}")]
+        };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
+        var provider = new McpAgentToolProvider(source, CreateNoOpCredentialResolver(), new CapturingMcpHttpClientFactory(), grpc,
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-alpha");
+        AgentToolSurfaceContribution result = await provider.ContributeAsync(context, TestContext.Current.CancellationToken);
+        AgentToolSurfaceEntry tool = Assert.Single(result.Entries);
+        Assert.Equal("fetch", tool.Name);
+        Assert.Equal("{\"type\":\"object\"}", tool.JsonSchema);
+        Assert.Equal(0, grpc.ListToolsCallCount);
+        var executable = Assert.Single(await provider.HydrateAsync(context, result.Entries, TestContext.Current.CancellationToken));
+        var changed = new McpServerDefinition
+        {
+            Id = "web",
+            Name = "Web",
+            Transport = McpTransport.Container,
+            Enabled = true,
+            Scope = "system",
+            ContainerImage = server.ContainerImage,
+            LocalImageDigest = "sha256:" + new string('b', 64),
+            LocalToolDefinitions = server.LocalToolDefinitions
+        };
+        source.Current = new PlatformConfiguration { Agents = [agent], McpServers = [changed] };
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => executable.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), TestContext.Current.CancellationToken).AsTask());
+        Assert.Contains("changed since this run started", error.Message, StringComparison.Ordinal);
+    }
+    [Fact]
+    public async Task RetainedLocalToolRejectsChangedCommandBeforeCallingManager()
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var grpc = new CapturingWorkspaceGrpcService { RecordCalls = true };
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "web", Context = "OwnContext" }] };
+        McpServerDefinition Server(string command) => new()
+        {
+            Id = "web",
+            Name = "Web",
+            Transport = McpTransport.Container,
+            Enabled = true,
+            Scope = "system",
+            ContainerImage = "example/image@" + digest,
+            ContainerCommand = command,
+            LocalImageDigest = digest,
+            LocalToolDefinitions = [new ConnectorToolDefinition("fetch", "Fetch a URL", "{\"type\":\"object\"}")]
+        };
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [Server("original")] } };
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), new CapturingMcpHttpClientFactory(), grpc,
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-alpha");
+        AgentToolSurfaceContribution definitions = await provider.ContributeAsync(context, TestContext.Current.CancellationToken);
+        var executable = Assert.Single(await provider.HydrateAsync(context, definitions.Entries, TestContext.Current.CancellationToken));
+        source.Current = new PlatformConfiguration { Agents = [agent], McpServers = [Server("changed")] };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executable.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), TestContext.Current.CancellationToken).AsTask());
+        Assert.Null(grpc.LastCall);
+    }
+
+    [Fact]
+    public async Task RetainedRemoteToolRejectsChangedEndpointBeforeConnecting()
+    {
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "remote", Context = "OwnContext" }] };
+        McpServerDefinition Server(string url) => new() { Id = "remote", Name = "Remote", Transport = McpTransport.Http, Enabled = true, Scope = "system", HttpUrl = new Uri(url) };
+        var original = Server("https://example.com/mcp");
+        var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [original] } };
+        var factory = new CapturingMcpHttpClientFactory();
+        var provider = new McpAgentToolProvider(source, CreateHeldSecretResolver("unused", "unused"), factory, new CapturingWorkspaceGrpcService(),
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        AgentToolContext context = CreateContainerToolContext(agent, "user-alpha");
+        AgentToolSurfaceEntry entry = AgentToolSurfaceEntry.Describe(AgentToolSurfaceSources.Mcp, "remote", "search", "Search", "{\"type\":\"object\"}");
+        entry.ExecutionConfigHash = AgentToolingFingerprint.ConnectorExecutionHash(original);
+        var executable = Assert.Single(await provider.HydrateAsync(context, [entry], TestContext.Current.CancellationToken));
+        source.Current = new PlatformConfiguration { Agents = [agent], McpServers = [Server("https://changed.example/mcp")] };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => executable.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), TestContext.Current.CancellationToken).AsTask());
+        Assert.False(factory.WasCalled);
+    }
+
+    [Fact]
+    public async Task SystemwideIsolatedConnectorReceivesInvokingUserAndAgentContext()
+    {
+        var grpcService = new CapturingWorkspaceGrpcService { RecordCalls = true };
+        var agent = new AgentDefinition
+        {
+            Id = "agent-alpha",
+            Scope = "system",
+            Name = "Agent Alpha",
+            Sandbox = new AgentSandboxDefinition { Enabled = false },
+            McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "kautuka-google-mail", Context = "Mail" }],
+        };
+        var provider = new McpAgentToolProvider(
+            new StaticPlatformConfigurationProvider(new PlatformConfiguration
+            {
+                Agents = [agent],
+                McpServers = [new McpServerDefinition
+                {
+                    Id = "kautuka-google-mail", Name = "Gmail", Scope = GatewayOwnershipScopes.System,
+                    Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true,
+                    LocalImageDigest = "sha256:" + new string('a', 64),
+                    LocalToolDefinitions = [new ConnectorToolDefinition("mail_list", "List mail", "{\"type\":\"object\"}")],
+                }],
+            }),
+            CreateHeldSecretResolver("unused", "unused"), new CapturingMcpHttpClientFactory(), grpcService,
+            new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        var tool = Assert.Single(await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-alpha"), CancellationToken.None));
+        _ = await tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None);
+        WorkspaceMcpContainerCallRequest request = Assert.IsType<WorkspaceMcpContainerCallRequest>(grpcService.LastCall);
+        Assert.Equal("user-alpha", request.WorkspaceContext?.UserId);
+        Assert.Equal("agent-alpha", request.WorkspaceContext?.ScopeId);
+    }
+
+    [Theory]
+    [InlineData("OwnContextWithAgentFiles", WorkspaceMcpExecutionContext.IsolatedWithAgentFiles)]
+    [InlineData("AgentContext", WorkspaceMcpExecutionContext.AgentSandbox)]
+    public async Task SavedConnectorToolUsesConfiguredExecutionContext(string binding, WorkspaceMcpExecutionContext expected)
+    {
+        var grpc = new CapturingWorkspaceGrpcService { RecordCalls = true };
+        var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", Sandbox = new AgentSandboxDefinition { Enabled = true }, McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "bundle-mcp", Context = binding }] };
+        var server = new McpServerDefinition { Id = "bundle-mcp", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true, LocalImageDigest = "sha256:" + new string('a', 64), LocalToolDefinitions = [new ConnectorToolDefinition("search", "Search", "{\"type\":\"object\"}")] };
+        var provider = new McpAgentToolProvider(new StaticPlatformConfigurationProvider(new PlatformConfiguration { Agents = [agent], McpServers = [server] }), CreateHeldSecretResolver("unused", "unused"), new CapturingMcpHttpClientFactory(), grpc, new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
+        var tool = Assert.Single(await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-1"), CancellationToken.None));
+        _ = await tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None);
+        Assert.Equal(expected, grpc.LastCall?.ExecutionContext);
+        Assert.Equal("/workspace", grpc.LastCall?.WorkspaceContext?.ContainerWorkspacePath);
+        Assert.Equal(0, grpc.ListToolsCallCount);
+    }
+
+    [Fact]
+    public async Task InternalParserBoundToAgentRemainsDenyAllAndCannotCreateApprovalCard_WithNegativeControl()
+    {
+        string stateDirectory = Path.Combine(Path.GetTempPath(), "nac-v7-parser-agent-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateDirectory);
+        try
+        {
+            var policyStore = new NetworkAccessPolicyStore(Path.Combine(stateDirectory, "policy.json"));
+            var registry = new WorkloadRegistry();
+            var controller = new NetworkAccessController.NetworkAccessController(policyStore, registry);
+            var grpcService = new CapturingWorkspaceGrpcService { RecordCalls = true };
+            var agent = new AgentDefinition
+            {
+                Id = "agent-alpha",
+                Name = "Agent Alpha",
+                Scope = "system",
+                Sandbox = new AgentSandboxDefinition { Enabled = false },
+                McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "markitdown", Context = "Parse local files" }],
+            };
+            var provider = new McpAgentToolProvider(
+                new StaticPlatformConfigurationProvider(new PlatformConfiguration
+                {
+                    Agents = [agent],
+                    McpServers =
+                    [
+                        new McpServerDefinition
+                        {
+                            Id = "markitdown",
+                            Name = "MarkItDown",
+                            Scope = GatewayOwnershipScopes.User,
+                            OwnerUserId = "user-alpha",
+                            Transport = McpTransport.Container,
+                            ContainerImage = "docker.io/mcp/markitdown@sha256:" + new string('a', 64),
+                            LocalImageDigest = "sha256:" + new string('a', 64),
+                            LocalToolDefinitions = [new ConnectorToolDefinition("convert", "Convert", "{\"type\":\"object\"}")],
+                            Enabled = true,
+                            IsInternalSystemConnector = true,
+                        },
+                    ],
+                }),
+                CreateHeldSecretResolver("unused", "unused"),
+                new CapturingMcpHttpClientFactory(),
+                grpcService,
+                new ToolExecutionPolicyService(),
+                NullLogger<McpAgentToolProvider>.Instance);
+
+            var tool = Assert.Single(await provider.BuildToolsAsync(CreateContainerToolContext(agent, "user-alpha"), CancellationToken.None));
+            _ = await tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None);
+
+            WorkspaceMcpContainerCallRequest request = Assert.IsType<WorkspaceMcpContainerCallRequest>(grpcService.LastCall);
+            Assert.True(request.AllowInternalSystemConnector);
+            Assert.Equal("user-alpha::markitdown", request.ConnectorId);
+            Assert.NotNull(request.WorkspaceContext);
+            Assert.Equal("agent", request.WorkspaceContext.ScopeType);
+            Assert.Equal("agent-alpha", request.WorkspaceContext.ScopeId);
+            Assert.Equal("user-alpha", request.WorkspaceContext.UserId);
+
+            ContainerContext launchContext = new(
+                request.WorkspaceContext.ScopeType,
+                request.WorkspaceContext.ScopeId,
+                request.WorkspaceContext.UserId,
+                request.WorkspaceContext.HostWorkspacePath,
+                request.WorkspaceContext.ContainerWorkspacePath,
+                request.WorkspaceContext.Image,
+                request.WorkspaceContext.DefaultTimeoutSeconds,
+                "512m",
+                30,
+                [],
+                new Dictionary<string, string>());
+            var connector = new WorkspaceMcpContainerConnectorDefinition(
+                request.ConnectorId, "docker.io/mcp/markitdown@sha256:" + new string('a', 64),
+                string.Empty, [], true, true, null, null, [], 30, 600);
+            ConnectorContainerSpecBuilder.ConnectorIdentity identity =
+                ConnectorContainerSpecBuilder.ResolveIdentity(connector, launchContext, purpose: null);
+            Assert.Equal("deny-all", identity.Egress);
+            Assert.Equal("system", identity.Kind);
+            Assert.Equal("user-alpha", identity.UserId);
+
+            List<string> runArguments = ConnectorContainerSpecBuilder.BuildRun(
+                connector, "internal-markitdown", WorkspaceMcpExecutionContext.Isolated, launchContext,
+                persistent: true, allocatedIp: "10.247.1.44", isBraked: false);
+            Assert.Contains("io.kautuka.user=user-alpha", runArguments, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.egress=deny-all", runArguments, StringComparer.Ordinal);
+            Assert.Contains("io.kautuka.kind=system", runArguments, StringComparer.Ordinal);
+
+            registry.Register(new RegistryEntry(
+                "10.247.1.44", identity.UserId, null, "internal-markitdown", identity.Kind,
+                request.ConnectorId, "isolated", identity.Egress, "none", null,
+                DateTimeOffset.UtcNow));
+            NetworkAccessDecisionResult decision = controller.EvaluateContainerConnection(
+                new ContainerConnectionInput("10.247.1.44", "93.184.216.34", 443, "parser-egress.example", true));
+            Assert.False(decision.Allowed);
+            Assert.Equal("deny_all", decision.Reason);
+            Assert.Empty(policyStore.ListRequests(new NetworkAccessActor("admin-1", IsAdmin: true)).Requests);
+        }
+        finally
+        {
+            Directory.Delete(stateDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public void PersonalHttpOverrideDoesNotAllowPrivateConnectForASystemConnector()
     {
@@ -150,7 +455,7 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
-    public async Task BuildToolsAsyncAttemptsContainerConnectorWithoutSandbox()
+    public async Task LocalConnectorWithoutSavedToolsDoesNotDiscoverDuringRun()
     {
         var httpFactory = new CapturingMcpHttpClientFactory();
         var grpcService = new CapturingWorkspaceGrpcService();
@@ -202,7 +507,7 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> tools = [.. await provider.BuildToolsAsync(context, CancellationToken.None)];
 
         Assert.Empty(tools);
-        Assert.True(grpcService.ListToolsWasCalled);
+        Assert.False(grpcService.ListToolsWasCalled);
         Assert.False(httpFactory.WasCalled);
         Assert.Equal(0, workspaceTool.SpawnAgentSandboxCallCount);
     }
@@ -272,7 +577,7 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
-    public async Task BuildToolsAsyncIncludesBoundInternalSystemConnectorsWhenDisabled()
+    public async Task InternalConnectorWithoutSavedToolsDoesNotDiscoverDuringRun()
     {
         var grpcService = new CapturingWorkspaceGrpcService();
         var provider = new McpAgentToolProvider(
@@ -324,13 +629,12 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> tools = [.. await provider.BuildToolsAsync(context, CancellationToken.None)];
 
         Assert.Empty(tools);
-        Assert.True(grpcService.ListToolsWasCalled);
-        Assert.True(grpcService.LastListToolsRequest?.AllowInternalSystemConnector);
-        Assert.Equal("system::kautuka-web-tools", grpcService.LastListToolsRequest?.ConnectorId);
+        Assert.False(grpcService.ListToolsWasCalled);
+        Assert.Null(grpcService.LastListToolsRequest);
     }
 
     [Fact]
-    public async Task BuildToolsAsyncUsesIsolatedWithAgentFilesExecutionContextForBinding()
+    public async Task MissingIsolatedWithAgentFilesMetadataDoesNotStartDiscovery()
     {
         var grpcService = new CapturingWorkspaceGrpcService();
         var provider = new McpAgentToolProvider(
@@ -378,12 +682,11 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> tools = [.. await provider.BuildToolsAsync(context, CancellationToken.None)];
 
         Assert.Empty(tools);
-        Assert.Equal(WorkspaceMcpExecutionContext.IsolatedWithAgentFiles, grpcService.LastListToolsRequest?.ExecutionContext);
-        Assert.Equal("/workspace", grpcService.LastListToolsRequest?.WorkspaceContext?.ContainerWorkspacePath);
+        Assert.Null(grpcService.LastListToolsRequest);
     }
 
     [Fact]
-    public async Task BuildToolsAsyncUsesAgentSandboxExecutionContextForBinding()
+    public async Task MissingAgentSandboxMetadataDoesNotStartDiscovery()
     {
         var grpcService = new CapturingWorkspaceGrpcService();
         var provider = new McpAgentToolProvider(
@@ -431,8 +734,7 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> tools = [.. await provider.BuildToolsAsync(context, CancellationToken.None)];
 
         Assert.Empty(tools);
-        Assert.Equal(WorkspaceMcpExecutionContext.AgentSandbox, grpcService.LastListToolsRequest?.ExecutionContext);
-        Assert.Equal("/workspace", grpcService.LastListToolsRequest?.WorkspaceContext?.ContainerWorkspacePath);
+        Assert.Null(grpcService.LastListToolsRequest);
     }
 
     [Fact]
@@ -669,7 +971,7 @@ public sealed class McpAgentToolProviderTests
     }
 
     [Fact]
-    public async Task CatalogMissPersistsSuccessfulContainerListAndReusesIt()
+    public async Task LocalCatalogueUsesSavedToolsWithoutDiscoveringAgain()
     {
         using ToolSurfaceTestStore testStore = ToolSurfaceTestStore.Create();
         var httpFactory = new CapturingMcpHttpClientFactory();
@@ -684,7 +986,7 @@ public sealed class McpAgentToolProviderTests
 
         Assert.Contains(first, tool => tool.Name == "search");
         Assert.Contains(second, tool => tool.Name == "search");
-        Assert.Equal(1, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
         Assert.False(httpFactory.WasCalled);
     }
 
@@ -708,6 +1010,8 @@ public sealed class McpAgentToolProviderTests
                     Enabled = true,
                     Scope = GatewayOwnershipScopes.User,
                     OwnerUserId = "user-a",
+                    LocalImageDigest = "sha256:" + new string('a', 64),
+                    LocalToolDefinitions = [new ConnectorToolDefinition("owner-tool", "Search", "{\"type\":\"object\"}")],
                 },
             ],
         };
@@ -722,11 +1026,11 @@ public sealed class McpAgentToolProviderTests
 
         Assert.Contains(ownerTools, tool => tool.Name == "owner-tool");
         Assert.DoesNotContain(otherTools, tool => tool.Name == "owner-tool");
-        Assert.Equal(1, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
-    public async Task SharedConnectorDiscoveryIsCachedPerCaller()
+    public async Task SharedLocalConnectorUsesSameSavedDefinitionsForEachCaller()
     {
         using ToolSurfaceTestStore testStore = ToolSurfaceTestStore.Create();
         var grpcService = new CapturingWorkspaceGrpcService { SucceedListTools = true, ListedToolName = "caller-a-tool" };
@@ -737,15 +1041,13 @@ public sealed class McpAgentToolProviderTests
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> firstCaller = await catalog.BuildToolsAsync(
             CreateContainerToolContext(agent, "user-a"),
             CancellationToken.None);
-        grpcService.ListedToolName = "caller-b-tool";
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction> secondCaller = await catalog.BuildToolsAsync(
             CreateContainerToolContext(agent, "user-b"),
             CancellationToken.None);
 
-        Assert.Contains(firstCaller, tool => tool.Name == "caller-a-tool");
-        Assert.Contains(secondCaller, tool => tool.Name == "caller-b-tool");
-        Assert.DoesNotContain(secondCaller, tool => tool.Name == "caller-a-tool");
-        Assert.Equal(2, grpcService.ListToolsCallCount);
+        Assert.Contains(firstCaller, tool => tool.Name == "search");
+        Assert.Contains(secondCaller, tool => tool.Name == "search");
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
@@ -820,7 +1122,7 @@ public sealed class McpAgentToolProviderTests
         };
         await catalog.BuildToolsAsync(CreateContainerToolContext(personaChanged), CancellationToken.None);
 
-        Assert.Equal(1, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
@@ -837,7 +1139,7 @@ public sealed class McpAgentToolProviderTests
         AgentToolCatalog secondCatalog = CreateCatalog(testStore, secondConfig, new CapturingMcpHttpClientFactory(), grpcService, new CountingSkillPackageService());
         await secondCatalog.BuildToolsAsync(CreateContainerToolContext(agent), CancellationToken.None);
 
-        Assert.Equal(2, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
@@ -858,6 +1160,8 @@ public sealed class McpAgentToolProviderTests
                     Transport = McpTransport.Container,
                     ContainerImage = "ghcr.io/example/container-mcp:latest",
                     Enabled = true,
+                    LocalImageDigest = "sha256:" + new string('a', 64),
+                    LocalToolDefinitions = [new ConnectorToolDefinition("search", "Search", "{\"type\":\"object\"}")],
                 },
                 new McpServerDefinition
                 {
@@ -866,39 +1170,43 @@ public sealed class McpAgentToolProviderTests
                     Transport = McpTransport.Container,
                     ContainerImage = "ghcr.io/example/other:latest",
                     Enabled = true,
+                    LocalImageDigest = "sha256:" + new string('b', 64),
+                    LocalToolDefinitions = [new ConnectorToolDefinition("other_search", "Search", "{\"type\":\"object\"}")],
                 },
             ],
         };
         AgentToolCatalog catalog = CreateCatalog(testStore, config, new CapturingMcpHttpClientFactory(), grpcService, new CountingSkillPackageService());
-        await catalog.BuildToolsAsync(CreateContainerToolContext(firstAgent), CancellationToken.None);
+        IReadOnlyList<Microsoft.Extensions.AI.AIFunction> first = await catalog.BuildToolsAsync(CreateContainerToolContext(firstAgent), CancellationToken.None);
 
         AgentDefinition rebound = CreateBoundContainerAgent("other-mcp");
         config.Agents.Clear();
         config.Agents.Add(rebound);
-        await catalog.BuildToolsAsync(CreateContainerToolContext(rebound), CancellationToken.None);
+        IReadOnlyList<Microsoft.Extensions.AI.AIFunction> second = await catalog.BuildToolsAsync(CreateContainerToolContext(rebound), CancellationToken.None);
 
-        Assert.Equal(2, grpcService.ListToolsCallCount);
+        Assert.Contains(first, tool => tool.Name == "search");
+        Assert.Contains(second, tool => tool.Name == "other_search");
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
-    public async Task FailedConnectorListIsNotPersisted()
+    public async Task MissingSavedLocalDefinitionsDoNotTriggerDiscovery()
     {
         using ToolSurfaceTestStore testStore = ToolSurfaceTestStore.Create();
         var grpcService = new CapturingWorkspaceGrpcService();
         AgentDefinition agent = CreateBoundContainerAgent();
-        PlatformConfiguration config = CreateContainerPlatform(agent, "ghcr.io/example/container-mcp:latest");
+        PlatformConfiguration config = CreateContainerPlatform(agent, "ghcr.io/example/container-mcp:latest", includeSavedTools: false);
         AgentToolCatalog catalog = CreateCatalog(testStore, config, new CapturingMcpHttpClientFactory(), grpcService, new CountingSkillPackageService());
         AgentToolContext context = CreateContainerToolContext(agent);
 
         _ = await catalog.BuildToolsAsync(context, CancellationToken.None);
         _ = await catalog.BuildToolsAsync(context, CancellationToken.None);
 
-        Assert.Equal(2, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
         Assert.Null(testStore.SurfaceStore.TryGet(agent.Id, AgentToolingFingerprint.Compute(agent, config)));
     }
 
     [Fact]
-    public async Task ConcurrentCatalogMissSharesOneContainerListTools()
+    public async Task ConcurrentCatalogMissDoesNotDiscoverLocalTools()
     {
         using ToolSurfaceTestStore testStore = ToolSurfaceTestStore.Create();
         var grpcService = new CapturingWorkspaceGrpcService { SucceedListTools = true, BlockListTools = true };
@@ -909,15 +1217,10 @@ public sealed class McpAgentToolProviderTests
         AgentToolContext second = CreateContainerToolContext(agent);
 
         Task<IReadOnlyList<Microsoft.Extensions.AI.AIFunction>> firstBuild = catalog.BuildToolsAsync(first, CancellationToken.None).AsTask();
-        await grpcService.ListToolsStarted.Task.ConfigureAwait(true);
         Task<IReadOnlyList<Microsoft.Extensions.AI.AIFunction>> secondBuild = catalog.BuildToolsAsync(second, CancellationToken.None).AsTask();
-
-        Assert.Equal(1, grpcService.ListToolsCallCount);
-        grpcService.ListToolsRelease.TrySetResult();
-
         IReadOnlyList<Microsoft.Extensions.AI.AIFunction>[] results = await Task.WhenAll(firstBuild, secondBuild).ConfigureAwait(true);
         Assert.All(results, tools => Assert.Contains(tools, tool => tool.Name == "search"));
-        Assert.Equal(1, grpcService.ListToolsCallCount);
+        Assert.Equal(0, grpcService.ListToolsCallCount);
     }
 
     [Fact]
@@ -949,7 +1252,7 @@ public sealed class McpAgentToolProviderTests
     {
         var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "legacy", Context = "OwnContext" }, new AgentMcpBindingDefinition { ConnectorId = "healthy", Context = "OwnContext" }] };
         var server = new McpServerDefinition { Id = "legacy", Name = "Legacy", Transport = McpTransport.Http, HttpUrl = new Uri("https://example.com/mcp"), Enabled = true, RequiresCredentialReentry = true };
-        var healthy = new McpServerDefinition { Id = "healthy", Name = "Healthy", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true };
+        var healthy = new McpServerDefinition { Id = "healthy", Name = "Healthy", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true, LocalImageDigest = "sha256:" + new string('a', 64), LocalToolDefinitions = [new ConnectorToolDefinition("healthy_search", "Search", "{\"type\":\"object\"}")] };
         var source = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server, healthy] } };
         var factory = new CapturingMcpHttpClientFactory();
         var grpc = new CapturingWorkspaceGrpcService { SucceedListTools = true, ListedToolName = "healthy_search" };
@@ -964,7 +1267,7 @@ public sealed class McpAgentToolProviderTests
         var catalog = new AgentToolCatalog([provider], store.SurfaceStore, source);
         Assert.Equal("healthy_search", Assert.Single(await catalog.BuildToolsAsync(context, TestContext.Current.CancellationToken)).Name);
         Assert.Equal("healthy_search", Assert.Single(await catalog.BuildToolsAsync(context, TestContext.Current.CancellationToken)).Name);
-        Assert.Equal(3, grpc.ListToolsCallCount);
+        Assert.Equal(0, grpc.ListToolsCallCount);
     }
 
     [Theory]
@@ -1038,7 +1341,7 @@ public sealed class McpAgentToolProviderTests
     public async Task RetainedProxyRejectsDisabledUnboundAndNewApprovalPolicy()
     {
         var agent = new AgentDefinition { Id = "agent-alpha", Scope = "system", McpBindings = [new AgentMcpBindingDefinition { ConnectorId = "test", Context = "OwnContext" }] };
-        var server = new McpServerDefinition { Id = "test", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true };
+        var server = new McpServerDefinition { Id = "test", Transport = McpTransport.Container, ContainerImage = "example/image", Enabled = true, LocalImageDigest = "sha256:" + new string('a', 64), LocalToolDefinitions = [new ConnectorToolDefinition("search", "Search", "{\"type\":\"object\"}")] };
         var configuration = new MutablePlatformConfigurationProvider { Current = new PlatformConfiguration { Agents = [agent], McpServers = [server] } };
         var grpc = new CapturingWorkspaceGrpcService { SucceedListTools = true, ListedToolName = "search", RecordCalls = true };
         var provider = new McpAgentToolProvider(configuration, CreateHeldSecretResolver("unused", "unused"), new CapturingMcpHttpClientFactory(), grpc, new ToolExecutionPolicyService(), NullLogger<McpAgentToolProvider>.Instance);
@@ -1118,6 +1421,8 @@ public sealed class McpAgentToolProviderTests
                         Name = "Microsoft 365 mail",
                         Transport = McpTransport.Container,
                         ContainerCommand = "kautuka-m365-mail",
+                        LocalImageDigest = "sha256:" + new string('a', 64),
+                        LocalToolDefinitions = [new ConnectorToolDefinition("mail_list", "List mail", "{\"type\":\"object\"}")],
                         EnvKeys = [refreshKey],
                         Enabled = true,
                     },
@@ -1158,15 +1463,16 @@ public sealed class McpAgentToolProviderTests
         CredentialResolverService resolver = new(new Lazy<CredentialsService.CredentialsServiceClient>(() => credentials));
 
         (IReadOnlyList<Microsoft.Extensions.AI.AIFunction> userTools, CapturingWorkspaceGrpcService userGrpc) = await BuildContainerEchoAsync(resolver, "user").ConfigureAwait(true);
-        Assert.Empty(userTools);
+        Microsoft.Extensions.AI.AIFunction userTool = Assert.Single(userTools);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => userTool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None).AsTask());
         Assert.Equal(1, credentials.ResolveCount);
         Assert.False(credentials.LastIncludeSystemScope);
         Assert.Null(userGrpc.LastCall);
 
         (IReadOnlyList<Microsoft.Extensions.AI.AIFunction> systemTools, CapturingWorkspaceGrpcService systemGrpc) = await BuildContainerEchoAsync(resolver, "system").ConfigureAwait(true);
-        Assert.True(credentials.LastIncludeSystemScope);
         Microsoft.Extensions.AI.AIFunction tool = Assert.Single(systemTools);
         _ = await tool.InvokeAsync(new Microsoft.Extensions.AI.AIFunctionArguments(), CancellationToken.None).ConfigureAwait(true);
+        Assert.True(credentials.LastIncludeSystemScope);
         Assert.NotNull(systemGrpc.LastCall);
         Dictionary<string, string> systemEnvironment = systemGrpc.LastCall.Environment.ToDictionary(
             static pair => pair.Key,
@@ -1214,6 +1520,8 @@ public sealed class McpAgentToolProviderTests
                         Name = connectorId,
                         Transport = McpTransport.Container,
                         ContainerCommand = "echo-mcp",
+                        LocalImageDigest = "sha256:" + new string('a', 64),
+                        LocalToolDefinitions = [new ConnectorToolDefinition("echo", "Echo", "{\"type\":\"object\"}")],
                         EnvKeys = ["OWN_TOKEN", "MCP_AUTH_TOKEN"],
                         Scope = scope,
                         OwnerUserId = string.Equals(scope, "user", StringComparison.Ordinal) ? "user-1" : null,
@@ -1443,7 +1751,7 @@ public sealed class McpAgentToolProviderTests
             ],
         };
 
-    private static PlatformConfiguration CreateContainerPlatform(AgentDefinition agent, string image)
+    private static PlatformConfiguration CreateContainerPlatform(AgentDefinition agent, string image, bool includeSavedTools = true)
         => new()
         {
             Agents = [agent],
@@ -1455,6 +1763,8 @@ public sealed class McpAgentToolProviderTests
                     Name = "container",
                     Transport = McpTransport.Container,
                     ContainerImage = image,
+                    LocalImageDigest = includeSavedTools ? "sha256:" + new string('a', 64) : null,
+                    LocalToolDefinitions = includeSavedTools ? [new ConnectorToolDefinition("search", "Search", "{\"type\":\"object\"}")] : null,
                     Enabled = true,
                 },
             ],

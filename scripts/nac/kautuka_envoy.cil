@@ -1,0 +1,6 @@
+; Development Envoy uses the standard confined-container templates.
+(block kautuka_envoy
+  (blockinherit container)
+  (blockinherit net_container)
+  (allow process unconfined_t (unix_stream_socket (connectto)))
+)

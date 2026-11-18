@@ -13,6 +13,77 @@ namespace Kautuka.IntegrationTests;
 public sealed class BuiltInMcpPackageBootstrapServiceTests
 {
     [Fact]
+    public async Task DevelopmentBootstrapImportsFreshRepositoryBundleAheadOfStaleBuildOutput()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            await File.WriteAllTextAsync(Path.Combine(root, "src", "Kautuka.slnx"), "", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string artifacts = Path.Combine(root, "artifacts", "mcpb");
+            Directory.CreateDirectory(artifacts);
+            byte[] freshBundle = "fresh-development-bundle"u8.ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(artifacts, "kautuka-web-tools-9.9.9.mcpb"), freshBundle, TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string staleContentRoot = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(staleContentRoot);
+            await File.WriteAllTextAsync(Path.Combine(staleContentRoot, "kautuka-web-tools.mcpb"), "stale-content-root-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string staleOutput = Path.Combine(root, "app-output", "built-in-mcpb");
+            Directory.CreateDirectory(staleOutput);
+            await File.WriteAllTextAsync(Path.Combine(staleOutput, "kautuka-web-tools.mcpb"), "stale-output-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            var packages = new FakeMcpbPackageService
+            {
+                Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Fresh", Transport = "container" }, "0.4", "node", "kautuka-web-tools")
+            };
+            var service = new BuiltInMcpPackageBootstrapService(
+                new FakeWebHostEnvironment(root), new FakeCatalogStore(), packages,
+                NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                applicationBaseDirectory: Path.Combine(root, "app-output"));
+
+            await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.Equal(freshBundle, packages.InspectedBundleBytes);
+            Assert.Equal(1, packages.InspectCallCount);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ProductionBootstrapKeepsContentRootBundlePrecedence()
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "src"));
+            await File.WriteAllTextAsync(Path.Combine(root, "src", "Kautuka.slnx"), "", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string artifacts = Path.Combine(root, "artifacts", "mcpb");
+            Directory.CreateDirectory(artifacts);
+            await File.WriteAllTextAsync(Path.Combine(artifacts, "kautuka-web-tools-9.9.9.mcpb"), "repository-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string contentBundle = Path.Combine(root, "built-in-mcpb");
+            Directory.CreateDirectory(contentBundle);
+            await File.WriteAllTextAsync(Path.Combine(contentBundle, "kautuka-web-tools.mcpb"), "production-content-root-bundle", TestContext.Current.CancellationToken).ConfigureAwait(true);
+            string productionOutput = Path.Combine(root, "app-output", "built-in-mcpb");
+            Directory.CreateDirectory(productionOutput);
+            byte[] productionBundle = "production-output-bundle"u8.ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(productionOutput, "kautuka-web-tools.mcpb"), productionBundle, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            var environment = new FakeWebHostEnvironment(root) { EnvironmentName = "Production" };
+            var packages = new FakeMcpbPackageService
+            {
+                Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Production", Transport = "container" }, "0.4", "node", "kautuka-web-tools")
+            };
+            var service = new BuiltInMcpPackageBootstrapService(environment, new FakeCatalogStore(), packages,
+                NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                applicationBaseDirectory: Path.Combine(root, "app-output"));
+
+            await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
+
+            Assert.Equal(productionBundle, packages.InspectedBundleBytes);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task BootstrapStopsAfterCancellationDuringRejectedActivation()
     {
         string root = CreateTempDirectory();
@@ -26,7 +97,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             var catalog = new FakeCatalogStore { ActivationFailuresRemaining = 1, OnActivationFailure = stop.Cancel };
             var packages = new FakeMcpbPackageService { Inspection = new McpbConnectorInspection("kautuka-web-tools", new GatewayConnectorUpsertRequest { Name = "Test", Transport = "container" }, "0.4", "node", "kautuka-web-tools") };
             var service = new BuiltInMcpPackageBootstrapService(new FakeWebHostEnvironment(root), catalog, packages,
-                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
+                NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
             await service.StartAsync(stop.Token).ConfigureAwait(true);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExecuteTask!).ConfigureAwait(true);
             Assert.Equal(1, catalog.SaveSystemCallCount);
@@ -61,7 +132,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 }, "0.4", "node", "kautuka-web-tools")
             };
             var service = new BuiltInMcpPackageBootstrapService(new FakeWebHostEnvironment(root), catalog, packages,
-                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
+                NullLogger<BuiltInMcpPackageBootstrapService>.Instance, retryDelay: TimeSpan.FromMilliseconds(10));
             await service.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
             await service.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken).ConfigureAwait(true);
             Assert.Equal(2, catalog.SaveSystemCallCount);
@@ -85,7 +156,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             bool maintenance = true;
             var service = new BuiltInMcpPackageBootstrapService(
                 new FakeWebHostEnvironment(root), new FakeCatalogStore(), packageService,
-                new FakeMcpConnectorTestService(), NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
+                NullLogger<BuiltInMcpPackageBootstrapService>.Instance,
                 () => Volatile.Read(ref maintenance));
             await service.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
             await Task.Delay(100, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -94,61 +165,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             await service.ExecuteTask!.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken).ConfigureAwait(true);
             Assert.Equal(1, packageService.InspectCallCount);
             await service.StopAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task StartAsyncDoesNotWaitForFirstRunConnectorProbe()
-    {
-        string root = CreateTempDirectory();
-        try
-        {
-            string bundleDirectory = Path.Combine(root, "built-in-mcpb");
-            Directory.CreateDirectory(bundleDirectory);
-            await File.WriteAllTextAsync(
-                Path.Combine(bundleDirectory, "kautuka-web-tools.mcpb"),
-                "placeholder",
-                TestContext.Current.CancellationToken).ConfigureAwait(true);
-
-            var testService = new FakeMcpConnectorTestService
-            {
-                Completion = new TaskCompletionSource<McpConnectorTestResult>(TaskCreationOptions.RunContinuationsAsynchronously)
-            };
-            var service = new BuiltInMcpPackageBootstrapService(
-                new FakeWebHostEnvironment(root),
-                new FakeCatalogStore(),
-                new FakeMcpbPackageService
-                {
-                    Inspection = new McpbConnectorInspection(
-                        "kautuka-web-tools",
-                        new GatewayConnectorUpsertRequest
-                        {
-                            Name = "Kautuka Web Tools",
-                            Transport = "container",
-                            ContainerImage = McpCommandTransportMapper.NodeImage,
-                            ContainerCommand = "node",
-                            ContainerArgs = ["server.js"],
-                            BundlePath = "/tmp/kautuka-web-tools.mcpb",
-                            ServerType = "node",
-                            ReadinessTimeoutSeconds = 45,
-                        },
-                        "0.4",
-                        "node",
-                        "kautuka-web-tools")
-                },
-                testService,
-                NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
-
-            await service.StartAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
-
-            Assert.False(service.ExecuteTask!.IsCompleted);
-            await testService.Started.Task.WaitAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
-            testService.Completion!.SetResult(new(true, "Connected.", 1, ToolNames: ["kautuka_web_fetch"]));
-            await service.ExecuteTask.WaitAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
         }
         finally
         {
@@ -168,7 +184,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(root),
                 catalog,
                 mcpb,
-                new FakeMcpConnectorTestService(),
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -251,7 +266,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(root),
                 catalog,
                 mcpb,
-                new FakeMcpConnectorTestService(),
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -295,7 +309,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(root),
                 catalog,
                 mcpb,
-                new FakeMcpConnectorTestService(),
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -330,10 +343,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 TestContext.Current.CancellationToken).ConfigureAwait(true);
 
             var catalog = new FakeCatalogStore();
-            var testService = new FakeMcpConnectorTestService
-            {
-                Result = new McpConnectorTestResult(true, "Connected. 1 tool(s) available.", 1, ToolNames: ["kautuka_web_fetch"])
-            };
             var mcpb = new FakeMcpbPackageService
             {
                 Inspection = new McpbConnectorInspection(
@@ -361,7 +370,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(Path.Combine(solutionRoot, "src", "backend", "Kautuka.Gateway")),
                 catalog,
                 mcpb,
-                testService,
+
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -369,8 +378,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             Assert.Equal(1, mcpb.InspectCallCount);
             Assert.Equal(1, catalog.SaveCallCount);
             Assert.Equal("kautuka-web-tools", catalog.SavedServerId);
-            Assert.Equal(1, catalog.SaveDiscoveryCallCount);
-            Assert.Equal(1, testService.TestCallCount);
+
         }
         finally
         {
@@ -379,7 +387,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
     }
 
     [Fact]
-    public async Task StartAsyncChangedBundleRefreshesDiscoveredTools()
+    public async Task StartAsyncChangedBundleUsesSuppliedToolMetadata()
     {
         string root = CreateTempDirectory();
         try
@@ -419,10 +427,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                     ["old_tool"],
                     null)
             };
-            var testService = new FakeMcpConnectorTestService
-            {
-                Result = new McpConnectorTestResult(true, "Connected. 1 tool(s) available.", 1, ToolNames: ["kautuka_web_fetch"])
-            };
             var mcpb = new FakeMcpbPackageService
             {
                 Inspection = new McpbConnectorInspection(
@@ -437,6 +441,8 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                         ContainerArgs = ["${__dirname}/server.js"],
                         BundlePath = "/tmp/new-bundle.mcpb",
                         ServerType = "node",
+                        ToolCount = 1,
+                        ToolNames = ["kautuka_web_fetch"],
                         Enabled = true,
                         ReadinessTimeoutSeconds = 45,
                         JitCooldownSeconds = 600,
@@ -450,16 +456,16 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(root),
                 catalog,
                 mcpb,
-                testService,
+
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
 
             Assert.Equal(1, catalog.SaveSystemCallCount);
-            Assert.Equal(1, testService.TestCallCount);
-            Assert.Equal(1, catalog.SaveDiscoveryCallCount);
-            Assert.Equal(["kautuka_web_fetch"], catalog.DiscoveredToolNames);
-            Assert.Equal(1, catalog.DiscoveredToolCount);
+
+            Assert.NotNull(catalog.SavedRequest!.ToolNames);
+            Assert.Equal(["kautuka_web_fetch"], catalog.SavedRequest!.ToolNames);
+            Assert.Equal(1, catalog.SavedRequest.ToolCount);
         }
         finally
         {
@@ -506,7 +512,6 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                 new FakeWebHostEnvironment(root),
                 catalog,
                 mcpb,
-                new FakeMcpConnectorTestService(),
                 NullLogger<BuiltInMcpPackageBootstrapService>.Instance);
 
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
@@ -543,20 +548,25 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
     {
         public int InspectCallCount { get; private set; }
 
+        public byte[]? InspectedBundleBytes { get; private set; }
+
         public McpbConnectorInspection? Inspection { get; init; }
 
         public Exception? Exception { get; init; }
 
-        public Task<McpbConnectorInspection> InspectAsync(Stream archiveStream, string fileName, CancellationToken cancellationToken)
+        public async Task<McpbConnectorInspection> InspectAsync(Stream archiveStream, string fileName, CancellationToken cancellationToken)
         {
             InspectCallCount++;
+            using var contents = new MemoryStream();
+            await archiveStream.CopyToAsync(contents, cancellationToken).ConfigureAwait(false);
+            InspectedBundleBytes = contents.ToArray();
 
             if (Exception is not null)
             {
                 throw Exception;
             }
 
-            return Task.FromResult(Inspection!);
+            return Inspection!;
         }
     }
 

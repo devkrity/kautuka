@@ -31,6 +31,7 @@ export type ConnectorDraft = {
 };
 
 export type ConnectorSavePayload = {
+  discoveryEnv?: Record<string, string>;
   name: string;
   description: string;
   iconUrl: string;

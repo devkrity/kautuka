@@ -190,7 +190,7 @@ export function projectAuthorityTrace(
       const open = openTools.get(event.toolCallId);
       const startedAtMs = open?.startedAtMs ?? null;
       const status =
-        event.outcome === 'error' ? 'failed' : event.outcome === 'cancelled' ? 'skipped' : 'completed';
+        event.outcome === 'error' || event.outcome === 'failed' ? 'failed' : event.outcome === 'cancelled' ? 'skipped' : 'completed';
       if (open) {
         const existing = spans[open.index];
         if (existing) {

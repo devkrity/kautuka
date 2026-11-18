@@ -622,6 +622,11 @@ export function RemoteMcpEditor({
               {busy === 'save' ? 'Saving…' : 'Save'}
             </Button>
           </div>
+          {busy === 'save' && (
+            <p role="status" className="text-right text-sm text-muted-foreground">
+              Saving the connector. This may take a few moments.
+            </p>
+          )}
         </div>
       </DialogContent>
     </Dialog>

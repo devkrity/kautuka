@@ -10,6 +10,7 @@ using Google.Protobuf;
 using Grpc.Core;
 
 using Kautuka.ChannelHost.Grpc;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 namespace Kautuka.ChannelHost.Providers.Slack;
@@ -55,7 +56,8 @@ internal sealed class SlackSocketModeWorker(
     TimeSpan? supervisorPollInterval = null,
     Func<int, TimeSpan>? identitySyncRetryDelay = null,
     TimeProvider? connectionTimeProvider = null,
-    TimeSpan? connectionStabilityThreshold = null) : IChannelAdapter
+    TimeSpan? connectionStabilityThreshold = null,
+    NetworkAccessWebSocketChecker? webSocketChecker = null) : IChannelAdapter
 {
     private static readonly ConcurrentDictionary<string, DateTimeOffset> nonOwnerNoticeTimes = new(StringComparer.Ordinal);
     private const string eventsApiEnvelopeType = "events_api";
@@ -65,7 +67,7 @@ internal sealed class SlackSocketModeWorker(
 
     private readonly ConcurrentDictionary<string, ActiveSlackConnection> activeConnections = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, IdentitySyncFailure> identitySyncFailures = new(StringComparer.Ordinal);
-    private readonly Func<Uri, CancellationToken, Task<WebSocket>> connectSocket = socketConnector ?? ConnectSocketAsync;
+    private readonly Func<Uri, CancellationToken, Task<WebSocket>> connectSocket = socketConnector ?? CreateSocketConnector(webSocketChecker);
     private readonly Func<int, TimeSpan> getConnectionBackoffDelay = connectionBackoffDelay ?? GetConnectionBackoffDelay;
     private readonly Func<int, TimeSpan> getIdentitySyncRetryDelay = identitySyncRetryDelay ?? GetIdentitySyncRetryDelay;
     private readonly Func<string, string, string, CancellationToken, Task>? testConnectionLoopRunner = connectionLoopRunner;
@@ -327,8 +329,7 @@ internal sealed class SlackSocketModeWorker(
         if (!info.RootElement.TryGetProperty("ok", out JsonElement ok) || !ok.GetBoolean() || !info.RootElement.TryGetProperty("file", out JsonElement file)) yield break;
         string downloadUrl = file.TryGetProperty("url_private_download", out JsonElement download) ? download.GetString() ?? string.Empty : string.Empty;
         if (!Uri.TryCreate(downloadUrl, UriKind.Absolute, out Uri? uri) || !SlackFileDownloadPolicy.IsSlackOwnedHttpsUri(uri)) yield break;
-        using HttpRequestMessage downloadRequest = new(HttpMethod.Get, uri); downloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", botToken);
-        using HttpResponseMessage response = await httpClientFactory.CreateClient("slack-api").SendAsync(downloadRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using HttpResponseMessage response = await DownloadSlackFileAsync(uri, botToken, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode(); using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         byte[] buffer = new byte[64 * 1024]; int read; bool first = true;
         while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
@@ -337,6 +338,31 @@ internal sealed class SlackSocketModeWorker(
             first = false;
         }
         yield return new ReadInboundMediaChunk { IsFinal = true };
+    }
+
+    private async Task<HttpResponseMessage> DownloadSlackFileAsync(Uri uri, string botToken, CancellationToken cancellationToken)
+    {
+        string originalHost = uri.IdnHost;
+        int originalPort = uri.Port;
+        HttpClient client = httpClientFactory.CreateClient("slack-api");
+        for (int redirects = 0; ; redirects++)
+        {
+            using HttpRequestMessage request = new(HttpMethod.Get, uri);
+            if (uri.Port == originalPort && string.Equals(uri.IdnHost, originalHost, StringComparison.OrdinalIgnoreCase))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", botToken);
+            HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
+                return response;
+            if (redirects >= 10)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Too many Slack file redirects.");
+            }
+            Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
+            response.Dispose();
+            if (next.Scheme != Uri.UriSchemeHttps) throw new HttpRequestException("Slack file redirects require HTTPS.");
+            uri = next;
+        }
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "The supervisor isolates attachment failures so other Slack connections continue.")]
@@ -702,19 +728,26 @@ internal sealed class SlackSocketModeWorker(
         }
     }
 
-    private static async Task<WebSocket> ConnectSocketAsync(Uri uri, CancellationToken cancellationToken)
+    private static Func<Uri, CancellationToken, Task<WebSocket>> CreateSocketConnector(
+        NetworkAccessWebSocketChecker? webSocketChecker)
     {
-        ClientWebSocket socket = new();
-        try
+        return async (uri, ct) =>
         {
-            await socket.ConnectAsync(uri, cancellationToken).ConfigureAwait(false);
-            return socket;
-        }
-        catch
-        {
-            socket.Dispose();
-            throw;
-        }
+            ClientWebSocket socket = new();
+            try
+            {
+                NetworkAccessWebSocketChecker effectiveChecker = webSocketChecker
+                    ?? new NetworkAccessWebSocketChecker(FailClosedNetworkAccessChecker.Instance);
+                await effectiveChecker.ConnectAsync(socket, uri, ct).ConfigureAwait(false);
+
+                return socket;
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+        };
     }
 
     private async Task SendSlackResponseUrlEphemeralAsync(JsonElement payload, string text, CancellationToken cancellationToken)

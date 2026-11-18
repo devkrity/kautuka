@@ -7,6 +7,7 @@ using Kautuka.Gateway.Domain.Runtime;
 using Kautuka.Gateway.Domain.Skills;
 using Kautuka.Gateway.Domain.Usage;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -29,16 +30,16 @@ internal static class GatewayServiceCollectionExtensions
         services.AddSingleton<IProviderPathTelemetryChatClientDecorator, ProviderPathTelemetryChatClientDecorator>();
         services.AddSingleton<IRunLimitResolver, RunLimitResolver>();
         services.AddSingleton<IToolInvocationSettingsResolver, ToolInvocationSettingsResolver>();
-        services.AddSingleton<IAiClientProvider, OllamaAiClientProvider>();
-        services.AddSingleton<IAiClientProvider, GoogleAiClientProvider>();
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("openai", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("azure-openai", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("foundry", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("anthropic", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("groq", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("mistral", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("openrouter", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>()));
-        services.AddSingleton<IAiClientProvider>(sp => new OpenAiResponsesCompatibleProvider(sp.GetRequiredService<IRunLimitResolver>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OllamaAiClientProvider(sp.GetService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new GoogleAiClientProvider(sp.GetService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("openai", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("azure-openai", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("foundry", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("anthropic", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("groq", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("mistral", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiCompatibleProvider("openrouter", runLimitResolver: sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
+        services.AddSingleton<IAiClientProvider>(sp => new OpenAiResponsesCompatibleProvider(sp.GetRequiredService<IRunLimitResolver>(), checker: sp.GetService<INetworkAccessChecker>()));
         services.AddSingleton<KautukaAiClientFactory>();
 
         return services;

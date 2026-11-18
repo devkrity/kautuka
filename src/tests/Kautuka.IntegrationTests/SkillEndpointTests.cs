@@ -6,11 +6,13 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Skills;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 using Xunit.Sdk;
@@ -534,6 +536,10 @@ public sealed class SkillEndpointTests
 
             builder.WebHost.UseTestServer();
             GatewayAppBootstrap.ConfigureServices(builder);
+            var providerRules = new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json"));
+            builder.Services.AddSingleton(providerRules);
+            builder.Services.RemoveAll<IManagerGrpcService>();
+            builder.Services.AddSingleton(ProviderModelFixture.CreateTestManager(providerRules));
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
             WebApplication app = builder.Build();

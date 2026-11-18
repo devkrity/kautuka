@@ -13,6 +13,26 @@ namespace Kautuka.Gateway.Domain.Stores;
 
 internal sealed class GatewayApprovalStore(KautukaDatabase database) : IGatewayApprovalStore, IApprovalResolutionEventStore
 {
+    public bool TryClaimToolExecution(string requestId)
+    {
+        using var connection = new SqliteConnection(database.ConnectionString);
+        connection.Open();
+        return connection.Execute("UPDATE tool_approval_requests SET execution_started_at = $now WHERE id = $id AND decision IN ('approved', 'auto_approved') AND execution_started_at IS NULL", new { id = requestId, now = DateTimeOffset.UtcNow.ToString("O") }) == 1;
+    }
+
+    public string? GetToolExecutionResult(string requestId)
+    {
+        using var connection = new SqliteConnection(database.ConnectionString);
+        connection.Open();
+        return connection.QuerySingleOrDefault<string?>("SELECT execution_result_json FROM tool_approval_requests WHERE id = $id", new { id = requestId });
+    }
+
+    public bool SaveToolExecutionResult(string requestId, string result)
+    {
+        using var connection = new SqliteConnection(database.ConnectionString);
+        connection.Open();
+        return connection.Execute("UPDATE tool_approval_requests SET execution_result_json = $result WHERE id = $id AND execution_started_at IS NOT NULL AND execution_result_json IS NULL", new { id = requestId, result }) == 1;
+    }
     private const string channelTetherModeColumn = "channel_tether_mode";
     // A pre-run decision cannot start an already terminal/deleted scheduled run.
     // Keep this eligibility identical for recovery, expiry sweeping and the atomic update.
@@ -41,12 +61,12 @@ internal sealed class GatewayApprovalStore(KautukaDatabase database) : IGatewayA
                 (id, session_id, run_id, checkpoint_id, agent_id, user_id,
                  tool_call_id, tool_name, tool_type, mcp_server_id,
                 arguments_json, requested_at, expires_at, outer_session_id, outer_agent_id, resolution_source, {channelTetherModeColumn},
-                agent_definition_revision, kind, workflow_id, instance_id, node_id)
+                agent_definition_revision, kind, workflow_id, instance_id, node_id, decision, decided_by, decided_at, reason)
             VALUES
                 ($id, $sessionId, $runId, $checkpointId, $agentId, $userId,
                  $toolCallId, $toolName, $toolType, $mcpServerId,
                $argsJson, $requestedAt, $expiresAt, $outerSessionId, $outerAgentId, $resolutionSource, $ChannelTetherMode,
-               $agentDefinitionRevision, $kind, $workflowId, $instanceId, $nodeId)
+               $agentDefinitionRevision, $kind, $workflowId, $instanceId, $nodeId, $decision, $decidedBy, $decidedAt, $reason)
             ON CONFLICT(id) DO NOTHING
             """,
             new
@@ -73,6 +93,10 @@ internal sealed class GatewayApprovalStore(KautukaDatabase database) : IGatewayA
                 workflowId = request.WorkflowId,
                 instanceId = request.InstanceId,
                 nodeId = request.NodeId,
+                decision = request.Decision,
+                decidedBy = request.DecidedBy,
+                decidedAt = request.DecidedAt,
+                reason = request.Reason,
             });
         if (changed == 0)
         {

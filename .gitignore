@@ -83,3 +83,6 @@ src/tests/channel-acceptance/run-*.ps1
 src/tests/channel-acceptance/full-suite-latest.txt
 artifacts/channel-acceptance/
 .cursor/
+
+__pycache__/
+*.pyc

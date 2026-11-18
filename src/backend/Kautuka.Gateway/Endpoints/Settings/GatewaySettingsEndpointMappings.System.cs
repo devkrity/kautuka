@@ -2,13 +2,39 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Connectors;
+using Kautuka.Manager.Protos;
 
 namespace Kautuka.Gateway.Endpoints.Settings;
+
+internal sealed record NetworkAccessApprovalLimitsDto(int Global, int PerUser);
 
 internal static partial class GatewaySettingsEndpointMappings
 {
     private static void MapSystemSettingsEndpoints(WebApplication app)
     {
+        app.MapGet("/api/settings/system/network-access", async (IManagerGrpcService manager, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        {
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? user);
+            if (unauthorized is not null || user is null) return unauthorized ?? Results.Unauthorized();
+            try
+            {
+                var result = await manager.Client.GetApprovalLimitsAsync(new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true }, cancellationToken: ct);
+                return Results.Json(new NetworkAccessApprovalLimitsDto(result.Global, result.PerUser), KautukaJsonContext.Default.NetworkAccessApprovalLimitsDto);
+            }
+            catch (Grpc.Core.RpcException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+        });
+        app.MapPut("/api/settings/system/network-access", async (NetworkAccessApprovalLimitsDto body, IManagerGrpcService manager, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
+        {
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? user);
+            if (unauthorized is not null || user is null) return unauthorized ?? Results.Unauthorized();
+            if (body.Global < 1 || body.PerUser < 1 || body.PerUser > body.Global) return Results.BadRequest();
+            try
+            {
+                var result = await manager.Client.SetApprovalLimitsAsync(new NetworkAccessSetApprovalLimitsRequest { Actor = new NetworkAccessActorMessage { UserId = user.Id, IsAdmin = true }, Global = body.Global, PerUser = body.PerUser }, cancellationToken: ct);
+                return Results.Json(new NetworkAccessApprovalLimitsDto(result.Global, result.PerUser), KautukaJsonContext.Default.NetworkAccessApprovalLimitsDto);
+            }
+            catch (Grpc.Core.RpcException) { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+        });
         app.MapGet("/api/settings/system/authentication-broker", GetAuthenticationBrokerSettings);
         app.MapPut("/api/settings/system/authentication-broker", SaveAuthenticationBrokerSettings);
         app.MapGet("/api/settings/system", async (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>

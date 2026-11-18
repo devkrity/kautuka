@@ -39,7 +39,7 @@ internal sealed partial class GatewayCatalogStore
     public async Task<GatewayMcpServer> SaveSystemMcpServerAsync(string serverId, GatewayConnectorUpsertRequest request, CancellationToken cancellationToken = default)
     {
         SemaphoreSlim mutex = ConnectorMutationLock(serverId); await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { return await SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, null, true, cancellationToken).ConfigureAwait(false); }
+        try { return await SaveMcpServerCoreAsync(serverId, request, GatewayOwnershipScopes.System, null, false, cancellationToken).ConfigureAwait(false); }
         finally { mutex.Release(); }
     }
 
@@ -244,6 +244,14 @@ internal sealed partial class GatewayCatalogStore
         bool configuredRequiredHeader = associationOperationId is not null && request.ConfirmLegacyAuthReplacement;
         bool requiresCredentialReentry = string.Equals(transport, "http", StringComparison.OrdinalIgnoreCase)
             && existingServer?.RequiresCredentialReentry == true && !configuredRequiredHeader;
+        bool retainLocalTools = !request.LocalDiscoveryAttempted && existingServer is not null
+            && string.Equals(existingServer.Transport, transport, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existingServer.ContainerImage, containerImage, StringComparison.Ordinal)
+            && string.Equals(existingServer.ContainerCommand, containerCommand, StringComparison.Ordinal)
+            && existingServer.ContainerArgs.SequenceEqual(containerArgs, StringComparer.Ordinal)
+            && string.Equals(existingServer.BundlePath, bundlePath, StringComparison.Ordinal)
+            && string.Equals(existingServer.ServerType, serverType, StringComparison.Ordinal)
+            && string.Equals(existingServer.RuntimeArtifactSourceDigest, runtimeArtifactSourceDigest, StringComparison.OrdinalIgnoreCase);
         var server = new GatewayMcpServer(serverId, name, description, iconUrl, presetId, transport,
             httpUrl, containerImage, containerCommand, containerArgs, containerSidecarName,
             bundlePath, serverType,
@@ -251,7 +259,10 @@ internal sealed partial class GatewayCatalogStore
             enabled, isInternalSystemConnector, createdAt, now, scopeValue, ownerUserIdValue, toolCount, toolNames, envKeysFinal,
             runtimeArtifactType, runtimeArtifactSourceDigest, runtimeArtifactBuildStatus, mcpProtocolVersion, credentials, headers, credentialNamespace,
             associationId ?? existingServer?.CredentialAssociationId, associationOperationId ?? existingServer?.CredentialOperationId, associationSourceId ?? existingServer?.CredentialSourceId,
-            requiresCredentialReentry);
+            requiresCredentialReentry,
+            request.LocalToolDefinitions ?? (retainLocalTools ? existingServer!.LocalToolDefinitions : null),
+            request.LocalArtifactDigest ?? (retainLocalTools ? existingServer!.LocalArtifactDigest : null),
+            request.LocalImageDigest ?? (retainLocalTools ? existingServer!.LocalImageDigest : null));
 
         McpTransport parsedTransport = ParsePersistedTransport(transport);
 
@@ -295,6 +306,9 @@ internal sealed partial class GatewayCatalogStore
             CredentialOperationId = server.CredentialOperationId,
             CredentialSourceId = server.CredentialSourceId,
             RequiresCredentialReentry = server.RequiresCredentialReentry,
+            LocalToolDefinitions = server.LocalToolDefinitions,
+            LocalArtifactDigest = server.LocalArtifactDigest,
+            LocalImageDigest = server.LocalImageDigest,
         });
 
         state.McpServers[serverId] = server;
@@ -379,6 +393,23 @@ internal sealed partial class GatewayCatalogStore
         finally { mutex.Release(); }
     }
 
+    public async Task<GatewayMcpServer> SaveVerifiedLocalToolsAsync(string serverId, string expectedUpdatedAt, IReadOnlyList<Kautuka.Gateway.Domain.Connectors.ConnectorToolDefinition> definitions, string? digest, string imageDigest, CancellationToken cancellationToken = default)
+    {
+        SemaphoreSlim mutex = ConnectorMutationLock(serverId);
+        await mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!state.McpServers.TryGetValue(serverId, out GatewayMcpServer? existing)
+                || existing is null || !string.Equals(existing.UpdatedAt, expectedUpdatedAt, StringComparison.Ordinal))
+                throw new InvalidOperationException("Connector changed during discovery. Test it again.");
+            GatewayMcpServer updated = existing with { LocalToolDefinitions = [.. definitions], LocalArtifactDigest = digest, LocalImageDigest = imageDigest, RuntimeArtifactSourceDigest = digest, ToolCount = definitions.Count, ToolNames = [.. definitions.Select(static tool => tool.Name)], UpdatedAt = Timestamp() };
+            topologyWriter.SaveMcpServer(ToDefinition(updated));
+            state.McpServers[serverId] = updated;
+            return updated;
+        }
+        finally { mutex.Release(); }
+    }
+
     private GatewayMcpServer SaveMcpServerDiscoveryCore(string serverId, int? toolCount, IReadOnlyList<string>? toolNames)
     {
         if (!state.McpServers.TryGetValue(serverId, out GatewayMcpServer? existingServer) || existingServer is null)
@@ -432,7 +463,10 @@ internal sealed partial class GatewayCatalogStore
             OwnerUserId = server.OwnerUserId,
             ToolCount = toolCount,
             ToolNames = normalizedToolNames,
+            LocalToolDefinitions = server.LocalToolDefinitions,
+            LocalArtifactDigest = server.LocalArtifactDigest,
             EnvKeys = [.. server.EnvKeys ?? []],
+            LocalImageDigest = server.LocalImageDigest,
             Credentials = [.. server.Credentials ?? []],
             HttpHeaders = [.. server.HttpHeaders ?? []],
             CredentialNamespace = server.CredentialNamespace,
@@ -483,7 +517,10 @@ internal sealed partial class GatewayCatalogStore
             OwnerUserId = server.OwnerUserId,
             ToolCount = server.ToolCount,
             ToolNames = server.ToolNames,
+            LocalToolDefinitions = server.LocalToolDefinitions,
+            LocalArtifactDigest = server.LocalArtifactDigest,
             EnvKeys = [.. server.EnvKeys ?? []],
+            LocalImageDigest = server.LocalImageDigest,
             Credentials = [.. server.Credentials ?? []],
             HttpHeaders = [.. server.HttpHeaders ?? []],
             CredentialNamespace = server.CredentialNamespace,

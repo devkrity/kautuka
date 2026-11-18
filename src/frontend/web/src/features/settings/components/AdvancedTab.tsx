@@ -11,6 +11,7 @@ import { Banner } from './SettingsShared';
 import { WorkspaceAndSandboxSection } from './WorkspaceAndSandboxSection';
 import { PackageCacheStatsSection } from './PackageCacheStatsSection';
 import { AuthenticationBrokerSection } from './AuthenticationBrokerSection';
+import { NetworkAccessLimitsSection } from './NetworkAccessLimitsSection';
 
 const structuredJsonStrictPromotionThresholdLabel = 'Structured JSON strict promotion threshold';
 const structuredJsonStrictPromotionThresholdId = 'structured-json-strict-promotion-threshold';
@@ -214,10 +215,16 @@ export function AdvancedTab() {
               <TabsTrigger className="rounded-lg border border-transparent px-3 py-2 text-sm data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground" value="authentication">
                 Authentication
               </TabsTrigger>
+              <TabsTrigger className="rounded-lg border border-transparent px-3 py-2 text-sm data-[state=active]:border-border data-[state=active]:bg-card data-[state=active]:text-foreground" value="network-access">
+                Network access
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="authentication" className="space-y-4">
               <AuthenticationBrokerSection />
+            </TabsContent>
+            <TabsContent value="network-access" className="space-y-4">
+              <NetworkAccessLimitsSection />
             </TabsContent>
 
             <TabsContent value="workspace" className="space-y-4">

@@ -11,8 +11,13 @@ public sealed class McpbImageMaterializer(
     PodmanCommandRunner podmanCommandRunner,
     ILogger<McpbImageMaterializer> logger,
     RuntimeImageAllowlist? allowlist = null,
-    PodmanImageArchiveStore? imageArchives = null)
+    PodmanImageArchiveStore? imageArchives = null,
+    NetworkAccess.WorkloadAddressAllocator? addressAllocator = null,
+    Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = null)
 {
+    private readonly NetworkAccess.WorkloadAddressAllocator? addressAllocator = addressAllocator;
+    private readonly Kautuka.NetworkAccessController.IWorkloadRegistry? workloadRegistry = workloadRegistry;
+    private static readonly TimeSpan cleanupTimeout = TimeSpan.FromSeconds(30);
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
@@ -33,6 +38,7 @@ public sealed class McpbImageMaterializer(
 
     public async Task<string> EnsureImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connector);
@@ -135,11 +141,12 @@ public sealed class McpbImageMaterializer(
                     connector,
                     serverType,
                     forSandboxArtifact: false,
+                    isBraked,
                     cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                await TryRemoveImageAsync(systemImage, cancellationToken).ConfigureAwait(false);
+                await TryRemoveImageAsync(systemImage).ConfigureAwait(false);
             }
 
             return localImage;
@@ -165,6 +172,7 @@ public sealed class McpbImageMaterializer(
     public async Task<string> EnsureSandboxArtifactImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string installRoot,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connector);
@@ -246,6 +254,7 @@ public sealed class McpbImageMaterializer(
                     connector,
                     connector.ServerType!,
                     forSandboxArtifact: true,
+                    isBraked,
                     cancellationToken).ConfigureAwait(false);
 
                 string scratchPath = Path.Combine(buildContextPath, "Containerfile.scratch");
@@ -276,8 +285,8 @@ public sealed class McpbImageMaterializer(
             }
             finally
             {
-                await TryRemoveImageAsync(systemImage, cancellationToken).ConfigureAwait(false);
-                await TryRemoveImageAsync(depsImage, cancellationToken).ConfigureAwait(false);
+                await TryRemoveImageAsync(systemImage).ConfigureAwait(false);
+                await TryRemoveImageAsync(depsImage).ConfigureAwait(false);
             }
 
             return localImage;
@@ -569,34 +578,48 @@ public sealed class McpbImageMaterializer(
         string containerName,
         string systemImage,
         IReadOnlyList<KeyValuePair<string, string>> indexEnvironment,
-        string installScript)
+        string installScript,
+        string allocatedIp,
+        bool isBraked)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(systemImage);
         ArgumentNullException.ThrowIfNull(indexEnvironment);
         ArgumentException.ThrowIfNullOrWhiteSpace(installScript);
 
-        var arguments = new List<string>
+        ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        string effectiveIp = allocatedIp;
+        var builderCompat = new NetworkAccess.ImageCompatProfile(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            null,
+            null,
+            [NetworkAccess.ImageCompatibilityStore.WritableRootfs, NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps],
+            "system",
+            DateTimeOffset.UtcNow,
+            "builder profile");
+
+        var spec = new NetworkAccess.WorkloadContainerSpec(containerName, systemImage, effectiveIp)
         {
-            "run",
-            "--replace",
-            "--name", containerName,
-            "--network", ConnectorContainerSpecBuilder.SandboxNetworkName,
+            Kind = "builder",
+            ExecContext = "builder",
+            Egress = "proxy-only",
+            Persistent = false,
+            Replace = true,
+            ManagerRole = "builder",
+            StartupGateOpen = true,
+            IsBraked = isBraked,
+            Environment = indexEnvironment,
+            CompatibilityProfile = builderCompat,
+            AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
+            Command = "/bin/sh",
+            Args = ["-lc", installScript],
         };
 
-        foreach (KeyValuePair<string, string> pair in indexEnvironment)
-        {
-            arguments.Add("--env");
-            arguments.Add($"{pair.Key}={pair.Value}");
-        }
-
-        // Do not use --entrypoint: podman commit snapshots it. A baked
-        // ENTRYPOINT /bin/sh turns connector `sh -lc` into `sh sh -lc` (exit 126),
-        // then probe exec fails with 125 on the stopped container.
-        arguments.Add(systemImage);
-        arguments.Add("/bin/sh");
-        arguments.Add("-lc");
-        arguments.Add(installScript);
+        // This is a foreground, one-shot run, but unlike ordinary runs it must survive process
+        // exit so CommitLanguagePackagesAsync can commit the installed filesystem. The caller's
+        // finally block removes this uniquely named builder container after commit (or failure).
+        List<string> arguments = spec.Render().ToList();
+        arguments.Remove("--rm");
         return arguments;
     }
 
@@ -606,6 +629,7 @@ public sealed class McpbImageMaterializer(
         WorkspaceMcpContainerConnectorDefinition connector,
         string serverType,
         bool forSandboxArtifact,
+        bool isBraked,
         CancellationToken cancellationToken)
     {
         if (string.Equals(serverType, "binary", StringComparison.OrdinalIgnoreCase))
@@ -630,11 +654,32 @@ public sealed class McpbImageMaterializer(
             serverType);
         string installScript = BuildLanguagePackageInstallScript(serverType, forSandboxArtifact);
         string containerName = "kautuka-mcpb-pkg-" + Guid.NewGuid().ToString("N")[..12];
+        string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
+            .AllocateNextIp(workloadRegistry);
+
+        if (workloadRegistry is not null)
+        {
+            workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
+                allocatedIp,
+                null,
+                null,
+                containerName,
+                "builder",
+                null,
+                "builder",
+                "proxy-only",
+                "none",
+                $"{NetworkAccess.ImageCompatibilityStore.WritableRootfs},{NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps}",
+                DateTimeOffset.UtcNow));
+        }
+
         List<string> arguments = BuildLanguagePackageRunArguments(
             containerName,
             systemImage,
             indexEnvironment,
-            installScript);
+            installScript,
+            allocatedIp,
+            isBraked);
 
         try
         {
@@ -660,29 +705,33 @@ public sealed class McpbImageMaterializer(
         }
         finally
         {
-            await TryRemoveContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
+            workloadRegistry?.Deregister(allocatedIp, containerName);
+            await TryRemoveContainerAsync(containerName).ConfigureAwait(false);
         }
     }
 
     private async Task EnsureSandboxNetworkExistsAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult existsResult = await podmanCommandRunner
-            .RunAsync(["network", "exists", ConnectorContainerSpecBuilder.SandboxNetworkName], 10, cancellationToken)
+            .RunAsync(["network", "exists", NetworkAccess.WorkloadContainerSpec.DefaultNetworkName], 10, cancellationToken)
             .ConfigureAwait(false);
         if (existsResult.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"MCPB language-package install requires Podman network '{ConnectorContainerSpecBuilder.SandboxNetworkName}' so npm/pip/uv can reach kautuka-pkgs-proxy. Refusing public-index fallback.");
+                $"MCPB language-package install requires Podman network '{NetworkAccess.WorkloadContainerSpec.DefaultNetworkName}' so npm/pip/uv can reach the NAC-routed kautuka-pkgs-proxy. Refusing public-index fallback.");
         }
     }
 
-    private async Task TryRemoveImageAsync(string image, CancellationToken cancellationToken)
+    private async Task TryRemoveImageAsync(string image)
     {
         try
         {
-            _ = await podmanCommandRunner
-                .RunAsync(["rmi", "-f", image], 30, cancellationToken)
-                .ConfigureAwait(false);
+            await RunBoundedCleanupAsync(async cancellationToken =>
+            {
+                _ = await podmanCommandRunner
+                    .RunAsync(["rmi", "-f", image], (int)cleanupTimeout.TotalSeconds, cancellationToken)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -690,18 +739,32 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    private async Task TryRemoveContainerAsync(string containerName, CancellationToken cancellationToken)
+    private async Task TryRemoveContainerAsync(string containerName)
     {
         try
         {
-            _ = await podmanCommandRunner
-                .RunAsync(["rm", "-f", containerName], 30, cancellationToken)
-                .ConfigureAwait(false);
+            await RunBoundedCleanupAsync(async cancellationToken =>
+            {
+                _ = await podmanCommandRunner
+                    .RunAsync(["rm", "-f", containerName], (int)cleanupTimeout.TotalSeconds, cancellationToken)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to remove temporary MCPB package container '{Container}'.", containerName);
         }
+    }
+
+    internal static async Task RunBoundedCleanupAsync(
+        Func<CancellationToken, Task> cleanup,
+        TimeSpan? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+        TimeSpan effectiveTimeout = timeout ?? cleanupTimeout;
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(effectiveTimeout, TimeSpan.Zero);
+        using var cleanupCancellation = new CancellationTokenSource(effectiveTimeout);
+        await cleanup(cleanupCancellation.Token).ConfigureAwait(false);
     }
 
     private static void ExtractBundle(string archivePath, string destinationPath)
@@ -739,7 +802,7 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    private static string ComputeSha256Hex(string filePath)
+    public static string ComputeSha256Hex(string filePath)
     {
         using var stream = File.OpenRead(filePath);
         byte[] hash = SHA256.HashData(stream);

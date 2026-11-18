@@ -12,6 +12,13 @@ development. The MCPB bundle excludes `uv.lock`; its runtime resolves the
 pinned project dependencies when the bundle is materialized, then launches
 through the standard MCPB `uv` runtime layout.
 
+The native development launcher stages the built-in web-tools bundle before
+starting services. Windows uses `build-mcpb.ps1` with Windows PowerShell (or
+`pwsh` when available); Linux and macOS use `build-mcpb.sh`. The launcher warns
+and continues if staging cannot complete, retaining any prior valid artifact.
+In Development, Gateway prefers the newest repository artifact so a fresh
+launcher run is not shadowed by an older bundle copied into the app output.
+
 The default fetch profile is `browser_http`: a browser-like HTTP client profile built on `httpx` with richer navigation headers and HTTP/2 enabled. `fetchMode: "http"` remains a compatibility alias for the same profile.
 
 Normalization defaults to a preserve-first DOM path: objectively noisy HTML elements are removed, strongly signaled boilerplate lists are pruned, the remaining HTML is converted with MarkItDown, and a markdown cleanup pass trims obvious junk before chunking. That cleanup now removes promotional blocks, repeated article windows, related-story link clusters, explicit ad markers, and footer/navigation slabs when those patterns are strongly signaled. `normalizationMode: "trafilatura_recall"` is also available as an explicit comparison path, but it is not the default.

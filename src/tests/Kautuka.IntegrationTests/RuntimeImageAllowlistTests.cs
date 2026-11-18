@@ -67,6 +67,25 @@ public sealed class RuntimeImageAllowlistTests
     }
 
     [Fact]
+    public void BareImageIdCannotBypassLoadedSignedAllowlist()
+    {
+        RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
+        InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
+            () => ContainerImageProvenancePolicy.EnsureTrusted(
+                "sha256:" + new string('a', 64),
+                "sandbox",
+                allowlist.ImageReferences,
+                requireListed: true));
+        Assert.Contains("allowlist", ex.Message, StringComparison.Ordinal);
+
+        ContainerImageProvenancePolicy.EnsureTrusted(
+            "sha256:" + new string('a', 64),
+            "connector",
+            allowlist.ImageReferences,
+            requireListed: false);
+    }
+
+    [Fact]
     public void UserConnectorDigestsRemainAdmittedWithoutAllowlistMembership()
     {
         RuntimeImageAllowlist allowlist = LoadCommittedAllowlist();
@@ -100,6 +119,9 @@ public sealed class RuntimeImageAllowlistTests
         Assert.DoesNotContain("pip install", dockerfile, StringComparison.Ordinal);
         Assert.Contains("0ce210831380ab75a5fec0d3fb6b5af0958898016b2cae51cc2fa11057d2f77e", dockerfile, StringComparison.Ordinal);
         Assert.Contains("7035608168e106375b36d0c818d537a889c51a8625fe7f8f7cad5e62b947c368", dockerfile, StringComparison.Ordinal);
+        Assert.Contains("https://github.com/astral-sh/uv/releases/download/0.11.19/uv-x86_64-unknown-linux-gnu.tar.gz", dockerfile, StringComparison.Ordinal);
+        Assert.Contains("tar -C /usr/local/bin --strip-components=1 -xzf /tmp/uv.tar.gz", dockerfile, StringComparison.Ordinal);
+        Assert.Contains("UV_SYSTEM_PYTHON=1", dockerfile, StringComparison.Ordinal);
         Assert.DoesNotContain(allowlist.Images, entry => entry.Id == "fedora-minimal");
         Assert.Contains(allowlist.Images, entry => pkgsProxy.Contains(entry.Image, StringComparison.Ordinal));
         Assert.Contains(allowlist.Images, entry => sidecarsJson.Contains(entry.Image, StringComparison.Ordinal));

@@ -4,6 +4,9 @@ using System.Text.Json.Nodes;
 using Kautuka.Gateway.Domain.Providers;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Credentials;
+using Kautuka.Manager.Protos;
+using System.Net;
+using Grpc.Core;
 
 namespace Kautuka.Gateway.Endpoints.Settings;
 
@@ -15,7 +18,7 @@ internal static partial class GatewaySettingsEndpointMappings
 
     private static void MapProviderSettingsEndpoints(WebApplication app)
     {
-        app.MapGet("/api/settings/provider-types", (KautukaAiClientFactory aiClientFactory, IGatewayAuthGuard auth, HttpContext context) =>
+        app.MapGet("/api/settings/provider-types", (KautukaAiClientFactory aiClientFactory, IProviderTypeCatalog providerTypeCatalog, IGatewayAuthGuard auth, HttpContext context) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out _);
             if (unauthorized is not null)
@@ -24,12 +27,17 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             GatewayProviderTypeItem[] items = [.. aiClientFactory.ListProviderTypes()
-                .Select(t => new GatewayProviderTypeItem(
-                    t.Type,
-                    t.FriendlyName,
-                    t.RequiresApiKey,
-                    t.RequiresBaseUrl,
-                    t.SupportsHttpTimeoutSeconds))];
+                .Select(t =>
+                {
+                    providerTypeCatalog.TryGet(t.Type, out AiProviderCatalog.ProviderMetadata? meta);
+                    return new GatewayProviderTypeItem(
+                        t.Type,
+                        t.FriendlyName,
+                        t.RequiresApiKey,
+                        t.RequiresBaseUrl,
+                        t.SupportsHttpTimeoutSeconds,
+                        meta?.DefaultBaseUrl);
+                })];
             return Results.Json(new GatewayProviderTypesResponse(items), KautukaJsonContext.Default.GatewayProviderTypesResponse);
         });
 
@@ -64,13 +72,45 @@ internal static partial class GatewaySettingsEndpointMappings
 
         app.MapPost("/api/settings/providers/test", async (JsonElement body, IProviderValidationService providerValidationService, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
-                return unauthorized;
+                return unauthorized ?? Results.Unauthorized();
             }
 
-            GatewayProviderTestResult result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false);
+            string? testToken = null;
+            IManagerGrpcService? manager = null;
+            var actor = new NetworkAccessActorMessage { UserId = adminUser.Id, IsAdmin = true };
+            bool temporary = body.TryGetProperty("allowTemporaryNetworkAccess", out JsonElement temporaryValue) && temporaryValue.ValueKind == JsonValueKind.True;
+            if (temporary)
+            {
+                var catalog = context.RequestServices.GetRequiredService<IGatewayCatalogStore>();
+                var types = context.RequestServices.GetRequiredService<IProviderTypeCatalog>();
+                Uri? target = ResolveProviderTarget(body, catalog, types);
+                if (target is null) return Results.BadRequest(new GatewayErrorResponse("Provider endpoint is invalid."));
+                manager = context.RequestServices.GetRequiredService<IManagerGrpcService>();
+                var grant = await manager.Client.BeginProviderTestAsync(new NetworkAccessProviderTestRequest
+                {
+                    Actor = actor,
+                    Host = target.IdnHost,
+                    Port = target.Port,
+                    AllowLan = IsLocalProviderTarget(target),
+                }, cancellationToken: ct);
+                testToken = grant.Token;
+            }
+            using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
+                userId: adminUser.Id,
+                agentId: "gateway",
+                purpose: "provider-test",
+                service: "ai-provider",
+                correlationId: testToken);
+            GatewayProviderTestResult result;
+            try { result = await providerValidationService.TestProviderAsync(body, ct).ConfigureAwait(false); }
+            finally
+            {
+                if (manager is not null && testToken is not null)
+                    await manager.Client.EndProviderTestAsync(new NetworkAccessProviderTestEndRequest { Actor = actor, Token = testToken }, cancellationToken: CancellationToken.None);
+            }
             return Results.Json(
                 new GatewayProviderTestResponse(result.Success, result.Message),
                 KautukaJsonContext.Default.GatewayProviderTestResponse,
@@ -87,8 +127,8 @@ internal static partial class GatewaySettingsEndpointMappings
             IGatewayAuthGuard auth,
             CancellationToken ct) =>
         {
-            IResult? unauthorized = auth.RequireAdmin(context, out _);
-            if (unauthorized is not null)
+            IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? adminUser);
+            if (unauthorized is not null || adminUser is null)
             {
                 return unauthorized;
             }
@@ -121,6 +161,22 @@ internal static partial class GatewaySettingsEndpointMappings
                 && providerMetadata?.RequiresApiKey is true;
             bool hasApiKey = !string.IsNullOrWhiteSpace(apiKey);
 
+            JsonObject proposedSettings = bodyElement.GetObjectProperty("settings");
+            bool providerExists = catalog.TryGetProvider(providerId, out GatewayProvider? previousProvider) && previousProvider is not null;
+            if (!providerExists) proposedSettings = ProviderTypeCatalogSettings.ApplyCreateDefaults(proposedSettings, providerType, providerTypeCatalog);
+            if (!ProviderTypeCatalogSettings.TryValidate(proposedSettings, providerType, providerTypeCatalog, out string validationError))
+            {
+                return Results.Json(new GatewayErrorResponse(validationError), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+            }
+            string? proposedBaseUrl = AiProviderSettings.GetString(proposedSettings, "base_url");
+            if (string.IsNullOrWhiteSpace(proposedBaseUrl) && providerTypeCatalog.TryGet(providerType, out AiProviderCatalog.ProviderMetadata? targetMetadata))
+                proposedBaseUrl = targetMetadata?.DefaultBaseUrl;
+            Uri? providerTarget = Uri.TryCreate(proposedBaseUrl, UriKind.Absolute, out Uri? proposedUri) && proposedUri.Scheme is "http" or "https" ? proposedUri : null;
+            if (providerTarget is null)
+            {
+                return Results.Json(new GatewayErrorResponse("Provider endpoint is invalid."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+            }
+
             if (requiresApiKey && !hasApiKey)
             {
                 if (string.IsNullOrWhiteSpace(providerId)
@@ -144,11 +200,13 @@ internal static partial class GatewaySettingsEndpointMappings
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(apiKey) && !string.IsNullOrWhiteSpace(providerId))
+            var manager = context.RequestServices.GetRequiredService<IManagerGrpcService>();
+            var actor = new NetworkAccessActorMessage { UserId = adminUser.Id, IsAdmin = true };
+            NetworkAccessListRulesResponse rules;
+            try { rules = await manager.Client.ListRulesAsync(new NetworkAccessListRulesRequest { Actor = actor }, cancellationToken: ct); }
+            catch (RpcException)
             {
-                await credentialResolver.SetSystemAsync(
-                    new Dictionary<string, string> { [$"provider.{providerId}.api_key"] = apiKey },
-                    ct).ConfigureAwait(false);
+                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not confirm the network rule."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
             GatewayProvider saved;
@@ -164,12 +222,40 @@ internal static partial class GatewaySettingsEndpointMappings
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
-            if (!string.IsNullOrWhiteSpace(apiKey)
-                && !string.Equals(saved.Id, providerId, StringComparison.Ordinal))
+            try
+            {
+                bool allowLan = IsLocalProviderTarget(providerTarget);
+                string destKind = IPAddress.TryParse(providerTarget.IdnHost, out _) ? "ip" : "host";
+                bool alreadyAllowed = rules.Rules.Any(rule => rule.ScopeKind == "system" && rule.Destination.Equals(providerTarget.IdnHost, StringComparison.OrdinalIgnoreCase)
+                    && rule.Port == providerTarget.Port && rule.DestKind == destKind && rule.Allowed && !rule.Paused && (!allowLan || rule.AllowLan));
+                if (!alreadyAllowed) await manager.Client.SetRuleAsync(new NetworkAccessSetRuleRequest
+                {
+                    Actor = actor,
+                    ScopeKind = "system",
+                    Destination = providerTarget.IdnHost,
+                    DestKind = destKind,
+                    Port = providerTarget.Port,
+                    Allowed = true,
+                    AllowLan = allowLan,
+                    ExpectedRevision = rules.Revision,
+                }, cancellationToken: ct);
+            }
+            catch (RpcException)
+            {
+                if (previousProvider is null) catalog.DeleteProvider(saved.Id);
+                else
+                {
+                    var restore = new JsonObject { ["id"] = previousProvider.Id, ["type"] = previousProvider.Type, ["settings"] = previousProvider.Settings.DeepClone() };
+                    using JsonDocument restoreDocument = JsonDocument.Parse(restore.ToJsonString());
+                    catalog.SaveProvider(restoreDocument.RootElement);
+                }
+                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not update the network rule."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            if (!string.IsNullOrWhiteSpace(apiKey))
             {
                 await credentialResolver.SetSystemAsync(
-                    new Dictionary<string, string> { [$"provider.{saved.Id}.api_key"] = apiKey },
-                    ct).ConfigureAwait(false);
+                    new Dictionary<string, string> { [$"provider.{saved.Id}.api_key"] = apiKey }, ct).ConfigureAwait(false);
             }
 
             return Results.Json(
@@ -189,6 +275,27 @@ internal static partial class GatewaySettingsEndpointMappings
                 ? Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse)
                 : Results.Json(new GatewayErrorResponse("Provider not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
         });
+    }
+
+    private static Uri? ResolveProviderTarget(JsonElement body, IGatewayCatalogStore catalog, IProviderTypeCatalog types)
+    {
+        string id = body.GetStringProperty("id", body.GetStringProperty("provider_id", string.Empty));
+        catalog.TryGetProvider(id, out GatewayProvider? existing);
+        string type = ProviderTypeCatalogSettings.NormalizeType(body.GetStringProperty("type", existing?.Type ?? string.Empty));
+        bool hasBaseUrl = body.TryGetProperty("settings", out JsonElement settings) && settings.ValueKind == JsonValueKind.Object
+            && settings.TryGetProperty("base_url", out _);
+        string? baseUrl = hasBaseUrl ? settings.GetStringProperty("base_url", string.Empty) : null;
+        if (!hasBaseUrl && existing is not null) baseUrl = AiProviderSettings.GetString(existing.Settings, "base_url");
+        if (string.IsNullOrWhiteSpace(baseUrl) && types.TryGet(type, out AiProviderCatalog.ProviderMetadata? metadata)) baseUrl = metadata?.DefaultBaseUrl;
+        return Uri.TryCreate(baseUrl, UriKind.Absolute, out Uri? uri) && uri.Scheme is "http" or "https" ? uri : null;
+    }
+
+    private static bool IsLocalProviderTarget(Uri uri)
+    {
+        if (uri.IsLoopback) return true;
+        if (!IPAddress.TryParse(uri.IdnHost, out IPAddress? address) || address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+        byte[] bytes = address.GetAddressBytes();
+        return bytes[0] == 10 || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) || (bytes[0] == 192 && bytes[1] == 168);
     }
 
     private static JsonElement StripApiKeyFromBody(JsonElement body)

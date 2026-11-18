@@ -20,9 +20,6 @@ public sealed partial class ManagerRuntimeAdapter(
 {
     private const string sandboxSourceHashLabel = "io.kautuka.sandbox.source-hash";
     private const string sandboxUvInstallRecipeVersion = "sandbox-uv-pkgs-proxy-v3";
-    private const string sandboxPipIndexUrl = "http://kautuka-pkgs-proxy:20101/pypi/simple/";
-    private const string sandboxPipTrustedHost = "kautuka-pkgs-proxy";
-    private const string sandboxUvPackage = "uv==0.11.19";
 
     private readonly PodmanCommandRunner podmanCommandRunner = podmanCommandRunner;
     private readonly IManagerRuntimeHealthProbe runtimeHealthProbe = runtimeHealthProbe;
@@ -248,14 +245,8 @@ public sealed partial class ManagerRuntimeAdapter(
                 sandboxAssetsRoot);
         }
 
-        string systemTag = $"{localTag}-sys";
         PodmanCommandResult buildResult = await this.podmanCommandRunner.RunAsync(
-            [
-                "build",
-                "-t", systemTag,
-                "-f", dockerfilePath,
-                sandboxAssetsRoot
-            ],
+            BuildSandboxImageArguments(localTag, dockerfilePath, sandboxAssetsRoot, sourceHash),
             Math.Max(900, sandbox.DefaultTimeout),
             cancellationToken).ConfigureAwait(false);
 
@@ -264,127 +255,21 @@ public sealed partial class ManagerRuntimeAdapter(
             return PodmanFailureFormatter.FormatFailure("Podman build for sandbox image", buildResult);
         }
 
-        try
-        {
-            return await StampSandboxImageWithUvAsync(systemTag, localTag, sourceHash, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            await TryRemoveImageAsync(systemTag, cancellationToken).ConfigureAwait(false);
-        }
+        return null;
     }
 
-    private async Task<string?> StampSandboxImageWithUvAsync(
-        string systemImage,
-        string finalImage,
-        string sourceHash,
-        CancellationToken cancellationToken)
-    {
-        PodmanCommandResult networkExists = await this.podmanCommandRunner
-            .RunAsync(["network", "exists", ConnectorContainerSpecBuilder.SandboxNetworkName], 10, cancellationToken)
-            .ConfigureAwait(false);
-        if (networkExists.ExitCode != 0)
-        {
-            return $"Sandbox uv install requires Podman network '{ConnectorContainerSpecBuilder.SandboxNetworkName}' so pip can reach kautuka-pkgs-proxy. Refusing public-index fallback.";
-        }
-
-        string uvImage = $"{finalImage}-uv";
-        string containerName = "kautuka-sandbox-uv-" + Guid.NewGuid().ToString("N")[..12];
-        try
-        {
-            PodmanCommandResult runResult = await this.podmanCommandRunner
-                .RunAsync(
-                    [
-                        "run",
-                        "--replace",
-                        "--name", containerName,
-                        "--network", ConnectorContainerSpecBuilder.SandboxNetworkName,
-                        "--user", "0",
-                        "--env", $"PIP_INDEX_URL={sandboxPipIndexUrl}",
-                        "--env", $"PIP_TRUSTED_HOST={sandboxPipTrustedHost}",
-                        "--env", "PIP_CONFIG_FILE=/dev/null",
-                        systemImage,
-                        "python3",
-                        "-m",
-                        "pip",
-                        "install",
-                        "--break-system-packages",
-                        "--no-cache-dir",
-                        "--index-url",
-                        sandboxPipIndexUrl,
-                        "--trusted-host",
-                        sandboxPipTrustedHost,
-                        sandboxUvPackage,
-                    ],
-                    900,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (runResult.ExitCode != 0)
-            {
-                return PodmanFailureFormatter.FormatFailure(
-                    $"Install sandbox {sandboxUvPackage} via {ConnectorContainerSpecBuilder.SandboxNetworkName}",
-                    runResult);
-            }
-
-            PodmanCommandResult commitResult = await this.podmanCommandRunner
-                .RunAsync(["commit", containerName, uvImage], 120, cancellationToken)
-                .ConfigureAwait(false);
-            if (commitResult.ExitCode != 0)
-            {
-                return PodmanFailureFormatter.FormatFailure("Commit sandbox uv layer", commitResult);
-            }
-        }
-        finally
-        {
-            await TryRemoveContainerAsync(containerName, cancellationToken).ConfigureAwait(false);
-        }
-
-        string stampContext = Path.Combine(Path.GetTempPath(), "kautuka-sandbox-uv-stamp", Guid.NewGuid().ToString("N"));
-        try
-        {
-            Directory.CreateDirectory(stampContext);
-            string stampFile = Path.Combine(stampContext, "Containerfile");
-            await File.WriteAllTextAsync(
-                stampFile,
-                $"FROM {uvImage}\nUSER node\nCMD [\"tail\", \"-f\", \"/dev/null\"]\n",
-                cancellationToken).ConfigureAwait(false);
-
-            PodmanCommandResult stampResult = await this.podmanCommandRunner
-                .RunAsync(
-                    [
-                        "build",
-                        "--pull=never",
-                        "-t", finalImage,
-                        "--label", $"{sandboxSourceHashLabel}={sourceHash}",
-                        "-f", stampFile,
-                        stampContext,
-                    ],
-                    120,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (stampResult.ExitCode != 0)
-            {
-                return PodmanFailureFormatter.FormatFailure("Stamp sandbox USER node after uv install", stampResult);
-            }
-
-            return null;
-        }
-        finally
-        {
-            await TryRemoveImageAsync(uvImage, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                if (Directory.Exists(stampContext))
-                {
-                    Directory.Delete(stampContext, recursive: true);
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogDebug(ex, "Failed to clean sandbox uv stamp context '{StampContext}'.", stampContext);
-            }
-        }
-    }
+    internal static IReadOnlyList<string> BuildSandboxImageArguments(
+        string image,
+        string dockerfilePath,
+        string contextPath,
+        string sourceHash)
+        => [
+            "build",
+            "-t", image,
+            "--label", $"{sandboxSourceHashLabel}={sourceHash}",
+            "-f", dockerfilePath,
+            contextPath,
+        ];
 
     private async Task TryRemoveImageAsync(string image, CancellationToken cancellationToken)
     {
@@ -395,18 +280,6 @@ public sealed partial class ManagerRuntimeAdapter(
         catch (Exception ex)
         {
             logger.LogDebug(ex, "Failed to remove temporary sandbox image '{Image}'.", image);
-        }
-    }
-
-    private async Task TryRemoveContainerAsync(string containerName, CancellationToken cancellationToken)
-    {
-        try
-        {
-            _ = await this.podmanCommandRunner.RunAsync(["rm", "-f", containerName], 30, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Failed to remove temporary sandbox uv container '{Container}'.", containerName);
         }
     }
 
@@ -468,7 +341,8 @@ public sealed partial class ManagerRuntimeAdapter(
     public async Task<ManagedContainerReconcileResult> RemoveOrphanedManagedContainersAsync(
         string role,
         IReadOnlyCollection<string> desiredContainerNames,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, bool>? isActiveConnector = null)
     {
         ArgumentNullException.ThrowIfNull(desiredContainerNames);
         if (role is not ("agent" or "connector" or "sidecar"))
@@ -492,6 +366,10 @@ public sealed partial class ManagerRuntimeAdapter(
         int removed = 0;
         foreach (string name in stale)
         {
+            if (role == "connector" && isActiveConnector?.Invoke(name) == true)
+            {
+                continue;
+            }
             PodmanCommandResult remove = await podmanCommandRunner.RunAsync(["rm", "-f", name], 15, cancellationToken).ConfigureAwait(false);
             PodmanCommandResult observed = await podmanCommandRunner.RunAsync(["container", "exists", name], 10, cancellationToken).ConfigureAwait(false);
             if (remove.ExitCode != 0 || observed.ExitCode == 0)
