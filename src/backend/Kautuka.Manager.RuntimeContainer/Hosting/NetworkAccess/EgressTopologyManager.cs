@@ -94,6 +94,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private volatile bool topologyIncidentLatched;
     private volatile bool topologyContainmentComplete;
     private volatile bool transientRecoveryPending;
+    private volatile bool workloadSnapshotRetryPending;
     private volatile bool startupCanaryRetryPending;
     private volatile bool startupInitializationRetryPending;
     private long admissionCloseVersion;
@@ -237,6 +238,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             startupInitializationRetryPending = false;
             startupCanaryRetryPending = false;
             transientRecoveryPending = false;
+            workloadSnapshotRetryPending = false;
             change = UpdateStartupGateStateUnderLock(isOpen: false);
         }
 
@@ -2690,6 +2692,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         if (!IsStartupGateOpen && transientRecoveryPending)
         {
+            if (workloadSnapshotRetryPending)
+            {
+                await RetryWorkloadSnapshotAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
             await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -2797,6 +2804,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         bool RejectInvalidSnapshot()
         {
+            lock (gateLock)
+            {
+                if (isStartupGateOpen) workloadSnapshotRetryPending = true;
+            }
             CloseForQuarantineCleanupRetry();
             return false;
         }
@@ -3072,6 +3083,43 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return cleanupComplete;
     }
 
+    private async Task RetryWorkloadSnapshotAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false)) return;
+            string sourceHash = await ReadRenderedReconcileConfigurationHashAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(sourceHash) || string.IsNullOrWhiteSpace(expectedBoundaryNftSourceHash)) return;
+            if (!string.Equals(sourceHash, expectedBoundaryNftSourceHash, StringComparison.Ordinal))
+            {
+                await LatchTopologyIncidentAndContainAsync(registry, "rendered egress configuration drift during snapshot retry", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+            {
+                workloadSnapshotRetryPending = false;
+                await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if (OperatingSystem.IsLinux() || !string.IsNullOrWhiteSpace(windowsPodmanMachineName))
+            {
+                string liveHash = await ReadBoundaryRulesetHashAsync(cancellationToken).ConfigureAwait(false);
+                if (string.IsNullOrWhiteSpace(liveHash) || string.IsNullOrWhiteSpace(expectedBoundaryRulesetHash)) return;
+                if (!string.Equals(liveHash, expectedBoundaryRulesetHash, StringComparison.Ordinal))
+                {
+                    await LatchTopologyIncidentAndContainAsync(registry, "live boundary ruleset drift during snapshot retry", cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+            }
+            TryCompleteTransientRecovery();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Workload snapshot retry could not verify the egress topology; launch admission remains closed.");
+        }
+    }
+
     private async Task RecoverEgressTopologyAsync(IWorkloadRegistry registry, CancellationToken cancellationToken)
     {
         StartupGateStateChange? gateChange = null;
@@ -3181,6 +3229,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
 
             transientRecoveryPending = false;
+            workloadSnapshotRetryPending = false;
             gateChange = UpdateStartupGateStateUnderLock(isOpen: true);
         }
 

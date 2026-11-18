@@ -6,9 +6,9 @@ Rules can target the whole platform, one user, a user and agent, or a user and c
 
 Approval cards identify the agent and connector by name when available. Their choices distinguish allowing the agent, allowing the connector across the user's activity, and allowing all of the user's activity. The underlying connector ID stays the same for rule matching.
 
-When a user's management privilege is removed, their own rules pause until it is restored. Rules created by an administrator remain active.
+When a user's management privilege is removed, their own allow rules pause until it is restored. Their blocks and rules created by an administrator remain active.
 
-Users cannot delete, replace or relax an administrator-created rule. They may block a destination that an administrator allowed for them: Kautuka retains the administrator's allow and adds a separate user block, which takes precedence. The user can manage or remove their own block, returning to the administrator's rule. Like other user-created rules, the block pauses if an administrator removes the user's network-management privilege.
+Users cannot delete, replace or relax an administrator-created rule. They may block a destination that an administrator allowed for them: Kautuka retains the administrator's allow and adds a separate user block, which takes precedence. The user can manage or remove their own block, returning to the administrator's rule.
 
 Manager checks every rule whose target and destination match. An explicit block wins over every applicable allow; otherwise an applicable allow permits the new connection. No matching allow means deny. Emergency brakes and hard deny-all remain above all rules. Existing network and LAN restrictions continue to apply.
 

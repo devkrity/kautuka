@@ -33,6 +33,81 @@ namespace Kautuka.IntegrationTests;
 public sealed class GatewayOnboardingEndpointTests
 {
     [Theory]
+    [InlineData(3, true)]
+    [InlineData(4, false)]
+    public async Task CatalogueDownloadLimitsRedirects(int redirects, bool expectedSuccess)
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", "https://catalog.test/0", Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectChainHandler(redirects, bundle);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(transport));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Equal(expectedSuccess ? HttpStatusCode.OK : HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal(expectedSuccess, transport.TargetReached);
+    }
+
+    private sealed class RedirectChainHandler(int redirects, byte[] bundle) : HttpMessageHandler
+    {
+        public bool TargetReached { get; private set; }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int hop = int.Parse(request.RequestUri!.AbsolutePath.TrimStart('/'), System.Globalization.CultureInfo.InvariantCulture);
+            if (hop < redirects)
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+                response.Headers.Location = new Uri($"https://catalog.test/{hop + 1}");
+                return Task.FromResult(response);
+            }
+            TargetReached = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bundle) });
+        }
+    }
+
+    [Fact]
+    public async Task CatalogueDownloadRejectsHttpsDowngradeBeforeContactingTarget()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        IConfiguration configuration = CreateConfiguration(temp.SqlitePath);
+        GatewayState state = CreateState(configuration);
+        var catalogStore = new GatewayCatalogStore(state, new SqliteAgentDefinitionStore(configuration), new NoOpTopologyWriter(),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new NoOpDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        byte[] bundle = Encoding.UTF8.GetBytes("connector-bundle");
+        const string original = "https://catalog.test/bundle";
+        const string target = "http://release.test/bundle";
+        var updateService = new RecordingUpdateServiceGrpcService { CatalogEntries = [CreateCatalogEntry("kautuka-web-tools", "connector", original, Convert.ToHexString(SHA256.HashData(bundle)))] };
+        var transport = new RedirectArtifactHandler(original, target, bundle);
+        await using WebApplication app = await CreateAppAsync(catalogStore, updateService, services =>
+        {
+            services.AddSingleton<IHttpClientFactory>(new StaticHttpClientFactory(transport));
+            services.AddSingleton<IMcpbPackageService>(new RecordingMcpbPackageService());
+            services.AddSingleton<IMcpConnectorTestService>(new RecordingMcpConnectorTestService());
+            services.AddSingleton<ISkillPackageService>(new NoOpSkillPackageService());
+            services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
+        });
+        using HttpResponseMessage response = await app.GetTestClient().PostAsync(
+            new Uri("http://localhost/api/catalog/recommendations/connector/kautuka-web-tools/install"),
+            new StringContent("{}", Encoding.UTF8, "application/json"), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.False(transport.TargetReached);
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task CatalogueDownloadFollowsOnlyNetworkApprovedRedirects(bool allowTarget)

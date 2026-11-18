@@ -67,6 +67,8 @@ public sealed class NetworkAccessMatchingModelTests
             store.SetRule(new NetworkAccessActor("alice", true), new RuleWriteSpec("user", "alice", null, null, "admin.example", "host", 443, true), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "admin-block.example", "host", 443, true), store.Revision);
             store.SetRule(admin, new RuleWriteSpec("user", "alice", null, null, "admin-block.example", "host", 443, false), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, "user-block.example", "host", 443, true), store.Revision);
+            store.SetRule(alice, new RuleWriteSpec("agent", "alice", "secretary", null, "user-block.example", "host", 443, false), store.Revision);
             registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "connector", "alice::web", "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
             string[] destinations = ["user.example", "agent.example", "connector.example"];
             bool Allowed(string host) => controller.EvaluateContainerConnection(new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, host, true)).Allowed;
@@ -76,7 +78,9 @@ public sealed class NetworkAccessMatchingModelTests
             Assert.All(destinations, host => Assert.False(Allowed(host)));
             Assert.True(Allowed("admin.example"));
             Assert.False(Allowed("admin-block.example"));
-            Assert.All(store.ListRules(admin).Rules.Where(view => view.Rule.UserId == "alice" && !view.Rule.Destination.StartsWith("admin", StringComparison.Ordinal)), view => Assert.True(view.Paused));
+            Assert.False(Allowed("user-block.example"));
+            Assert.False(store.ListRules(admin).Rules.Single(view => view.Rule.UserId == "alice" && view.Rule.Destination == "user-block.example").Paused);
+            Assert.All(store.ListRules(admin).Rules.Where(view => view.Rule.UserId == "alice" && view.Rule.Allowed && !view.Rule.Destination.StartsWith("admin", StringComparison.Ordinal)), view => Assert.True(view.Paused));
             Assert.False(store.ListRules(admin).Rules.Single(view => view.Rule.Destination == "admin.example").Paused);
             using (var reopened = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json")))
             {

@@ -206,7 +206,7 @@ internal sealed class GatewayHostedCatalogInstaller(
             HttpResponseMessage response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if ((int)response.StatusCode is not (300 or 301 or 302 or 303 or 307 or 308) || response.Headers.Location is not { } location)
                 return response;
-            if (redirects >= 10)
+            if (redirects >= 3)
             {
                 response.Dispose();
                 throw new HttpRequestException("Too many catalogue artifact redirects.");
@@ -214,6 +214,8 @@ internal sealed class GatewayHostedCatalogInstaller(
             Uri next = location.IsAbsoluteUri ? location : new Uri(uri, location);
             response.Dispose();
             if (next.Scheme is not ("http" or "https")) throw new HttpRequestException("Unsupported catalogue redirect scheme.");
+            if (uri.Scheme == Uri.UriSchemeHttps && next.Scheme != Uri.UriSchemeHttps)
+                throw new HttpRequestException("Catalogue artifact redirects cannot downgrade HTTPS to HTTP.");
             uri = next;
         }
     }

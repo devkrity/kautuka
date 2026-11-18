@@ -39,7 +39,7 @@ internal static class NetworkAccessRuleMatcher
     }
 
     public static bool IsPaused(NetworkAccessPolicyState state, NetworkAccessRule rule)
-        => rule.ScopeKind is "user" or "agent"
+        => rule.Allowed && rule.ScopeKind is ("user" or "agent")
             && rule.UserId is not null
             && rule.UserId == rule.DecidedBy
             && !rule.DecidedByAdmin

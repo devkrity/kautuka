@@ -24,6 +24,21 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void BoundaryImageDigestMatchesReleaseAndRuntimeManifests()
+    {
+        DirectoryInfo? root = new(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "src", "images", "kautuka-egress-boundary", "release.json"))) root = root.Parent;
+        Assert.NotNull(root);
+        using JsonDocument release = JsonDocument.Parse(File.ReadAllText(Path.Combine(root.FullName, "src", "images", "kautuka-egress-boundary", "release.json")));
+        using JsonDocument runtime = JsonDocument.Parse(File.ReadAllText(Path.Combine(root.FullName, "src", "backend", "Kautuka.Manager", "runtime-images.json")));
+        string? releaseImage = release.RootElement.GetProperty("image").GetString();
+        string? runtimeImage = runtime.RootElement.GetProperty("images").EnumerateArray()
+            .Single(item => item.GetProperty("id").GetString() == "egress-boundary").GetProperty("image").GetString();
+        Assert.Equal(EgressTopologyManager.BoundaryInitImage, releaseImage);
+        Assert.Equal(EgressTopologyManager.BoundaryInitImage, runtimeImage);
+    }
+
+    [Fact]
     public async Task MissingBoundaryImageIsPulledByDigestWithoutBuildingOnHost()
     {
         var calls = new List<string[]>();
@@ -2350,6 +2365,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         if (testListingRetry)
         {
+            int removalsBeforeListingFailure = podRemovals;
             failNextListing = true;
             await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
             Assert.False(manager.IsStartupGateOpen);
@@ -2359,6 +2375,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             releaseSecondRecoveryPodStart.TrySetResult();
             await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
             Assert.True(manager.IsStartupGateOpen);
+            Assert.Equal(removalsBeforeListingFailure, podRemovals);
             return;
         }
 
