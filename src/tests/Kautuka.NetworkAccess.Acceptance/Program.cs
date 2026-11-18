@@ -50,6 +50,7 @@ public sealed record ProductionProofReport(
     [property: JsonPropertyName("envoyVersion")] string EnvoyVersion,
     [property: JsonPropertyName("corednsVersion")] string CoreDnsVersion,
     [property: JsonPropertyName("kernelVersion")] string KernelVersion,
+    [property: JsonPropertyName("developmentSelinuxDomain")] bool DevelopmentSelinuxDomain,
     [property: JsonPropertyName("egressManagerGateOpen")] bool EgressManagerGateOpen,
     [property: JsonPropertyName("canaryVerificationPassed")] bool CanaryVerificationPassed,
     [property: JsonPropertyName("upstreamDnsRule")] string UpstreamDnsRule,
@@ -1585,6 +1586,9 @@ public static class Program
         var desiredState = new WorkspaceDesiredStateStore();
         var verifier = new WorkloadPostStartVerifier(podman, desiredState);
         using ILoggerFactory loggerFactory = LoggerFactory.Create(static b => b.AddSimpleConsole());
+        bool useDevelopmentSelinuxDomain = string.Equals(Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX"), "1", StringComparison.Ordinal);
+        if (useDevelopmentSelinuxDomain)
+            Console.WriteLine("[PROD_STAGE] Fedora development Envoy SELinux domain enabled for this run");
         var topology = new EgressTopologyManager(
             podman,
             allocator,
@@ -1593,7 +1597,8 @@ public static class Program
             stateDir,
             loggerFactory.CreateLogger<EgressTopologyManager>(),
             envoySocketHostDir: socketDir,
-            hookStateDirectory: nacStateDir);
+            hookStateDirectory: nacStateDir,
+            useDevelopmentSelinuxDomain: useDevelopmentSelinuxDomain);
         int packetPathOnlyGateOverride = 0;
         var controller = new NacController(
             policyStore,
@@ -1656,6 +1661,7 @@ public static class Program
 
             IReadOnlyList<AcceptanceObservation> packageProxyObservations = await VerifyManagedPackageProxyPathAsync(repoRoot, tempRoot, topology, controller, registry, podman, verifier, loggerFactory)
                 .ConfigureAwait(false);
+            Console.WriteLine("[PROD_STAGE] package proxy access and deny checks completed");
 
             int egressPid = await InspectContainerPidAsync("kautuka-egress-envoy").ConfigureAwait(false);
             var (routeExitCode, routeOutput, routeError) = await ExecAsync(
@@ -2486,6 +2492,7 @@ public static class Program
                 envoyVer.Trim().Split('\n')[0].Trim(),
                 corednsVer.Trim().Replace('\n', ' '),
                 kernelVer.Trim(),
+                useDevelopmentSelinuxDomain,
                 startupGateOpenBeforeFinalNegativeControl,
                 verResult.Passed,
                 dnsUpstreamLine,
