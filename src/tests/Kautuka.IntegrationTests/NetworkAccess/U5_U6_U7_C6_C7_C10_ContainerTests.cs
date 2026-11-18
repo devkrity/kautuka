@@ -2381,6 +2381,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
 
         if (testQuarantineRetry)
         {
+            int removalsBeforeCleanupFailure = podRemovals;
             desiredState.QuarantineWorkload(quarantinedId);
             cleanupPhase = true;
             var reconcileWorkloads = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
@@ -2391,6 +2392,7 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             Assert.Equal(2, quarantineRemovals);
             Assert.False(quarantineSurvives);
             Assert.True(manager.IsStartupGateOpen);
+            Assert.Equal(removalsBeforeCleanupFailure, podRemovals);
             return;
         }
 

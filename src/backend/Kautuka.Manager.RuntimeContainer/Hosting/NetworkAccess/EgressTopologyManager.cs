@@ -257,7 +257,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         StartupGateStateChange change;
         lock (gateLock)
         {
-            if (isStartupGateOpen) transientRecoveryPending = true;
+            if (isStartupGateOpen)
+            {
+                transientRecoveryPending = true;
+                workloadSnapshotRetryPending = true;
+            }
             change = UpdateStartupGateStateUnderLock(isOpen: false);
         }
         CompleteStartupGateStateChange(change);
