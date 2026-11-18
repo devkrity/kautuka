@@ -65,6 +65,7 @@ export interface NetworkAccessRuleDto {
   decidedBy: string;
   decidedAtUtc: string;
   openInternetBadge: boolean;
+  protectedFromUser?: boolean;
 }
 
 export interface NetworkRulesResponseDto {

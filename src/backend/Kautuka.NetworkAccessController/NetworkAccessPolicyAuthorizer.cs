@@ -318,6 +318,8 @@ internal static class NetworkAccessPolicyAuthorizer
 
         if (!actor.IsAdmin)
         {
+            if (existing.DecidedByAdmin)
+                throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may remove this protected rule.");
             if (!string.Equals(existing.UserId, actor.UserId, StringComparison.Ordinal)
                 || existing.ScopeKind is not ("agent" or "user")
                 || !resolvePrivileges(actor.UserId, false).CanApproveOwn)

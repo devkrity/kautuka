@@ -368,6 +368,9 @@ public sealed partial class NetworkAccessPolicyStore
                 normalizedDest,
                 port);
 
+            (ruleId, _) = ResolveProtectedRuleWrite(current, actor, ruleId, effectiveScope,
+                ruleUserId, ruleAgentId, ruleConnectorId, destKind, normalizedDest, port, allow);
+
             DateTimeOffset now = DateTimeOffset.UtcNow;
             var rule = new NetworkAccessRule(
                 ruleId,
@@ -452,12 +455,11 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
+            NetworkAccessRule? replaced = null;
             if (!string.IsNullOrWhiteSpace(replaceRuleId))
             {
-                NetworkAccessRule replaced = current.Rules.FirstOrDefault(rule => string.Equals(rule.Id, replaceRuleId, StringComparison.Ordinal))
+                replaced = current.Rules.FirstOrDefault(rule => string.Equals(rule.Id, replaceRuleId, StringComparison.Ordinal))
                     ?? throw new KeyNotFoundException("Rule to replace was not found.");
-                NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, replaced,
-                    (userId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, userId, isTargetAdmin));
             }
             NetworkAccessPolicyAuthorizer.NormalizedRuleTarget normalized = NetworkAccessPolicyAuthorizer.AuthorizeSetRule(
                 actor,
@@ -477,11 +479,6 @@ public sealed partial class NetworkAccessPolicyStore
                 actor.IsAdmin,
                 allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan);
 
-            if (current.Revision != expectedRevision)
-            {
-                throw new InvalidOperationException("revision_conflict: Policy revision has changed.");
-            }
-
             string ruleId = NetworkAccessRule.ComputeId(
                 scopeKind,
                 userId,
@@ -490,6 +487,18 @@ public sealed partial class NetworkAccessPolicyStore
                 destKind,
                 normalizedDest,
                 port);
+
+            (ruleId, string? protectedRuleId) = ResolveProtectedRuleWrite(current, actor, ruleId, scopeKind,
+                userId, agentId, connectorId, destKind, normalizedDest, port, spec.Allowed);
+            bool preserveReplacedAdminRule = !spec.Allowed && protectedRuleId is not null && replaced is not null
+                && string.Equals(replaced.Id, protectedRuleId, StringComparison.Ordinal);
+            if (replaced is not null && !preserveReplacedAdminRule)
+            {
+                NetworkAccessPolicyAuthorizer.AuthorizeDeleteRule(actor, replaced,
+                    (targetUserId, isTargetAdmin) => ResolveUserPrivilegesUnsafe(ref current, targetUserId, isTargetAdmin));
+            }
+            if (current.Revision != expectedRevision)
+                throw new InvalidOperationException("revision_conflict: Policy revision has changed.");
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
             var rule = new NetworkAccessRule(
@@ -511,7 +520,7 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessRule[] nextRules =
             [
                 .. current.Rules.Where(r => !string.Equals(r.Id, ruleId, StringComparison.Ordinal)
-                    && !string.Equals(r.Id, replaceRuleId, StringComparison.Ordinal)),
+                    && (preserveReplacedAdminRule || !string.Equals(r.Id, replaceRuleId, StringComparison.Ordinal))),
                 rule,
             ];
             if (nextRules.Length > MaxRules)
@@ -542,6 +551,26 @@ public sealed partial class NetworkAccessPolicyStore
                 OpenInternetBadge: rule.Allowed && rule.DestKind == "any-public");
             return (nextRevision, view);
         }
+    }
+
+    private static (string RuleId, string? ProtectedRuleId) ResolveProtectedRuleWrite(
+        NetworkAccessPolicyState current, NetworkAccessActor actor, string ruleId, string scopeKind,
+        string? userId, string? agentId, string? connectorId, string destKind, string destination, int port, bool allowed)
+    {
+        if (actor.IsAdmin)
+            return (ruleId, null);
+        string? normalizedConnector = connectorId is not null && userId is not null
+            ? NetworkAccessRuleMatcher.ConnectorForUser(connectorId, userId) : connectorId;
+        NetworkAccessRule? existing = current.Rules.FirstOrDefault(rule => rule.DecidedByAdmin
+            && rule.ScopeKind == scopeKind && rule.UserId == userId && rule.AgentId == agentId
+            && (rule.ConnectorId is not null && userId is not null
+                ? NetworkAccessRuleMatcher.ConnectorForUser(rule.ConnectorId, userId) : rule.ConnectorId) == normalizedConnector
+            && rule.DestKind == destKind && rule.Destination == destination && rule.Port == port);
+        if (existing is null)
+            return (ruleId, null);
+        if (!existing.Allowed && allowed)
+            throw new UnauthorizedAccessException("PermissionDenied: Only an administrator may change this protected rule.");
+        return (NetworkAccessIdGenerator.ComputeBase32Id("user-rule-over-admin|" + existing.Id), existing.Id);
     }
 
     public long DeleteRule(NetworkAccessActor actor, string ruleId, long expectedRevision)

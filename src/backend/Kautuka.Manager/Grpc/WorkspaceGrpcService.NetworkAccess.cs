@@ -603,6 +603,7 @@ public sealed partial class WorkspaceGrpcService
             Source = view.Rule.Source,
             Paused = view.Paused,
             OpenInternetBadge = view.OpenInternetBadge,
+            ProtectedFromUser = view.Rule.DecidedByAdmin,
         };
 
     private static NetworkAccessUserPrivilegesMessage ToMessage(UserPrivileges privs, bool hasStoredRecord = true)

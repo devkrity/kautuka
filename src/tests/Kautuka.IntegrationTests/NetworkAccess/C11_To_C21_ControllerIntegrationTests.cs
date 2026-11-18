@@ -20,6 +20,37 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class C11_To_C21_ControllerIntegrationTests
 {
     [Fact]
+    public async Task ProtectedAdministratorRulesAreEnforcedAndReportedThroughGrpc()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            WorkspaceGrpcService svc = CreateGrpcService(tempDir, out NacController controller, out _);
+            var admin = new NetworkAccessActorMessage { UserId = "admin", IsAdmin = true };
+            var alice = new NetworkAccessActorMessage { UserId = "alice" };
+            var ctx = CreateCallContext();
+            await svc.SetUserPrivileges(new NetworkAccessSetUserPrivilegesRequest { Actor = admin, UserId = "alice", CanApproveOwn = true }, ctx);
+            var request = new NetworkAccessSetRuleRequest { Actor = admin, ScopeKind = "agent", UserId = "alice", AgentId = "secretary", Destination = "example.com", DestKind = "host", Port = 443, Allowed = true, ExpectedRevision = controller.PolicyStore.Revision };
+            NetworkAccessSetRuleResponse created = await svc.SetRule(request, ctx);
+            Assert.True(created.Rule.ProtectedFromUser);
+            RpcException denied = await Assert.ThrowsAsync<RpcException>(() => svc.DeleteRule(new NetworkAccessDeleteRuleRequest { Actor = alice, RuleId = created.Rule.Id, ExpectedRevision = created.Revision }, ctx));
+            Assert.Equal(StatusCode.PermissionDenied, denied.StatusCode);
+            request.Actor = alice;
+            request.Allowed = false;
+            request.ExpectedRevision = created.Revision;
+            NetworkAccessSetRuleResponse blocked = await svc.SetRule(request, ctx);
+            Assert.False(blocked.Rule.ProtectedFromUser);
+            Assert.NotEqual(created.Rule.Id, blocked.Rule.Id);
+            NetworkAccessListRulesResponse rules = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = alice }, ctx);
+            Assert.Contains(rules.Rules, rule => rule.Id == created.Rule.Id && rule.Allowed && rule.ProtectedFromUser);
+            Assert.Contains(rules.Rules, rule => rule.Id == blocked.Rule.Id && !rule.Allowed && !rule.ProtectedFromUser);
+            await svc.DeleteRule(new NetworkAccessDeleteRuleRequest { Actor = alice, RuleId = blocked.Rule.Id, ExpectedRevision = blocked.Revision }, ctx);
+            NetworkAccessListRulesResponse afterRemoval = await svc.ListRules(new NetworkAccessListRulesRequest { Actor = alice }, ctx);
+            Assert.Contains(afterRemoval.Rules, rule => rule.Id == created.Rule.Id && rule.Allowed && rule.ProtectedFromUser);
+        }
+        finally { TryDeleteDir(tempDir); }
+    }
+    [Fact]
     public void NetworkAccessPrivilegeHasOneStoredAndWireField()
     {
         Assert.Null(typeof(UserPrivileges).GetProperty("CanAllowAllAgents"));

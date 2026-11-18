@@ -470,6 +470,7 @@ message NetworkAccessRuleMessage {
   string source = 13;
   bool paused = 14;
   bool open_internet_badge = 15;
+  bool protected_from_user = 16;
 }
 
 message NetworkAccessUserPrivilegesMessage {

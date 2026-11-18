@@ -142,7 +142,44 @@ describe('network access user scopes', () => {
     render(<RulesList rules={[rule]} expectedRevision={4} currentUser={{ id: 'admin', role: 'admin' }} onDeleteRule={vi.fn()} onBlockSeedRule={block} />);
     await userEvent.setup().click(screen.getByRole('tab', { name: 'Built in (1)' }));
     fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    expect(screen.getByRole('heading', { name: 'Block built-in permission?' })).toBeInTheDocument();
     expect(block).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm block' }));
+    await waitFor(() => expect(block).toHaveBeenCalledWith(rule));
+  });
+
+  it('lets a user remove their own block over an administrator allow', async () => {
+    const rule: NetworkAccessRuleDto = {
+      id: 'tightening', scopeKind: 'agent', userId: 'alice', agentId: 'secretary',
+      destination: 'example.com', destKind: 'host', port: 443, allowed: false,
+      allowLan: false, source: 'user', paused: false, summaryText: '', decidedBy: 'alice',
+      decidedAtUtc: '2026-01-01T00:00:00Z', openInternetBadge: false, protectedFromUser: false,
+    };
+    const remove = vi.fn().mockResolvedValue(undefined);
+    render(<RulesList rules={[rule]} expectedRevision={4} currentUser={{ id: 'alice', role: 'user' }}
+      onDeleteRule={remove} onEditRule={vi.fn()} onBlockSeedRule={vi.fn()} canManageOwn />);
+    await userEvent.setup().click(screen.getByRole('tab', { name: /Blocked/ }));
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm removal' }));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('tightening', 4));
+  });
+
+  it('lets a user block an administrator rule but not edit or remove it', async () => {
+    const rule: NetworkAccessRuleDto = {
+      id: 'admin-rule', scopeKind: 'agent', userId: 'alice', agentId: 'secretary',
+      destination: 'example.com', destKind: 'host', port: 443, allowed: true,
+      allowLan: false, source: 'user', paused: false, summaryText: '', decidedBy: 'admin',
+      decidedAtUtc: '2026-01-01T00:00:00Z', openInternetBadge: false, protectedFromUser: true,
+    };
+    const block = vi.fn().mockResolvedValue(undefined);
+    render(<RulesList rules={[rule]} expectedRevision={4} currentUser={{ id: 'alice', role: 'user' }}
+      onDeleteRule={vi.fn()} onEditRule={vi.fn()} onBlockSeedRule={block} canManageOwn />);
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Block' }));
+    expect(screen.getByRole('heading', { name: 'Block access?' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm block' }));
     await waitFor(() => expect(block).toHaveBeenCalledWith(rule));
   });

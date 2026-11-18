@@ -123,13 +123,16 @@ export function RulesList({
                 Built in
               </Badge>
             )}
+            {!isSeed && rule.protectedFromUser && (
+              <Badge variant="outline" className="text-xs">Set by an administrator</Badge>
+            )}
           </div>
 
           <p className="text-sm text-muted-foreground">{scopeSentence}</p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {!isSeed && onEditRule && (isAdmin || (canManageOwn && rule.userId === currentUser?.id)) && (
+          {!isSeed && onEditRule && (isAdmin || (canManageOwn && rule.userId === currentUser?.id && !rule.protectedFromUser)) && (
             <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onEditRule(rule)}>Edit</Button>
           )}
           {isSeed ? (
@@ -145,7 +148,9 @@ export function RulesList({
                 Block
               </Button>
             )
-          ) : (isAdmin || (canManageOwn && rule.userId === currentUser?.id)) ? (
+          ) : !isAdmin && canManageOwn && rule.userId === currentUser?.id && rule.protectedFromUser && rule.allowed && rule.destKind !== 'any-public' && onBlockSeedRule ? (
+            <Button type="button" variant="outline" size="sm" disabled={disabled || submittingRuleId === rule.id} onClick={() => setConfirmation({ rule, action: 'block' })}>Block</Button>
+          ) : (isAdmin || (canManageOwn && rule.userId === currentUser?.id && !rule.protectedFromUser)) ? (
             // Normal rule: Remove button
             <Button
               type="button"
@@ -202,7 +207,7 @@ export function RulesList({
       <Dialog open={confirmation !== null} onOpenChange={(open) => { if (!open) setConfirmation(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{confirmation?.action === 'block' ? 'Block built-in permission?' : 'Remove network rule?'}</DialogTitle>
+            <DialogTitle>{confirmation?.action === 'block' ? (confirmation.rule.source === 'seed' ? 'Block built-in permission?' : 'Block access?') : 'Remove network rule?'}</DialogTitle>
             <DialogDescription>
               {confirmation?.action === 'block' ? 'Block access to ' : 'Remove the rule for '}{confirmation?.rule.destination}?
             </DialogDescription>

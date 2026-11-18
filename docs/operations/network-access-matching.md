@@ -8,6 +8,8 @@ Approval cards identify the agent and connector by name when available. Their ch
 
 When a user's management privilege is removed, their own rules pause until it is restored. Rules created by an administrator remain active.
 
+Users cannot delete, replace or relax an administrator-created rule. They may block a destination that an administrator allowed for them: Kautuka retains the administrator's allow and adds a separate user block, which takes precedence. The user can manage or remove their own block, returning to the administrator's rule. Like other user-created rules, the block pauses if an administrator removes the user's network-management privilege.
+
 Manager checks every rule whose target and destination match. An explicit block wins over every applicable allow; otherwise an applicable allow permits the new connection. No matching allow means deny. Emergency brakes and hard deny-all remain above all rules. Existing network and LAN restrictions continue to apply.
 
 Discovery during connector save has a user and connector but no agent. It checks platform, user and user-and-connector rules; an absent agent grants no access. An unapproved connection produces a normal approval request for the user and connector. The connector can be saved while approval is pending, and Test connection can retry discovery.

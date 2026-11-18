@@ -7,6 +7,30 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
 {
+    [Fact]
+    public async Task GatewayProtectsAdministratorRulesAndReportsTightening()
+    {
+        await using GatewayNacFixture fixture = await GatewayNacFixture.CreateAsync();
+        string adminToken = await fixture.SetupAndLoginFirstAdminAsync("admin", "Testing1!");
+        using JsonDocument invite = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite",
+            new { username = "alice", email = "alice@example.com", password = "Testing1!", role = "user" }, adminToken);
+        string aliceId = invite.RootElement.GetProperty("user").GetProperty("id").GetString()!;
+        string aliceToken = await LoginAsync(fixture, "alice");
+        var admin = new NetworkAccessActor("admin", true);
+        fixture.PolicyStore.SetUserPrivileges(admin, aliceId, canApproveOwn: true);
+        var rule = fixture.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", aliceId, "secretary", null, "example.com", "host", 443, true), fixture.PolicyStore.Revision).Rule.Rule;
+        using JsonDocument listed = await fixture.SendGetAsync("/api/network-access/rules", aliceToken);
+        Assert.True(listed.RootElement.GetProperty("rules").EnumerateArray().Single(r => r.GetProperty("id").GetString() == rule.Id).GetProperty("protectedFromUser").GetBoolean());
+        using (HttpResponseMessage deletion = await fixture.SendRawJsonAsync(HttpMethod.Delete, $"/api/network-access/rules/{rule.Id}?expectedRevision={fixture.PolicyStore.Revision}", new { }, aliceToken))
+            Assert.Equal(HttpStatusCode.Forbidden, deletion.StatusCode);
+        using JsonDocument blocked = await fixture.SendJsonAsync(HttpMethod.Put, "/api/network-access/rules", new { scopeKind = "agent", userId = aliceId, agentId = "secretary", destination = "example.com", destKind = "host", port = 443, allowed = false, expectedRevision = fixture.PolicyStore.Revision }, aliceToken);
+        Assert.False(blocked.RootElement.GetProperty("protectedFromUser").GetBoolean());
+        Assert.NotEqual(rule.Id, blocked.RootElement.GetProperty("id").GetString());
+        string blockId = blocked.RootElement.GetProperty("id").GetString()!;
+        using (HttpResponseMessage deletion = await fixture.SendRawJsonAsync(HttpMethod.Delete, $"/api/network-access/rules/{blockId}?expectedRevision={fixture.PolicyStore.Revision}", new { }, aliceToken))
+            Assert.True(deletion.IsSuccessStatusCode);
+        Assert.Contains(fixture.PolicyStore.ListRules(admin).Rules, r => r.Rule.Id == rule.Id && r.Rule.Allowed);
+    }
     [Theory]
     [InlineData("decision")]
     [InlineData("set-rule")]

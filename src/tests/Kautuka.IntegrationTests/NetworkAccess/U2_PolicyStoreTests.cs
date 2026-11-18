@@ -9,6 +9,97 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class U2_PolicyStoreTests : IDisposable
 {
     [Fact]
+    public void UserCanOnlyTightenAdminRuleWithoutRemovingOrRelaxingIt()
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "admin-rules.json"));
+        var admin = new NetworkAccessActor("admin", true);
+        var alice = new NetworkAccessActor("alice", false);
+        store.SetUserPrivileges(admin, "alice", canApproveOwn: true);
+        var allow = new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, Allowed: true);
+        var adminRule = store.SetRule(admin, allow, store.Revision).Rule.Rule;
+        var registry = new WorkloadRegistry();
+        registry.Register(new RegistryEntry("10.247.1.10", "alice", "secretary", "container", "agent-sandbox", null, "isolated", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+        var controller = new Kautuka.NetworkAccessController.NetworkAccessController(store, registry);
+        var connection = new ContainerConnectionInput("10.247.1.10", "93.184.216.34", 443, "example.com");
+        Assert.True(controller.EvaluateContainerConnection(connection).Allowed);
+        Assert.Throws<UnauthorizedAccessException>(() => store.DeleteRule(alice, adminRule.Id, store.Revision));
+        Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, allow, store.Revision, adminRule.Id));
+        Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, allow with { Destination = "other.example", Allowed = false }, store.Revision, adminRule.Id));
+        var block = store.SetRule(alice, allow with { Allowed = false }, store.Revision).Rule.Rule;
+        Assert.NotEqual(adminRule.Id, block.Id);
+        Assert.False(controller.EvaluateContainerConnection(connection).Allowed);
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && r.Rule.Allowed && r.Rule.DecidedByAdmin);
+        using (var reopened = new NetworkAccessPolicyStore(Path.Combine(tempDir, "admin-rules.json")))
+        {
+            Assert.False(new Kautuka.NetworkAccessController.NetworkAccessController(reopened, registry).EvaluateContainerConnection(connection).Allowed);
+            Assert.False(Assert.Single(reopened.ListRules(admin).Rules, r => r.Rule.Id == block.Id).Rule.DecidedByAdmin);
+        }
+        var userAllow = store.SetRule(alice, allow, store.Revision, block.Id).Rule.Rule;
+        Assert.Equal(block.Id, userAllow.Id);
+        Assert.True(userAllow.Allowed);
+        Assert.False(userAllow.DecidedByAdmin);
+        store.DeleteRule(alice, userAllow.Id, store.Revision);
+        Assert.True(controller.EvaluateContainerConnection(connection).Allowed);
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && r.Rule.Allowed);
+        var secondBlock = store.SetRule(alice, allow with { Allowed = false }, store.Revision).Rule.Rule;
+        store.DeleteRule(alice, secondBlock.Id, store.Revision);
+        Assert.True(controller.EvaluateContainerConnection(connection).Allowed);
+    }
+
+    [Fact]
+    public void UserCannotOverrideAdministratorBlockThroughApproval()
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "admin-block.json"));
+        var admin = new NetworkAccessActor("admin", true);
+        var alice = new NetworkAccessActor("alice", false);
+        store.SetUserPrivileges(admin, "alice", canApproveOwn: true);
+        var spec = new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, Allowed: false);
+        var adminRule = store.SetRule(admin, spec, store.Revision).Rule.Rule;
+        var ownBlock = store.SetRule(alice, spec, store.Revision).Rule.Rule;
+        Assert.NotEqual(adminRule.Id, ownBlock.Id);
+        store.DeleteRule(alice, ownBlock.Id, store.Revision);
+        Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(alice, spec with { Allowed = true }, store.Revision));
+        var (requestId, _) = store.RecordOrUpdatePendingRequest("alice", "secretary", null, "user-agent", "host", "example.com", 443, "agent", "container");
+        Assert.NotNull(requestId);
+        Assert.Throws<UnauthorizedAccessException>(() => store.DecideRequest(alice, requestId, true, "agent", store.Revision));
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && !r.Rule.Allowed && r.Rule.DecidedByAdmin);
+    }
+
+    [Fact]
+    public void BlockingApprovalKeepsTheAdministratorAllow()
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "admin-allow-approval.json"));
+        var admin = new NetworkAccessActor("admin", true);
+        var alice = new NetworkAccessActor("alice", false);
+        store.SetUserPrivileges(admin, "alice", canApproveOwn: true);
+        var adminRule = store.SetRule(admin, new RuleWriteSpec("agent", "alice", "secretary", null, "example.com", "host", 443, true), store.Revision).Rule.Rule;
+        var (requestId, _) = store.RecordOrUpdatePendingRequest("alice", "secretary", null, "user-agent", "host", "example.com", 443, "agent", "container");
+        var decision = store.DecideRequest(alice, requestId!, false, "agent", store.Revision);
+        Assert.NotNull(decision.Rule);
+        Assert.NotEqual(adminRule.Id, decision.Rule.Id);
+        Assert.False(decision.Rule.Allowed);
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && r.Rule.Allowed);
+        store.DeleteRule(alice, decision.Rule.Id, store.Revision);
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && r.Rule.Allowed);
+    }
+
+    [Theory]
+    [InlineData("alice::web", "web")]
+    [InlineData("web", "alice::web")]
+    public void ConnectorAliasCannotBypassAdministratorProtection(string adminConnector, string userConnector)
+    {
+        using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "connector-alias.json"));
+        var admin = new NetworkAccessActor("admin", true);
+        var alice = new NetworkAccessActor("alice", false);
+        store.SetUserPrivileges(admin, "alice", canApproveOwn: true);
+        var adminRule = store.SetRule(admin, new RuleWriteSpec("user", "alice", null, adminConnector, "example.com", "host", 443, true), store.Revision).Rule.Rule;
+        var userSpec = new RuleWriteSpec("user", "alice", null, userConnector, "example.com", "host", 443, false);
+        var block = store.SetRule(alice, userSpec, store.Revision).Rule.Rule;
+        Assert.Equal("user", block.Source);
+        store.DeleteRule(alice, block.Id, store.Revision);
+        Assert.Contains(store.ListRules(admin).Rules, r => r.Rule.Id == adminRule.Id && r.Rule.Allowed);
+    }
+    [Fact]
     public void ConfiguredPerUserLimitAlsoAppliesToSingleProbe()
     {
         using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "probe-configured-limit.json"));

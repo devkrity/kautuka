@@ -45,7 +45,7 @@ internal static class NetworkAccessRuleMatcher
             && !rule.DecidedByAdmin
             && !state.UserPrivileges.Any(p => p.UserId == rule.UserId && p.CanApproveOwn);
 
-    private static string ConnectorForUser(string connectorId, string userId)
+    internal static string ConnectorForUser(string connectorId, string userId)
     {
         string prefix = userId + "::";
         return connectorId.StartsWith(prefix, StringComparison.Ordinal) ? connectorId[prefix.Length..] : connectorId;

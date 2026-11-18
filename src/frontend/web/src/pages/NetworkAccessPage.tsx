@@ -410,7 +410,7 @@ export function NetworkAccessPage() {
             onDeleteRule={handleDeleteRule}
             onEditRule={setEditingRule}
             canManageOwn={privileges.canApproveOwn}
-            onBlockSeedRule={isAdmin ? handleBlockSeedRule : undefined}
+            onBlockSeedRule={isAdmin || privileges?.canApproveOwn ? handleBlockSeedRule : undefined}
           />}
           {!rulesQuery.isError && !requestsQuery.isError && editingRule && currentUser?.id && (
             <RuleScopeEditor rule={editingRule} userId={currentUser.id} isAdmin={Boolean(isAdmin)} expectedRevision={revision}
