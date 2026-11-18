@@ -1174,10 +1174,7 @@ internal sealed partial class AgentChatService
                     ex,
                     nacEx,
                     activeToolCallId,
-                    activeToolName,
-                    userId,
-                    agentId,
-                    managerGrpcService?.Client).ConfigureAwait(false);
+                    activeToolName).ConfigureAwait(false);
 
                 await eventWriter.WriteRuntimeAsync(
                     writer,

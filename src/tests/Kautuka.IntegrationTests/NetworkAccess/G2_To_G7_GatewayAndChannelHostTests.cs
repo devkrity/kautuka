@@ -915,8 +915,29 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     }
 
     [Fact]
+    public async Task UnrelatedToolFailureIsNotRelabeledByAnOldPendingRequest()
+    {
+        await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest { Host = "old.example", Port = 443, UserId = "user-a", AgentId = "agent-a", Purpose = "tool" }, new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName));
+        var payload = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper.BuildToolCallFinishedPayloadAsync(
+            new InvalidOperationException("Tool failed"), null, "call", "fetch");
+        Assert.Equal("tool_execution_failed", payload.GetProperty("code").GetString());
+        Assert.False(payload.TryGetProperty("destination", out _));
+    }
+
+    [Fact]
+    public async Task ExplicitNetworkDenialStillIncludesApprovalDetails()
+    {
+        var denial = new NetworkAccessDeniedException("blocked.example", 443, "https", NetworkAccessDenialKind.Denied, "denied", requestId: "request-1");
+        var payload = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper.BuildToolCallFinishedPayloadAsync(
+            denial, denial, "call", "fetch");
+        Assert.Equal("network_access_required", payload.GetProperty("code").GetString());
+        Assert.Equal("blocked.example", payload.GetProperty("destination").GetString());
+        Assert.Equal("request-1", payload.GetProperty("requestId").GetString());
+    }
+
+    [Fact]
     [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
-    public async Task V7_30_ToolFailureLookup_UsesNonAdminActorAndNeverDisclosesOtherUsersOrSystemwideDestinations_WithNegativeControl()
+    public async Task V7_30_ToolFailureDoesNotInspectOrDisclosePendingRequests()
     {
         var gatewayCtx = new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName);
 
@@ -940,13 +961,6 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             Purpose = "tool",
         }, gatewayCtx);
 
-        NetworkAccessActorMessage? capturedActor = null;
-        Task<NetworkAccessListRequestsResponse> ListViaManagerAsync(NetworkAccessListRequestsRequest req)
-        {
-            capturedActor = req.Actor;
-            return grpcService.ListRequests(req, gatewayCtx);
-        }
-
         // User B executes a failing tool without a direct NetworkAccessDeniedException
         var toolErr = new InvalidOperationException("Generic tool failure");
         System.Text.Json.JsonElement payloadB = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper
@@ -954,20 +968,13 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
                 toolErr,
                 nacEx: null,
                 activeToolCallId: "tc-1",
-                activeToolName: "fetch",
-                userId: "user-b",
-                agentId: "agent-b",
-                listRequestsAsync: ListViaManagerAsync);
+                activeToolName: "fetch");
 
-        Assert.NotNull(capturedActor);
-        Assert.False(capturedActor!.IsAdmin);
-        Assert.Equal("user-b", capturedActor.UserId);
         Assert.Equal("tool_execution_failed", payloadB.GetProperty("code").GetString());
         Assert.False(payloadB.TryGetProperty("destination", out _));
         Assert.False(payloadB.TryGetProperty("approvalUrl", out _));
 
-        // Negative control (.NC): When user-b / agent-b itself has a pending non-systemwide request,
-        // the lookup DOES surface user-b's own blocked destination without admin privileges.
+        // A pending request for the same agent is still not evidence that this call was denied.
         await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest
         {
             Host = "user-b-target.example",
@@ -982,65 +989,11 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
                 toolErr,
                 nacEx: null,
                 activeToolCallId: "tc-2",
-                activeToolName: "fetch",
-                userId: "user-b",
-                agentId: "agent-b",
-                listRequestsAsync: ListViaManagerAsync);
+                activeToolName: "fetch");
 
-        Assert.False(capturedActor!.IsAdmin);
-        Assert.Equal("network_access_required", payloadBWithOwnPending.GetProperty("code").GetString());
-        Assert.Equal("user-b-target.example", payloadBWithOwnPending.GetProperty("destination").GetString());
-        Assert.Equal(443, payloadBWithOwnPending.GetProperty("port").GetInt32());
-        Assert.Equal("/network-access", payloadBWithOwnPending.GetProperty("approvalUrl").GetString());
-    }
-
-    [Fact]
-    [SuppressMessage("Naming", "CA1707:Identifiers should not contain underscores", Justification = "Test naming convention")]
-    public async Task V7_30_ToolFailureLookup_SelectsMostRecentlySeenMatchingRequest_WithNegativeControl()
-    {
-        NetworkAccessActorMessage? capturedActor = null;
-        Task<NetworkAccessListRequestsResponse> ListRequestsAsync(NetworkAccessListRequestsRequest req)
-        {
-            capturedActor = req.Actor;
-            var response = new NetworkAccessListRequestsResponse();
-            response.Requests.Add(new NetworkAccessRequestMessage
-            {
-                Id = "older-request",
-                UserId = "user-a",
-                AgentId = "agent-a",
-                Destination = "older.example",
-                Port = 443,
-                Status = "pending",
-                LastSeenUtc = "2026-01-01T00:00:00+00:00",
-            });
-            response.Requests.Add(new NetworkAccessRequestMessage
-            {
-                Id = "newer-request",
-                UserId = "user-a",
-                AgentId = "agent-a",
-                Destination = "newer.example",
-                Port = 8443,
-                Status = "pending",
-                LastSeenUtc = "2026-01-02T00:00:00+00:00",
-            });
-            return Task.FromResult(response);
-        }
-
-        var payload = await Kautuka.Gateway.Domain.Execution.ChatToolNetworkAccessHelper
-            .BuildToolCallFinishedPayloadAsync(
-                new InvalidOperationException("Generic tool failure"),
-                nacEx: null,
-                activeToolCallId: "tc-latest",
-                activeToolName: "fetch",
-                userId: "user-a",
-                agentId: "agent-a",
-                listRequestsAsync: ListRequestsAsync);
-
-        Assert.NotNull(capturedActor);
-        Assert.False(capturedActor!.IsAdmin);
-        Assert.Equal("newer.example", payload.GetProperty("destination").GetString());
-        Assert.Equal(8443, payload.GetProperty("port").GetInt32());
-        Assert.Equal("newer-request", payload.GetProperty("requestId").GetString());
+        Assert.Equal("tool_execution_failed", payloadBWithOwnPending.GetProperty("code").GetString());
+        Assert.False(payloadBWithOwnPending.TryGetProperty("destination", out _));
+        Assert.False(payloadBWithOwnPending.TryGetProperty("approvalUrl", out _));
     }
 
     private sealed class PortSelectiveTestChecker(int allowedPort) : INetworkAccessChecker

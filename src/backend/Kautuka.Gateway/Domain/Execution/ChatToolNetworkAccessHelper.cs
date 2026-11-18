@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-using Kautuka.Manager.Protos;
 using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.Gateway.Domain.Execution;
@@ -19,98 +18,17 @@ internal static class ChatToolNetworkAccessHelper
             ?? (ex is AggregateException agg ? agg.InnerExceptions.OfType<NetworkAccessDeniedException>().FirstOrDefault() : null);
     }
 
-    public static async Task<JsonElement> BuildToolCallFinishedPayloadAsync(
+    public static Task<JsonElement> BuildToolCallFinishedPayloadAsync(
         Exception ex,
         NetworkAccessDeniedException? nacEx,
         string activeToolCallId,
-        string? activeToolName,
-        string? userId,
-        string? agentId,
-        ManagerService.ManagerServiceClient? managerClient)
-    {
-        Func<NetworkAccessListRequestsRequest, Task<NetworkAccessListRequestsResponse>>? listAsync = managerClient is null
-            ? null
-            : req => managerClient.ListRequestsAsync(
-                req,
-                deadline: DateTime.UtcNow.AddSeconds(1),
-                cancellationToken: CancellationToken.None).ResponseAsync;
-
-        return await BuildToolCallFinishedPayloadAsync(
-            ex,
-            nacEx,
-            activeToolCallId,
-            activeToolName,
-            userId,
-            agentId,
-            listAsync).ConfigureAwait(false);
-    }
-
-    [System.Diagnostics.CodeAnalysis.SuppressMessage(
-        "Design",
-        "CA1031:Do not catch general exception types",
-        Justification = "Best-effort pending request enrichment must never mask the primary tool failure.")]
-    internal static async Task<JsonElement> BuildToolCallFinishedPayloadAsync(
-        Exception ex,
-        NetworkAccessDeniedException? nacEx,
-        string activeToolCallId,
-        string? activeToolName,
-        string? userId,
-        string? agentId,
-        Func<NetworkAccessListRequestsRequest, Task<NetworkAccessListRequestsResponse>>? listRequestsAsync)
+        string? activeToolName)
     {
         string code = nacEx?.NaradReason ?? "tool_execution_failed";
         string? destination = nacEx?.Destination;
         int? port = nacEx?.Port;
         string? requestId = nacEx?.RequestId;
         string? approvalUrl = nacEx is not null ? "/network-access" : null;
-
-        if (nacEx is null
-            && listRequestsAsync is not null
-            && !string.IsNullOrWhiteSpace(userId)
-            && !string.IsNullOrWhiteSpace(agentId))
-        {
-            try
-            {
-                NetworkAccessListRequestsResponse listResp = await listRequestsAsync(
-                    new NetworkAccessListRequestsRequest
-                    {
-                        Actor = new NetworkAccessActorMessage
-                        {
-                            UserId = userId,
-                            IsAdmin = false,
-                        },
-                    }).ConfigureAwait(false);
-
-                NetworkAccessRequestMessage? recent = listResp.Requests
-                    .Where(r =>
-                        string.Equals(r.Status, "pending", StringComparison.Ordinal)
-                        && !string.IsNullOrWhiteSpace(r.UserId)
-                        && string.Equals(r.UserId, userId, StringComparison.OrdinalIgnoreCase)
-                        && !string.IsNullOrWhiteSpace(r.AgentId)
-                        && string.Equals(r.AgentId, agentId, StringComparison.OrdinalIgnoreCase))
-                    .OrderByDescending(static r => DateTimeOffset.TryParse(
-                        r.LastSeenUtc,
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.RoundtripKind,
-                        out DateTimeOffset lastSeen)
-                            ? lastSeen
-                            : DateTimeOffset.MinValue)
-                    .FirstOrDefault();
-
-                if (recent is not null)
-                {
-                    code = "network_access_required";
-                    destination = recent.Destination;
-                    port = recent.Port;
-                    requestId = recent.Id;
-                    approvalUrl = "/network-access";
-                }
-            }
-            catch
-            {
-                // Ignore best-effort lookup errors
-            }
-        }
 
         var toolFinishedPayload = new JsonObject
         {
@@ -139,6 +57,6 @@ internal static class ChatToolNetworkAccessHelper
             toolFinishedPayload["approvalUrl"] = approvalUrl;
         }
 
-        return JsonSerializer.SerializeToElement(toolFinishedPayload, KautukaJsonContext.Default.JsonObject);
+        return Task.FromResult(JsonSerializer.SerializeToElement(toolFinishedPayload, KautukaJsonContext.Default.JsonObject));
     }
 }
