@@ -14,6 +14,17 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class EgressArchivedImageStartupTests
 {
     [Fact]
+    public void X64EgressImagesUsePlatformManifestsInTheArchiveInventory()
+    {
+        if (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture != System.Runtime.InteropServices.Architecture.X64) return;
+        RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(
+            Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName), requirePresent: true);
+        Assert.Equal("docker.io/envoyproxy/envoy@sha256:16e0d4dac937ffa34103aa6ba1013dc2030b9de2a249273c8d23c7c5c2989664", EgressTopologyManager.EnvoyPinnedImage);
+        Assert.Equal("docker.io/coredns/coredns@sha256:1ba6f47265602e2e50a9c4669e3a955e4298a0d30dc82f39293d4bf1a851e0ff", EgressTopologyManager.CoreDnsPinnedImage);
+        Assert.Equal(EgressTopologyManager.EnvoyPinnedImage, Assert.Single(images.Images, i => i.Id == "envoy").Image);
+        Assert.Equal(EgressTopologyManager.CoreDnsPinnedImage, Assert.Single(images.Images, i => i.Id == "coredns").Image);
+    }
+    [Fact]
     public void PublishedBoundaryImageMatchesThePackagedArchiveInventory()
     {
         RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(

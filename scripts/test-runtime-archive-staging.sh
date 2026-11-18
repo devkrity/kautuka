@@ -51,18 +51,21 @@ log_phase() { :; }
 source <(sed -n '/^stage_oci_image_archives() {/,/^}$/p' "$repo_root/scripts/build-release-assets.sh")
 
 cat > "$allowlist" <<'EOF'
-{"images":[{"id":"base","image":"base-ref","archive":null},{"id":"egress-boundary","image":"boundary-ref","archive":"one.tar"},{"id":"two","image":"two-ref","archive":"two.tar"}]}
+{"images":[{"id":"base","image":"base-ref","archive":null},{"id":"egress-boundary","image":"boundary-ref","archive":"one.tar"},{"id":"coredns","image":"dns-ref","archive":"dns.tar"},{"id":"envoy","image":"envoy-ref","archive":"envoy.tar"},{"id":"git-pkgs-proxy","image":"proxy-ref","archive":"proxy.tar"},{"id":"two","image":"two-ref","archive":"two.tar"}]}
 EOF
 stage_oci_image_archives "$tmp/rootfs"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/two.tar")" == archive ]]
-[[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 4 ]]
+[[ "$(wc -l < "$TEST_ARCHIVE_CALLS")" == 10 ]]
 grep -q '^save --format oci-archive .* boundary-ref$' "$TEST_ARCHIVE_CALLS"
+grep -q '^save --format oci-archive .* dns-ref$' "$TEST_ARCHIVE_CALLS"
+grep -q '^save --format oci-archive .* envoy-ref$' "$TEST_ARCHIVE_CALLS"
+grep -q '^save --format oci-archive .* proxy-ref$' "$TEST_ARCHIVE_CALLS"
 
 : > "$TEST_ARCHIVE_CALLS"
 container_runtime=docker
 stage_oci_image_archives "$tmp/rootfs"
-[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 1 ]]
+[[ "$(grep -c '^skopeo copy --preserve-digests ' "$TEST_ARCHIVE_CALLS")" == 4 ]]
 grep -q '^save -o .* two-ref$' "$TEST_ARCHIVE_CALLS"
 [[ "$(cat "$tmp/rootfs/var/lib/kautuka/oci-images/one.tar")" == archive ]]
 container_runtime=test-runtime
