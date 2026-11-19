@@ -148,6 +148,9 @@ jobs:
       - name: Test runtime archive staging
         run: bash ./scripts/test-runtime-archive-staging.sh
 
+      - name: Test image archive format detection
+        run: bash ./scripts/test-image-archive-format.sh
+
       - name: Test Fedora source RPM archive fallback
         run: node ./scripts/test-stage-third-party-sources.mjs
 

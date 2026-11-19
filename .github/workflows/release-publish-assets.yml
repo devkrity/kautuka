@@ -235,10 +235,7 @@ jobs:
             -o spdx-json="/src/$release_dir/kautuka-wsl-appliance.spdx.json"
           while IFS=$'\t' read -r image_id archive_name; do
             archive_path="sbom-input/wsl-appliance/var/lib/kautuka/oci-images/$archive_name"
-            archive_format=docker-archive
-            if tar -tf "$archive_path" | grep -Fx 'oci-layout' > /dev/null; then
-              archive_format=oci-archive
-            fi
+            archive_format="$(bash scripts/detect-image-archive-format.sh "$archive_path")"
             docker run --rm \
               -v "$PWD:/src" \
               docker.io/anchore/syft@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a \

@@ -311,6 +311,9 @@ jobs:
       - name: Verify runtime archive staging
         run: bash ./scripts/test-runtime-archive-staging.sh
 
+      - name: Verify image archive format detection
+        run: bash ./scripts/test-image-archive-format.sh
+
       - name: Verify WSL NAC hook staging
         run: bash ./scripts/test-wsl-nac-hook-staging.sh
 
