@@ -26,6 +26,8 @@ The startup canary and acceptance runner use the base image pinned in the releas
 
 Administrators can set the maximum pending network requests in Settings → Advanced → Network access. Defaults are 500 in total and 64 per user; ordinary requests and connector probes share these limits, including when a single probe creates multiple requests. Lowering a limit does not delete existing requests. The Gateway uses its authorized Manager client identity for both reading and updating the limits; non-administrators cannot access the setting.
 
+Administrators can also set an address that Slack and Telegram users can reach. Network-access errors in those channels link to that address; if it is not set, the message asks users to contact an administrator rather than showing an unusable relative link.
+
 Approved tool calls resumed by the background dispatcher retain the approving run's user, agent, and connector identity for network access checks. This is covered by a focused continuation test.
 
 Hosted catalogue connector discovery runs as the installing user and saves the verified tool definitions and image and bundle digests alongside the connector.

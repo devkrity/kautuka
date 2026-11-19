@@ -78,6 +78,7 @@ internal static class ChannelNaradProjectionPayload
             NaradEventTypes.MessageTextDelta => SanitizeTextDelta(root),
             NaradEventTypes.MessageTextCompleted => SanitizeMessageCompleted(root),
             NaradEventTypes.RunFinished => SanitizeRunFinished(root),
+            NaradEventTypes.RunError => SanitizeNetworkAccessError(root),
             NaradEventTypes.InterruptRequested => SanitizeApprovalRequested(root),
             NaradEventTypes.InterruptResolved => SanitizeApprovalResolved(root),
             _ => null,
@@ -251,6 +252,7 @@ internal static class ChannelNaradProjectionPayload
             NaradEventTypes.MessageTextDelta => WireEventTypes.AssistantTextDelta,
             NaradEventTypes.MessageTextCompleted => WireEventTypes.AssistantMessageCompleted,
             NaradEventTypes.RunFinished => WireEventTypes.RunFinished,
+            NaradEventTypes.RunError => WireEventTypes.RunFinished,
             NaradEventTypes.InterruptRequested => WireEventTypes.ToolApprovalRequested,
             NaradEventTypes.InterruptResolved => WireEventTypes.ToolApprovalResolved,
             _ => naradEventType,
@@ -308,6 +310,11 @@ internal static class ChannelNaradProjectionPayload
             ? null
             : new JsonObject { ["messageId"] = messageId };
     }
+
+    private static JsonObject? SanitizeNetworkAccessError(JsonElement root)
+        => string.Equals(ReadString(root, "code"), "network_access_required", StringComparison.Ordinal)
+            ? new JsonObject { ["response"] = ChannelPublicAddress.NetworkRequestMessage(null) }
+            : null;
 
     private static JsonObject? SanitizeRunFinished(JsonElement root)
     {

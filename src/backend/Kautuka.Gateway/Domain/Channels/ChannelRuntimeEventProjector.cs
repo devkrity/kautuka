@@ -47,7 +47,8 @@ internal sealed partial class ChannelRuntimeEventProjector(
     IGatewaySessionStore sessionStore,
     IConversationAssetStore? assets = null,
     IWorkspaceRuntimeTool? workspace = null,
-    IChannelOutboundAssetUploadService? assetUploads = null) : IChannelRuntimeEventProjector, IRuntimeEventPublicationObserver
+    IChannelOutboundAssetUploadService? assetUploads = null,
+    IGatewaySettingsStore? settings = null) : IChannelRuntimeEventProjector, IRuntimeEventPublicationObserver
 {
     private readonly ConcurrentDictionary<string, byte> projectedEventIds = new(StringComparer.Ordinal);
 
@@ -607,6 +608,8 @@ internal sealed partial class ChannelRuntimeEventProjector(
         string? interactionId,
         string? agentIdOverride = null)
     {
+        if (persistedEvent.EventType == NaradEventTypes.RunError && wireEventType == ChannelNaradProjectionPayload.WireEventTypes.RunFinished)
+            payloadJson = new JsonObject { ["response"] = ChannelPublicAddress.NetworkRequestMessage(ChannelPublicAddress.Read(settings)) }.ToJsonString();
         if (!projectedEventIds.TryAdd($"{registration.Id}:{persistedEvent.EventId}", 0))
         {
             return;

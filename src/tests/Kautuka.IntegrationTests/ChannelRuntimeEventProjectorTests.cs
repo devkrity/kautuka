@@ -646,6 +646,7 @@ public sealed class ChannelRuntimeEventProjectorTests
         IChannelConversationMapStore mapStore,
         IGatewaySessionStore? sessionStore = null,
         string? agentColor = null,
+        IGatewaySettingsStore? settings = null,
         params (string Id, string Name)[] agents)
     {
         GatewayState state = GatewayState.Create(
@@ -683,7 +684,7 @@ public sealed class ChannelRuntimeEventProjectorTests
             attachments,
             mapStore,
             state,
-            sessionStore ?? new FakeSessionStore());
+            sessionStore ?? new FakeSessionStore(), settings: settings);
     }
 
     private static NaradPersistedEvent CreateEvent(
@@ -713,6 +714,67 @@ public sealed class ChannelRuntimeEventProjectorTests
             runId,
             runId,
             JsonSerializer.SerializeToElement(envelope, KautukaJsonContext.Default.JsonObject));
+    }
+
+    [Fact]
+    public void ChannelProjectionExplainsNetworkApprovalWithoutARelativeLink()
+    {
+        NaradPersistedEvent blocked = CreateEvent("evt-network", NaradEventTypes.RunError, "session-1", "run-1",
+            NaradEventBodies.RunError("network_access_required", "blocked", destination: "example.com", approvalUrl: "/network-access"));
+        Assert.True(ChannelNaradProjectionPayload.TryBuild(blocked, out string wireType, out string payloadJson));
+        Assert.Equal(ChannelNaradProjectionPayload.WireEventTypes.RunFinished, wireType);
+        using JsonDocument payload = JsonDocument.Parse(payloadJson);
+        string response = payload.RootElement.GetProperty("response").GetString()!;
+        Assert.Contains("administrator", response, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Network Access", response, StringComparison.Ordinal);
+        Assert.DoesNotContain("/network-access", response, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChannelNetworkApprovalUsesConfiguredAddressAndRejectsUnsafeLinks()
+    {
+        Assert.Equal("A network request was blocked. Review it in Network Access: https://kautuka.example/network-access",
+            ChannelPublicAddress.NetworkRequestMessage("https://kautuka.example/"));
+        Assert.False(ChannelPublicAddress.TryNormalize("javascript:alert(1)", out _));
+        Assert.False(ChannelPublicAddress.TryNormalize("https://user:pass@example.com/", out _));
+        Assert.Contains("administrator", ChannelPublicAddress.NetworkRequestMessage(null), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ProjectedNetworkErrorIncludesTheConfiguredAddress()
+    {
+        var outbox = new CapturingChannelOutboxStore();
+        var map = new ChannelConversationMapEntry("map-link", "telegram", "reg-1", "agent", "agent-1", "chat-1", "thread-1",
+            "permanent_topic", "session-1", DateTimeOffset.UtcNow.ToString("O"), DateTimeOffset.UtcNow.ToString("O"), null);
+        var projector = CreateProjector(outbox, new FakeChannelAttachmentRegistry(), new FakeConversationMapStore(map), settings: new AddressSettings());
+        NaradPersistedEvent blocked = CreateEvent("evt-configured-link", NaradEventTypes.RunError, "session-1", "run-1",
+            NaradEventBodies.RunError("network_access_required", "blocked", approvalUrl: "/network-access"));
+        await projector.ProjectAsync(blocked, TestContext.Current.CancellationToken);
+        ChannelRuntimeEventAction action = JsonSerializer.Deserialize(Assert.Single(outbox.Entries).PayloadJson,
+            ChannelContractsJsonContext.Default.ChannelRuntimeEventAction)!;
+        Assert.Contains("https://kautuka.example/network-access", action.PayloadJson, StringComparison.Ordinal);
+    }
+
+    private sealed class AddressSettings : IGatewaySettingsStore
+    {
+        public string? ReadSettingJson(string key) => key == ChannelPublicAddress.SettingKey ? "{\"address\":\"https://kautuka.example\"}" : null;
+        public void WriteSettingJson(string key, string rawJson) => throw new NotSupportedException();
+        public void Save(JsonElement body) => throw new NotSupportedException();
+        public GatewaySystemSettingsResponse GetPayload() => throw new NotSupportedException();
+        public GatewayAdvancedSettingsResponse GetAdvancedSettingsPayload() => throw new NotSupportedException();
+        public Task SaveAdvancedSettingsAsync(JsonElement body, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public void SaveProviderPathPolicySettings(JsonElement body) => throw new NotSupportedException();
+        public void SaveMemorySettings(JsonElement body) => throw new NotSupportedException();
+        public GatewayProviderPathPolicySettingsResponse GetProviderPathPolicyPayload() => throw new NotSupportedException();
+        public GatewayMemorySettingsResponse GetMemorySettingsPayload() => throw new NotSupportedException();
+        public GatewayPersonaDefinitionsResponse GetPersonaDefinitionsPayload() => throw new NotSupportedException();
+        public void SavePersonaDefinitions(JsonElement body) => throw new NotSupportedException();
+        public GatewayPersonaProfilesResponse GetPersonaProfilesPayload() => throw new NotSupportedException();
+        public JsonObject GetAgentPersonaProfile(string agentId) => throw new NotSupportedException();
+        public JsonObject NormalizeAgentPersonaProfile(JsonObject? profile) => throw new NotSupportedException();
+        public JsonObject ResolveAgentPersonaProfile(JsonObject? profile) => throw new NotSupportedException();
+        public GatewayOrganizationSettingsResponse GetOrganizationPayload() => throw new NotSupportedException();
+        public void SaveOrganization(JsonElement body) => throw new NotSupportedException();
     }
 
     [Fact]

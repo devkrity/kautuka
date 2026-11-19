@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
+using Kautuka.Gateway.Domain.Channels;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Manager.Protos;
@@ -12,6 +14,23 @@ internal static partial class GatewaySettingsEndpointMappings
 {
     private static void MapSystemSettingsEndpoints(WebApplication app)
     {
+        app.MapGet("/api/settings/system/channels/address", IResult (IGatewaySettingsStore settings, IGatewayAuthGuard auth, HttpContext context) =>
+        {
+            IResult? unauthorized = auth.RequireAdmin(context, out _);
+            return unauthorized ?? Results.Json(new JsonObject { ["address"] = ChannelPublicAddress.Read(settings) }, KautukaJsonContext.Default.JsonObject);
+        });
+        app.MapPut("/api/settings/system/channels/address", async Task<IResult> (HttpContext context, IGatewaySettingsStore settings, IGatewayAuthGuard auth, CancellationToken ct) =>
+        {
+            IResult? unauthorized = auth.RequireAdmin(context, out _);
+            if (unauthorized is not null) return unauthorized;
+            JsonObject? body = await context.Request.ReadFromJsonAsync(KautukaJsonContext.Default.JsonObject, ct).ConfigureAwait(false);
+            if (body is null || (body["address"] is not null && (body["address"] is not JsonValue value || !value.TryGetValue<string>(out _)))) return Results.BadRequest();
+            string? address = body["address"]?.GetValue<string>();
+            if (!ChannelPublicAddress.TryNormalize(address, out string? normalized)) return Results.BadRequest();
+            var saved = new JsonObject { ["address"] = normalized };
+            settings.WriteSettingJson(ChannelPublicAddress.SettingKey, saved.ToJsonString());
+            return Results.Json(saved, KautukaJsonContext.Default.JsonObject);
+        });
         app.MapGet("/api/settings/system/network-access", async (IManagerGrpcService manager, IGatewayAuthGuard auth, HttpContext context, CancellationToken ct) =>
         {
             IResult? unauthorized = auth.RequireAdmin(context, out GatewayUser? user);
