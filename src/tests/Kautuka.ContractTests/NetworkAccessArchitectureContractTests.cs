@@ -45,7 +45,7 @@ public sealed class NetworkAccessArchitectureContractTests
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
         string guide = File.ReadAllText(Path.Combine(repositoryRoot, "docs", "operations", "network-access.md"));
-        string reportPath = Path.Combine(repositoryRoot, "docs", "verification", "nac-v7-production-rootless-run.json");
+        string reportPath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.ContractTests", "Fixtures", "NetworkAccess", "nac-v7-production-rootless-run.json");
         using JsonDocument report = JsonDocument.Parse(File.ReadAllText(reportPath));
 
         Assert.DoesNotContain("live connector launch still need their own production evidence", guide, StringComparison.OrdinalIgnoreCase);
@@ -243,7 +243,7 @@ public sealed class NetworkAccessArchitectureContractTests
     public void V7_21_ProductionAcceptanceReportIsCommittedAndEveryNegativeControlFlipped()
     {
         string repositoryRoot = Directory.GetParent(gatewayRoot)!.Parent!.Parent!.FullName;
-        string reportPath = Path.Combine(repositoryRoot, "docs", "verification", "nac-v7-production-rootless-run.json");
+        string reportPath = Path.Combine(repositoryRoot, "src", "tests", "Kautuka.ContractTests", "Fixtures", "NetworkAccess", "nac-v7-production-rootless-run.json");
         using JsonDocument report = JsonDocument.Parse(File.ReadAllText(reportPath));
 
         Assert.Equal("97b66ca", report.RootElement.GetProperty("gitSha").GetString());
