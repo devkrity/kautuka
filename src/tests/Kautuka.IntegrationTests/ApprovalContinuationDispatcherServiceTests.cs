@@ -17,13 +17,16 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ApprovalContinuationDispatcherServiceTests
 {
-    [Fact]
-    public async Task ApprovedToolPublishesStartBeforeTheCallAndFinishAfterItReturns()
+    [Theory]
+    [InlineData("{}", "success")]
+    [InlineData("{\"result\":\"Tool failed\",\"outcome\":\"error\"}", "error")]
+    [InlineData("{\"isError\":true,\"content\":[]}", "error")]
+    public async Task ApprovedToolPublishesStartBeforeTheCallAndFinishAfterItReturns(string result, string outcome)
     {
         var queue = new TestApprovalContinuationQueue();
         var completion = new CapturingPublisher();
         var journal = new RecordingToolJournal();
-        var invoker = new BlockingPackedToolInvoker();
+        var invoker = new BlockingPackedToolInvoker(result);
         GatewayToolApprovalRequest approval = CreatePackedFetchApproval("req-boundary", "call-boundary", "approved") with { McpServerId = "web-tools" };
         var waitStore = new FakeRunWaitStateStore(CreatePackedApprovalWaitState("req-boundary"));
         using var service = new ApprovalContinuationDispatcherService(queue, new FakeApprovalStore(approval), new CapturingContinuationOrchestrator(), waitStore,
@@ -43,12 +46,13 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             _ = await completion.WaitForCompletedAsync();
             Assert.Equal([Narad.Contracts.NaradEventTypes.RunResumed, Narad.Contracts.NaradEventTypes.ToolCallStarted, Narad.Contracts.NaradEventTypes.ToolCallFinished], journal.EventTypes);
             var events = journal.Events.ToArray();
+            Assert.Equal(outcome, events[2].Body.GetProperty("outcome").GetString());
             Assert.True(DateTimeOffset.Parse(events[2].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) - DateTimeOffset.Parse(events[1].OccurredAt, System.Globalization.CultureInfo.InvariantCulture) >= TimeSpan.FromMilliseconds(100));
         }
         finally { invoker.Release.TrySetResult(); await service.StopAsync(CancellationToken.None); }
     }
 
-    private sealed class BlockingPackedToolInvoker : IPackedApprovedToolInvoker
+    private sealed class BlockingPackedToolInvoker(string result) : IPackedApprovedToolInvoker
     {
         public NetworkAccessScope? NetworkScope { get; private set; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -58,7 +62,7 @@ public sealed class ApprovalContinuationDispatcherServiceTests
             NetworkScope = NetworkAccessContext.Current;
             Started.TrySetResult();
             await Release.Task.WaitAsync(cancellationToken);
-            return "{}";
+            return result;
         }
     }
 

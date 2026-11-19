@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Runtime;
@@ -707,8 +708,19 @@ internal sealed class ApprovalContinuationDispatcherService(
         await runtimeEventPublisher!.PublishWithIdAsync($"approval-tool-start:{approval.Id}", NaradEventTypes.ToolCallStarted,
             AgentExecutionNaradToolBodies.ToolCallStarted(tool), context, cancellationToken).ConfigureAwait(false);
         string result = await invoke().ConfigureAwait(false);
+        string outcome = "success";
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(result);
+            JsonElement root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object &&
+                ((root.TryGetProperty("outcome", out JsonElement savedOutcome) && savedOutcome.ValueKind == JsonValueKind.String && savedOutcome.GetString() == "error") ||
+                 (root.TryGetProperty("isError", out JsonElement isError) && isError.ValueKind == JsonValueKind.True)))
+                outcome = "error";
+        }
+        catch (JsonException) { }
         await runtimeEventPublisher.PublishWithIdAsync($"approval-tool-finish:{approval.Id}", NaradEventTypes.ToolCallFinished,
-            AgentExecutionNaradToolBodies.ToolCallFinished(approval.ToolCallId, "success", result), context, cancellationToken).ConfigureAwait(false);
+            AgentExecutionNaradToolBodies.ToolCallFinished(approval.ToolCallId, outcome, result), context, cancellationToken).ConfigureAwait(false);
         return result;
     }
 
