@@ -16,6 +16,14 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class EgressArchivedImageStartupTests
 {
     [Fact]
+    public void CanaryImageUsesTheReleaseManifest()
+    {
+        RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(
+            Path.Combine(AppContext.BaseDirectory, RuntimeImageAllowlistLoader.FileName), requirePresent: true);
+        Assert.Equal(Assert.Single(images.Images, image => image.Id == "kautuka-base").Image,
+            EgressTopologyManager.CanaryBasePinnedImage);
+    }
+    [Fact]
     public void X64EgressImagesUsePlatformManifestsInTheArchiveInventory()
     {
         RuntimeImageAllowlist images = RuntimeImageAllowlistLoader.Load(

@@ -70,6 +70,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public static string EnvoyPinnedImage => SelectRuntimeImage("envoy", RuntimeInformation.OSArchitecture);
     public static string CoreDnsPinnedImage => SelectRuntimeImage("coredns", RuntimeInformation.OSArchitecture);
     public static string BoundaryInitImage => FindRuntimeImage("egress-boundary").Image;
+    public static string CanaryBasePinnedImage => FindRuntimeImage("kautuka-base").Image;
 
     private static RuntimeImageAllowlist LoadRuntimeImages()
     {
@@ -927,8 +928,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         return null;
     }
-    private const string CanaryBasePinnedImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
-
     public async Task<bool> RunStartupSelfTestAsync(CancellationToken cancellationToken = default)
     {
         startupCanaryBrakeObserved = IsCanaryIdentityBraked();

@@ -225,7 +225,7 @@ public static class Program
         const string npmRegistry = "http://kautuka-pkgs-proxy:20101/npm/";
         var builderSpec = new WorkloadContainerSpec(
             builderName,
-            "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+            EgressTopologyManager.CanaryBasePinnedImage,
             builderIp)
         {
             Kind = "builder",
@@ -1569,7 +1569,7 @@ public static class Program
 
         string wlName = PodmanContainerTool.BuildContainerName(new ContainerContext(
             "agent", "a1", "u1", Path.Combine(tempRoot, "workspaces", "users", "u1", "agents", "a1"), "/workspace",
-            "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+            EgressTopologyManager.CanaryBasePinnedImage,
             1, "512m", 30, [], new Dictionary<string, string>()));
         Process? lanFixtureProcess = null;
         string? lanFixtureNamespaceName = null;
@@ -1707,7 +1707,7 @@ public static class Program
                 throw new InvalidOperationException("LAN acceptance requires the production boundary to admit LAN packets to Envoy for policy enforcement.");
             }
 
-            const string baseImage = "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839";
+            string baseImage = EgressTopologyManager.CanaryBasePinnedImage;
             (lanFixtureNamespaceName, lanFixtureHostDevice, lanHostAddress) = await CreateRoutedLanFixtureAsync().ConfigureAwait(false);
             Console.WriteLine($"[PROD_STAGE] routed LAN fixture address={lanHostAddress}; namespace={lanFixtureNamespaceName}");
             string rebindHostName = $"rebind.{lanHostAddress}.nip.io";
@@ -2530,10 +2530,10 @@ public static class Program
                 }
                 await ExecAsync("podman", ["rm", "-f", wlName, PodmanContainerTool.BuildContainerName(new ContainerContext(
                     "agent", "a2", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a2"), "/workspace",
-                    "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+                    EgressTopologyManager.CanaryBasePinnedImage,
                     1, "512m", 30, [], new Dictionary<string, string>())), PodmanContainerTool.BuildContainerName(new ContainerContext(
                     "agent", "a3", "u1", Path.Combine(workspaceRoot, "users", "u1", "agents", "a3"), "/workspace",
-                    "ghcr.io/devkrity/kautuka-base@sha256:675400832f2ced5cf802db66eb067ef5022f65f0551c665d87ae7edc58dc0839",
+                    EgressTopologyManager.CanaryBasePinnedImage,
                     1, "512m", 30, [], new Dictionary<string, string>()))]).ConfigureAwait(false);
                 await ExecAsync("podman", ["pod", "rm", "-f", EgressTopologyManager.EgressPodName]).ConfigureAwait(false);
                 await ExecAsync("podman", ["network", "rm", "-f", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName]).ConfigureAwait(false);
