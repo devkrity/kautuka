@@ -35,6 +35,7 @@ internal static class ChannelHostRuntimeEventTypes
     public const string AssistantTextDelta = "assistant.text.delta";
     public const string AssistantMessageCompleted = "assistant.message.completed";
     public const string RunFinished = "run.finished";
+    public const string NetworkAccessRequired = "network.access.required";
     public const string ToolApprovalRequested = "tool.approval.requested";
     public const string ToolApprovalResolved = "tool.approval.resolved";
 }
@@ -72,6 +73,7 @@ internal sealed class ChannelRuntimeEventTranslator
             ChannelHostRuntimeEventTypes.AssistantTextDelta => TranslateTextDelta(runtimeEvent, mode),
             ChannelHostRuntimeEventTypes.AssistantMessageCompleted => TranslateMessageCompleted(runtimeEvent, mode),
             ChannelHostRuntimeEventTypes.RunFinished => TranslateRunFinished(runtimeEvent),
+            ChannelHostRuntimeEventTypes.NetworkAccessRequired => TranslateNetworkAccessRequired(runtimeEvent),
             ChannelHostRuntimeEventTypes.ToolApprovalRequested => TranslateApprovalRequested(runtimeEvent, richContext),
             ChannelHostRuntimeEventTypes.ToolApprovalResolved => TranslateApprovalResolved(runtimeEvent, approvalTransportMessageId, richContext),
             _ => [],
@@ -115,6 +117,7 @@ internal sealed class ChannelRuntimeEventTranslator
             or ChannelHostRuntimeEventTypes.UserMessageRecorded
             or ChannelHostRuntimeEventTypes.AssistantMessageCompleted
             or ChannelHostRuntimeEventTypes.RunFinished
+            or ChannelHostRuntimeEventTypes.NetworkAccessRequired
             // Deltas are buffered in-process for one-shot completed messages; never streamed out.
             or ChannelHostRuntimeEventTypes.AssistantTextDelta;
 
@@ -242,6 +245,15 @@ internal sealed class ChannelRuntimeEventTranslator
                 ChannelMessageTemplates.AgentResponse(response, SenderLabel(runtimeEvent)),
                 runtimeEvent.InteractionId),
         ];
+    }
+
+    private static IReadOnlyList<ChannelTranslatedOutboundAction> TranslateNetworkAccessRequired(ChannelRuntimeEventAction runtimeEvent)
+    {
+        string? conversationId = RequireConversationId(runtimeEvent);
+        string? response = TryReadRunFinishedResponse(runtimeEvent.PayloadJson);
+        if (conversationId is null || string.IsNullOrWhiteSpace(response)) return [];
+        return [Semantic(conversationId, runtimeEvent.ConversationThreadId,
+            ChannelMessageTemplates.AgentResponse(response, SenderLabel(runtimeEvent)), runtimeEvent.InteractionId)];
     }
 
     private static IReadOnlyList<ChannelTranslatedOutboundAction> TranslateApprovalRequested(ChannelRuntimeEventAction runtimeEvent, bool richContext)

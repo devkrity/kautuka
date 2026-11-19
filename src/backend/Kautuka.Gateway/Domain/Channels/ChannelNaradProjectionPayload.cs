@@ -23,6 +23,7 @@ internal static class ChannelNaradProjectionPayload
         public const string AssistantTextDelta = "assistant.text.delta";
         public const string AssistantMessageCompleted = "assistant.message.completed";
         public const string RunFinished = "run.finished";
+        public const string NetworkAccessRequired = "network.access.required";
         public const string ToolApprovalRequested = "tool.approval.requested";
         public const string ToolApprovalResolved = "tool.approval.resolved";
     }
@@ -36,7 +37,6 @@ internal static class ChannelNaradProjectionPayload
         NaradEventTypes.ProgressRecorded,
         NaradEventTypes.SessionRevision,
         NaradEventTypes.ToolCallStarted,
-        NaradEventTypes.ToolCallFinished,
         NaradEventTypes.ReasoningStarted,
         NaradEventTypes.ReasoningDelta,
         NaradEventTypes.ReasoningCompleted,
@@ -79,6 +79,7 @@ internal static class ChannelNaradProjectionPayload
             NaradEventTypes.MessageTextCompleted => SanitizeMessageCompleted(root),
             NaradEventTypes.RunFinished => SanitizeRunFinished(root),
             NaradEventTypes.RunError => SanitizeNetworkAccessError(root),
+            NaradEventTypes.ToolCallFinished => SanitizeNetworkAccessError(root),
             NaradEventTypes.InterruptRequested => SanitizeApprovalRequested(root),
             NaradEventTypes.InterruptResolved => SanitizeApprovalResolved(root),
             _ => null,
@@ -253,6 +254,7 @@ internal static class ChannelNaradProjectionPayload
             NaradEventTypes.MessageTextCompleted => WireEventTypes.AssistantMessageCompleted,
             NaradEventTypes.RunFinished => WireEventTypes.RunFinished,
             NaradEventTypes.RunError => WireEventTypes.RunFinished,
+            NaradEventTypes.ToolCallFinished => WireEventTypes.NetworkAccessRequired,
             NaradEventTypes.InterruptRequested => WireEventTypes.ToolApprovalRequested,
             NaradEventTypes.InterruptResolved => WireEventTypes.ToolApprovalResolved,
             _ => naradEventType,

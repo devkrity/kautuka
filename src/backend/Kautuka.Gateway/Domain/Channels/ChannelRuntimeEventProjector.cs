@@ -608,7 +608,8 @@ internal sealed partial class ChannelRuntimeEventProjector(
         string? interactionId,
         string? agentIdOverride = null)
     {
-        if (persistedEvent.EventType == NaradEventTypes.RunError && wireEventType == ChannelNaradProjectionPayload.WireEventTypes.RunFinished)
+        if ((persistedEvent.EventType == NaradEventTypes.RunError && wireEventType == ChannelNaradProjectionPayload.WireEventTypes.RunFinished)
+            || wireEventType == ChannelNaradProjectionPayload.WireEventTypes.NetworkAccessRequired)
             payloadJson = new JsonObject { ["response"] = ChannelPublicAddress.NetworkRequestMessage(ChannelPublicAddress.Read(settings)) }.ToJsonString();
         if (!projectedEventIds.TryAdd($"{registration.Id}:{persistedEvent.EventId}", 0))
         {

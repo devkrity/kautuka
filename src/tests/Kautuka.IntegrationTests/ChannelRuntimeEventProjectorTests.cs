@@ -730,6 +730,19 @@ public sealed class ChannelRuntimeEventProjectorTests
         Assert.DoesNotContain("/network-access", response, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("error")]
+    [InlineData("failed")]
+    public void ChannelProjectionIncludesToolNetworkDenialsWithoutToolDetails(string outcome)
+    {
+        NaradPersistedEvent blocked = CreateEvent("evt-tool-network", NaradEventTypes.ToolCallFinished, "session-1", "run-1",
+            NaradEventBodies.ToolCallFinished("call-1", outcome, code: "network_access_required", message: "private details", approvalUrl: "/network-access"));
+        Assert.True(ChannelNaradProjectionPayload.TryBuild(blocked, out string wireType, out string payloadJson));
+        Assert.Equal("network.access.required", wireType);
+        Assert.DoesNotContain("private details", payloadJson, StringComparison.Ordinal);
+        Assert.Contains("Network Access", payloadJson, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ChannelNetworkApprovalUsesConfiguredAddressAndRejectsUnsafeLinks()
     {
@@ -753,6 +766,23 @@ public sealed class ChannelRuntimeEventProjectorTests
         ChannelRuntimeEventAction action = JsonSerializer.Deserialize(Assert.Single(outbox.Entries).PayloadJson,
             ChannelContractsJsonContext.Default.ChannelRuntimeEventAction)!;
         Assert.Contains("https://kautuka.example/network-access", action.PayloadJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProjectedToolNetworkDenialIncludesConfiguredAddress()
+    {
+        var outbox = new CapturingChannelOutboxStore();
+        var map = new ChannelConversationMapEntry("map-tool", "telegram", "reg-1", "agent", "agent-1", "chat-1", "thread-1",
+            "permanent_topic", "session-1", DateTimeOffset.UtcNow.ToString("O"), DateTimeOffset.UtcNow.ToString("O"), null);
+        var projector = CreateProjector(outbox, new FakeChannelAttachmentRegistry(), new FakeConversationMapStore(map), settings: new AddressSettings());
+        NaradPersistedEvent blocked = CreateEvent("evt-tool-link", NaradEventTypes.ToolCallFinished, "session-1", "run-1",
+            NaradEventBodies.ToolCallFinished("call-1", "error", code: "network_access_required", message: "private details"));
+        await projector.ProjectAsync(blocked, TestContext.Current.CancellationToken);
+        ChannelRuntimeEventAction action = JsonSerializer.Deserialize(Assert.Single(outbox.Entries).PayloadJson,
+            ChannelContractsJsonContext.Default.ChannelRuntimeEventAction)!;
+        Assert.Equal("network.access.required", action.EventType);
+        Assert.Contains("https://kautuka.example/network-access", action.PayloadJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("private details", action.PayloadJson, StringComparison.Ordinal);
     }
 
     private sealed class AddressSettings : IGatewaySettingsStore
