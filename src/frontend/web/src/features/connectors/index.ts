@@ -3,6 +3,7 @@
  */
 export * from './api/connectors';
 export * from './api/queries';
+export { useBuiltInToolRefresh } from './api/refreshBuiltInTools';
 export * from './schemas/connectorSchema';
 export * from './types/connectorDraft';
 export * from './types/mcpImport';

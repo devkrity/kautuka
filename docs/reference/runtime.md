@@ -33,6 +33,7 @@ MCPB import validation runs with the identity of the user importing the connecto
 MCPB inspection reads any tool names declared in the bundle manifest; the bundled Web Tools manifest includes its tool name.
 Built-in bundle registration uses supplied tool metadata and does not run userless connector discovery at startup.
 On a fresh installation the bundled connectors start disabled. An administrator enables each connector, which runs the existing image build and tool discovery during save; existing enabled or disabled choices survive a restart or upgrade.
+When an administrator signs in, the open application checks for enabled bundled connectors whose saved tools are missing or outdated and refreshes them in the background using the administrator's identity. It retries once; if refresh still fails, Test connection remains available on the connector.
 Local connector tool definitions are cached when the connector is saved or tested; an agent run uses those definitions rather than listing the local connector tools again.
 
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.

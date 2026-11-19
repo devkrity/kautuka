@@ -2737,6 +2737,35 @@ public sealed class WorkspaceDesiredStatePublicationTests
     }
 
     [Fact]
+    public async Task ConnectorPayloadHidesToolsWhenBundleDigestChanges()
+    {
+        using var temp = new TemporaryGatewayStateDirectory();
+        GatewayState state = CreateState(temp.SqlitePath);
+        IConfiguration config = CreateConfiguration(temp.SqlitePath);
+        var definitions = new SqliteAgentDefinitionStore(config);
+        var database = new KautukaDatabase(config);
+        var provider = new SqlitePlatformConfigurationProvider(database, definitions);
+        var catalog = new GatewayCatalogStore(state, definitions, new SqliteTopologyConfigurationWriter(database, provider),
+            new NoOpWorkspaceRuntimeTool(), new NoOpSkillPackageService(), new RecordingDesiredStatePublisher(),
+            new NoOpContinuationStore(), new NoOpConversationAssetStore());
+        GatewayMcpServer server = await catalog.SaveMcpServerAsync("builtin", new GatewayConnectorUpsertRequest
+        { Name = "Built-in", Transport = "container", ContainerImage = "example/image", BundlePath = "/bundle.mcpb" }, GatewayOwnershipScopes.System, null, TestContext.Current.CancellationToken);
+        server = server with
+        {
+            ToolCount = 1,
+            ToolNames = ["fetch"],
+            LocalToolDefinitions = [new ConnectorToolDefinition("fetch", "", "{}")],
+            LocalImageDigest = "sha256:" + new string('a', 64),
+            LocalArtifactDigest = new string('b', 64),
+            RuntimeArtifactSourceDigest = new string('b', 64)
+        };
+        Assert.Equal(1, GatewayConnectorEndpointMappings.ToConnectorPayload(server).ToolCount);
+        var changed = server with { RuntimeArtifactSourceDigest = new string('c', 64) };
+        Assert.Null(GatewayConnectorEndpointMappings.ToConnectorPayload(changed).ToolCount);
+        Assert.Empty(GatewayConnectorEndpointMappings.ToConnectorPayload(changed).ToolNames);
+    }
+
+    [Fact]
     public async Task LegacyCredentialReentrySurvivesOrdinaryEditsUntilRequiredHeaderSetup()
     {
         using var temp = new TemporaryGatewayStateDirectory();

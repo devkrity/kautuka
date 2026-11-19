@@ -698,8 +698,8 @@ internal static class GatewayConnectorEndpointMappings
         server.HealthcheckIntervalMilliseconds,
         server.Enabled,
         server.IsInternalSystemConnector,
-        string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase) && (server.LocalToolDefinitions is null || !IsCanonicalImageDigest(server.LocalImageDigest)) ? null : server.ToolCount,
-        string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase) && (server.LocalToolDefinitions is null || !IsCanonicalImageDigest(server.LocalImageDigest)) ? [] : [.. server.ToolNames?.ToArray() ?? []],
+        !HasCurrentLocalTools(server) ? null : server.ToolCount,
+        !HasCurrentLocalTools(server) ? [] : [.. server.ToolNames?.ToArray() ?? []],
         [.. server.EnvKeys?.ToArray() ?? []],
         server.Scope,
         server.OwnerUserId,
@@ -709,6 +709,13 @@ internal static class GatewayConnectorEndpointMappings
         [.. server.Credentials ?? []],
         [.. server.HttpHeaders ?? []],
         server.RequiresCredentialReentry);
+
+    private static bool HasCurrentLocalTools(GatewayMcpServer server)
+        => !string.Equals(server.Transport, "container", StringComparison.OrdinalIgnoreCase)
+            || (server.LocalToolDefinitions is not null && IsCanonicalImageDigest(server.LocalImageDigest)
+                && (string.IsNullOrWhiteSpace(server.BundlePath)
+                    || (!string.IsNullOrWhiteSpace(server.LocalArtifactDigest)
+                        && string.Equals(server.LocalArtifactDigest, server.RuntimeArtifactSourceDigest, StringComparison.OrdinalIgnoreCase))));
 
     private static GatewayConnectorTestRequest BuildImportValidationRequest(string serverId, GatewayConnectorUpsertRequest connector, string userId)
         => new()
