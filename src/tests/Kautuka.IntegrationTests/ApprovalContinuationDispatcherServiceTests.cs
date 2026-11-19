@@ -21,6 +21,8 @@ public sealed class ApprovalContinuationDispatcherServiceTests
     [InlineData("{}", "success")]
     [InlineData("{\"result\":\"Tool failed\",\"outcome\":\"error\"}", "error")]
     [InlineData("{\"isError\":true,\"content\":[]}", "error")]
+    [InlineData("{\"is_error\":true,\"content\":[]}", "error")]
+    [InlineData("{\"is_error\":false,\"content\":[]}", "success")]
     public async Task ApprovedToolPublishesStartBeforeTheCallAndFinishAfterItReturns(string result, string outcome)
     {
         var queue = new TestApprovalContinuationQueue();

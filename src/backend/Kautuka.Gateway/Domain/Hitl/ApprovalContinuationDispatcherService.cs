@@ -715,7 +715,8 @@ internal sealed class ApprovalContinuationDispatcherService(
             JsonElement root = document.RootElement;
             if (root.ValueKind == JsonValueKind.Object &&
                 ((root.TryGetProperty("outcome", out JsonElement savedOutcome) && savedOutcome.ValueKind == JsonValueKind.String && savedOutcome.GetString() == "error") ||
-                 (root.TryGetProperty("isError", out JsonElement isError) && isError.ValueKind == JsonValueKind.True)))
+                 (root.TryGetProperty("isError", out JsonElement isError) && isError.ValueKind == JsonValueKind.True) ||
+                 (root.TryGetProperty("is_error", out JsonElement snakeCaseError) && snakeCaseError.ValueKind == JsonValueKind.True)))
                 outcome = "error";
         }
         catch (JsonException) { }
