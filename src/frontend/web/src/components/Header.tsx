@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { APPROVAL_REFRESH_INTERVAL_MS, usePendingApprovals } from '@/features/approvals';
 import { useNetworkPendingCount } from '@/features/network-access';
+import { useNetworkRequestNotifications } from '@/features/network-access/useNetworkRequestNotifications';
 import { useCurrentUser, UserProfileDialog, UserVersionInfo } from '@/features/auth';
 import { ROLE_ADMIN } from '@/features/settings';
 import { cn } from '@/lib/utils';
@@ -97,6 +98,7 @@ export function Header({
   const pendingApprovals = pendingList.length;
 
   const { data: networkPending } = useNetworkPendingCount(authenticated);
+  useNetworkRequestNotifications(authenticated, networkPending?.requests);
   const pendingNetwork = networkPending?.count ?? 0;
 
   const { data: user } = useCurrentUser();
