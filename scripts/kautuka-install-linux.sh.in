@@ -576,7 +576,7 @@ install_envoy_selinux_policy() {
         if command -v dnf >/dev/null 2>&1; then dnf install -y udica; fi
     fi
     [[ -r "$templates/base_container.cil" && -r "$templates/net_container.cil" ]] || {
-        echo 'error: SELinux is enabled but udica policy templates are unavailable.' >&2; return 1;
+        echo 'error: SELinux is enabled but udica policy templates are unavailable. Install udica with your distribution package manager and rerun the installer.' >&2; return 1;
     }
     command -v semodule >/dev/null 2>&1 || { echo 'error: SELinux policy installation requires semodule.' >&2; return 1; }
     local installed_modules
