@@ -37,6 +37,8 @@ Local connector tool definitions are cached when the connector is saved or teste
 
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.
 
+Mail sign-in checks access to the configured sign-in service and asks the user before allowing it for that connector. After sign-in, it asks separately about the mail provider's API when needed. Declining the second request leaves the mailbox signed in but the provider connection blocked.
+
 After an approved tool call runs, its journal records an error when the returned result reports a tool failure; approval itself does not imply that execution succeeded.
 
 Administrators can load live package-proxy cache inventory on demand at `GET /api/runtime/diagnostics/pkgs-proxy/stats` (`AdminDiagnostics`). Gateway asks Manager to `podman exec kautuka-pkgs-proxy proxy stats -json`; Kautuka does not persist that payload. The host port stays unpublished.

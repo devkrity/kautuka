@@ -28,15 +28,15 @@ export async function runBoundExternalLogin(
   return loginResponseSchema.parse(await runBoundFlow(provider, accountType, intent, inputs, signal));
 }
 
-export async function runBoundMailLogin(connectorId: string, signal?: AbortSignal): Promise<void> {
-  const result = await runBoundFlow('google', undefined, 'login', {}, signal, connectorId);
+export async function runBoundMailLogin(connectorId: string, signal?: AbortSignal, beforeStart?: () => Promise<void>): Promise<void> {
+  const result = await runBoundFlow('google', undefined, 'login', {}, signal, connectorId, beforeStart);
   if (!result || typeof result !== 'object' || (result as { status?: unknown }).status !== 'connected')
     throw new Error('Mail sign-in was not accepted. Start again.');
 }
 
 async function runBoundFlow(
   provider: Provider, accountType: 'organizations' | 'consumers' | undefined, intent: Intent,
-  inputs: { inviteCode?: string; setupToken?: string }, signal?: AbortSignal, connectorId?: string,
+  inputs: { inviteCode?: string; setupToken?: string }, signal?: AbortSignal, connectorId?: string, beforeStart?: () => Promise<void>,
 ): Promise<unknown> {
   signal?.throwIfAborted();
   const popup = window.open('', '_blank', 'popup,width=520,height=720');
@@ -46,6 +46,8 @@ async function runBoundFlow(
   let startedMail: Started | undefined;
   let completed = false;
   try {
+    await beforeStart?.();
+    signal?.throwIfAborted();
     const mail = connectorId !== undefined;
     const startPath = mail ? `/api/connectors/${encodeURIComponent(connectorId)}/oauth/bound-begin` : '/api/auth/external/bound-start';
     const start = await fetch(startPath, {

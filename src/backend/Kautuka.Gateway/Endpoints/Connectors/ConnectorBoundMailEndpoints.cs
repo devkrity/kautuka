@@ -1,6 +1,9 @@
+using System.Text.Json.Nodes;
+
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
 using Kautuka.Gateway.Infrastructure.Connectors;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,12 +17,44 @@ internal static partial class ConnectorOAuthEndpointMappings
     {
         app.MapPost("/api/connectors/{connectorId}/oauth/bound-begin", BeginBoundMail)
             .RequireRateLimiting("MailHandoff").WithMetadata(new RequestSizeLimitAttribute(16384));
+        app.MapPost("/api/connectors/{connectorId}/oauth/network-check/{phase}", CheckMailNetworkAccess)
+            .RequireRateLimiting("MailHandoffPoll");
         app.MapPost("/api/connectors/oauth/bound-bind", BindBoundMail)
             .RequireRateLimiting("MailHandoff").WithMetadata(new RequestSizeLimitAttribute(16384));
         app.MapPost("/api/connectors/oauth/bound-complete", CompleteBoundMail)
             .RequireRateLimiting("MailHandoffPoll").WithMetadata(new RequestSizeLimitAttribute(16384));
         app.MapPost("/api/connectors/oauth/bound-cancel", CancelBoundMail)
             .RequireRateLimiting("MailHandoff").WithMetadata(new RequestSizeLimitAttribute(16384));
+    }
+
+    private static async Task<IResult> CheckMailNetworkAccess(string connectorId, string phase, HttpContext context,
+        IGatewayAuthGuard auth, IGatewayCatalogStore catalog, ConnectorAuthCatalog profiles,
+        ConnectorAuthEndpoint endpoint, INetworkAccessChecker checker, CancellationToken ct)
+    {
+        if (!TryGetUser(auth, context, out GatewayUser? user) || user is null) return Results.Unauthorized();
+        if (!TryAuthorizeConnector(catalog, user, connectorId, out IResult? denied)) return denied!;
+        ConnectorAuthProfile? profile = profiles.Find(connectorId);
+        if (profile?.Id is not ("kautuka-google-mail" or "kautuka-m365-mail")) return Results.BadRequest();
+        string? host = phase switch
+        {
+            "auth" when endpoint.IsHosted && Uri.TryCreate(endpoint.Host, UriKind.Absolute, out Uri? uri) => uri.IdnHost,
+            "mail" when profile?.Id == "kautuka-google-mail" => "gmail.googleapis.com",
+            "mail" when profile?.Id == "kautuka-m365-mail" => "graph.microsoft.com",
+            _ => null,
+        };
+        if (profile is null || host is null) return Results.BadRequest();
+        int port = phase == "auth" && Uri.TryCreate(endpoint.Host, UriKind.Absolute, out Uri? authUri) ? authUri.Port : 443;
+        var target = new OutboundTarget(host, port, UserId: user.Id,
+            ConnectorId: connectorId, Purpose: "connector-oauth", Service: "connector-auth");
+        NetworkAccessCheckResult result = await checker.CheckAsync(target, ct).ConfigureAwait(false);
+        var response = new JsonObject
+        {
+            ["allowed"] = result.Allowed,
+            ["requestId"] = result.RequestId,
+            ["reason"] = result.Reason,
+            ["destination"] = host
+        };
+        return Results.Json(response, KautukaJsonContext.Default.JsonObject);
     }
 
     private static async Task<IResult> CancelBoundMail(BoundExternalOperationRequest? body, HttpContext context, IGatewayAuthGuard auth,
@@ -117,7 +152,7 @@ internal static partial class ConnectorOAuthEndpointMappings
         if (intent is null) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
             userId: user.Id,
-            connectorId: profile!.Id,
+            connectorId: connectorId,
             purpose: "connector-oauth",
             service: "connector-auth");
         try
