@@ -96,7 +96,7 @@ internal sealed partial class BuiltInMcpPackageBootstrapService(
             }
 
             bool hasExisting = catalog.TryGetMcpServer(connectorId, out GatewayMcpServer? existing) && existing is not null;
-            bool keepEnabled = hasExisting ? existing!.Enabled : true;
+            bool keepEnabled = hasExisting && existing!.Enabled;
             await catalog.SaveSystemMcpServerAsync(
                 connectorId,
                 CreateRequest(inspection, keepEnabled, connectorId),
