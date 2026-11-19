@@ -22,7 +22,7 @@ This guide describes the architecture, approval workflows, operational procedure
 
 NAC governs managed workload traffic through Envoy. System-controlled Podman image-build steps and the OpenObserve sidecar use separate networking and do not pass through the workload Envoy authorization path. Server-first protocols have the limitations described below.
 
-The startup canary and acceptance runner use the base image pinned in the release runtime image manifest.
+The startup canary and acceptance runner use the base image pinned in the release runtime image manifest. A regression test checks that the canary follows a changed manifest value.
 
 Administrators can set the maximum pending network requests in Settings → Advanced → Network access. Defaults are 500 in total and 64 per user; ordinary requests and connector probes share these limits, including when a single probe creates multiple requests. Lowering a limit does not delete existing requests. The Gateway uses its authorized Manager client identity for both reading and updating the limits; non-administrators cannot access the setting.
 

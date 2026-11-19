@@ -70,7 +70,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public static string EnvoyPinnedImage => SelectRuntimeImage("envoy", RuntimeInformation.OSArchitecture);
     public static string CoreDnsPinnedImage => SelectRuntimeImage("coredns", RuntimeInformation.OSArchitecture);
     public static string BoundaryInitImage => FindRuntimeImage("egress-boundary").Image;
-    public static string CanaryBasePinnedImage => FindRuntimeImage("kautuka-base").Image;
+    public static string CanaryBasePinnedImage => ResolveCanaryBaseImage(runtimeImages);
+    internal static string ResolveCanaryBaseImage(RuntimeImageAllowlist images)
+        => images.Images.Single(entry => string.Equals(entry.Id, "kautuka-base", StringComparison.Ordinal)).Image;
 
     private static RuntimeImageAllowlist LoadRuntimeImages()
     {
