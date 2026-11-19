@@ -925,6 +925,14 @@ verify_envoy_selinux_policy_compatibility() {
         echo 'error: the Envoy SELinux policy differs from this release; run the current signed Linux installer before updating.' >&2
         return 1
     fi
+    local modules loaded expected
+    modules="$(semodule -lfull -m)" || { echo 'error: cannot inspect the loaded Envoy SELinux policy.' >&2; return 1; }
+    loaded="$(printf '%s\n' "$modules" | awk '$2 == "kautuka_envoy" && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
+    expected="sha256:$(sha256sum "$current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+    if [[ "$loaded" != "$expected" ]]; then
+        echo 'error: the loaded Envoy SELinux policy differs from the installed release; run the current signed Linux installer before updating.' >&2
+        return 1
+    fi
 }
 
 verify_nac_hook_compatibility() {

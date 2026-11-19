@@ -26,7 +26,24 @@ fi
 mkdir -p "$tmp/current/scripts"
 printf 'policy-v1\n' > "$tmp/current/scripts/kautuka_envoy.cil"
 cp "$tmp/current/scripts/kautuka_envoy.cil" "$tmp/candidate/scripts/kautuka_envoy.cil"
+loaded_checksum="sha256:$(sha256sum "$tmp/current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
 verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing
+semodule() { printf '400 kautuka_envoy cil %s\n500 kautuka_envoy cil sha256:wrong\n' "$loaded_checksum"; }
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'higher-priority changed Envoy module was accepted' >&2; exit 1
+fi
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
+loaded_checksum='sha256:0000000000000000000000000000000000000000000000000000000000000000'
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'changed loaded Envoy SELinux module was accepted' >&2; exit 1
+fi
+loaded_checksum="sha256:$(sha256sum "$tmp/current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+semodule() { :; }
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'missing loaded Envoy SELinux module was accepted' >&2; exit 1
+fi
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
 printf 'policy-v2\n' > "$tmp/candidate/scripts/kautuka_envoy.cil"
 if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
   echo 'changed Envoy SELinux policy was accepted' >&2; exit 1
