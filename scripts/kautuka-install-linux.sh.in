@@ -809,11 +809,7 @@ write_manager_user_unit() {
     local install_root="$2"
     local visible_root="$3"
     local selinux_env=''
-    local selinux_relabel=''
-    if [[ "${4:-false}" == 'true' ]]; then
-        selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'
-        selinux_relabel='ExecStartPre=/usr/bin/chcon -t container_file_t /run/kautuka/networkaccess-envoy'
-    fi
+    if [[ "${4:-false}" == 'true' ]]; then selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'; fi
 
     cat > "$unit_path" <<EOF
 [Unit]
@@ -824,7 +820,6 @@ PartOf=kautuka.target
 [Service]
 Type=exec
 WorkingDirectory=${install_root}/current
-${selinux_relabel}
 ExecStart=${install_root}/current/kautuka-manager
 Environment=Kautuka__Mode=prod
 Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka

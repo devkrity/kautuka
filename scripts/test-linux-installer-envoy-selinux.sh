@@ -29,8 +29,6 @@ getenforce() { printf '%s\n' Disabled; }
 install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates"
 write_manager_user_unit "$tmp/manager.service" /opt/kautuka/manager /var/lib/kautuka true
 grep -Fxq 'Environment=KAUTUKA_ENVOY_SELINUX=1' "$tmp/manager.service"
-grep -Fxq 'ExecStartPre=/usr/bin/chcon -t container_file_t /run/kautuka/networkaccess-envoy' "$tmp/manager.service"
 write_manager_user_unit "$tmp/manager.service" /opt/kautuka/manager /var/lib/kautuka false
 if grep -Fq 'KAUTUKA_ENVOY_SELINUX' "$tmp/manager.service"; then echo 'SELinux domain enabled on an unsupported host' >&2; exit 1; fi
-if grep -Fq 'ExecStartPre=/usr/bin/chcon' "$tmp/manager.service"; then echo 'SELinux relabel enabled on an unsupported host' >&2; exit 1; fi
 echo 'Envoy SELinux installation checks passed.'

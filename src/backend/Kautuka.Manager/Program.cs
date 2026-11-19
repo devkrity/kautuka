@@ -86,6 +86,7 @@ builder.Services.AddSingleton(_ =>
     new WorkloadAddressAllocator(Path.Combine(managerDataRoot, "networkAccess", "ip-cursor.json")));
 builder.Services.AddSingleton<WorkloadPostStartVerifier>();
 string envoySocketDir = Path.Combine(socketRoot, "networkaccess-envoy");
+EnvoySocketSelinuxLabel.RelabelIfRequired(OperatingSystem.IsLinux(), Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"), envoySocketDir);
 string hookStateDir = Environment.GetEnvironmentVariable("XDG_STATE_HOME") is { Length: > 0 } xdgState
     ? Path.Combine(xdgState, "kautuka", "nac")
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "state", "kautuka", "nac");
