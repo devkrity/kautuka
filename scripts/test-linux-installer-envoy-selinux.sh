@@ -8,6 +8,21 @@ source <(sed -n '/^write_manager_user_unit() {/,/^}/p' "$repo_root/scripts/kautu
 mkdir -p "$tmp/templates"
 touch "$tmp/templates/base_container.cil" "$tmp/templates/net_container.cil" "$tmp/kautuka_envoy.cil"
 getenforce() { printf '%s\n' Enforcing; }
+command() {
+  if [[ "$1" == -v && "$2" == dnf && "${TEST_APT:-no}" == yes ]]; then return 1; fi
+  if [[ "$1" == -v && ( "$2" == dnf || "$2" == apt-get ) && "${TEST_ZYPPER:-no}" == yes ]]; then return 1; fi
+  builtin command "$@"
+}
+zypper() {
+  [[ "$*" == '--non-interactive install udica' ]] || return 1
+  touch "$tmp/templates/base_container.cil" "$tmp/templates/net_container.cil"
+  printf 'zypper\n' > "$tmp/package-manager"
+}
+apt-get() {
+  [[ "$*" == 'install -y udica' ]] || return 1
+  touch "$tmp/templates/base_container.cil" "$tmp/templates/net_container.cil"
+  printf 'apt-get\n' > "$tmp/package-manager"
+}
 semodule() {
   if [[ "$1" == -l ]]; then
     if [[ "${MODULES_PRESENT:-yes}" == yes ]]; then printf 'base_container\nnet_container\n'; fi
@@ -23,6 +38,12 @@ MODULES_PRESENT=no install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/t
 grep -Fq "$tmp/templates/base_container.cil" "$tmp/semodule-call"
 grep -Fq "$tmp/templates/net_container.cil" "$tmp/semodule-call"
 if FAIL_INSTALL=yes install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates" >/dev/null 2>&1; then echo 'failed policy installation was accepted' >&2; exit 1; fi
+rm "$tmp/templates/base_container.cil" "$tmp/templates/net_container.cil"
+TEST_APT=yes install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates"
+grep -Fxq 'apt-get' "$tmp/package-manager"
+rm "$tmp/templates/base_container.cil" "$tmp/templates/net_container.cil"
+TEST_ZYPPER=yes install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates"
+grep -Fxq 'zypper' "$tmp/package-manager"
 rm "$tmp/kautuka_envoy.cil"
 if install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates" >/dev/null 2>&1; then echo 'missing SELinux policy was accepted' >&2; exit 1; fi
 getenforce() { printf '%s\n' Disabled; }
