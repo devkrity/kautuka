@@ -20,6 +20,8 @@ The [network access test index](../../src/tests/Kautuka.IntegrationTests/Network
 
 This guide describes the architecture, approval workflows, operational procedures, and troubleshooting diagnostics for **Kautuka Network Access Control (NAC) v7**.
 
+NAC governs managed workload traffic through Envoy. System-controlled Podman image-build steps and the OpenObserve sidecar use separate networking and do not pass through the workload Envoy authorization path. Server-first protocols have the limitations described below.
+
 Administrators can set the maximum pending network requests in Settings → Advanced → Network access. Defaults are 500 in total and 64 per user; ordinary requests and connector probes share these limits, including when a single probe creates multiple requests. Lowering a limit does not delete existing requests. The Gateway uses its authorized Manager client identity for both reading and updating the limits; non-administrators cannot access the setting.
 
 Approved tool calls resumed by the background dispatcher retain the approving run's user, agent, and connector identity for network access checks. This is covered by a focused continuation test.
