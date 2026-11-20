@@ -13,6 +13,7 @@ import { PackageCacheStatsSection } from './PackageCacheStatsSection';
 import { AuthenticationBrokerSection } from './AuthenticationBrokerSection';
 import { NetworkAccessLimitsSection } from './NetworkAccessLimitsSection';
 import { ChannelPublicAddressSection } from './ChannelPublicAddressSection';
+import { ChannelSettingsSection } from './ChannelSettingsSection';
 
 const structuredJsonStrictPromotionThresholdLabel = 'Structured JSON strict promotion threshold';
 const structuredJsonStrictPromotionThresholdId = 'structured-json-strict-promotion-threshold';
@@ -227,6 +228,7 @@ export function AdvancedTab() {
             <TabsContent value="network-access" className="space-y-4">
               <NetworkAccessLimitsSection />
               <ChannelPublicAddressSection />
+              <ChannelSettingsSection />
             </TabsContent>
 
             <TabsContent value="workspace" className="space-y-4">

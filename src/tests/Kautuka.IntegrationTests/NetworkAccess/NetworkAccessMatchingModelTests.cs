@@ -7,6 +7,57 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class NetworkAccessMatchingModelTests
 {
     [Fact]
+    public void SlackChannelSwitchCoversSubdomainsOnlyForChannelHost()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-slack-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"), seedRules: NetworkAccessDefaultSeeds.DefaultRules);
+            var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry());
+            var admin = new NetworkAccessActor("admin", true);
+            var channel = new OutboundCheckInput("system", "channelhost", null, "dynamic.slack.com", 443, null, null);
+            Assert.False(controller.EvaluateOutboundCheck(channel).Allowed);
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "slack.com", "host", 443, true), store.Revision);
+            Assert.True(controller.EvaluateOutboundCheck(channel).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "assistant", null, "dynamic.slack.com", 443, null, null)).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("system", "channelhost", null, "evilslack.com", 443, null, null)).Allowed);
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "dynamic.slack.com", "host", 443, true), store.Revision);
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "slack.com", "host", 443, false), store.Revision);
+            Assert.False(controller.EvaluateOutboundCheck(channel).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+    [Theory]
+    [InlineData("api.telegram.org")]
+    [InlineData("slack.com")]
+    [InlineData("files.slack.com")]
+    [InlineData("wss-primary.slack.com")]
+    [InlineData("wss-backup.slack.com")]
+    public void ChannelsStartBlockedAndAdminCanEnableOnlyTheChannelService(string host)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "nac-channel-setting-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"), seedRules: NetworkAccessDefaultSeeds.DefaultRules);
+            var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry());
+            var admin = new NetworkAccessActor("admin", true);
+            var channel = new OutboundCheckInput("system", "channelhost", null, host, 443, null, null);
+            Assert.False(controller.EvaluateOutboundCheck(channel).Allowed);
+            Assert.Throws<UnauthorizedAccessException>(() => store.SetRule(new NetworkAccessActor("alice", false),
+                new RuleWriteSpec("agent", "system", "channelhost", null, host, "host", 443, true), store.Revision));
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, host, "host", 443, true), store.Revision);
+            Assert.True(controller.EvaluateOutboundCheck(channel).Allowed);
+            Assert.False(controller.EvaluateOutboundCheck(new OutboundCheckInput("alice", "assistant", null, host, 443, null, null)).Allowed);
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, host, "host", 443, false), store.Revision);
+            Assert.False(controller.EvaluateOutboundCheck(channel).Allowed);
+            store.SetRule(admin, new RuleWriteSpec("system", null, null, null, host, "host", 443, true), store.Revision);
+            Assert.False(controller.EvaluateOutboundCheck(channel).Allowed);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+    [Fact]
     public void DocumentedScopeExamplesMatchContainerAndDiscoveryDecisions()
     {
         string root = Path.Combine(Path.GetTempPath(), "nac-examples-" + Guid.NewGuid().ToString("N"));
