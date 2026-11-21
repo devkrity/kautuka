@@ -488,6 +488,9 @@ public sealed class UpdateServiceIntegrationTests
             : version;
         string channel = manifest.RootElement.GetProperty("channel").GetString()!;
         string releaseTag = manifest.RootElement.GetProperty("releaseTag").GetString()!;
+        bool appliance = manifest.RootElement.TryGetProperty("applianceDeployment", out _);
+        string installedVersion = channel == "preview" ? "0.0.0-preview.1" : "0.0.0";
+        string installedReleaseId = $"v{installedVersion}";
         string artifactUrl = manifest.RootElement.GetProperty("artifacts").EnumerateArray()
             .First(artifact => string.Equals(artifact.GetProperty("platform").GetString(), "linux-x64", StringComparison.OrdinalIgnoreCase))
             .GetProperty("url").GetString()!;
@@ -500,6 +503,7 @@ public sealed class UpdateServiceIntegrationTests
                 UpdateStateRecord.CreateDefault() with
                 {
                     State = UpdateWorkflowState.Available,
+                    CurrentRelease = CreateRelease(installedVersion, channel) with { ReleaseId = installedReleaseId },
                     AvailableRelease = new UpdateReleaseReference(
                         ReleaseId: releaseId,
                         Version: version,
@@ -513,7 +517,8 @@ public sealed class UpdateServiceIntegrationTests
                         Tag: releaseTag)
                 });
 
-            var hostIntegration = new RecordingUpdateServiceIntegration(tempRoot);
+            var hostIntegration = new RecordingUpdateServiceIntegration(
+                tempRoot, installedVersion, installedReleaseId, applianceBootConfirmed: appliance ? true : null);
             string publicKeyPath = Path.Combine(tempRoot, "manifest-public.pem");
             if (!string.IsNullOrWhiteSpace(publicKeyPathFromEnv))
             {
@@ -528,7 +533,9 @@ public sealed class UpdateServiceIntegrationTests
             {
                 Enabled = true,
                 StateRootPath = tempRoot,
-                ManifestPublicKeyPath = publicKeyPath
+                ManifestPublicKeyPath = publicKeyPath,
+                ApplianceReleaseId = appliance ? installedReleaseId : null,
+                ApplianceReleaseVersion = appliance ? installedVersion : null,
             });
 
             var services = new ServiceCollection();
@@ -538,7 +545,7 @@ public sealed class UpdateServiceIntegrationTests
 
             var coordinator = new UpdateCoordinator(
                 stateStore,
-                new InMemoryUpdateRuntimePolicyStore("preview"),
+                new InMemoryUpdateRuntimePolicyStore(channel),
                 new NullReleaseDiscoveryClient(NullLogger<NullReleaseDiscoveryClient>.Instance),
                 httpClientFactory,
                 hostIntegration,
@@ -547,7 +554,7 @@ public sealed class UpdateServiceIntegrationTests
                 NullLogger<UpdateCoordinator>.Instance);
 
             UpdateStatusSnapshot applying = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
-            Assert.Equal(UpdateWorkflowState.Applying, applying.State);
+            Assert.True(applying.State == UpdateWorkflowState.Applying, $"Expected Applying, got {applying.State}. {applying.LastError}");
             Assert.Equal(releaseId, hostIntegration.ActivatedReleaseId);
             Assert.True(File.Exists(hostIntegration.ActivatedPlatformPackagePath));
             Assert.Equal(string.Empty, hostIntegration.ActivatedPlatformExtractedPath);
