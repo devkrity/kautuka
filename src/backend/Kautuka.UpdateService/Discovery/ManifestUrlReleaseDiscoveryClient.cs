@@ -82,6 +82,11 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
         {
             return ReleaseDiscoveryResult.Unsupported("Invalid appliance deployment descriptor.", eTag);
         }
+        if (options.ApplianceReleaseId is not null && appliance is null)
+        {
+            return ReleaseDiscoveryResult.Unsupported("The selected release has no appliance deployment descriptor.", eTag);
+        }
+
         PlatformReleaseDescriptor? descriptor = JsonSerializer.Deserialize(
             manifestBytes,
             PlatformReleaseDescriptorJsonContext.Default.PlatformReleaseDescriptor);

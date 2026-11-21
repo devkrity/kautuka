@@ -1278,6 +1278,10 @@ internal sealed class UpdateCoordinator(
         byte[] manifestBytes = await DownloadBytesAsync(descriptorUrl, cancellationToken).ConfigureAwait(false);
         bool requireVerification = ReleaseTrustPolicy.RequiresVerification(options);
         ApplianceDeploymentDescriptor? appliance = ApplianceDeploymentManifest.Parse(manifestBytes);
+        if (options.ApplianceReleaseId is not null && appliance is null)
+        {
+            throw new InvalidOperationException("The selected release has no appliance deployment descriptor.");
+        }
 
         if (string.IsNullOrWhiteSpace(signatureUrl))
         {
@@ -1301,7 +1305,7 @@ internal sealed class UpdateCoordinator(
                 throw new InvalidOperationException(verificationError ?? "Platform release signature verification failed.");
             }
 
-            if (appliance is not null)
+            if (appliance is not null && options.ApplianceReleaseId is null)
                 throw new InvalidOperationException("Appliance deployment activation is not supported by this updater.");
 
             // The privileged helper independently verifies these bytes and a private

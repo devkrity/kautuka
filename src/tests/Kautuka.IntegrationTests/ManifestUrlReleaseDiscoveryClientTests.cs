@@ -247,6 +247,36 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
     }
 
     [Fact]
+    public async Task ApplianceDiscoveryRejectsSignedHostServiceReleaseAsync()
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const string tag = "v1.2.3-preview.10";
+        const string releaseBase = $"https://github.com/devkrity/kautuka/releases/download/{tag}";
+        byte[] manifest = CreateManifest(key, "preview", tag);
+        string publicKeyPath = await WritePublicKeyAsync(key.ExportSubjectPublicKeyInfoPem());
+        var handler = new RouteHttpMessageHandler(request => request.RequestUri!.AbsoluteUri switch
+        {
+            api + "1" => JsonResponse(ReleaseRows((tag, false, true, true))),
+            releaseBase + "/kautuka-platform-release.json" => JsonResponse(manifest),
+            releaseBase + "/kautuka-platform-release.sig" => TextResponse(Sign(key, manifest)),
+            _ => throw new InvalidOperationException($"Unexpected request: {request.RequestUri}"),
+        });
+
+        try
+        {
+            ReleaseDiscoveryResult result = await CreateClient(handler, publicKeyPath, "v1.2.3-preview.9").DiscoverAsync(
+                new("devkrity", "kautuka", "preview", null), TestContext.Current.CancellationToken);
+            Assert.Null(result.AvailableRelease);
+            Assert.True(result.IsUnsupported);
+            Assert.Contains("no appliance deployment descriptor", result.FailureReason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(publicKeyPath);
+        }
+    }
+
+    [Fact]
     public async Task ApplianceDiscoveryRequiresSignatureEvenForLocalFeedAsync()
     {
         using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
@@ -272,9 +302,10 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
         }
         finally { File.Delete(publicKey); }
     }
-    private static ManifestUrlReleaseDiscoveryClient CreateClient(HttpMessageHandler handler, string publicKeyPath)
+    private static ManifestUrlReleaseDiscoveryClient CreateClient(HttpMessageHandler handler, string publicKeyPath, string? applianceReleaseId = null)
         => new(new StubHttpClientFactory(handler), Options.Create(new UpdateOptions
         {
+            ApplianceReleaseId = applianceReleaseId,
             RepositoryOwner = "devkrity",
             RepositoryName = "kautuka",
             ManifestPublicKeyPath = publicKeyPath,

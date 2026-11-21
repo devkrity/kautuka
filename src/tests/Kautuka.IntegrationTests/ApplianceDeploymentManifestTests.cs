@@ -16,8 +16,10 @@ public sealed class ApplianceDeploymentManifestTests
         string.Join(',', new[] { "credentialshost", "channelhost", "gateway", "webhost", "updateservice" }.Select(Service)) + "}}}";
     private static ApplianceDeploymentDescriptor? Parse(string text) => ApplianceDeploymentManifest.Parse(Encoding.UTF8.GetBytes(text));
 
-    [Fact]
-    public async Task PreparationRejectsSignedAndUnsignedApplianceBeforeWritingLegacyHandoff()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("v1.2.3-preview.9")]
+    public async Task PreparationWritesVerifiedApplianceMetadataOnlyInApplianceMode(string? installedAppliance)
     {
         string temp = Path.Combine(Path.GetTempPath(), "appliance-manifest-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -27,15 +29,32 @@ public sealed class ApplianceDeploymentManifestTests
         byte[] manifest = Encoding.UTF8.GetBytes(Valid());
         string signature = Convert.ToBase64String(key.SignData(manifest, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
         var factory = new ManifestFactory(manifest, signature);
-        var coordinator = new UpdateCoordinator(null!, null!, null!, factory, null!, null!,
-            Options.Create(new UpdateOptions { AllowUnsignedLocalFeeds = true, ManifestPublicKeyPath = keyPath }), NullLogger<UpdateCoordinator>.Instance);
+        var coordinator = new UpdateCoordinator(null!, null!, null!, factory, null!, null!, Options.Create(new UpdateOptions
+        {
+            ApplianceReleaseId = installedAppliance,
+            AllowUnsignedLocalFeeds = true,
+            ManifestPublicKeyPath = keyPath,
+        }), NullLogger<UpdateCoordinator>.Instance);
         try
         {
             await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.DownloadPlatformReleaseDescriptorAsync("https://example.test/manifest", null, temp, TestContext.Current.CancellationToken));
-            InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.DownloadPlatformReleaseDescriptorAsync("https://example.test/manifest", "https://example.test/signature", temp, TestContext.Current.CancellationToken));
-            Assert.Contains("activation is not supported", error.Message, StringComparison.Ordinal);
-            Assert.False(File.Exists(Path.Combine(temp, "kautuka-platform-release.json")));
-            Assert.False(File.Exists(Path.Combine(temp, "kautuka-platform-release.sig")));
+            string manifestPath = Path.Combine(temp, "kautuka-platform-release.json");
+            string signaturePath = Path.Combine(temp, "kautuka-platform-release.sig");
+            Assert.False(File.Exists(manifestPath));
+            Assert.False(File.Exists(signaturePath));
+            Task DownloadSignedManifest() => coordinator.DownloadPlatformReleaseDescriptorAsync("https://example.test/manifest", "https://example.test/signature", temp, TestContext.Current.CancellationToken);
+            if (installedAppliance is null)
+            {
+                InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(DownloadSignedManifest);
+                Assert.Contains("activation is not supported", error.Message, StringComparison.Ordinal);
+                Assert.False(File.Exists(manifestPath));
+                Assert.False(File.Exists(signaturePath));
+                return;
+            }
+
+            await DownloadSignedManifest();
+            Assert.Equal(manifest, await File.ReadAllBytesAsync(manifestPath, TestContext.Current.CancellationToken));
+            Assert.Equal(signature, await File.ReadAllTextAsync(signaturePath, TestContext.Current.CancellationToken));
         }
         finally { Directory.Delete(temp, true); }
     }

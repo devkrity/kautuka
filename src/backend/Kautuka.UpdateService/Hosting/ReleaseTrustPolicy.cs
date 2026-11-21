@@ -25,7 +25,7 @@ internal static class ReleaseTrustPolicy
     public static bool RequiresVerification(UpdateOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        return !options.AllowUnsignedLocalFeeds;
+        return options.ApplianceReleaseId is not null || !options.AllowUnsignedLocalFeeds;
     }
 
     public static void EnsureApprovedSourceUrl(string assetUrl, UpdateOptions options, string purpose)
