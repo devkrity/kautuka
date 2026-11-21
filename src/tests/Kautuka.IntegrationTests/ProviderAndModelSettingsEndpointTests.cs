@@ -11,7 +11,6 @@ using Grpc.Core;
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Autopilot;
 using Kautuka.Gateway.Domain.Providers;
-using Kautuka.Gateway.Endpoints.Settings;
 using Kautuka.Gateway.Infrastructure.Channels;
 using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.Gateway.Domain.Stores;
@@ -130,45 +129,38 @@ public sealed class ProviderSettingsEndpointTests
                 aiClientFactory,
                 providerTypeCatalog,
                 NullLogger<ProviderValidationService>.Instance);
-            var builder = WebApplication.CreateBuilder();
-            builder.WebHost.UseTestServer();
-            builder.Services.ConfigureHttpJsonOptions(options => options.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
-            builder.Services.AddSingleton<IProviderValidationService>(validation);
-            builder.Services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
-            WebApplication app = builder.Build();
-            await using (app)
+            await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services =>
             {
-                app.MapGatewaySettingsEndpoints();
-                await app.StartAsync(TestContext.Current.CancellationToken);
-                using HttpClient client = app.GetTestClient();
-
-                using HttpResponseMessage response = await client.PostAsJsonAsync(
-                    "/api/settings/providers/test",
-                    new
+                services.AddSingleton<IProviderValidationService>(validation);
+                services.AddSingleton<IGatewayAuthGuard, ProviderTestAdminAuthGuard>();
+            });
+            string token = await fixture.LoginAsBootstrapAdminAsync();
+            using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post,
+                "/api/settings/providers/test",
+                new
+                {
+                    provider_id = "custom-openai",
+                    type = "openai",
+                    settings = new
                     {
-                        provider_id = "custom-openai",
-                        type = "openai",
-                        settings = new
-                        {
-                            base_url = "https://api.provider.test/v1",
-                            api_key = "test-key",
-                        },
+                        base_url = "https://api.provider.test/v1",
+                        api_key = "test-key",
                     },
-                    cancellationToken: TestContext.Current.CancellationToken);
-                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-                Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
-                Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), checker.Scope);
+                },
+                token);
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            Assert.Equal("api.provider.test", Assert.Single(checker.Targets).Host);
+            Assert.Equal(new NetworkAccessScope("admin-1", "gateway", Purpose: "provider-test", Service: "ai-provider"), checker.Scope);
 
-                var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-                NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
-                    .Select(static view => view.Request)
-                    .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
-                Assert.NotNull(pending);
-                Assert.Equal("gateway", pending.AgentId);
-                Assert.Equal("user-agent", pending.Attribution);
-                Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
-                await policyStore.FlushPendingWritesAsync();
-            }
+            var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
+            NetworkAccessRequest? pending = policyStore.ListRequests(admin).Requests
+                .Select(static view => view.Request)
+                .SingleOrDefault(request => request.Destination == "api.provider.test" && request.Port == 443 && request.UserId == "admin-1");
+            Assert.NotNull(pending);
+            Assert.Equal("gateway", pending.AgentId);
+            Assert.Equal("user-agent", pending.Attribution);
+            Assert.DoesNotContain(policyStore.ListRules(admin).Rules, view => view.Rule.Destination == "api.provider.test");
+            await policyStore.FlushPendingWritesAsync();
         }
         finally
         {
@@ -625,19 +617,12 @@ public sealed class ModelSettingsEndpointTests
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Minimal-pattern tests — model discovery endpoint
-// These use a hand-rolled WebApplication with only the required services,
-// avoiding the full GatewayAppBootstrap startup time.
+// Model discovery endpoint with production Gateway routing and a probe double.
 // ─────────────────────────────────────────────────────────────────────────────
 
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ModelDiscoveryEndpointTests
 {
-    private static readonly JsonSerializerOptions jsonOpts = new()
-    {
-        TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
-    };
-
     [Fact]
     public async Task DiscoverModelsEndpointReturnsModelsFromService()
     {
@@ -646,18 +631,13 @@ public sealed class ModelDiscoveryEndpointTests
             new DiscoveredModelDefinition("llama3:8b", "Llama 3 8B"),
         ]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument doc = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "ollama-local" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
+            token);
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-
-        using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
         JsonElement models = doc.RootElement.GetProperty("models");
         Assert.Equal(2, models.GetArrayLength());
         Assert.Equal("gemma3:9b", models[0].GetProperty("id").GetString());
@@ -665,20 +645,22 @@ public sealed class ModelDiscoveryEndpointTests
     }
 
     [Fact]
-    public async Task DiscoverModelsEndpointPassesProviderIdToService()
+    public async Task DiscoverModelsEndpointPassesProviderIdAndCallerScopeToService()
     {
         var fakeProbe = new CapturingModelProbeService([]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument _ = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "my-special-provider" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
+            token);
 
         Assert.Equal("my-special-provider", fakeProbe.LastProviderIdReceived);
+        NetworkAccessScope scope = Assert.IsType<NetworkAccessScope>(fakeProbe.LastCaller);
+        Assert.False(string.IsNullOrWhiteSpace(scope.UserId));
+        Assert.Equal("gateway", scope.AgentId);
+        Assert.Equal("ai-discovery", scope.Purpose);
     }
 
     [Fact]
@@ -687,43 +669,25 @@ public sealed class ModelDiscoveryEndpointTests
         // IModelProbeService returns empty for unknown provider — endpoint surfaces this as empty array.
         var fakeProbe = new CapturingModelProbeService([]);
 
-        using WebApplication app = await BuildMinimalAppAsync(fakeProbe);
-        using HttpClient client = app.GetTestClient();
-
-        using HttpResponseMessage response = await client.PostAsJsonAsync(
+        await using var fixture = await ProviderModelFixture.CreateAsync(configureServices: services => services.AddSingleton<IModelProbeService>(fakeProbe));
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument doc = await fixture.SendJsonAsync(HttpMethod.Post,
             "/api/settings/models/discover",
             new { providerId = "nonexistent" },
-            jsonOpts,
-            TestContext.Current.CancellationToken);
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+            token);
         Assert.Equal(0, doc.RootElement.GetProperty("models").GetArrayLength());
-    }
-
-    private static async Task<WebApplication> BuildMinimalAppAsync(IModelProbeService modelProbeService)
-    {
-        var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseTestServer();
-        builder.Services.ConfigureHttpJsonOptions(o =>
-            o.SerializerOptions.TypeInfoResolver = new DefaultJsonTypeInfoResolver());
-        builder.Services.AddSingleton<IModelProbeService>(modelProbeService);
-        builder.Services.AddSingleton<IGatewayAuthGuard, AllowAllAuthGuard>();
-
-        WebApplication app = builder.Build();
-        app.MapGatewaySettingsEndpoints();
-        await app.StartAsync(TestContext.Current.CancellationToken);
-        return app;
     }
 
     private sealed class CapturingModelProbeService(IReadOnlyList<DiscoveredModelDefinition> models)
         : IModelProbeService
     {
         public string? LastProviderIdReceived { get; private set; }
+        public NetworkAccessScope? LastCaller { get; private set; }
 
         public Task<IReadOnlyList<DiscoveredModelDefinition>> DiscoverModelsAsync(string providerId)
         {
             LastProviderIdReceived = providerId;
+            LastCaller = NetworkAccessContext.Current;
             return Task.FromResult(models);
         }
 
@@ -734,35 +698,6 @@ public sealed class ModelDiscoveryEndpointTests
             => Task.FromResult(new GatewayModelCapabilities(null, null, null, null, null, null, DateTimeOffset.UtcNow.ToString("O")));
     }
 
-    private sealed class AllowAllAuthGuard : IGatewayAuthGuard
-    {
-        public bool TryAuthorize(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return true;
-        }
-
-        public IResult? RequireAuthenticated(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return null;
-        }
-
-        public IResult? RequireAdmin(HttpContext context, out GatewayUser? user)
-        {
-            user = BuildUser();
-            return null;
-        }
-
-        private static GatewayUser BuildUser() => new(
-            Id: "user-1",
-            Username: "tester",
-            Password: "pwd",
-            Role: "admin",
-            IsActive: true,
-            Email: null,
-                DisplayName: null);
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -934,7 +869,7 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
     internal static IManagerGrpcService CreateTestManager(NetworkAccessPolicyStore rules)
         => new ManagerGrpcServiceClient(new ProviderRulesCallInvoker(rules), "http://localhost");
 
-    public static async Task<ProviderModelFixture> CreateAsync(bool useControlledValidation = false)
+    public static async Task<ProviderModelFixture> CreateAsync(bool useControlledValidation = false, Action<IServiceCollection>? configureServices = null)
     {
         string root = Path.Combine(
             Path.GetTempPath(), "kautuka-provider-model-tests", Guid.NewGuid().ToString("N"));
@@ -982,6 +917,7 @@ internal sealed class ProviderModelFixture : IAsyncDisposable
 
         builder.Services.Configure<HostOptions>(o =>
             o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+        configureServices?.Invoke(builder.Services);
 
         WebApplication app = builder.Build();
         var database = app.Services.GetRequiredService<KautukaDatabase>();
