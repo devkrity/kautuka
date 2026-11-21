@@ -77,6 +77,10 @@ if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
         throw new InvalidOperationException("Appliance service supervision requires Linux production mode.");
     }
 
+    string stateRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration);
+    if (Path.TrimEndingDirectorySeparator(stateRoot) == Path.TrimEndingDirectorySeparator(socketRoot))
+        throw new InvalidOperationException("Appliance service sockets must be stored separately from service state and private keys.");
+
     const string managerRoot = "/opt/kautuka/manager";
     VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
         TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
@@ -85,7 +89,7 @@ if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
     string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
     builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
-        KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), socketRoot,
+        stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
         gatewayConnectDirectory));
 }

@@ -22,7 +22,6 @@ public sealed class ApplianceServiceSupervisorTests
     {
         var podman = new PodmanCommandRunner((args, _) => Task.FromResult(args[1] switch
         {
-            "exists" => new PodmanCommandResult(0, "", ""),
             "inspect" => new PodmanCommandResult(0, $$$"""[{"Id":"{{{Id}}}","Config":{"Labels":null}}]""", ""),
             _ => throw new InvalidOperationException($"Unexpected Podman call: {string.Join(' ', args)}"),
         }));
@@ -185,9 +184,10 @@ public sealed class ApplianceServiceSupervisorTests
         string runtime = Path.Combine(root, "runtime");
         Assert.False(Directory.Exists(runtime));
         Directory.CreateDirectory(Path.Combine(runtime, "credentialsHost"));
-        Directory.CreateDirectory(Path.Combine(runtime, Role));
+        string sockets = Path.Combine(runtime, "sockets");
+        foreach (string role in new[] { Role, "channelhost", "gateway", "manager" })
+            Directory.CreateDirectory(Path.Combine(sockets, role));
         Directory.CreateDirectory(Path.Combine(runtime, "channelHost"));
-        Directory.CreateDirectory(Path.Combine(runtime, "channelhost"));
         string manager = Path.Combine(runtime, "manager");
         Directory.CreateDirectory(manager);
         ChannelSecurityMaterialDirectories securityRoots = ProvisionTrust(runtime, manager);
@@ -233,11 +233,11 @@ public sealed class ApplianceServiceSupervisorTests
         PodmanCommandResult channelLoad = await podman.RunAsync(["load", "--input", Path.Combine(images, "channelhost.tar")], 30, cancellation);
         Assert.True(channelLoad.ExitCode == 0, channelLoad.StdErr);
 
-        using var supervisor = CreateSupervisor(podman, release, runtime);
+        using var supervisor = new ApplianceServiceSupervisor(podman, release, root, runtime, sockets, NullLogger<ApplianceServiceSupervisor>.Instance);
         try
         {
             string first = await supervisor.EnsureRunningAsync(Role, cancellation);
-            string socket = Path.Combine(runtime, Role, "credentialshost.sock");
+            string socket = Path.Combine(sockets, Role, "credentialshost.sock");
             string transport = Path.Combine(runtime, "credentialsHost", "transport");
             await WaitForReadinessAsync(socket, Path.Combine(transport, ".ca.cer"), Path.Combine(transport, ".credentials-client.pfx"), cancellation);
             byte[] originalCa = await File.ReadAllBytesAsync(Path.Combine(transport, ".ca.cer"), cancellation);
@@ -249,7 +249,7 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.Equal(originalCa, await File.ReadAllBytesAsync(Path.Combine(transport, ".ca.cer"), cancellation));
 
             string channel = await supervisor.EnsureRunningAsync("channelhost", cancellation);
-            string channelSocket = Path.Combine(runtime, "channelhost", "channelhost.sock");
+            string channelSocket = Path.Combine(sockets, "channelhost", "channelhost.sock");
             string channelCa = Path.Combine(securityRoots.GatewayTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate);
             string gatewayClient = Path.Combine(securityRoots.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx);
             await WaitForReadinessAsync(channelSocket, channelCa, gatewayClient, cancellation);
@@ -269,7 +269,7 @@ public sealed class ApplianceServiceSupervisorTests
             if (gatewayEnabled)
             {
                 Assert.True(OperatingSystem.IsLinux());
-                await RunGatewayFixtureAsync(root, runtime, images, gatewayHook!, podman, release, hooks => fixtureHooks = hooks, cancellation);
+                await RunGatewayFixtureAsync(root, runtime, sockets, images, gatewayHook!, podman, release, hooks => fixtureHooks = hooks, cancellation);
                 Assert.Contains(calls, call => call.SequenceEqual(["image", "inspect", "--format", "{{.Id}}", release.Deployment.Images["gateway"]]));
             }
         }
@@ -289,7 +289,7 @@ public sealed class ApplianceServiceSupervisorTests
         }
     }
 
-    private static async Task RunGatewayFixtureAsync(string root, string runtime, string images, string nativeHook,
+    private static async Task RunGatewayFixtureAsync(string root, string runtime, string sockets, string images, string nativeHook,
         PodmanCommandRunner podman, VerifiedApplianceRelease release, Action<string> setFixtureHooks, CancellationToken token)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
@@ -322,16 +322,23 @@ public sealed class ApplianceServiceSupervisorTests
             gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory);
         topology.WriteInfraAllowlist([]);
         typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
-        using var gateway = new ApplianceServiceSupervisor(podman, release, version, runtime, runtime,
+        int imageInspections = 0;
+        var gatewayPodman = new PodmanCommandRunner((args, cancellation) =>
+        {
+            if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect") imageInspections++;
+            return podman.RunAsync(args, 30, cancellation);
+        });
+        using var gateway = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
             NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory);
         try
         {
             string id = await gateway.EnsureRunningAsync("gateway", token);
             Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
+            Assert.Equal(1, imageInspections);
             PodmanCommandResult inspected = await podman.RunAsync(["container", "inspect", id], 15, token);
             Assert.Equal(0, inspected.ExitCode);
             AssertGatewayMounts(inspected.StdOut, runtime);
-            string socket = Path.Combine(runtime, "gateway", "gateway.sock");
+            string socket = Path.Combine(sockets, "gateway", "gateway.sock");
             bool ready = false;
             for (int attempt = 0; attempt < 40 && !ready; attempt++)
             {
@@ -339,6 +346,21 @@ public sealed class ApplianceServiceSupervisorTests
                 if (!ready) await Task.Delay(TimeSpan.FromMilliseconds(250), token);
             }
             Assert.True(ready, "Gateway did not answer its health probe.");
+            Assert.Equal(0, (await podman.RunAsync(["stop", id], 30, token)).ExitCode);
+            Assert.True(await ApplianceServiceReadiness.CheckAsync(Path.Combine(sockets, "credentialshost", "credentialshost.sock"),
+                Path.Combine(runtime, "credentialsHost", "transport", ".ca.cer"),
+                Path.Combine(runtime, "credentialsHost", "transport", ".credentials-client.pfx"), token));
+            Assert.True(await ApplianceServiceReadiness.CheckAsync(Path.Combine(sockets, "channelhost", "channelhost.sock"),
+                Path.Combine(runtime, "security", "channel", "gateway-trust", ChannelSecurityMaterialProvisioner.CaCertificate),
+                Path.Combine(runtime, "security", "channel", "gateway-private", ChannelSecurityMaterialProvisioner.GatewayClientPfx), token));
+            Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
+            ready = false;
+            for (int attempt = 0; attempt < 40 && !ready; attempt++)
+            {
+                ready = await ApplianceServiceReadiness.CheckGatewayAsync(socket, token);
+                if (!ready) await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+            }
+            Assert.True(ready, "Gateway did not recover after restart.");
         }
         finally
         {
