@@ -50,6 +50,18 @@ public sealed class ApplianceRoleImageImporterTests
         Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(
             valid.Replace(imageId, "missing", StringComparison.Ordinal), references, "amd64"));
         Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds("{}", references, "amd64"));
+
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(
+            valid, references, "amd64", requireVerificationFence: true));
+        string fenced = valid.Replace(
+            """{ "io.kautuka.service.role": "gateway" }""",
+            """{ "io.kautuka.service.role": "gateway", "io.kautuka.service.appliance-fence": "1" }""",
+            StringComparison.Ordinal);
+        Assert.Equal($"sha256:{imageId}", ApplianceRoleImageImporter.ReadInstalledImageIds(
+            fenced, references, "amd64", requireVerificationFence: true)["gateway"]);
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(
+            fenced.Replace("""appliance-fence": "1" """, """appliance-fence": "0" """, StringComparison.Ordinal),
+            references, "amd64", requireVerificationFence: true));
     }
 
     private static MemoryStream Archive(string index, bool duplicate = false)

@@ -5,6 +5,27 @@ namespace Kautuka.IntegrationTests;
 public sealed class TrustedApplianceReleaseFilesTests
 {
     [Fact]
+    public void VerificationRequiresProtectedMarkerNamingTheSelectedRelease()
+    {
+        if (!OperatingSystem.IsLinux() || Environment.UserName != "root") return;
+        string directory = Path.Combine("/root", "kautuka-verification-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string marker = Path.Combine(directory, "maintenance.json");
+        try
+        {
+            Assert.Throws<IOException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
+            File.WriteAllText(marker, """{"phase":"committed","targetRelease":"1.2.3"}""");
+            Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
+            File.WriteAllText(marker, """{"phase":"verifying","targetRelease":"1.2.3"}""");
+            Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.4", directory));
+            TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory);
+            File.SetUnixFileMode(marker, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupWrite);
+            Assert.Throws<IOException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void ReadsOnlyProtectedVersionedFilesAndKey()
     {
         if (!OperatingSystem.IsLinux() || Environment.UserName != "root") return;
@@ -37,13 +58,13 @@ public sealed class TrustedApplianceReleaseFilesTests
             Assert.Equal("signature", actual.SignatureContent);
             Assert.Equal("key", actual.PublicKeyPem);
             Assert.Equal("{}", System.Text.Encoding.UTF8.GetString(actual.ManifestBytes));
-            Directory.Delete(pointer);
+            File.Delete(pointer);
             Directory.CreateSymbolicLink(pointer, version);
             Assert.Equal("v1", TrustedApplianceReleaseFiles.Read(manager, keys).VersionDirectoryName);
-            Directory.Delete(pointer);
+            File.Delete(pointer);
             Directory.CreateSymbolicLink(pointer, "versions/../keys");
             Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.Read(manager, keys));
-            Directory.Delete(pointer);
+            File.Delete(pointer);
             Directory.CreateSymbolicLink(pointer, "versions/v1");
             string manifest = Path.Combine(version, "kautuka-platform-release.json");
             File.SetUnixFileMode(manifest, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupWrite);

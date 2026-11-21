@@ -23,7 +23,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     PodmanImageArchiveStore? imageArchives = null,
     bool superviseObservability = false,
     bool superviseUpdateService = false,
-    Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null) : BackgroundService
+    Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null,
+    bool verificationMode = false) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -68,13 +69,13 @@ internal sealed partial class ApplianceServiceSupervisor(
         try
         {
             var imageIds = await new ApplianceRoleImageImporter(podman)
-                .EnsureAsync(release.Deployment, versionDirectory, stoppingToken).ConfigureAwait(false);
+                .EnsureAsync(release.Deployment, versionDirectory, stoppingToken, requireVerificationFence: verificationMode).ConfigureAwait(false);
             foreach (Service service in new[] { credentials, channel, gateway, webHost, updater })
                 service.RuntimeImageId = imageIds[service.Role];
             using var timer = new PeriodicTimer(reconcileDelay);
             do
             {
-                if (KautukaMaintenanceMode.IsActive || (superviseObservability && topology?.IsStartupGateOpen != true))
+                if ((!verificationMode && KautukaMaintenanceMode.IsActive) || (superviseObservability && topology?.IsStartupGateOpen != true))
                     await StopCohortAsync(stoppingToken).ConfigureAwait(false);
                 else
                     await ReconcileServicesAsync(stoppingToken).ConfigureAwait(false);
@@ -346,7 +347,11 @@ internal sealed partial class ApplianceServiceSupervisor(
         // peer uses custom trust. Numeric container users may receive an empty
         // HOME from Podman when recreated during boot.
         if (service.Role != ObservabilityRole)
+        {
             args.AddRange(["--env", "HOME=/tmp"]);
+            if (verificationMode)
+                args.AddRange(["--env", $"{KautukaMaintenanceMode.ApplianceVerificationEnvironmentVariable}=1"]);
+        }
 
         if (superviseObservability && service.Role != ObservabilityRole)
         {

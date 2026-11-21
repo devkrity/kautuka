@@ -12,6 +12,7 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
+bool verifyAppliance = KautukaMaintenanceMode.IsApplianceVerification;
 bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
 if (prepareApplianceImages || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
 {
@@ -31,7 +32,8 @@ if (prepareApplianceImages || args.Contains("--verify-appliance-release", String
         if (prepareApplianceImages)
         {
             var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());
-            await images.EnsureAsync(release.Deployment, Path.Combine(managerRoot, "versions", release.Version), CancellationToken.None)
+            await images.EnsureAsync(release.Deployment, Path.Combine(managerRoot, "versions", release.Version), CancellationToken.None,
+                requireVerificationFence: verifyAppliance)
                 .ConfigureAwait(false);
             await Console.Out.WriteLineAsync($"Prepared appliance images for {release.ReleaseId}.").ConfigureAwait(false);
             return 0;
@@ -73,6 +75,17 @@ var podmanCommandRunner = new PodmanCommandRunner();
 string? gatewayConnectEnvoyDirectory = null;
 string? telemetryAuthorization = null;
 bool applianceEnabled = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+if (verifyAppliance && !applianceEnabled)
+    throw new InvalidOperationException("Verification requires appliance service supervision.");
+
+List<ServiceDescriptor> verificationServices = [];
+void AddApplianceVerificationService(Func<IServiceProvider, IHostedService> factory)
+{
+    ServiceDescriptor service = ServiceDescriptor.Singleton(factory);
+    builder.Services.Add(service);
+    if (verifyAppliance) verificationServices.Add(service);
+}
+
 if (applianceEnabled)
 {
     if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
@@ -88,6 +101,8 @@ if (applianceEnabled)
     const string managerRoot = "/opt/kautuka/manager";
     VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
         TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+    if (verifyAppliance)
+        TrustedApplianceReleaseFiles.RequireVerificationTarget(release.Version, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
     GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
     gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
     string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
@@ -97,8 +112,9 @@ if (applianceEnabled)
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
-        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true));
-    builder.Services.AddHostedService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
+        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
+        verificationMode: verifyAppliance));
+    AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<bool>>(sp =>
     {
         ApplianceServiceSupervisor supervisor = sp.GetRequiredService<ApplianceServiceSupervisor>();
@@ -188,7 +204,7 @@ builder.Services.AddSingleton(sp =>
         imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
         gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory,
         telemetryAuthorization: telemetryAuthorization));
-builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
+AddApplianceVerificationService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
@@ -196,7 +212,7 @@ builder.Services.AddManagerNetworkAccessController();
 
 if (OperatingSystem.IsLinux())
 {
-    builder.Services.AddSingleton<IHostedService>(sp =>
+    AddApplianceVerificationService(sp =>
         EnvoyAuthorizationHost.Create(
             sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessController>(),
             new EnvoyAuthorizationHostOptions
@@ -263,6 +279,8 @@ builder.Services.AddSingleton<ManagerClientAuthorizationInterceptor>();
 KautukaMaintenanceMode.SuppressApplicationHostedServices(
     builder.Services,
     typeof(ManagerRuntimeHealthWarmWorker));
+foreach (ServiceDescriptor service in verificationServices)
+    builder.Services.Add(service);
 
 var (serverCert, caCert) = LocalCaMtlsBootstrap.EnsureAndLoad(
     managerDataRoot,

@@ -26,7 +26,8 @@ internal sealed class ApplianceRoleImageImporter
 
 #pragma warning disable CA2000 // FileStream and its owned handle are held through Podman load and disposed by using declarations.
     internal async Task<Dictionary<string, string>> EnsureAsync(
-        ApplianceDeploymentDescriptor descriptor, string releaseVersionDirectory, CancellationToken cancellationToken)
+        ApplianceDeploymentDescriptor descriptor, string releaseVersionDirectory, CancellationToken cancellationToken,
+        bool requireVerificationFence = false)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
@@ -48,7 +49,7 @@ internal sealed class ApplianceRoleImageImporter
             .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (installed.ExitCode == 0)
-            return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture);
+            return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture, requireVerificationFence);
 
         SafeFileHandle? images = null;
         try
@@ -76,12 +77,12 @@ internal sealed class ApplianceRoleImageImporter
         cancellationToken.ThrowIfCancellationRequested();
         if (installed.ExitCode != 0)
             throw new InvalidDataException("Could not inspect the installed appliance images.");
-        return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture);
+        return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture, requireVerificationFence);
     }
 
 #pragma warning restore CA2000
     internal static Dictionary<string, string> ReadInstalledImageIds(
-        string json, IReadOnlyDictionary<string, string> references, string architecture)
+        string json, IReadOnlyDictionary<string, string> references, string architecture, bool requireVerificationFence = false)
     {
         using JsonDocument document = JsonDocument.Parse(json);
         JsonElement entries = document.RootElement;
@@ -96,6 +97,10 @@ internal sealed class ApplianceRoleImageImporter
                 !image.TryGetProperty("Id", out JsonElement id) || id.ValueKind != JsonValueKind.String ||
                 !TryNormalizeImageId(id.GetString(), out string canonical))
                 throw new InvalidDataException(mismatch);
+            if (requireVerificationFence &&
+                (!image.GetProperty("Config").GetProperty("Labels").TryGetProperty("io.kautuka.service.appliance-fence", out JsonElement fence) ||
+                 !IsString(fence, "1")))
+                throw new InvalidDataException($"The signed appliance image for {role} does not support fenced verification.");
             imageIds.Add(role, canonical);
         }
         return imageIds;

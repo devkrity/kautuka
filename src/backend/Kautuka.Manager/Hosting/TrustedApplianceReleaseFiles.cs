@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 
 using Microsoft.Win32.SafeHandles;
 
@@ -23,6 +24,17 @@ internal static class TrustedApplianceReleaseFiles
     private const ushort DirectoryType = 0x4000;
     private const ushort FileType = 0x8000;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+
+    internal static void RequireVerificationTarget(string version, string recoveryDirectory)
+    {
+        using SafeFileHandle recovery = OpenAbsoluteDirectory(recoveryDirectory);
+        using JsonDocument marker = JsonDocument.Parse(ReadFile(recovery, "maintenance.json", 16 * 1024));
+        JsonElement record = marker.RootElement;
+        if (record.ValueKind != JsonValueKind.Object ||
+            !record.TryGetProperty("phase", out JsonElement phase) || phase.ValueKind != JsonValueKind.String || phase.GetString() != "verifying" ||
+            !record.TryGetProperty("targetRelease", out JsonElement target) || target.ValueKind != JsonValueKind.String || target.GetString() != version)
+            throw new InvalidDataException("The selected appliance release is not the active verification target.");
+    }
 
     internal static TrustedApplianceReleaseInput Read(string managerRoot, string trustedKeyDirectory, string? candidateVersion = null)
     {
