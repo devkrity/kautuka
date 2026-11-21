@@ -250,6 +250,8 @@ import hashlib, json, os, sys
 manifest_path, artifact_path, requested = sys.argv[1:]
 with open(manifest_path, encoding='utf-8') as f:
     manifest = json.load(f)
+if any(key.casefold() == 'appliancedeployment' for key in manifest):
+    raise SystemExit('error: appliance deployment requires a Manager appliance activation transaction')
 expected_tag = requested if requested.startswith('v') else 'v' + requested
 if manifest.get('releaseTag') != expected_tag or manifest.get('version') != expected_tag[1:]:
     raise SystemExit('error: signed manifest identity does not match requested version')

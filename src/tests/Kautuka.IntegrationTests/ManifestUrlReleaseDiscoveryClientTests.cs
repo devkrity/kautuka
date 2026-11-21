@@ -246,6 +246,32 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
         }
     }
 
+    [Fact]
+    public async Task ApplianceDiscoveryRequiresSignatureEvenForLocalFeedAsync()
+    {
+        using ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const string tag = "v1.2.3-preview.10";
+        var root = System.Text.Json.Nodes.JsonNode.Parse(CreateManifest(key, "preview", tag))!.AsObject();
+        var services = new System.Text.Json.Nodes.JsonObject();
+        foreach (string role in new[] { "credentialshost", "channelhost", "gateway", "webhost", "updateservice" })
+            services[role] = new System.Text.Json.Nodes.JsonObject { ["image"] = $"registry.example/{role}@sha256:{new string('a', 64)}" };
+        root["applianceDeployment"] = new System.Text.Json.Nodes.JsonObject { ["schemaVersion"] = 1, ["hookAbi"] = 1, ["services"] = services };
+        byte[] manifest = Encoding.UTF8.GetBytes(root.ToJsonString());
+        string publicKey = await WritePublicKeyAsync(key.ExportSubjectPublicKeyInfoPem());
+        var handler = new RouteHttpMessageHandler(request => request.RequestUri!.AbsolutePath.EndsWith(".sig", StringComparison.Ordinal)
+            ? TextResponse(Sign(key, manifest)) : JsonResponse(manifest));
+        try
+        {
+            UpdateOptions options = new() { AllowUnsignedLocalFeeds = true, ReleaseManifestUrl = "http://localhost/manifest", PlatformAssetName = "kautuka-linux-amd64.tar.gz" };
+            var client = new ManifestUrlReleaseDiscoveryClient(new StubHttpClientFactory(handler), Options.Create(options), NullLogger<ManifestUrlReleaseDiscoveryClient>.Instance);
+            ReleaseDiscoveryResult unsigned = await client.DiscoverAsync(new("devkrity", "kautuka", "preview", null), TestContext.Current.CancellationToken);
+            Assert.Null(unsigned.AvailableRelease);
+            options.ManifestPublicKeyPath = publicKey;
+            ReleaseDiscoveryResult signed = await client.DiscoverAsync(new("devkrity", "kautuka", "preview", null), TestContext.Current.CancellationToken);
+            Assert.NotNull(signed.AvailableRelease);
+        }
+        finally { File.Delete(publicKey); }
+    }
     private static ManifestUrlReleaseDiscoveryClient CreateClient(HttpMessageHandler handler, string publicKeyPath)
         => new(new StubHttpClientFactory(handler), Options.Create(new UpdateOptions
         {

@@ -65,6 +65,7 @@ try {
   signature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
   assert.equal(manifest.signature.url, "http://127.0.0.1:20300/kautuka-platform-release.sig", "default remains the release-asset URL");
   assert.equal(manifest.signature.path, "kautuka-platform-release.sig", "signature asset has the published flat filename");
+  assert.equal(Object.hasOwn(manifest, "applianceDeployment"), false, "legacy releases do not opt into an appliance deployment");
   assert.equal(cryptoVerify("sha256", manifestBytes, publicKey, signature), true, "default release manifest signature remains valid");
 
   const signatureAssetName = windowsInstaller.match(/releaseManifestSignatureAssetName = "([^"]+)"/u)?.[1];
@@ -108,6 +109,41 @@ try {
     assert.match(rejected.stderr, /ECDSA P-256/);
     assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), manifestBytes,
       "rejecting a key must not overwrite the existing manifest");
+  }
+
+  const deploymentPath = path.join(tempRoot, "appliance-deployment.json");
+  const deployment = {
+    schemaVersion: 1,
+    hookAbi: 1,
+    services: Object.fromEntries(["credentialshost", "channelhost", "gateway", "webhost", "updateservice"]
+      .map((role) => [role, { image: `ghcr.io/devkrity/kautuka-${role}@sha256:${"a".repeat(64)}` }])),
+  };
+  deployment.services.gateway.image = `registry.example:5000/platform/core__gateway--service@sha256:${"b".repeat(64)}`;
+  await fs.writeFile(deploymentPath, JSON.stringify(deployment));
+  generate(["--appliance-deployment", deploymentPath]);
+  const applianceBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  const applianceSignature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  const applianceManifest = JSON.parse(applianceBytes);
+  assert.deepEqual(applianceManifest.applianceDeployment, deployment);
+  assert.equal(cryptoVerify("sha256", applianceBytes, publicKey, applianceSignature), true);
+  const changedBytes = Buffer.from(applianceBytes.toString("utf8").replace("a".repeat(64), "b".repeat(64)), "utf8");
+  assert.equal(cryptoVerify("sha256", changedBytes, publicKey, applianceSignature), false, "changing a service image invalidates the signature");
+
+  const missingRole = structuredClone(deployment);
+  delete missingRole.services.updateservice;
+  const mutableImage = structuredClone(deployment);
+  mutableImage.services.gateway.image = "ghcr.io/devkrity/kautuka-gateway:latest";
+  const shortImage = structuredClone(deployment);
+  shortImage.services.gateway.image = `devkrity/gateway@sha256:${"a".repeat(64)}`;
+  const badRegistryPort = structuredClone(deployment);
+  badRegistryPort.services.gateway.image = deployment.services.gateway.image.replace(":5000/", ":65536/");
+  const arbitraryRunOption = structuredClone(deployment);
+  arbitraryRunOption.services.gateway.privileged = true;
+  for (const invalid of [missingRole, mutableImage, shortImage, badRegistryPort, arbitraryRunOption, { ...deployment, hookAbi: 0 }]) {
+    await fs.writeFile(deploymentPath, JSON.stringify(invalid));
+    const result = generateRaw(["--appliance-deployment", deploymentPath]);
+    assert.notEqual(result.status, 0, "invalid appliance layout must not be signed");
+    assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), applianceBytes);
   }
 
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");

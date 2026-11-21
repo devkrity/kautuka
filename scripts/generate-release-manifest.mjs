@@ -92,6 +92,45 @@ async function loadRuntimeImages(runtimeImagesPath) {
   });
 }
 
+const applianceServiceRoles = ["credentialshost", "channelhost", "gateway", "webhost", "updateservice"];
+const registryLabel = "[a-z0-9](?:[a-z0-9-]*[a-z0-9])?";
+const repositorySegment = "[a-z0-9]+(?:(?:[.]|__?|[-]+)[a-z0-9]+)*";
+const pinnedImage = new RegExp(
+  `^(?:localhost|${registryLabel}(?:[.]${registryLabel})+)(?::([1-9][0-9]{0,4}))?(?:/${repositorySegment})+@sha256:[a-f0-9]{64}$`,
+  "u",
+);
+
+function hasFields(value, fields) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+}
+
+async function loadApplianceDeployment(deploymentPath) {
+  const deploymentBytes = await fs.readFile(path.resolve(deploymentPath));
+  if (deploymentBytes.length > 16 * 1024) {
+    throw new Error("Appliance deployment descriptor exceeds 16 KiB.");
+  }
+  const deployment = JSON.parse(deploymentBytes.toString("utf8"));
+  if (!hasFields(deployment, ["schemaVersion", "hookAbi", "services"])
+      || deployment.schemaVersion !== 1 || !Number.isInteger(deployment.hookAbi)
+      || deployment.hookAbi < 1 || deployment.hookAbi > 2147483647) {
+    throw new Error("Appliance deployment requires schemaVersion 1, a positive hookAbi, and services.");
+  }
+  if (!hasFields(deployment.services, applianceServiceRoles)) {
+    throw new Error("Appliance deployment must declare exactly the five supported service roles.");
+  }
+  for (const role of applianceServiceRoles) {
+    const service = deployment.services[role];
+    const image = service?.image;
+    const match = typeof image === "string" && image.length <= 512 && pinnedImage.exec(image);
+    if (!hasFields(service, ["image"]) || !match || match[0] !== image || Number(match[1] ?? 0) > 65535) {
+      throw new Error(`Appliance service '${role}' requires a canonical digest-pinned OCI image reference.`);
+    }
+  }
+  return deployment;
+}
+
 function signatureUrlFor(signatureName, signatureBaseUrl, artifactBaseUrl) {
   const normalizedSignatureBaseUrl = normalizeBaseUrl(signatureBaseUrl);
   if (normalizedSignatureBaseUrl) {
@@ -150,6 +189,9 @@ async function main() {
   }));
 
   const runtimeImages = await loadRuntimeImages(options["runtime-images"]);
+  const applianceDeployment = options["appliance-deployment"]
+    ? await loadApplianceDeployment(options["appliance-deployment"])
+    : undefined;
 
   const manifest = stable({
     schemaVersion: 2,
@@ -162,6 +204,7 @@ async function main() {
     minimumUpdaterVersion: options["minimum-updater-version"] || null,
     artifacts,
     runtimeImages,
+    applianceDeployment,
     signature: {
       algorithm: "ecdsa-p256-sha256",
       path: signatureName,

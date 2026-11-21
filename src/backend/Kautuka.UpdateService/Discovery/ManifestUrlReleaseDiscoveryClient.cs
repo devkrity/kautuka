@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Hosting;
 using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Hosting;
@@ -75,6 +76,12 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
 
         string? eTag = response.Headers.ETag?.Tag ?? discoveryETag;
         byte[] manifestBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        ApplianceDeploymentDescriptor? appliance;
+        try { appliance = ApplianceDeploymentManifest.Parse(manifestBytes); }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException)
+        {
+            return ReleaseDiscoveryResult.Unsupported("Invalid appliance deployment descriptor.", eTag);
+        }
         PlatformReleaseDescriptor? descriptor = JsonSerializer.Deserialize(
             manifestBytes,
             PlatformReleaseDescriptorJsonContext.Default.PlatformReleaseDescriptor);
@@ -152,7 +159,7 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
                 eTag);
         }
 
-        if (!options.AllowUnsignedLocalFeeds)
+        if (!options.AllowUnsignedLocalFeeds || appliance is not null)
         {
             if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath) || !File.Exists(options.ManifestPublicKeyPath))
             {

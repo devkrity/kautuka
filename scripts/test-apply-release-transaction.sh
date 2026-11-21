@@ -92,7 +92,7 @@ chmod 755 "$temp_dir/mock/"*
 python3 -c 'import socket; s = socket.socket(socket.AF_UNIX); s.bind("/run/user/992/bus"); s.close()'
 
 make_signed_release() {
-    local release="$1" protocol="${2:-current}" payload="$temp_dir/payload-$1" stage='/var/lib/kautuka/updateService/updates/staging/test'
+    local release="$1" protocol="${2:-current}" layout="${3:-host}" payload="$temp_dir/payload-$1" stage='/var/lib/kautuka/updateService/updates/staging/test'
     rm -rf -- "$payload"
     mkdir -p "$payload/bin"
     for service in "${services[@]}"; do
@@ -111,15 +111,21 @@ make_signed_release() {
         chmod 755 "$payload/bin/kautuka-apply-release"
     fi
     tar --owner=1234 --group=1234 -czf "$stage/kautuka-linux-amd64.tar.gz" -C "$payload" .
-    python3 - "$stage" "$release" <<'PY'
+    python3 - "$stage" "$release" "$layout" <<'PY'
 import hashlib, json, os, sys
-stage, release = sys.argv[1:]
+stage, release, layout = sys.argv[1:]
 artifact = os.path.join(stage, 'kautuka-linux-amd64.tar.gz')
 with open(artifact, 'rb') as stream: digest = hashlib.file_digest(stream, 'sha256').hexdigest()
 manifest = {'version': release, 'releaseTag': 'v' + release,
             'signature': {'algorithm': 'ecdsa-p256-sha256', 'format': 'base64'},
             'artifacts': [{'name': 'kautuka-linux-amd64.tar.gz', 'sha256': digest,
                            'size': os.path.getsize(artifact)}]}
+if layout == 'appliance':
+    manifest['applianceDeployment'] = {
+        'schemaVersion': 1, 'hookAbi': 1,
+        'services': {role: {'image': f"ghcr.io/devkrity/kautuka-{role}@sha256:{'a' * 64}"}
+                     for role in ('credentialshost', 'channelhost', 'gateway', 'webhost', 'updateservice')},
+    }
 with open(os.path.join(stage, 'kautuka-platform-release.json'), 'w') as stream: json.dump(manifest, stream)
 PY
     openssl dgst -sha256 -sign "$temp_dir/private.pem" -out "$temp_dir/signature.der" "$stage/kautuka-platform-release.json"
@@ -154,6 +160,15 @@ set -e
 [[ $legacy_state_marker_status -ne 0 && -f /var/lib/kautuka-recovery/kautuka-apply.rollback ]]
 grep -Fq 'legacy recovery marker requires administrator review' "$temp_dir/legacy-state-marker.log"
 rm -f /var/lib/kautuka-recovery/kautuka-apply.rollback
+make_signed_release 1.0.1 current appliance
+if run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuka-linux-amd64.tar.gz \
+    --version 1.0.1 >"$temp_dir/appliance-activation.log" 2>&1; then
+    echo 'error: legacy apply helper accepted a signed appliance deployment' >&2
+    exit 1
+fi
+grep -Fq 'appliance deployment requires a Manager appliance activation transaction' "$temp_dir/appliance-activation.log"
+[[ "$(readlink /opt/kautuka/manager/current)" == 'versions/v1.0.0' ]]
+[[ ! -e /var/lib/kautuka-recovery/operation.json && ! -e /var/lib/kautuka-recovery/maintenance.json ]]
 make_signed_release 1.0.1 missing
 for rejected_version in 0.9.9 1.0.0 v1.0.0 1.0 01.0.0; do
     set +e

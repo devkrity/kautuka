@@ -1,3 +1,4 @@
+using Kautuka.Hosting;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -1264,7 +1265,7 @@ internal sealed class UpdateCoordinator(
             artifactName: artifact.Name);
     }
 
-    private async Task<PlatformReleaseDescriptor> DownloadPlatformReleaseDescriptorAsync(
+    internal async Task<PlatformReleaseDescriptor> DownloadPlatformReleaseDescriptorAsync(
         string descriptorUrl,
         string? signatureUrl,
         string stageRoot,
@@ -1272,10 +1273,11 @@ internal sealed class UpdateCoordinator(
     {
         byte[] manifestBytes = await DownloadBytesAsync(descriptorUrl, cancellationToken).ConfigureAwait(false);
         bool requireVerification = ReleaseTrustPolicy.RequiresVerification(options);
+        ApplianceDeploymentDescriptor? appliance = ApplianceDeploymentManifest.Parse(manifestBytes);
 
         if (string.IsNullOrWhiteSpace(signatureUrl))
         {
-            if (requireVerification)
+            if (requireVerification || appliance is not null)
             {
                 throw new InvalidOperationException(
                     "Platform release signature URL was missing. Fail-closed verification requires a detached ECDSA signature.");
@@ -1294,6 +1296,9 @@ internal sealed class UpdateCoordinator(
             {
                 throw new InvalidOperationException(verificationError ?? "Platform release signature verification failed.");
             }
+
+            if (appliance is not null)
+                throw new InvalidOperationException("Appliance deployment activation is not supported by this updater.");
 
             // The privileged helper independently verifies these bytes and a private
             // copy of the archive before it installs any files.
