@@ -47,6 +47,7 @@ DEFAULT_COMPACT_EXPANSION_BUDGET = 1
 DEFAULT_COMPACT_SELECTED_CHUNK_CHARS = 900
 DEFAULT_COMPACT_ITEM_SUMMARY_CHARS = 240
 DEFAULT_MAX_RESPONSE_BYTES = 1_000_000
+MAX_FETCH_BODY_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_NORMALIZED_MARKDOWN_CHARS = 120_000
 DEFAULT_MAX_CHUNK_COUNT = 128
 DEFAULT_REDIRECT_CAP = 5
@@ -340,6 +341,7 @@ class FetchResult:
     body: bytes
     html_metadata: dict[str, str | None]
     response_bytes_limit_exceeded: bool = False
+    response_body_truncated: bool = False
 
 
 @dataclass(slots=True)
@@ -500,8 +502,20 @@ async def fetch_url(url: str, options: FetchOptions) -> FetchResult:
         max_redirects=options.redirect_cap,
     ) as client:
         try:
-            response = await client.get(url)
-            response.raise_for_status()
+            async with client.stream("GET", url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
+                if not is_allowed_content_type(content_type, options.allowed_content_types):
+                    raise ValidationError(f"Unsupported content type: {content_type}")
+
+                prefix = bytearray()
+                response_body_truncated = False
+                async for chunk in response.aiter_bytes():
+                    remaining = MAX_FETCH_BODY_BYTES - len(prefix)
+                    prefix.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        response_body_truncated = True
+                        break
         except httpx.TimeoutException as exc:
             raise FetchError(f"Timed out fetching {url}.") from exc
         except httpx.HTTPStatusError as exc:
@@ -517,13 +531,9 @@ async def fetch_url(url: str, options: FetchOptions) -> FetchResult:
                 f"Check Network Access for a pending request for {target}."
             ) from exc
 
-    content_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
-    if not is_allowed_content_type(content_type, options.allowed_content_types):
-        raise ValidationError(f"Unsupported content type: {content_type}")
-
-    body = response.content
+    body = bytes(prefix)
     response_bytes = len(body)
-    response_bytes_limit_exceeded = response_bytes > options.max_response_bytes
+    response_bytes_limit_exceeded = response_body_truncated or response_bytes > options.max_response_bytes
 
     parsed_html_metadata = extract_html_metadata(body.decode(response.encoding or "utf-8", errors="ignore"))
 
@@ -539,6 +549,7 @@ async def fetch_url(url: str, options: FetchOptions) -> FetchResult:
         body=body,
         html_metadata=parsed_html_metadata,
         response_bytes_limit_exceeded=response_bytes_limit_exceeded,
+        response_body_truncated=response_body_truncated,
     )
 
 
@@ -1558,6 +1569,8 @@ def build_payload(url: str, fetch_result: FetchResult, options: FetchOptions) ->
     )
     paged_chunks, chunk_window, chunk_warnings = paginate_chunks(chunks, options)
     warnings = [*truncation_warnings, *chunk_warnings]
+    if fetch_result.response_body_truncated:
+        warnings.insert(0, f"Only the first {fetch_result.response_bytes:,} bytes of the page were processed. Later content is unavailable.")
     effective_expansion_budget = (
         options.expansion_budget
         if options.response_mode == "full"
@@ -1601,6 +1614,7 @@ def build_payload(url: str, fetch_result: FetchResult, options: FetchOptions) ->
             "redirectCount": fetch_result.redirect_count,
             "responseBytes": fetch_result.response_bytes,
             "responseBytesLimitExceeded": fetch_result.response_bytes_limit_exceeded,
+            "responseBodyTruncated": fetch_result.response_body_truncated,
         },
         "normalization": normalization,
         "document": document_metadata,
@@ -2433,7 +2447,8 @@ def summarize_payload(payload: dict[str, Any]) -> str:
     title = payload["document"].get("title") or payload["fetch"]["finalUrl"]
     paging = payload.get("paging", {})
     chunk_window = payload.get("chunkWindow", {})
-    partial = " Returned a bounded partial result." if (paging.get("truncated") or chunk_window.get("truncated")) else ""
+    is_partial = payload["fetch"].get("responseBodyTruncated", False)
+    partial = " Returned a bounded partial result." if (is_partial or paging.get("truncated") or chunk_window.get("truncated")) else ""
     return (
         f"Retrieved {chunk_count} chunks from {title}. Extracted {item_count} items. "
         f"Selected {selected_count} retrieval windows.{partial}"

@@ -276,6 +276,7 @@ TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
                 "redirectCount": {"type": "integer"},
                 "responseBytes": {"type": "integer"},
                 "responseBytesLimitExceeded": {"type": "boolean"},
+                "responseBodyTruncated": {"type": "boolean"},
             },
             "required": [
                 "requestedUrl",
