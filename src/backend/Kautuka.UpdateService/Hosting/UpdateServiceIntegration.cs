@@ -7,6 +7,7 @@ using System.Text.Json;
 using Grpc.Core;
 
 using Kautuka.Hosting.Hosting;
+using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
 
@@ -24,6 +25,7 @@ public sealed class UpdateServiceIntegration(
     private const string activationLauncherRelativePath = "updates/activate-updateservice.sh";
     private const string activationRequestRelativePath = "updates/activation-request.env";
     private const string pendingActivationRequestRelativePath = "updates/pending-activation.env";
+    private const string applianceActivationRequestName = "activate-appliance";
     private const string installedVersionFileName = "release-version.txt";
     private const string activationPathUnitName = "kautuka-activate.path";
     private const string serviceScopeDocumentPath = "/etc/kautuka/service-scope.json";
@@ -439,6 +441,12 @@ public sealed class UpdateServiceIntegration(
             throw new InvalidOperationException("Prepared update is missing a verified platform artifact.");
         }
 
+        if (updateOptions.ApplianceReleaseId is not null)
+        {
+            await RequestApplianceActivationAsync(preparedArtifacts, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         logger.LogInformation(
             "Delegating prepared update {ReleaseId} to apply-release helper {HelperPath}. Artifact={Artifact}",
             preparedArtifacts.TargetReleaseId,
@@ -480,6 +488,37 @@ public sealed class UpdateServiceIntegration(
         }
 
         RequestRestartForSwitchedUpdateService("apply", preparedArtifacts.TargetReleaseId);
+    }
+
+    private async Task RequestApplianceActivationAsync(UpdatePreparedArtifacts prepared, CancellationToken cancellationToken)
+    {
+        string tag = prepared.TargetReleaseId;
+        bool preview = tag.Contains("-preview.", StringComparison.Ordinal);
+        if (tag.Length > 128 || !ReleaseChannelPolicy.TryParseTag(tag, preview ? "preview" : "stable", preview, out var version)
+            || !string.Equals(tag, $"v{version.ToVersionString()}", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Prepared appliance update has an invalid release tag.");
+        }
+
+        string updates = Path.Combine(runtimePaths.RuntimeRoot, "updates");
+        string expectedArtifact = Path.Combine(updates, "staging", tag, "kautuka-linux-amd64.tar.gz");
+        if (!string.Equals(Path.GetFullPath(prepared.PlatformPackagePath), expectedArtifact, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Prepared appliance update is outside its release staging directory.");
+        }
+
+        string target = Path.Combine(updates, applianceActivationRequestName);
+        string temporary = Path.Combine(updates, $".{applianceActivationRequestName}-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, version.ToVersionString() + "\n", cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            File.Move(temporary, target, overwrite: false);
+        }
+        finally
+        {
+            File.Delete(temporary);
+        }
     }
 
     public ValueTask ActivateRollbackAsync(UpdateReleaseReference release, CancellationToken cancellationToken)

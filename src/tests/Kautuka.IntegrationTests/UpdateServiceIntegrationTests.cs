@@ -556,6 +556,54 @@ public sealed class UpdateServiceIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task ApplianceActivationPublishesOnlyTheVersionAndPreservesAnExistingRequest()
+    {
+        string tempRoot = CreateTempDirectory();
+        CancellationToken token = TestContext.Current.CancellationToken;
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Kautuka:Mode"] = "dev",
+                    ["Kautuka:HostPaths:VisibleRoot"] = Path.Combine(tempRoot, "visible"),
+                    ["Kautuka:HostPaths:InternalStateRoot"] = Path.Combine(tempRoot, "runtime"),
+                    ["Kautuka:HostPaths:LogsRoot"] = Path.Combine(tempRoot, "logs"),
+                    ["Kautuka:ContainerStateRoot"] = Path.Combine(tempRoot, "runtime"),
+                    ["Kautuka:Appliance:Enabled"] = "true",
+                }).Build();
+            var paths = new UpdateServiceRuntimePaths(configuration);
+            var integration = new UpdateServiceIntegration(paths,
+                Options.Create(new UpdateOptions { ApplianceReleaseId = "v1.2.3-preview.1", ApplianceReleaseVersion = "1.2.3-preview.1" }),
+                new RecordingManagerStatusClient(new ManagerStatusResponse()),
+                new TestHostApplicationLifetime(), NullLogger<UpdateServiceIntegration>.Instance);
+
+            const string tag = "v1.2.3-preview.2";
+            string updates = Path.Combine(paths.RuntimeRoot, "updates");
+            string stagedRelease = Directory.CreateDirectory(Path.Combine(updates, "staging", tag)).FullName;
+            string artifact = Path.Combine(stagedRelease, "kautuka-linux-amd64.tar.gz");
+            await File.WriteAllTextAsync(artifact, "fixture", token);
+            string request = Path.Combine(updates, "activate-appliance");
+            var prepared = new UpdatePreparedArtifacts(tag, artifact, string.Empty);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                integration.ActivatePreparedUpdateAsync(prepared with { TargetReleaseId = "v1.2.3-preview.3" }, token).AsTask());
+            Assert.False(File.Exists(request));
+
+            await integration.ActivatePreparedUpdateAsync(prepared, token);
+            Assert.Equal("1.2.3-preview.2\n", await File.ReadAllTextAsync(request, token));
+
+            await Assert.ThrowsAsync<IOException>(() => integration.ActivatePreparedUpdateAsync(prepared, token).AsTask());
+            Assert.Equal("1.2.3-preview.2\n", await File.ReadAllTextAsync(request, token));
+            Assert.Equal(request, Assert.Single(Directory.GetFiles(updates)));
+        }
+        finally
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData(false, "", true, true)]
     [InlineData(true, "v1.2.3", true, true)]
