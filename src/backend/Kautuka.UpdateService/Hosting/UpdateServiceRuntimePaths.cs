@@ -8,7 +8,9 @@ public sealed class UpdateServiceRuntimePaths
     {
         RuntimeRoot = Path.GetFullPath(KautukaHostPathPolicy.ResolveServiceStateRoot(configuration, "updateService"));
         SharedDataRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(configuration);
-        LogsRoot = Path.GetFullPath(KautukaHostPathPolicy.Resolve(configuration).LogsRoot);
+        LogsRoot = configuration.GetValue<bool>("Kautuka:Appliance:Enabled")
+            ? Path.Combine(RuntimeRoot, "logs")
+            : Path.GetFullPath(KautukaHostPathPolicy.Resolve(configuration).LogsRoot);
 
         Directory.CreateDirectory(RuntimeRoot);
         Directory.CreateDirectory(LogsRoot);

@@ -50,11 +50,6 @@ public sealed class UpdateServiceIntegration(
 
     public async ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
     {
-        string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
-        string managerReleaseId = TryResolveCurrentInstalledReleaseId(AppContext.BaseDirectory, "manager")
-            ?? ResolveManagerVersion(managerInstallRoot);
-        string managerVersion = ResolveManagerVersion(managerInstallRoot);
-
         int activeExecCount = 0;
         bool isReady = false;
         bool hostStatusObserved = false;
@@ -73,6 +68,14 @@ public sealed class UpdateServiceIntegration(
         {
         }
 
+        if (updateOptions.ApplianceReleaseId is { } releaseId)
+            return new UpdateServiceContext(runtimePaths.RuntimeRoot, AppContext.BaseDirectory, releaseId,
+                updateOptions.ApplianceReleaseVersion!, isReady, activeExecCount, hostStatusObserved,
+                RuntimeUnitsActive: false, CurrentPointersConsistent: false);
+
+        string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
+        string managerVersion = ResolveManagerVersion(managerInstallRoot);
+        string managerReleaseId = TryResolveCurrentInstalledReleaseId(AppContext.BaseDirectory, "manager") ?? managerVersion;
         (bool pointersConsistent, bool unitsActive) = ObserveReleaseHealth(managerReleaseId);
         bool updaterRunningCurrent = IsRunningCurrentUpdateService(AppContext.BaseDirectory);
 
@@ -104,6 +107,8 @@ public sealed class UpdateServiceIntegration(
 
     private async Task<string> RunApplyReleaseHelperAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        if (updateOptions.ApplianceReleaseId is not null)
+            throw new InvalidOperationException("The host activation helper is unavailable inside the appliance UpdateService.");
         if (string.IsNullOrWhiteSpace(updateOptions.ApplyReleaseHelperPath))
         {
             throw new InvalidOperationException("Update:ApplyReleaseHelperPath is not configured.");
@@ -481,6 +486,8 @@ public sealed class UpdateServiceIntegration(
     public ValueTask<bool> TryContinuePendingActivationAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (updateOptions.ApplianceReleaseId is not null)
+            return ValueTask.FromResult(false);
         return ContinueSafeRecoveryAsync(cancellationToken);
     }
 

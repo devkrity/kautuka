@@ -21,7 +21,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     EgressTopologyManager? topology = null,
     string? gatewayConnectDirectory = null,
     PodmanImageArchiveStore? imageArchives = null,
-    bool superviseObservability = false) : BackgroundService
+    bool superviseObservability = false,
+    bool superviseUpdateService = false) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -30,12 +31,14 @@ internal sealed partial class ApplianceServiceSupervisor(
     private const string GatewayRole = "gateway";
     private const string WebHostRole = "webhost";
     private const string ObservabilityRole = "observability";
+    private const string UpdateRole = "updateservice";
     private static readonly TimeSpan reconcileDelay = TimeSpan.FromSeconds(5);
     private readonly Service credentials = new(CredentialsRole, "credentialsHost", superviseObservability);
     private readonly Service channel = new(ChannelRole, "channelHost", superviseObservability);
     private readonly Service gateway = new(GatewayRole, "gateway", networked: true);
     private readonly Service webHost = new(WebHostRole, "webhost", networked: true);
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
+    private readonly Service updater = new(UpdateRole, "updateService", networked: true);
 
     private sealed class Service(string role, string stateName, bool networked)
     {
@@ -74,7 +77,10 @@ internal sealed partial class ApplianceServiceSupervisor(
                         await TryReconcileAsync(observability, stoppingToken).ConfigureAwait(false);
                     await TryReconcileAsync(credentials, stoppingToken).ConfigureAwait(false);
                     await TryReconcileAsync(channel, stoppingToken).ConfigureAwait(false);
-                    if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready)
+                    if (superviseUpdateService && topology?.IsStartupGateOpen == true)
+                        await TryReconcileAsync(updater, stoppingToken).ConfigureAwait(false);
+                    if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready
+                        && (!superviseUpdateService || updater.Ready))
                         await TryReconcileAsync(gateway, stoppingToken).ConfigureAwait(false);
                     else
                         await StopActiveAsync(gateway, stoppingToken).ConfigureAwait(false);
@@ -99,6 +105,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     {
         await StopActiveAsync(webHost, token).ConfigureAwait(false);
         await StopActiveAsync(gateway, token).ConfigureAwait(false);
+        await StopActiveAsync(updater, token).ConfigureAwait(false);
         await StopActiveAsync(channel, token).ConfigureAwait(false);
         await StopActiveAsync(credentials, token).ConfigureAwait(false);
         await StopActiveAsync(observability, token).ConfigureAwait(false);
@@ -145,6 +152,9 @@ internal sealed partial class ApplianceServiceSupervisor(
         {
             GatewayRole => await ApplianceServiceReadiness.CheckGatewayAsync(socket, token).ConfigureAwait(false),
             WebHostRole => await ApplianceServiceReadiness.CheckWebHostAsync(token).ConfigureAwait(false),
+            UpdateRole => await ApplianceServiceReadiness.CheckAsync(socket,
+                Path.Combine(stateRoot, service.StateName, ".ca.cer"),
+                Path.Combine(stateRoot, service.StateName, ".updateservice-client.pfx"), token).ConfigureAwait(false),
             _ => await ApplianceServiceReadiness.CheckAsync(
             socket,
             isChannel ? Path.Combine(security, "channel-trust", ChannelSecurityMaterialProvisioner.CaCertificate) : Path.Combine(transport, ".ca.cer"),
@@ -173,6 +183,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             GatewayRole => gateway,
             WebHostRole => webHost,
             ObservabilityRole when superviseObservability => observability,
+            UpdateRole when superviseUpdateService => updater,
             _ => throw new ArgumentOutOfRangeException(nameof(role)),
         }, token);
 
@@ -308,9 +319,9 @@ internal sealed partial class ApplianceServiceSupervisor(
 
         bool isGateway = service.Role == GatewayRole;
         string statePath = Path.Combine(stateRoot, service.StateName);
-        if (isGateway)
+        if (isGateway || service.Role == UpdateRole)
         {
-            if (File.Exists(Path.Combine(stateRoot, "kautuka.db")))
+            if (isGateway && File.Exists(Path.Combine(stateRoot, "kautuka.db")))
                 throw new InvalidOperationException("Gateway data is still in the host-service layout. Appliance activation requires a completed data migration.");
             Directory.CreateDirectory(statePath);
         }
@@ -350,6 +361,16 @@ internal sealed partial class ApplianceServiceSupervisor(
                 "--volume", $"{managerSocket}:/run/kautuka/manager:ro,z",
                 "--volume", $"{managerCa}:/data/manager/.ca.cer:ro,z",
                 "--volume", $"{managerClient}:/data/manager/{ManagerClientIdentities.ChannelHostCertificateFileName}:ro,Z",
+            ]);
+        }
+        if (service.Role == UpdateRole)
+        {
+            args.AddRange([
+                "--env", $"Kautuka__Appliance__ReleaseId={release.ReleaseId}",
+                "--env", $"Kautuka__Appliance__ReleaseVersion={release.Version}",
+                "--volume", $"{RequireMountSource(Path.Combine(socketRoot, "manager"), directory: true)}:/run/kautuka/manager:ro,z",
+                "--volume", $"{RequireMountSource(Path.Combine(stateRoot, "manager", ".ca.cer"), directory: false)}:/data/manager/.ca.cer:ro,z",
+                "--volume", $"{RequireMountSource(Path.Combine(stateRoot, "manager", ManagerClientIdentities.UpdateServiceCertificateFileName), directory: false)}:/data/manager/{ManagerClientIdentities.UpdateServiceCertificateFileName}:ro,z",
             ]);
         }
         args.Add(image);
@@ -403,10 +424,15 @@ internal sealed partial class ApplianceServiceSupervisor(
 
         foreach (string peer in new[] { "manager", CredentialsRole, ChannelRole })
             args.AddRange(["--volume", $"{RequireMountSource(Path.Combine(socketRoot, peer), directory: true)}:/run/kautuka/{peer}:ro,z"]);
+        if (superviseUpdateService)
+            args.AddRange(["--volume", $"{RequireMountSource(Path.Combine(socketRoot, UpdateRole), directory: true)}:/run/kautuka/{UpdateRole}:ro,z"]);
 
         using var version = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        foreach (string file in new[] { "manager/.ca.cer", $"manager/{ManagerClientIdentities.GatewayCertificateFileName}",
-            "credentialsHost/transport/.ca.cer", "credentialsHost/transport/.credentials-client.pfx" })
+        List<string> peerFiles = ["manager/.ca.cer", $"manager/{ManagerClientIdentities.GatewayCertificateFileName}",
+            "credentialsHost/transport/.ca.cer", "credentialsHost/transport/.credentials-client.pfx"];
+        if (superviseUpdateService)
+            peerFiles.AddRange(["updateService/.ca.cer", "updateService/.updateservice-client.pfx"]);
+        foreach (string file in peerFiles)
         {
             string source = RequireMountSource(Path.Combine(stateRoot, file), directory: false);
             args.AddRange(["--volume", $"{source}:{dataRoot}/{file}:ro,z"]);

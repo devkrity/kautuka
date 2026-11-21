@@ -18,6 +18,7 @@ public static class WorkloadRulesetRenderer
     public const string ObservabilityIp = "10.247.0.6";
     public const string ApplianceCredentialsHostIp = "10.247.0.7";
     public const string ApplianceChannelHostIp = "10.247.0.8";
+    public const string ApplianceUpdateServiceIp = "10.247.0.9";
     public const int TelemetryIngressPort = 15005;
     public const int ObservabilityPort = 5080;
     public const int WebHostPort = 20229;
@@ -48,6 +49,7 @@ public static class WorkloadRulesetRenderer
         ("appliance-observability", ObservabilityIp),
         ("appliance-credentialshost", ApplianceCredentialsHostIp),
         ("appliance-channelhost", ApplianceChannelHostIp),
+        ("appliance-updateservice", ApplianceUpdateServiceIp),
     ];
 
     public static string? FindApplianceAddress(string? role)
@@ -77,7 +79,7 @@ public static class WorkloadRulesetRenderer
                 "appliance-gateway" => RenderApplianceGateway(),
                 "appliance-webhost" => RenderApplianceWebHost(),
                 "appliance-observability" => RenderObservability(),
-                "appliance-credentialshost" => RenderTelemetryOnly(normalizedIp),
+                "appliance-credentialshost" or "appliance-updateservice" => RenderTelemetryOnly(normalizedIp),
                 "appliance-channelhost" => RenderTelemetryOnly(normalizedIp, channelProviders: true),
                 _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
             };
@@ -216,7 +218,7 @@ public static class WorkloadRulesetRenderer
         if (applianceRole is not null)
         {
             ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
-            string profile = applianceRole is "appliance-credentialshost"
+            string profile = applianceRole is "appliance-credentialshost" or "appliance-updateservice"
                 ? "appliance_telemetry_only" : applianceRole.Replace('-', '_');
             string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{profile}.nft.json.tmpl")
                 .Replace("{{IP}}", allocatedIp, StringComparison.Ordinal);

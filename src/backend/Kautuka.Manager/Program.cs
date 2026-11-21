@@ -95,7 +95,7 @@ if (applianceEnabled)
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
-        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true));
+        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true));
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())

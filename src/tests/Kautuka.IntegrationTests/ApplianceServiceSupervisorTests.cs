@@ -190,7 +190,7 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.False(Directory.Exists(runtime));
         Directory.CreateDirectory(Path.Combine(runtime, "credentialsHost"));
         string sockets = Path.Combine(runtime, "sockets");
-        foreach (string role in new[] { Role, "channelhost", "gateway", "manager" })
+        foreach (string role in new[] { Role, "channelhost", "gateway", "manager", "updateservice" })
             Directory.CreateDirectory(Path.Combine(sockets, role));
         Directory.CreateDirectory(Path.Combine(runtime, "channelHost"));
         string manager = Path.Combine(runtime, "manager");
@@ -202,6 +202,7 @@ public sealed class ApplianceServiceSupervisorTests
         string? gatewayHook = Environment.GetEnvironmentVariable("KAUTUKA_GATEWAY_CONTAINER_TEST_HOOK");
         bool gatewayEnabled = !string.IsNullOrWhiteSpace(gatewayHook) && File.Exists(Path.Combine(images, "gateway.tar"));
         bool webHostEnabled = gatewayEnabled && Environment.GetEnvironmentVariable("KAUTUKA_WEBHOST_CONTAINER_TEST") == "1";
+        bool updaterEnabled = gatewayEnabled && Environment.GetEnvironmentVariable("KAUTUKA_UPDATER_CONTAINER_TEST") == "1";
         string? fixtureHooks = null;
         byte[] deployment = await File.ReadAllBytesAsync(Path.Combine(images, "appliance-deployment.json"),
             TestContext.Current.CancellationToken);
@@ -211,6 +212,7 @@ public sealed class ApplianceServiceSupervisorTests
         var imageMap = new Dictionary<string, string> { [Role] = image, ["channelhost"] = channelImage };
         if (gatewayEnabled) imageMap["gateway"] = manifest.RootElement.GetProperty("services").GetProperty("gateway").GetProperty("image").GetString()!;
         if (webHostEnabled) imageMap["webhost"] = manifest.RootElement.GetProperty("services").GetProperty("webhost").GetProperty("image").GetString()!;
+        if (updaterEnabled) imageMap["updateservice"] = manifest.RootElement.GetProperty("services").GetProperty("updateservice").GetProperty("image").GetString()!;
         var release = new VerifiedApplianceRelease("v1.2.3", "1.2.3", new ApplianceDeploymentDescriptor(1, 1, imageMap));
         var engine = new PodmanCommandRunner();
         string[] isolatedStore = ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run")];
@@ -362,7 +364,8 @@ public sealed class ApplianceServiceSupervisorTests
             return podman.RunAsync(args, 30, cancellation);
         });
         using var gateway = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
-            NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory, superviseObservability: true);
+            NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory,
+            superviseObservability: true, superviseUpdateService: release.Deployment.Images.ContainsKey("updateservice"));
         try
         {
             foreach (string image in new[] { EgressTopologyManager.BoundaryInitImage, EgressTopologyManager.EnvoyPinnedImage,
@@ -395,6 +398,16 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.Equal(channel, await gateway.EnsureRunningAsync("channelhost", token));
             await CheckCollectorRelayAsync(podman, credentials, token);
             await CheckCollectorRelayAsync(podman, channel, token);
+            if (release.Deployment.Images.ContainsKey("updateservice"))
+            {
+                PodmanCommandResult updaterImage = await podman.RunAsync(["load", "--input", Path.Combine(images, "updateservice.tar")], 60, token);
+                Assert.True(updaterImage.ExitCode == 0, updaterImage.StdErr);
+                string updater = await gateway.EnsureRunningAsync("updateservice", token);
+                Assert.Equal(updater, await gateway.EnsureRunningAsync("updateservice", token));
+                await WaitForReadinessAsync(Path.Combine(sockets, "updateservice", "updateservice.sock"),
+                    Path.Combine(runtime, "updateService", ".ca.cer"), Path.Combine(runtime, "updateService", ".updateservice-client.pfx"), token);
+                await CheckCollectorRelayAsync(podman, updater, token);
+            }
             imageInspections = 0;
             string id = await gateway.EnsureRunningAsync("gateway", token);
             Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
@@ -439,6 +452,7 @@ public sealed class ApplianceServiceSupervisorTests
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-webhost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-channelhost", "kautuka-appliance-credentialshost"], 20, CancellationToken.None);
+            await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-updateservice"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-observability"], 20, CancellationToken.None);
             await topology.StopAsync(CancellationToken.None);
             await podman.RunAsync(["pod", "rm", "--force", "--ignore", EgressTopologyManager.EgressPodName], 30, CancellationToken.None);
@@ -575,7 +589,8 @@ public sealed class ApplianceServiceSupervisorTests
     {
         var (server, ca) = LocalCaMtlsBootstrap.EnsureAndLoad(manager, "Manager",
             [new LocalMtlsClientCertificate(ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.ChannelHostCertificateFileName),
-             new LocalMtlsClientCertificate(ManagerClientIdentities.GatewayCommonName, ManagerClientIdentities.GatewayCertificateFileName)]);
+             new LocalMtlsClientCertificate(ManagerClientIdentities.GatewayCommonName, ManagerClientIdentities.GatewayCertificateFileName),
+             new LocalMtlsClientCertificate(ManagerClientIdentities.UpdateServiceCommonName, ManagerClientIdentities.UpdateServiceCertificateFileName)]);
         server.Dispose();
         ca.Dispose();
         string security = Path.Combine(runtime, "security", "channel");

@@ -5,6 +5,8 @@ public sealed class UpdateOptions
     public const string SectionName = "Update";
 
     public bool Enabled { get; set; } = true;
+    internal string? ApplianceReleaseId { get; set; }
+    internal string? ApplianceReleaseVersion { get; set; }
 
     public string? RepositoryOwner { get; set; }
 

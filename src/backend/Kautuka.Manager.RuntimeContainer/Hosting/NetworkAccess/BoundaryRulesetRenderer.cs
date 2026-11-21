@@ -89,7 +89,7 @@ public static class BoundaryRulesetRenderer
         string gatewayConnectMatch = FormattableString.Invariant(
             $"ip saddr {WorkloadRulesetRenderer.ApplianceGatewayIp} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {GatewayConnectPort}");
         string telemetryMatch = FormattableString.Invariant(
-            $"ip saddr {{ {WorkloadRulesetRenderer.ApplianceGatewayIp}, {WorkloadRulesetRenderer.ApplianceWebHostIp}, {WorkloadRulesetRenderer.ApplianceCredentialsHostIp}, {WorkloadRulesetRenderer.ApplianceChannelHostIp} }} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {WorkloadRulesetRenderer.TelemetryIngressPort}");
+            $"ip saddr {{ {WorkloadRulesetRenderer.ApplianceGatewayIp}, {WorkloadRulesetRenderer.ApplianceWebHostIp}, {WorkloadRulesetRenderer.ApplianceCredentialsHostIp}, {WorkloadRulesetRenderer.ApplianceChannelHostIp}, {WorkloadRulesetRenderer.ApplianceUpdateServiceIp} }} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {WorkloadRulesetRenderer.TelemetryIngressPort}");
 
         var sb = new StringBuilder();
         sb.AppendLine("table ip kautuka_egress");

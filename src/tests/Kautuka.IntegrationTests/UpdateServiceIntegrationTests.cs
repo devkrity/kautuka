@@ -555,8 +555,10 @@ public sealed class UpdateServiceIntegrationTests
         }
     }
 
-    [Fact]
-    public async Task GetHostContextAsyncUsesManagerStatusFacts()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetHostContextAsyncUsesManagerStatusFacts(bool appliance)
     {
         string tempRoot = CreateTempDirectory();
 
@@ -570,6 +572,7 @@ public sealed class UpdateServiceIntegrationTests
                     ["Kautuka:HostPaths:InternalStateRoot"] = Path.Combine(tempRoot, "runtime"),
                     ["Kautuka:HostPaths:LogsRoot"] = Path.Combine(tempRoot, "logs"),
                     ["Kautuka:ContainerStateRoot"] = Path.Combine(tempRoot, "runtime"),
+                    ["Kautuka:Appliance:Enabled"] = appliance.ToString(),
                 })
                 .Build();
 
@@ -585,9 +588,12 @@ public sealed class UpdateServiceIntegrationTests
                 Message = "status",
             });
 
+            var options = appliance
+                ? new UpdateOptions { ApplianceReleaseId = "v1.2.3", ApplianceReleaseVersion = "1.2.3" }
+                : new UpdateOptions();
             var integration = new UpdateServiceIntegration(
                 runtimePaths,
-                Options.Create(new UpdateOptions()),
+                Options.Create(options),
                 managerStatusClient,
                 new TestHostApplicationLifetime(),
                 NullLogger<UpdateServiceIntegration>.Instance);
@@ -595,7 +601,16 @@ public sealed class UpdateServiceIntegrationTests
             UpdateServiceContext hostContext = await integration.GetHostContextAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
 
             Assert.Equal(runtimeRoot, hostContext.RuntimeRoot);
-            Assert.Equal(UpdateServiceIntegration.ResolveManagerInstallRoot(AppContext.BaseDirectory), hostContext.InstallRoot);
+            if (appliance)
+            {
+                Assert.Equal(Path.Combine(runtimeRoot, "logs"), runtimePaths.LogsRoot);
+                Assert.Equal("v1.2.3", hostContext.ManagerReleaseId);
+                Assert.Equal("1.2.3", hostContext.ManagerVersion);
+                Assert.False(hostContext.RuntimeUnitsActive);
+                Assert.False(hostContext.CurrentPointersConsistent);
+                Assert.False(await integration.TryContinuePendingActivationAsync(TestContext.Current.CancellationToken));
+            }
+            else Assert.Equal(UpdateServiceIntegration.ResolveManagerInstallRoot(AppContext.BaseDirectory), hostContext.InstallRoot);
             Assert.False(string.IsNullOrWhiteSpace(hostContext.ManagerVersion));
             Assert.True(hostContext.IsReady);
             Assert.True(hostContext.HostStatusObserved);

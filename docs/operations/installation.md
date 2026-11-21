@@ -73,6 +73,8 @@ Appliance socket directories are distinct from the state root so a peer socket m
 
 Manager publishes WebHost only at `127.0.0.1:20229` in appliance mode. WebHost starts after Gateway and mounts Gateway's local socket read-only. Its namespace allows incoming IPv4 HTTP, replies to established connections, and outgoing TCP to the Envoy telemetry listener. It drops other new outbound connections and IPv6.
 
+Manager also supervises the signed UpdateService image. UpdateService receives the selected release identity from Manager and queries Manager over its authenticated Unix socket for runtime status. Gateway mounts the UpdateService socket and its client trust material after UpdateService passes its authenticated health check. UpdateService can reach the Envoy telemetry listener. Release downloads, activation, and recovery handoff are pending in appliance mode.
+
 The Linux appliance service integration test starts the production Envoy and CoreDNS topology in an isolated rootless Podman store. The native hook and startup canary must open the gate before the test starts Gateway and verifies the published WebHost route. The fixture uses locally cached, digest-pinned egress images through a read-only additional image store.
 
 The appliance telemetry listener accepts HTTP OTLP POST requests for logs, metrics, and traces at Envoy's internal address, `10.247.0.2:15005`. Gateway, WebHost, CredentialsHost, and ChannelHost export to this endpoint. The boundary rules allow Envoy to reach OpenObserve at `10.247.0.6:5080`. The listener returns 404 for other methods and paths, including OpenObserve's query and administration APIs.
