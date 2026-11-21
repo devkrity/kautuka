@@ -1296,7 +1296,8 @@ install_socket_runtime_dirs() {
 
 install_apply_release_helper() {
     local extracted_root="$1"
-    mkdir -p /usr/local/lib/kautuka /etc/sudoers.d
+    local appliance_image_payload="${2:-false}"
+    mkdir -p /usr/local/lib/kautuka
     if [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-apply-release" /usr/local/lib/kautuka/apply-release
         sed -i 's/\r$//' /usr/local/lib/kautuka/apply-release
@@ -1338,10 +1339,15 @@ EOF
     if [[ "$(readlink -f "$0")" != "$(readlink -f /usr/local/lib/kautuka/kautuka-install-linux.sh)" ]]; then
         install -m 0755 "$0" /usr/local/lib/kautuka/kautuka-install-linux.sh
     fi
-    cat > /etc/sudoers.d/kautuka-apply-release <<'EOF'
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        rm -f -- /etc/sudoers.d/kautuka-apply-release
+    else
+        mkdir -p /etc/sudoers.d
+        cat > /etc/sudoers.d/kautuka-apply-release <<'EOF'
 kautuka ALL=(root) NOPASSWD: /usr/local/lib/kautuka/apply-release
 EOF
-    chmod 0440 /etc/sudoers.d/kautuka-apply-release
+        chmod 0440 /etc/sudoers.d/kautuka-apply-release
+    fi
 }
 
 install_appliance_update_path() {
@@ -3107,7 +3113,7 @@ PY
     fi
 
     clear_generated_agent_workspace_state "$visible_root"
-    install_apply_release_helper "$tmp_root/extracted"
+    install_apply_release_helper "$tmp_root/extracted" "$appliance_image_payload"
     if [[ "$appliance_image_payload" == 'true' ]]; then
         install_appliance_update_path
     fi
