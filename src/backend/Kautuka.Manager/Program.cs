@@ -68,6 +68,22 @@ managerDataRoot = Path.GetFullPath(managerDataRoot);
 KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
 string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
 var podmanCommandRunner = new PodmanCommandRunner();
+if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
+{
+    if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
+        || !string.Equals(builder.Configuration["Kautuka:Mode"], "prod", StringComparison.OrdinalIgnoreCase))
+    {
+        throw new InvalidOperationException("Appliance service supervision requires Linux production mode.");
+    }
+
+    const string managerRoot = "/opt/kautuka/manager";
+    VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
+        TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+    builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
+        podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
+        KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), socketRoot,
+        sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>()));
+}
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())
 {
