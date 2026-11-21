@@ -25,14 +25,31 @@ public sealed class ApplianceRoleImageImporterTests
     }
 
     [Fact]
-    public void InspectionBindsRepositoryDigestRoleAndPlatform()
+    public void InspectionBindsRepositoryDigestRoleAndPlatformToLocalImageId()
     {
-        string valid = "[{\"Digest\":\"" + Digest + "\",\"RepoDigests\":[\"" + Reference + "\"],\"Os\":\"linux\",\"Architecture\":\"amd64\",\"Config\":{\"Labels\":{\"io.kautuka.service.role\":\"gateway\"}}}]";
-        Assert.True(ApplianceRoleImageImporter.InspectMatches(valid, Reference, "gateway", "amd64"));
-        Assert.False(ApplianceRoleImageImporter.InspectMatches(valid, Reference, "webhost", "amd64"));
-        Assert.False(ApplianceRoleImageImporter.InspectMatches(valid, Reference, "gateway", "arm64"));
-        Assert.False(ApplianceRoleImageImporter.InspectMatches(valid.Replace("registry.example", "other.example", StringComparison.Ordinal), Reference, "gateway", "amd64"));
-        Assert.False(ApplianceRoleImageImporter.InspectMatches("{}", Reference, "gateway", "amd64"));
+        string imageId = new('b', 64);
+        string valid = $$"""
+            [{
+              "Id": "{{imageId}}",
+              "Digest": "{{Digest}}",
+              "RepoDigests": ["{{Reference}}"],
+              "Os": "linux",
+              "Architecture": "amd64",
+              "Config": {
+                "Labels": { "io.kautuka.service.role": "gateway" }
+              }
+            }]
+            """;
+        var references = new Dictionary<string, string> { ["gateway"] = Reference };
+        Assert.Equal($"sha256:{imageId}", ApplianceRoleImageImporter.ReadInstalledImageIds(valid, references, "amd64")["gateway"]);
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(valid,
+            new Dictionary<string, string> { ["webhost"] = Reference }, "amd64"));
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(valid, references, "arm64"));
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(
+            valid.Replace("registry.example", "other.example", StringComparison.Ordinal), references, "amd64"));
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds(
+            valid.Replace(imageId, "missing", StringComparison.Ordinal), references, "amd64"));
+        Assert.Throws<InvalidDataException>(() => ApplianceRoleImageImporter.ReadInstalledImageIds("{}", references, "amd64"));
     }
 
     private static MemoryStream Archive(string index, bool duplicate = false)

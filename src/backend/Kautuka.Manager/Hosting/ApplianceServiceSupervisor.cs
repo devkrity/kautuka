@@ -62,8 +62,10 @@ internal sealed partial class ApplianceServiceSupervisor(
     {
         try
         {
-            await new ApplianceRoleImageImporter(podman).EnsureAsync(release.Deployment, versionDirectory, stoppingToken)
-                .ConfigureAwait(false);
+            var imageIds = await new ApplianceRoleImageImporter(podman)
+                .EnsureAsync(release.Deployment, versionDirectory, stoppingToken).ConfigureAwait(false);
+            foreach (Service service in new[] { credentials, channel, gateway, webHost, updater })
+                service.RuntimeImageId = imageIds[service.Role];
             using var timer = new PeriodicTimer(reconcileDelay);
             do
             {
@@ -497,9 +499,9 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (service.Role == ObservabilityRole && imageArchives is not null)
             await imageArchives.TryEnsureImageAsync(image, token).ConfigureAwait(false);
         PodmanCommandResult result = await RequireSuccessAsync(service, ["image", "inspect", "--format", "{{.Id}}", image], 15, token).ConfigureAwait(false);
-        string id = result.StdOut.Trim();
-        if (id.StartsWith("sha256:", StringComparison.Ordinal)) id = id["sha256:".Length..];
-        return $"sha256:{RequireContainerId(id)}";
+        if (!ApplianceRoleImageImporter.TryNormalizeImageId(result.StdOut.Trim(), out string id))
+            throw new InvalidDataException("Invalid appliance image ID.");
+        return id;
     }
 
     private static bool MatchesImageId(string? actual, string expected)

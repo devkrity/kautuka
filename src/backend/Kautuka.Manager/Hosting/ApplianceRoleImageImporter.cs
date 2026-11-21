@@ -25,7 +25,8 @@ internal sealed class ApplianceRoleImageImporter
     }
 
 #pragma warning disable CA2000 // FileStream and its owned handle are held through Podman load and disposed by using declarations.
-    internal async Task EnsureAsync(ApplianceDeploymentDescriptor descriptor, string releaseVersionDirectory, CancellationToken cancellationToken)
+    internal async Task<Dictionary<string, string>> EnsureAsync(
+        ApplianceDeploymentDescriptor descriptor, string releaseVersionDirectory, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
@@ -47,26 +48,19 @@ internal sealed class ApplianceRoleImageImporter
             .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (installed.ExitCode == 0)
-        {
-            using JsonDocument inspection = JsonDocument.Parse(installed.StdOut);
-            JsonElement entries = inspection.RootElement;
-            if (entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() != Roles.Length ||
-                !Roles.All(role => entries.EnumerateArray().Any(image => ImageMatches(image, descriptor.Images[role], role, architecture))))
-                throw new InvalidDataException("Installed appliance images do not match the signed roles, digests and platform.");
-            return;
-        }
+            return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture);
 
         SafeFileHandle? images = null;
         try
         {
-            foreach (string role in Roles)
+            for (int index = 0; index < Roles.Length; index++)
             {
-                string reference = descriptor.Images[role];
+                string reference = references[index];
                 PodmanCommandResult exists = await runner.RunAsync(["image", "exists", reference], 30, cancellationToken).ConfigureAwait(false);
                 if (exists.ExitCode == 1)
                 {
                     images ??= TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseDirectory);
-                    using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, role);
+                    using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, Roles[index]);
                     using var stream = new FileStream(archive, FileAccess.Read);
                     ValidateArchiveIndex(stream, reference);
                     stream.Position = 0;
@@ -74,29 +68,47 @@ internal sealed class ApplianceRoleImageImporter
                     if (loaded.ExitCode != 0) throw new InvalidOperationException("Offline appliance image import failed.");
                 }
                 else if (exists.ExitCode != 0) throw new InvalidOperationException("Podman image lookup failed.");
-                await InspectAsync(reference, role, architecture, cancellationToken).ConfigureAwait(false);
             }
         }
         finally { images?.Dispose(); }
+
+        installed = await runner.RunAsync(["image", "inspect", .. references], 30, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (installed.ExitCode != 0)
+            throw new InvalidDataException("Could not inspect the installed appliance images.");
+        return ReadInstalledImageIds(installed.StdOut, descriptor.Images, architecture);
     }
 
 #pragma warning restore CA2000
-    private async Task InspectAsync(string reference, string role, string architecture, CancellationToken token)
+    internal static Dictionary<string, string> ReadInstalledImageIds(
+        string json, IReadOnlyDictionary<string, string> references, string architecture)
     {
-        PodmanCommandResult result = await runner.RunAsync(["image", "inspect", reference], 30, token).ConfigureAwait(false);
-        if (result.ExitCode != 0 || !InspectMatches(result.StdOut, reference, role, architecture))
-            throw new InvalidDataException("Installed appliance image does not match the signed role, digest and platform.");
+        using JsonDocument document = JsonDocument.Parse(json);
+        JsonElement entries = document.RootElement;
+        const string mismatch = "Installed appliance images do not match the signed roles, digests and platform.";
+        if (entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() != references.Count)
+            throw new InvalidDataException(mismatch);
+        var imageIds = new Dictionary<string, string>(references.Count, StringComparer.Ordinal);
+        foreach ((string role, string reference) in references)
+        {
+            JsonElement image = entries.EnumerateArray().FirstOrDefault(entry => ImageMatches(entry, reference, role, architecture));
+            if (image.ValueKind == JsonValueKind.Undefined ||
+                !image.TryGetProperty("Id", out JsonElement id) || id.ValueKind != JsonValueKind.String ||
+                !TryNormalizeImageId(id.GetString(), out string canonical))
+                throw new InvalidDataException(mismatch);
+            imageIds.Add(role, canonical);
+        }
+        return imageIds;
     }
 
-    internal static bool InspectMatches(string json, string reference, string role, string architecture)
+    internal static bool TryNormalizeImageId(string? value, out string canonical)
     {
-        try
-        {
-            using JsonDocument document = JsonDocument.Parse(json);
-            if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() != 1) return false;
-            return ImageMatches(document.RootElement[0], reference, role, architecture);
-        }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentOutOfRangeException) { return false; }
+        canonical = string.Empty;
+        if (value is null) return false;
+        string hex = value.StartsWith("sha256:", StringComparison.Ordinal) ? value["sha256:".Length..] : value;
+        if (hex.Length != 64 || hex.AsSpan().IndexOfAnyExcept(HexDigits) >= 0) return false;
+        canonical = $"sha256:{hex}";
+        return true;
     }
 
     private static bool ImageMatches(JsonElement image, string reference, string role, string architecture)
