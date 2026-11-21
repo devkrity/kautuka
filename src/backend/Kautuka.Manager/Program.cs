@@ -12,6 +12,29 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
+if (Array.IndexOf(args, "--verify-appliance-release") >= 0)
+{
+    if (!OperatingSystem.IsLinux() || args.Length != 1)
+    {
+        await Console.Error.WriteLineAsync("Appliance release verification requires Linux and accepts no other arguments.").ConfigureAwait(false);
+        return 1;
+    }
+
+    try
+    {
+        VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
+            TrustedApplianceReleaseFiles.Read("/opt/kautuka/manager", "/etc/kautuka"));
+        await Console.Out.WriteLineAsync($"Verified appliance release {release.ReleaseId}.").ConfigureAwait(false);
+        return 0;
+    }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException
+        or InvalidOperationException or System.Text.Json.JsonException or System.Text.DecoderFallbackException)
+    {
+        await Console.Error.WriteLineAsync($"Appliance release rejected: {error.Message}").ConfigureAwait(false);
+        return 1;
+    }
+}
+
 using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
     Environment.GetEnvironmentVariable("Kautuka__Mode"));
 
@@ -231,3 +254,4 @@ app.MapDefaultEndpoints();
 app.MapGrpcService<WorkspaceGrpcService>();
 
 await app.RunAsync().ConfigureAwait(false);
+return 0;
