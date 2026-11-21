@@ -14,7 +14,8 @@ internal sealed class KautukaAiClientFactory(
     CredentialResolverService credentialResolver,
     IProviderTypeCatalog providerTypeCatalog,
     IRunLimitResolver? runLimitResolver = null,
-    INetworkAccessChecker? checker = null)
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null)
 {
     public KautukaAiClientFactory(IEnumerable<IAiClientProvider> providers, CredentialResolverService credentialResolver)
         : this(providers, credentialResolver, new SeededProviderTypeCatalog())
@@ -250,7 +251,7 @@ internal sealed class KautukaAiClientFactory(
             return null;
         }
 
-        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver, checker);
+        return new OpenAiCompatibleProvider(providerType, allowCatalogDefaults ? metadata.DefaultBaseUrl : null, runLimitResolver, checker, transportFactory);
     }
 
     private JsonObject MaterializeCatalogDefaults(string providerType, JsonObject settings)

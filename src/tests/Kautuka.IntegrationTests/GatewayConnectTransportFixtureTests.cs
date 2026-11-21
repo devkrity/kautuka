@@ -4,8 +4,10 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Infrastructure.Egress;
+using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.IntegrationTests;
 
@@ -75,6 +77,27 @@ public sealed class GatewayConnectTransportFixtureTests
         using var lastRequest = new HttpRequestMessage(HttpMethod.Get, "http://example.com/");
         await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Correlation = "correlation-3" }, timeout.Token));
         Assert.Contains("x-kautuka-correlation: correlation-3\r\n", await lastTask, StringComparison.Ordinal);
+
+        using var modelTransport = new GatewayModelHttpTransport(transport);
+        var provider = new OllamaAiClientProvider(checker: new FixtureNetworkAccessChecker(), transportFactory: modelTransport.CreateHandler);
+        var settings = new JsonObject { ["base_url"] = "http://models.example.test" };
+        HttpRequestException missingIdentity = await Assert.ThrowsAsync<HttpRequestException>(
+            () => provider.DiscoverModelsAsync(settings, null, throwOnFailure: true, timeout.Token));
+        Assert.Contains("requires a caller identity", missingIdentity.Message, StringComparison.Ordinal);
+
+        Task<string> discoveryTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true,
+            ollamaDiscovery: true);
+        using (NetworkAccessContext.BeginScope("model-user", "model-agent", purpose: "ai-discovery", service: "ai-model", correlationId: "discovery-request"))
+        {
+            Assert.Single(await provider.DiscoverModelsAsync(settings, null, throwOnFailure: true, timeout.Token));
+        }
+        string discoveryConnect = await discoveryTask;
+        Assert.StartsWith("CONNECT models.example.test:80 HTTP/1.1\r\n", discoveryConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-user: model-user\r\n", discoveryConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-agent: model-agent\r\n", discoveryConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-purpose: ai-discovery\r\n", discoveryConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-correlation: discovery-request\r\n", discoveryConnect, StringComparison.Ordinal);
+
         Task<string> originTlsTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true, originTls: true);
         using var originTlsRequest = new HttpRequestMessage(HttpMethod.Get, "https://example.com/");
         Task<HttpResponseMessage> originRequestTask = transport.SendAsync(originTlsRequest, scope with { Correlation = "origin-tls" }, timeout.Token);
@@ -89,7 +112,7 @@ public sealed class GatewayConnectTransportFixtureTests
     }
 
 #pragma warning restore CA2025
-    private static async Task<string> ReceiveDeniedConnectAsync(TcpListener listener, X509Certificate2 server, X509Certificate2 client, CancellationToken token, bool accepted = false, bool originTls = false)
+    private static async Task<string> ReceiveDeniedConnectAsync(TcpListener listener, X509Certificate2 server, X509Certificate2 client, CancellationToken token, bool accepted = false, bool originTls = false, bool ollamaDiscovery = false)
     {
         using TcpClient socket = await listener.AcceptTcpClientAsync(token);
         using var tls = new SslStream(socket.GetStream(), false, (_, cert, _, _) => cert?.GetCertHashString() == client.GetCertHashString());
@@ -116,15 +139,29 @@ public sealed class GatewayConnectTransportFixtureTests
                 catch (Exception error) when (error is IOException or System.Security.Authentication.AuthenticationException) { }
                 return Encoding.ASCII.GetString(bytes.ToArray());
             }
-            int matched = 0;
-            while (matched < 4)
+            using var originHeaders = new MemoryStream();
+            while (originHeaders.Length < 16384)
             {
                 if (await tls.ReadAsync(buffer, token) == 0) throw new IOException("Origin request ended early.");
-                matched = buffer[0] == "\r\n\r\n"u8[matched] ? matched + 1 : 0;
+                originHeaders.WriteByte(buffer[0]);
+                if (originHeaders.Length >= 4 && originHeaders.GetBuffer().AsSpan((int)originHeaders.Length - 4, 4).SequenceEqual("\r\n\r\n"u8)) break;
             }
-            await tls.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"u8.ToArray(), token);
+            string body = "ok";
+            if (ollamaDiscovery)
+            {
+                Assert.StartsWith("GET /api/tags HTTP/1.1\r\n", Encoding.ASCII.GetString(originHeaders.ToArray()), StringComparison.Ordinal);
+                body = """{"models":[{"name":"fixture-model"}]}""";
+            }
+            await tls.WriteAsync(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}")), token);
         }
         else await tls.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), token);
         return Encoding.ASCII.GetString(bytes.ToArray());
+    }
+
+    private sealed class FixtureNetworkAccessChecker : INetworkAccessChecker
+    {
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+            => Task.FromResult(NetworkAccessCheckResult.CreateAllowed("fixture"));
     }
 }

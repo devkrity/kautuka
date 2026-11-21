@@ -1,6 +1,8 @@
 using System.Net;
 using System.Reflection;
 
+using Kautuka.Gateway.Infrastructure.Egress;
+
 using var databaseWriterLease = KautukaDatabaseWriterLease.AcquireForMode(
     Environment.GetEnvironmentVariable("Kautuka__Mode"));
 
@@ -12,6 +14,7 @@ GatewayAppBootstrap.ConfigureProductionServer(builder, IPAddress.Loopback);
 GatewayAppBootstrap.ConfigureServices(builder);
 
 var app = builder.Build();
+_ = app.Services.GetRequiredService<GatewayModelHttpTransport>();
 string buildVersion = typeof(GatewayProgramLog).Assembly
     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
     .InformationalVersion

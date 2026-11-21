@@ -13,7 +13,8 @@ namespace Kautuka.Gateway.Infrastructure.AI;
 
 internal sealed class GoogleAiClientProvider(
     IRunLimitResolver? runLimitResolver = null,
-    INetworkAccessChecker? checker = null) : IAiClientProvider
+    INetworkAccessChecker? checker = null,
+    Func<INetworkAccessChecker?, HttpMessageHandler>? transportFactory = null) : IAiClientProvider
 {
     private const string httpTimeoutSettingKey = "http_timeout_seconds";
     private const string openaiCompatPathSuffix = "/v1beta/openai";
@@ -154,7 +155,9 @@ internal sealed class GoogleAiClientProvider(
         var clientOptions = new ClientOptions
         {
             HttpClientFactory = () => new HttpClient(
-                new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler { AllowAutoRedirect = false }),
+                transportFactory is null
+                    ? new NetworkAccessCheckHandler(effectiveChecker, new SocketsHttpHandler { AllowAutoRedirect = false })
+                    : transportFactory(checker) ?? throw new InvalidOperationException("Configured model transport returned no handler."),
                 disposeHandler: true),
         };
 
