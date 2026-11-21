@@ -323,6 +323,7 @@ public sealed class ApplianceServiceSupervisorTests
             string gatewayClient = Path.Combine(securityRoots.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx);
             await WaitForReadinessAsync(channelSocket, channelCa, gatewayClient, cancellation);
             Assert.True(creates.TryGetValue("kautuka-appliance-channelhost", out string[]? channelArgs));
+            Assert.Contains("HOME=/tmp", channelArgs!);
             Assert.Contains(channelArgs!, arg => arg.Contains(securityRoots.ChannelPrivateRoot, StringComparison.Ordinal));
             Assert.Contains(channelArgs!, arg => arg.Contains(securityRoots.ChannelTrustRoot, StringComparison.Ordinal));
             Assert.DoesNotContain(channelArgs!, arg => arg.Contains(securityRoots.GatewayPrivateRoot, StringComparison.Ordinal));

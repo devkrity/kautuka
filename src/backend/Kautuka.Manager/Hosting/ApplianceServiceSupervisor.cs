@@ -342,6 +342,12 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
         else args.Add("--network=none");
 
+        // .NET certificate validation accesses the per-user store even when a
+        // peer uses custom trust. Numeric container users may receive an empty
+        // HOME from Podman when recreated during boot.
+        if (service.Role != ObservabilityRole)
+            args.AddRange(["--env", "HOME=/tmp"]);
+
         if (superviseObservability && service.Role != ObservabilityRole)
         {
             string endpoint = FormattableString.Invariant($"http://{WorkloadRulesetRenderer.EgressPodIp}:{WorkloadRulesetRenderer.TelemetryIngressPort}/api/default");

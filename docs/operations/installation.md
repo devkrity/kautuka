@@ -65,6 +65,8 @@ Both commands accept `--candidate-version <version>` to inspect a staged release
 
 In appliance mode, Manager's existing `GetHostStatus` RPC reports `core_ready` once the Podman runtime is available, the egress startup gate is open, and the supervised application services pass their local health checks. Manager also checks that the observability container is running.
 
+The application containers use an explicit temporary home directory for .NET certificate validation across starts.
+
 On a fresh signed Linux appliance installation, the installer provisions private socket directories and channel trust, then enables and starts Manager as the only Kautuka application host unit. Manager starts with the service account's systemd user target on subsequent boots. Manager creates missing application state directories with owner-only access and starts the application containers. The channel CA signing key stays in the root-only offline authority directory. The installer waits for the appliance's core readiness through WebHost and reads the first-run setup token from the Gateway state directory.
 
 The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
