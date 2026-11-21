@@ -103,7 +103,7 @@ internal sealed class UpdateCoordinator(
     public async ValueTask<UpdateStatusSnapshot> ApplyPreparedReleaseAsync(CancellationToken cancellationToken = default)
     {
         if (options.ApplianceReleaseId is not null)
-            throw new InvalidOperationException("Appliance release activation must be performed by Manager.");
+            throw new InvalidOperationException("Activate a signed appliance bundle with the host recovery helper.");
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -287,7 +287,7 @@ internal sealed class UpdateCoordinator(
     public async ValueTask<UpdateStatusSnapshot> RevertToLastKnownGoodAsync(CancellationToken cancellationToken = default)
     {
         if (options.ApplianceReleaseId is not null)
-            throw new InvalidOperationException("Appliance release recovery must be performed by Manager.");
+            throw new InvalidOperationException("Appliance release recovery is handled by the host recovery helper.");
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
