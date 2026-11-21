@@ -8,22 +8,22 @@ using Kautuka.Hosting.Hosting;
 
 namespace Kautuka.Manager.Hosting;
 
-/// <summary>Checks CredentialsHost readiness over its authenticated local transport.</summary>
-internal static class ApplianceCredentialsReadiness
+/// <summary>Checks application service readiness over its authenticated local transport.</summary>
+internal static class ApplianceServiceReadiness
 {
-    internal static async Task<bool> CheckAsync(string socketPath, string transportRoot, CancellationToken cancellationToken)
+    internal static async Task<bool> CheckAsync(string socketPath, string caPath, string clientPfxPath, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!OperatingSystem.IsLinux() || !Path.IsPathFullyQualified(socketPath) || !Path.IsPathFullyQualified(transportRoot))
+        if (!OperatingSystem.IsLinux())
             return false;
         try
         {
-            using X509Certificate2 ca = X509CertificateLoader.LoadCertificateFromFile(Path.Combine(transportRoot, ".ca.cer"));
-            using X509Certificate2 clientCertificate = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(transportRoot, ".credentials-client.pfx"), password: null);
+            using X509Certificate2 ca = X509CertificateLoader.LoadCertificateFromFile(caPath);
+            using X509Certificate2 clientCertificate = X509CertificateLoader.LoadPkcs12FromFile(clientPfxPath, password: null);
             if (!clientCertificate.HasPrivateKey) return false;
             var endpoint = new KautukaEndpoint
             {
-                Name = "credentialshost",
+                Name = "appliance-readiness",
                 Transport = KautukaTransport.UnixSocket,
                 Port = 0,
                 SocketPath = socketPath,
