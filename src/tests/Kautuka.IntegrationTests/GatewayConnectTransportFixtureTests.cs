@@ -151,13 +151,8 @@ public sealed class GatewayConnectTransportFixtureTests
             await tls.WriteAsync("HTTP/1.1 200 Connection Established\r\n\r\n"u8.ToArray(), token);
             if (originTls)
             {
-                using var origin = new SslStream(tls, leaveInnerStreamOpen: true);
-                try
-                {
-                    await origin.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = server }, token);
-                    _ = await origin.ReadAsync(buffer, token);
-                }
-                catch (Exception error) when (error is IOException or System.Security.Authentication.AuthenticationException) { }
+                Assert.Equal(1, await tls.ReadAsync(buffer, token));
+                Assert.Equal((byte)0x16, buffer[0]); // TLS handshake record, never a plaintext HTTP method.
                 return Encoding.ASCII.GetString(bytes.ToArray());
             }
             using var originHeaders = new MemoryStream();
