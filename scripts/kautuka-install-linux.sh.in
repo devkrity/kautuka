@@ -2835,6 +2835,9 @@ PY
         fi
         verify_linux_release "${verification_args[@]}"
         appliance_image_payload="$(python3 -c 'import json, sys; print("true" if "applianceDeployment" in json.load(sys.stdin) else "false")' < "$manifest_path")"
+        if [[ "$appliance_image_payload" == 'true' && "${install_root%/}" != '/opt/kautuka/manager' ]]; then
+            fail 'signed appliance releases require the Manager installation root /opt/kautuka/manager'
+        fi
     fi
 
     # Share the updater's lock before changing any installed files. An update
@@ -2944,6 +2947,12 @@ PY
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        echo 'Preparing the signed application images in the service account Podman store.'
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
+            "$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version" \
+            || fail 'could not prepare signed appliance service images'
+    fi
     local channel_security_root="$internal_state_root/security"
     chown_tree_excluding "$internal_state_root" "$service_user:$service_group" "$channel_security_root"
     if [[ "$visible_root" != "$internal_state_root" ]]; then

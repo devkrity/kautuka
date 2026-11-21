@@ -41,9 +41,11 @@ activation_line="$(grep -nF 'mv -Tf "$next_link" "$current_link"' "$tmp/generate
 }
 image_validation_line="$(grep -nF 'validate_appliance_image_payload "$tmp_root/extracted/service-images"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
 image_handoff_line="$(grep -nF 'install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+image_prepare_line="$(grep -nF '"$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
 stop_line="$(grep -nF 'stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
-[[ "$verification_line" -lt "$image_validation_line" && "$image_validation_line" -lt "$stop_line" && "$image_handoff_line" -lt "$activation_line" ]] || {
-  echo 'error: Linux installer must validate and stage signed appliance images before activation.' >&2
+[[ "$verification_line" -lt "$image_validation_line" && "$image_validation_line" -lt "$stop_line" &&
+   "$image_handoff_line" -lt "$image_prepare_line" && "$image_prepare_line" -lt "$activation_line" ]] || {
+  echo 'error: Linux installer must validate, stage, and prepare signed appliance images before activation.' >&2
   exit 1
 }
 
