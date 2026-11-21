@@ -69,7 +69,9 @@ KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Confi
 string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
 var podmanCommandRunner = new PodmanCommandRunner();
 string? gatewayConnectEnvoyDirectory = null;
-if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
+string? telemetryAuthorization = null;
+bool applianceEnabled = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+if (applianceEnabled)
 {
     if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
         || !string.Equals(builder.Configuration["Kautuka:Mode"], "prod", StringComparison.OrdinalIgnoreCase))
@@ -87,11 +89,13 @@ if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
     GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
     gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
     string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
+    telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podmanCommandRunner, stateRoot, CancellationToken.None)
+        .ConfigureAwait(false);
     builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
-        gatewayConnectDirectory));
+        gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true));
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())
@@ -112,10 +116,14 @@ if (OperatingSystem.IsWindows())
 
 builder.Services.AddSingleton<WorkspaceRuntimePaths>();
 builder.Services.AddSingleton(podmanCommandRunner);
-builder.Services.AddSingleton(static sp => WorkspaceSidecarCatalogLoader.Load(
-    Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
-    sp.GetRequiredService<WorkspaceRuntimePaths>(),
-    sp.GetRequiredService<ILoggerFactory>().CreateLogger("Kautuka.Manager.Configuration.WorkspaceSidecarCatalogLoader")));
+builder.Services.AddSingleton(sp =>
+{
+    WorkspaceSidecarCatalog catalog = WorkspaceSidecarCatalogLoader.Load(
+        Path.Combine(AppContext.BaseDirectory, "sidecars.json"),
+        sp.GetRequiredService<WorkspaceRuntimePaths>(),
+        sp.GetRequiredService<ILoggerFactory>().CreateLogger("Kautuka.Manager.Configuration.WorkspaceSidecarCatalogLoader"));
+    return applianceEnabled ? catalog with { Sidecars = [.. catalog.Sidecars.Where(sidecar => sidecar.Name != "kautuka-openobserve")] } : catalog;
+});
 builder.Services.AddSingleton(static sp =>
 {
     IHostEnvironment environment = sp.GetRequiredService<IHostEnvironment>();
@@ -170,7 +178,8 @@ builder.Services.AddSingleton(sp =>
             Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"),
             Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX")),
         imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
-        gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory));
+        gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory,
+        telemetryAuthorization: telemetryAuthorization));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());

@@ -69,6 +69,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public static string CoreDnsX64Image => FindRuntimeImage("coredns").Image;
     public static string EnvoyPinnedImage => SelectRuntimeImage("envoy", RuntimeInformation.OSArchitecture);
     public static string CoreDnsPinnedImage => SelectRuntimeImage("coredns", RuntimeInformation.OSArchitecture);
+    public static string ObservabilityPinnedImage => SelectRuntimeImage("openobserve", RuntimeInformation.OSArchitecture);
     public static string BoundaryInitImage => FindRuntimeImage("egress-boundary").Image;
     public static string CanaryBasePinnedImage => ResolveCanaryBaseImage(runtimeImages);
     internal static string ResolveCanaryBaseImage(RuntimeImageAllowlist images)
@@ -148,6 +149,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string? gatewayConnectEnvoyDirectory;
+    private readonly string? telemetryAuthorization;
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -167,7 +169,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         NetworkAccessPolicyStore? policyStore = null,
         bool useDevelopmentSelinuxDomain = false,
         PodmanImageArchiveStore? imageArchives = null,
-        string? gatewayConnectEnvoyDirectory = null)
+        string? gatewayConnectEnvoyDirectory = null,
+        string? telemetryAuthorization = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -184,6 +187,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.useDevelopmentSelinuxDomain = useDevelopmentSelinuxDomain;
         this.imageArchives = imageArchives;
         this.gatewayConnectEnvoyDirectory = gatewayConnectEnvoyDirectory;
+        this.telemetryAuthorization = telemetryAuthorization;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -1539,14 +1543,23 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         // Render boundary and configs
         bool includeGatewayConnect = gatewayConnectEnvoyDirectory is not null;
-        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp], includeGatewayConnect);
+        bool includeTelemetry = telemetryAuthorization is not null;
+        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp], includeGatewayConnect, includeTelemetry);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
             isWindowsMtls: isWindowsHostNativeDev,
-            includeGatewayConnect: includeGatewayConnect);
+            includeGatewayConnect: includeGatewayConnect,
+            includeApplianceTelemetry: includeTelemetry,
+            telemetryAuthorization: telemetryAuthorization);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
+        if (includeTelemetry && OperatingSystem.IsLinux())
+        {
+            const UnixFileMode privateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            Directory.CreateDirectory(nacDir, privateDirectory);
+            File.SetUnixFileMode(nacDir, privateDirectory);
+        }
         string boundaryConfigDir = Path.Combine(nacDir, "boundary");
         string boundaryPath = Path.Combine(boundaryConfigDir, "boundary.nft");
         string envoyConfigDir = Path.Combine(nacDir, "envoy");

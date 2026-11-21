@@ -214,7 +214,8 @@ public static class BoundaryRulesetRenderer
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
         bool isWindowsMtls = false,
         bool includeGatewayConnect = false,
-        bool includeApplianceTelemetry = false)
+        bool includeApplianceTelemetry = false,
+        string? telemetryAuthorization = null)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
         string gatewayConnect = includeGatewayConnect ? RenderGatewayConnectListener() : string.Empty;
@@ -235,7 +236,7 @@ public static class BoundaryRulesetRenderer
 
         string rendered = template
             .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
-            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener() : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener(telemetryAuthorization) : string.Empty, StringComparison.Ordinal)
             .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
@@ -247,7 +248,21 @@ public static class BoundaryRulesetRenderer
         return rendered;
     }
 
-    private static string RenderTelemetryListener() => FormattableString.Invariant($"""
+    private static string RenderTelemetryListener(string? authorization)
+    {
+        if (authorization is not null && (authorization.Length is 0 or > 256
+            || !authorization.All(static ch => char.IsAsciiLetterOrDigit(ch) || ch is '+' or '/' or '=')))
+            throw new ArgumentException("Invalid appliance telemetry authorization format.", nameof(authorization));
+
+        string header = authorization is null ? string.Empty : FormattableString.Invariant($"""
+                                  request_headers_to_add:
+                                    - header:
+                                        key: authorization
+                                        value: "Basic {authorization}"
+                                      append_action: OVERWRITE_IF_EXISTS_OR_ADD
+
+        """);
+        return FormattableString.Invariant($"""
         - name: appliance_telemetry
           address:
             socket_address:
@@ -276,7 +291,7 @@ public static class BoundaryRulesetRenderer
                                       exact: "POST"
                               route:
                                 cluster: appliance_observability
-                            - match:
+    {header}                        - match:
                                 prefix: "/"
                               direct_response:
                                 status: 404
@@ -286,6 +301,7 @@ public static class BoundaryRulesetRenderer
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
     """);
+    }
 
     private static string RenderTelemetryCluster() => FormattableString.Invariant($"""
         - name: appliance_observability

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Buffers.Binary;
 
 using Kautuka.Hosting;
 using Kautuka.Manager.Hosting;
@@ -225,7 +226,7 @@ public sealed class ApplianceServiceSupervisorTests
             ];
         }
         var creates = new Dictionary<string, string[]>(StringComparer.Ordinal);
-        var podman = new PodmanCommandRunner(async (args, token) =>
+        var podman = new PodmanCommandRunner(async (args, token, standardInput) =>
         {
             if (args.Count > 2 && args[0] == "create")
             {
@@ -239,9 +240,9 @@ public sealed class ApplianceServiceSupervisorTests
                 [.. isolatedStore, .. hookOptions, .. args.Select((arg, index) => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z"
                     ? $"{writerLock}:/run/kautuka-db-writer.lock:ro,z"
                     : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks
-                    : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token);
+                    : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token, standardInput: standardInput);
             if (result.ExitCode == 0 && fixtureHooks is not null && args.Count == 3 && args[0] == "container" && args[1] == "inspect"
-                && args[2] is "kautuka-appliance-gateway" or "kautuka-appliance-webhost")
+                && args[2] is "kautuka-appliance-gateway" or "kautuka-appliance-webhost" or "kautuka-appliance-observability")
                 return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, runtime) };
             return result;
         });
@@ -335,6 +336,7 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.True(load.ExitCode == 0, load.StdErr);
         string networkState = Path.Combine(runtime, "network");
         string envoySockets = Path.Combine(sockets, "envoy");
+        string telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podman, runtime, token);
         var registry = new WorkloadRegistry();
         using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
         using var logs = LoggerFactory.Create(builder => builder.AddSimpleConsole());
@@ -342,7 +344,7 @@ public sealed class ApplianceServiceSupervisorTests
             new WorkloadPostStartVerifier(podman), registry, networkState,
             logs.CreateLogger<EgressTopologyManager>(), envoySocketHostDir: envoySockets, hookStateDirectory: hookState,
             policyStore: policy,
-            gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory);
+            gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory, telemetryAuthorization: telemetryAuthorization);
         var controller = new NetworkAccessController.NetworkAccessController(policy, registry,
             isContainerAuthorizationGateOpen: () => topology.IsStartupGateOpen);
         await using var authorization = EnvoyAuthorizationHost.Create(controller, new EnvoyAuthorizationHostOptions
@@ -357,11 +359,11 @@ public sealed class ApplianceServiceSupervisorTests
             return podman.RunAsync(args, 30, cancellation);
         });
         using var gateway = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
-            NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory);
+            NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory, superviseObservability: true);
         try
         {
             foreach (string image in new[] { EgressTopologyManager.BoundaryInitImage, EgressTopologyManager.EnvoyPinnedImage,
-                EgressTopologyManager.CoreDnsPinnedImage, EgressTopologyManager.CanaryBasePinnedImage })
+                EgressTopologyManager.CoreDnsPinnedImage, EgressTopologyManager.CanaryBasePinnedImage, EgressTopologyManager.ObservabilityPinnedImage })
             {
                 PodmanCommandResult available = await podman.RunAsync(["image", "exists", image], 10, token);
                 Assert.True(available.ExitCode == 0, $"Missing pinned egress fixture image {image}.");
@@ -375,6 +377,15 @@ public sealed class ApplianceServiceSupervisorTests
                 Assert.Equal(0, state.ExitCode);
                 Assert.Equal("running", state.StdOut.Trim());
             }
+            string collector = await gateway.EnsureRunningAsync("observability", token);
+            Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
+            Assert.True(telemetryAuthorization == await ApplianceTelemetry.EnsureAuthorizationAsync(podman, runtime, token),
+                "The retained observability secret was not reused.");
+            await WaitForCollectorAsync(podman, collector, token);
+            Assert.Equal(0, (await podman.RunAsync(["stop", collector], 30, token)).ExitCode);
+            Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
+            await WaitForCollectorAsync(podman, collector, token);
+            imageInspections = 0;
             string id = await gateway.EnsureRunningAsync("gateway", token);
             Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
             Assert.Equal(1, imageInspections);
@@ -389,6 +400,7 @@ public sealed class ApplianceServiceSupervisorTests
                 if (!ready) await Task.Delay(TimeSpan.FromMilliseconds(250), token);
             }
             Assert.True(ready, "Gateway did not answer its health probe.");
+            await CheckCollectorRelayAsync(podman, id, token);
             Assert.Equal(0, (await podman.RunAsync(["stop", id], 30, token)).ExitCode);
             Assert.True(await ApplianceServiceReadiness.CheckAsync(Path.Combine(sockets, "credentialshost", "credentialshost.sock"),
                 Path.Combine(runtime, "credentialsHost", "transport", ".ca.cer"),
@@ -411,10 +423,44 @@ public sealed class ApplianceServiceSupervisorTests
         {
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-webhost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
+            await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-observability"], 20, CancellationToken.None);
             await topology.StopAsync(CancellationToken.None);
             await podman.RunAsync(["pod", "rm", "--force", "--ignore", EgressTopologyManager.EgressPodName], 30, CancellationToken.None);
             await podman.RunAsync(["network", "rm", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName], 20, CancellationToken.None);
         }
+    }
+
+    private static async Task WaitForCollectorAsync(PodmanCommandRunner podman, string container, CancellationToken token)
+    {
+        PodmanCommandResult pid = await podman.RunAsync(["inspect", "--format", "{{.State.Pid}}", container], 10, token);
+        Assert.Equal(0, pid.ExitCode);
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            PodmanCommandResult health = await podman.RunAsync(["unshare", "nsenter", "-t", pid.StdOut.Trim(), "-n",
+                "curl", "--noproxy", "*", "--max-time", "2", "--fail", "--silent", "http://127.0.0.1:5080/healthz"], 4, token);
+            if (health.ExitCode == 0) return;
+            await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+        }
+        Assert.Fail("OpenObserve did not answer its local readiness probe.");
+    }
+
+    private static async Task CheckCollectorRelayAsync(PodmanCommandRunner podman, string gateway, CancellationToken token)
+    {
+        PodmanCommandResult pid = await podman.RunAsync(["inspect", "--format", "{{.State.Pid}}", gateway], 10, token);
+        Assert.Equal(0, pid.ExitCode);
+
+        byte[] body = "fixture-otlp"u8.ToArray();
+        byte[] timestamp = new byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(timestamp, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1_000_000);
+        byte[] log = [0x09, .. timestamp, 0x2a, (byte)(body.Length + 2), 0x0a, (byte)body.Length, .. body];
+        // OTLP resource_logs -> scope_logs -> log_records, each with a short length prefix.
+        using var payload = new MemoryStream([0x0a, (byte)(log.Length + 4), 0x12, (byte)(log.Length + 2), 0x12, (byte)log.Length, .. log]);
+        PodmanCommandResult post = await podman.RunAsync(["unshare", "nsenter", "-t", pid.StdOut.Trim(), "-n", "curl",
+            "--noproxy", "*", "--max-time", "5", "--silent", "--show-error", "-o", "/dev/null", "-w", "%{http_code}",
+            "--header", "Content-Type: application/x-protobuf", "--data-binary", "@-",
+            "http://10.247.0.2:15005/api/default/v1/logs"], 10, token, standardInput: payload);
+        Assert.True(post.ExitCode == 0, post.StdErr);
+        Assert.Equal("200", post.StdOut.Trim());
     }
 
     private static async Task CheckPublishedWebHostAsync(ApplianceServiceSupervisor supervisor, PodmanCommandRunner podman,

@@ -184,12 +184,14 @@ Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(new("generic", 12
     new Dictionary<string, HookPolicy.Infrastructure> { ["generic"] = new("other", ["10.247.0.4"]) }, owners, "100"));
 string gatewayRules = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.Render("10.247.0.4", applianceRole: "appliance-gateway");
 if (!gatewayRules.Contains("tcp dport 15004 accept", StringComparison.Ordinal) ||
+    !gatewayRules.Contains("ip daddr 10.247.0.2 tcp dport 15005 accept", StringComparison.Ordinal) ||
     gatewayRules.Contains("meta l4proto tcp accept", StringComparison.Ordinal) ||
     gatewayRules.IndexOf("input_ipv6_drop", StringComparison.Ordinal) > gatewayRules.IndexOf("iifname", StringComparison.Ordinal) ||
     gatewayRules.IndexOf("ipv6_drop", gatewayRules.IndexOf("chain output", StringComparison.Ordinal), StringComparison.Ordinal) > gatewayRules.IndexOf("oifname", StringComparison.Ordinal))
     throw new InvalidOperationException("Gateway rules are not restricted.");
 string gatewayHash = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash("10.247.0.4", applianceRole: "appliance-gateway");
-if (gatewayHash != "821fea6deb4eaf3fd18478e9c680bd6490cfdaecb64a1890b360b562a45fa4c9") throw new InvalidOperationException("Gateway golden hash differs from the verified Fedora nft output.");
+if (gatewayHash != "01b9afdd45b53d0031d784ff1a0deaa782846619b7819d6cb12b20f6c71a4b17")
+    throw new InvalidOperationException($"Gateway ruleset hash differs from the verified Fedora nft output: {gatewayHash}");
 Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { Role = null }, ["10.247.0.4"], gatewayAllowlist, owners, "100"));
 Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "not-immutable" }, ["10.247.0.4"],
     new Dictionary<string, HookPolicy.Infrastructure> { ["gateway-id"] = new("appliance-gateway", ["10.247.0.4"], ImageDigest: "not-immutable") }, owners, "100"));

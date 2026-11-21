@@ -22,4 +22,18 @@ public sealed class ApplianceTelemetryNetworkPathTests
         Assert.DoesNotContain("appliance_telemetry", BoundaryRulesetRenderer.RenderEnvoyConfig(), StringComparison.Ordinal);
         Assert.DoesNotContain("telemetry_", BoundaryRulesetRenderer.RenderBoundaryNft(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void EnvoySetsTheCollectorAuthorizationOnlyOnTheIngestionRoute()
+    {
+        const string authorization = "Zml4dHVyZQ==";
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig(includeApplianceTelemetry: true, telemetryAuthorization: authorization);
+
+        string route = envoy[envoy.IndexOf("cluster: appliance_observability", StringComparison.Ordinal)..envoy.IndexOf("status: 404", StringComparison.Ordinal)];
+        Assert.Contains("key: authorization", route, StringComparison.Ordinal);
+        Assert.Contains($"value: \"Basic {authorization}\"", route, StringComparison.Ordinal);
+        Assert.Contains("append_action: OVERWRITE_IF_EXISTS_OR_ADD", route, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => BoundaryRulesetRenderer.RenderEnvoyConfig(
+            includeApplianceTelemetry: true, telemetryAuthorization: "bad\nvalue"));
+    }
 }

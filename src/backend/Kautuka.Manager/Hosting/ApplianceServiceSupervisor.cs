@@ -6,6 +6,7 @@ using Kautuka.Manager.Protos;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Telemetry.Security;
+using Kautuka.Telemetry.Telemetry;
 
 namespace Kautuka.Manager.Hosting;
 
@@ -18,7 +19,9 @@ internal sealed partial class ApplianceServiceSupervisor(
     string socketRoot,
     ILogger<ApplianceServiceSupervisor> logger,
     EgressTopologyManager? topology = null,
-    string? gatewayConnectDirectory = null) : BackgroundService
+    string? gatewayConnectDirectory = null,
+    PodmanImageArchiveStore? imageArchives = null,
+    bool superviseObservability = false) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -26,18 +29,20 @@ internal sealed partial class ApplianceServiceSupervisor(
     private const string ChannelRole = "channelhost";
     private const string GatewayRole = "gateway";
     private const string WebHostRole = "webhost";
+    private const string ObservabilityRole = "observability";
     private static readonly TimeSpan reconcileDelay = TimeSpan.FromSeconds(5);
     private readonly Service credentials = new(CredentialsRole, "credentialsHost");
     private readonly Service channel = new(ChannelRole, "channelHost");
     private readonly Service gateway = new(GatewayRole, "gateway");
     private readonly Service webHost = new(WebHostRole, "webhost");
+    private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName);
 
     private sealed class Service(string role, string stateName)
     {
         internal string Role { get; } = role;
         internal string StateName { get; } = stateName;
         internal string ContainerName { get; } = $"kautuka-appliance-{role}";
-        internal string? NetworkRole => Role is GatewayRole or WebHostRole ? $"appliance-{Role}" : null;
+        internal string? NetworkRole => Role is GatewayRole or WebHostRole or ObservabilityRole ? $"appliance-{Role}" : null;
         internal string? RuntimeImageId { get; set; }
         internal string? ActiveContainer { get; set; }
         internal bool Ready { get; set; }
@@ -65,6 +70,13 @@ internal sealed partial class ApplianceServiceSupervisor(
                 }
                 else
                 {
+                    if (superviseObservability)
+                    {
+                        if (topology?.IsStartupGateOpen == true)
+                            await TryReconcileAsync(observability, stoppingToken).ConfigureAwait(false);
+                        else
+                            await StopActiveAsync(observability, stoppingToken).ConfigureAwait(false);
+                    }
                     await TryReconcileAsync(credentials, stoppingToken).ConfigureAwait(false);
                     await TryReconcileAsync(channel, stoppingToken).ConfigureAwait(false);
                     if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready)
@@ -94,6 +106,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         await StopActiveAsync(gateway, token).ConfigureAwait(false);
         await StopActiveAsync(channel, token).ConfigureAwait(false);
         await StopActiveAsync(credentials, token).ConfigureAwait(false);
+        await StopActiveAsync(observability, token).ConfigureAwait(false);
     }
 
     private async Task StopActiveAsync(Service service, CancellationToken token)
@@ -128,6 +141,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private async Task ReconcileAsync(Service service, CancellationToken token)
     {
         await EnsureRunningAsync(service, token).ConfigureAwait(false);
+        if (service.Role == ObservabilityRole) return;
         string socket = Path.Combine(socketRoot, service.Role, service.Role + ".sock");
         string transport = Path.Combine(stateRoot, service.StateName, "transport");
         string security = Path.Combine(stateRoot, "security", "channel");
@@ -163,12 +177,13 @@ internal sealed partial class ApplianceServiceSupervisor(
             ChannelRole => channel,
             GatewayRole => gateway,
             WebHostRole => webHost,
+            ObservabilityRole when superviseObservability => observability,
             _ => throw new ArgumentOutOfRangeException(nameof(role)),
         }, token);
 
     private async Task<string> EnsureRunningAsync(Service service, CancellationToken token)
     {
-        string image = release.Deployment.Images[service.Role];
+        string image = service.Role == ObservabilityRole ? EgressTopologyManager.ObservabilityPinnedImage : release.Deployment.Images[service.Role];
         string? role = service.NetworkRole;
         if (role is not null && topology?.IsStartupGateOpen != true)
             throw new InvalidOperationException("The service cannot start before the appliance egress boundary is ready.");
@@ -262,6 +277,31 @@ internal sealed partial class ApplianceServiceSupervisor(
             ]);
         }
         else args.Add("--network=none");
+
+        if (service.Role == GatewayRole && superviseObservability)
+        {
+            string endpoint = FormattableString.Invariant($"http://{WorkloadRulesetRenderer.EgressPodIp}:{WorkloadRulesetRenderer.TelemetryIngressPort}/api/default");
+            args.AddRange([
+                "--env", $"Kautuka__Telemetry__Otlp__LogsEndpoint={endpoint}",
+                "--env", $"Kautuka__Telemetry__Otlp__MetricsEndpoint={endpoint}",
+                "--env", $"Kautuka__Telemetry__Otlp__TracesEndpoint={endpoint}",
+                "--env", "Kautuka__Telemetry__Otlp__Protocol=http/protobuf",
+                "--env", "Kautuka__Telemetry__Otlp__Headers=",
+            ]);
+        }
+
+        if (service.Role == ObservabilityRole)
+        {
+            string dataDirectory = Directory.CreateDirectory(Path.Combine(stateRoot, ApplianceTelemetry.StateName)).FullName;
+            args.AddRange([
+                "--secret", $"{ApplianceTelemetry.SecretName},type=env,target=ZO_ROOT_USER_PASSWORD",
+                "--env", $"ZO_ROOT_USER_EMAIL={KautukaTelemetryDefaults.DefaultOpenObserveRootUserEmail}",
+                "--env", "ZO_DATA_DIR=/data",
+                "--volume", $"{dataDirectory}:/data:Z",
+                image,
+            ]);
+            return args;
+        }
 
         if (service.Role == WebHostRole)
         {
@@ -390,6 +430,8 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     private async Task<string> ResolveImageIdAsync(Service service, string image, CancellationToken token)
     {
+        if (service.Role == ObservabilityRole && imageArchives is not null)
+            await imageArchives.TryEnsureImageAsync(image, token).ConfigureAwait(false);
         PodmanCommandResult result = await RequireSuccessAsync(service, ["image", "inspect", "--format", "{{.Id}}", image], 15, token).ConfigureAwait(false);
         string id = result.StdOut.Trim();
         if (id.StartsWith("sha256:", StringComparison.Ordinal)) id = id["sha256:".Length..];

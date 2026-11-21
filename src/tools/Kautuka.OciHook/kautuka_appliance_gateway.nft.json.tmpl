@@ -279,6 +279,42 @@
             "match": {
               "op": "==",
               "left": {
+                "payload": {
+                  "protocol": "tcp",
+                  "field": "dport"
+                }
+              },
+              "right": 15005
+            }
+          },
+          {
+            "accept": null
+          }
+        ]
+      }
+    },
+    {
+      "rule": {
+        "family": "inet",
+        "table": "kautuka_workload",
+        "chain": "output",
+        "expr": [
+          {
+            "match": {
+              "op": "==",
+              "left": {
+                "payload": {
+                  "protocol": "ip",
+                  "field": "daddr"
+                }
+              },
+              "right": "10.247.0.2"
+            }
+          },
+          {
+            "match": {
+              "op": "==",
+              "left": {
                 "meta": {
                   "key": "l4proto"
                 }

@@ -122,6 +122,7 @@ public static class WorkloadRulesetRenderer
             oifname "lo" accept
             oifname != "lo" ip saddr != {{ApplianceGatewayIp}} counter drop comment "spoof_drop"
             ip daddr {{EgressPodIp}} tcp dport {{GatewayConnectPort}} accept
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
             ip daddr {{EgressPodIp}} meta l4proto { udp, tcp } th dport {{DnsPort}} accept
             counter drop comment "final_drop"
           }
