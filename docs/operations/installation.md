@@ -71,4 +71,6 @@ Appliance socket directories are distinct from the state root so a peer socket m
 
 Manager publishes WebHost only at `127.0.0.1:20229` in appliance mode. WebHost starts after Gateway and mounts Gateway's local socket read-only. Its namespace allows incoming IPv4 HTTP and replies to established connections. It drops new outbound connections and IPv6.
 
+The Linux appliance service integration test starts the production Envoy and CoreDNS topology in an isolated rootless Podman store. The native hook and startup canary must open the gate before the test starts Gateway and verifies the published WebHost route. The fixture uses locally cached, digest-pinned egress images through a read-only additional image store.
+
 For an already running package proxy, Manager reads Podman's scheduled health result and reuses the resolved image ID for identity verification. It still checks the live namespace's egress rules before marking the proxy ready.

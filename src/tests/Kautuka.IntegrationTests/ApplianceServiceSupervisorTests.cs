@@ -8,6 +8,7 @@ using Kautuka.Manager.RuntimeContainer.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.NetworkAccessController;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Kautuka.IntegrationTests;
@@ -210,21 +211,32 @@ public sealed class ApplianceServiceSupervisorTests
         if (webHostEnabled) imageMap["webhost"] = manifest.RootElement.GetProperty("services").GetProperty("webhost").GetProperty("image").GetString()!;
         var release = new VerifiedApplianceRelease("v1.2.3", "1.2.3", new ApplianceDeploymentDescriptor(1, 1, imageMap));
         var engine = new PodmanCommandRunner();
-        string[] isolatedStore = gatewayEnabled
-            ? ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run"), "--network-config-dir", Path.Combine(runtime, "network-config")]
-            : ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run")];
+        string[] isolatedStore = ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run")];
+        if (gatewayEnabled)
+        {
+            PodmanCommandResult hostStore = await engine.RunAsync(["info", "--format", "{{.Store.GraphRoot}}"], 15, TestContext.Current.CancellationToken);
+            Assert.Equal(0, hostStore.ExitCode);
+            Assert.True(Path.IsPathFullyQualified(hostStore.StdOut.Trim()));
+            isolatedStore =
+            [
+                "--storage-driver", "overlay", "--storage-opt", $"additionalimagestore={hostStore.StdOut.Trim()}",
+                "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run"),
+                "--network-config-dir", Path.Combine(runtime, "network-config"),
+            ];
+        }
         var creates = new Dictionary<string, string[]>(StringComparer.Ordinal);
-        var calls = new List<string[]>();
         var podman = new PodmanCommandRunner(async (args, token) =>
         {
-            calls.Add([.. args]);
             if (args.Count > 2 && args[0] == "create")
             {
                 string name = args[2];
                 creates[name] = [.. args];
             }
+            string[] hookOptions = fixtureHooks is not null && !args.Contains("--hooks-dir", StringComparer.Ordinal)
+                ? ["--hooks-dir", fixtureHooks]
+                : [];
             PodmanCommandResult result = await engine.RunAsync(
-                [.. isolatedStore, .. args.Select((arg, index) => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z"
+                [.. isolatedStore, .. hookOptions, .. args.Select((arg, index) => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z"
                     ? $"{writerLock}:/run/kautuka-db-writer.lock:ro,z"
                     : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks
                     : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token);
@@ -276,8 +288,6 @@ public sealed class ApplianceServiceSupervisorTests
             {
                 Assert.True(OperatingSystem.IsLinux());
                 await RunGatewayFixtureAsync(root, runtime, sockets, images, gatewayHook!, podman, release, hooks => fixtureHooks = hooks, cancellation);
-                Assert.Contains(calls, call => call.SequenceEqual(["image", "inspect", "--format", "{{.Id}}", release.Deployment.Images["gateway"]]));
-                Assert.Equal(webHostEnabled ? 3 : 2, calls.Count(call => call.Length == 2 && call[0] == "inspect"));
             }
         }
         catch (Exception ex)
@@ -323,13 +333,23 @@ public sealed class ApplianceServiceSupervisorTests
         GatewayConnectCertificateMaterial certificates = GatewayConnectCertificateMaterial.Ensure(Path.Combine(runtime, "connect-certificates"));
         PodmanCommandResult load = await podman.RunAsync(["load", "--input", Path.Combine(images, "gateway.tar")], 120, token);
         Assert.True(load.ExitCode == 0, load.StdErr);
-        PodmanCommandResult network = await podman.RunAsync(["network", "create", "--internal", "--disable-dns", "--subnet", "10.247.0.0/16", EgressTopologyManager.WorkloadNetworkName], 30, token);
-        Assert.True(network.ExitCode == 0, network.StdErr);
-        await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(runtime, "ip.json")),
-            new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), runtime, hookStateDirectory: hookState,
+        string networkState = Path.Combine(runtime, "network");
+        string envoySockets = Path.Combine(sockets, "envoy");
+        var registry = new WorkloadRegistry();
+        using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
+        using var logs = LoggerFactory.Create(builder => builder.AddSimpleConsole());
+        await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(networkState, "ip.json")),
+            new WorkloadPostStartVerifier(podman), registry, networkState,
+            logs.CreateLogger<EgressTopologyManager>(), envoySocketHostDir: envoySockets, hookStateDirectory: hookState,
+            policyStore: policy,
             gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory);
-        topology.WriteInfraAllowlist([]);
-        typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
+        var controller = new NetworkAccessController.NetworkAccessController(policy, registry,
+            isContainerAuthorizationGateOpen: () => topology.IsStartupGateOpen);
+        await using var authorization = EnvoyAuthorizationHost.Create(controller, new EnvoyAuthorizationHostOptions
+        {
+            SocketPath = Path.Combine(envoySockets, "envoy.sock"),
+            LockFilePath = Path.Combine(networkState, "networkaccess.lock"),
+        });
         int imageInspections = 0;
         var gatewayPodman = new PodmanCommandRunner((args, cancellation) =>
         {
@@ -340,6 +360,21 @@ public sealed class ApplianceServiceSupervisorTests
             NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory);
         try
         {
+            foreach (string image in new[] { EgressTopologyManager.BoundaryInitImage, EgressTopologyManager.EnvoyPinnedImage,
+                EgressTopologyManager.CoreDnsPinnedImage, EgressTopologyManager.CanaryBasePinnedImage })
+            {
+                PodmanCommandResult available = await podman.RunAsync(["image", "exists", image], 10, token);
+                Assert.True(available.ExitCode == 0, $"Missing pinned egress fixture image {image}.");
+            }
+            await authorization.StartAsync(token);
+            await topology.InitializeProductionAsync(registry, isWindowsHostNativeDev: false, token);
+            Assert.True(topology.IsStartupGateOpen);
+            foreach (string service in new[] { "kautuka-egress-envoy", "kautuka-egress-dns" })
+            {
+                PodmanCommandResult state = await podman.RunAsync(["inspect", "--format", "{{.State.Status}}", service], 10, token);
+                Assert.Equal(0, state.ExitCode);
+                Assert.Equal("running", state.StdOut.Trim());
+            }
             string id = await gateway.EnsureRunningAsync("gateway", token);
             Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
             Assert.Equal(1, imageInspections);
@@ -376,7 +411,9 @@ public sealed class ApplianceServiceSupervisorTests
         {
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-webhost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
-            await podman.RunAsync(["network", "rm", EgressTopologyManager.WorkloadNetworkName], 20, CancellationToken.None);
+            await topology.StopAsync(CancellationToken.None);
+            await podman.RunAsync(["pod", "rm", "--force", "--ignore", EgressTopologyManager.EgressPodName], 30, CancellationToken.None);
+            await podman.RunAsync(["network", "rm", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName], 20, CancellationToken.None);
         }
     }
 
