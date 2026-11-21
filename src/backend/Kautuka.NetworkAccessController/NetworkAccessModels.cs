@@ -145,7 +145,10 @@ public sealed record NetworkAccessDecisionResult(
     string Reason,
     string? Cluster = null,
     string? RequestId = null,
-    bool OpenInternetBadge = false);
+    bool OpenInternetBadge = false)
+{
+    public bool AllowLan { get; init; }
+}
 
 public sealed record ContainerConnectionInput(
     string? SourceIp,

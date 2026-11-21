@@ -127,6 +127,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             var actor = new NetworkAccessActor("admin", IsAdmin: true);
             store.SetRule(actor, new RuleWriteSpec("user", "user-a", null, "connector-a", "mcp.example.test", "host", 443, Allowed: true), store.Revision);
             store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "model.example.test", "host", 443, Allowed: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "local.example.test", "host", 443, Allowed: true, AllowLan: true), store.Revision);
             var controller = new NacController(store, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => gateOpen);
             string socketPath = Path.Combine(tempDir, "networkaccess.sock");
             await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
@@ -155,6 +156,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                                 ["x-kautuka-user"] = "user-a",
                                 ["x-kautuka-agent"] = "agent-a",
                                 ["x-kautuka-connector"] = "connector-a",
+                                ["x-kautuka-egress-class"] = "lan",
                             },
                         },
                     },
@@ -164,6 +166,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 
             CheckResponse allowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
             Assert.Equal(0, allowed.Status.Code);
+            Assert.Equal("public", allowed.DynamicMetadata.Fields["egress_class"].StringValue);
             Assert.Contains("x-kautuka-user", allowed.OkResponse.HeadersToRemove);
             Assert.Contains("x-kautuka-agent", allowed.OkResponse.HeadersToRemove);
             Assert.Contains("x-kautuka-connector", allowed.OkResponse.HeadersToRemove);
@@ -183,6 +186,11 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             CheckResponse agentAllowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
             Assert.Equal(0, agentAllowed.Status.Code);
             await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
+            request.Attributes.Request.Http.Host = "local.example.test:443";
+            CheckResponse lanAllowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, lanAllowed.Status.Code);
+            Assert.Equal("lan", lanAllowed.DynamicMetadata.Fields["egress_class"].StringValue);
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
             gateOpen = false;
             await AssertDenied(static _ => { }, "topology_closed");
 
@@ -194,6 +202,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
                 Assert.Equal(7, denied.Status.Code);
                 Assert.Equal(reason, denied.Status.Message);
                 Assert.Null(denied.OkResponse);
+                Assert.Null(denied.DynamicMetadata);
             }
         }
         finally

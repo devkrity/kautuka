@@ -449,12 +449,13 @@ public sealed class NetworkAccessController
                 && !platformRules.Any(static rule => rule.Allowed && rule.AllowLan) && explicitSystemRule is not { Allowed: true, AllowLan: true })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
             if (platformRules.Any(static rule => rule.Allowed))
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system",
+                    allowLan: platformRules.Any(static rule => rule.Allowed && rule.AllowLan) || explicitSystemRule is { Allowed: true, AllowLan: true });
             if (explicitSystemRule is not null)
             {
                 if (explicitSystemRule.Allowed)
                 {
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system");
+                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system", allowLan: explicitSystemRule.AllowLan);
                 }
 
                 policyStore.IncrementBlockedRequestAttemptInMemory("system", agentId, null, destKind, normalizedDestination, input.Port);
@@ -463,7 +464,7 @@ public sealed class NetworkAccessController
 
             if (seedRule is not null && seedRule.Allowed)
             {
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed");
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed", allowLan: seedRule.AllowLan);
             }
 
             (string? sysReqId, bool sysOverflow) = policyStore.RecordOrUpdatePendingRequest(
@@ -507,7 +508,8 @@ public sealed class NetworkAccessController
         switch (match.Kind)
         {
             case ScopeMatchKind.Allowed:
-                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, match.Reason, match.OpenInternetBadge);
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, match.Reason,
+                    openInternetBadge: match.OpenInternetBadge, allowLan: match.AllowLan);
 
             case ScopeMatchKind.DeniedNotPublic:
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
@@ -529,7 +531,7 @@ public sealed class NetworkAccessController
                     && grant.UserId == userId && grant.Host == normalizedDestination && grant.Port == input.Port
                     && (destKind != "ip" || !NetworkAddressClassifier.IsNonPublicV4(normalizedDestination) || grant.AllowLan))
                 {
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test");
+                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test", allowLan: grant.AllowLan);
                 }
 
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
@@ -782,7 +784,8 @@ public sealed class NetworkAccessController
         string destination,
         int port,
         string reason,
-        bool openInternetBadge = false)
+        bool openInternetBadge = false,
+        bool allowLan = false)
     {
         Interlocked.Increment(ref allowed);
         auditRing.Record(new NetworkAccessActivityEntry(
@@ -798,7 +801,7 @@ public sealed class NetworkAccessController
             Cluster: null,
             openInternetBadge,
             CompatibilityMode: false));
-        return new NetworkAccessDecisionResult(true, reason, Cluster: null, RequestId: null, openInternetBadge);
+        return new NetworkAccessDecisionResult(true, reason, Cluster: null, RequestId: null, openInternetBadge) { AllowLan = allowLan };
     }
 
     private NetworkAccessDecisionResult RecordOutboundDeny(

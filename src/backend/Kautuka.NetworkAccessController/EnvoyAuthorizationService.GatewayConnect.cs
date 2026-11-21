@@ -1,5 +1,7 @@
 using System.Globalization;
 
+using Google.Protobuf.WellKnownTypes;
+
 using Kautuka.NetworkAccess.Protos.Envoy.Service.Auth.V3;
 
 namespace Kautuka.NetworkAccessController;
@@ -14,6 +16,7 @@ public sealed partial class EnvoyAuthorizationService
     private const string ConnectorHeader = "x-kautuka-connector";
     private const string PurposeHeader = "x-kautuka-purpose";
     private const string CorrelationHeader = "x-kautuka-correlation";
+    private const string EgressClassKey = "egress_class";
     private static readonly string[] scopeHeaders = [UserHeader, AgentHeader, ConnectorHeader, PurposeHeader, CorrelationHeader];
 
     private CheckResponse CheckGatewayConnect(AttributeContext attributes)
@@ -48,7 +51,14 @@ public sealed partial class EnvoyAuthorizationService
             return CreateDenyResponse(decision.Reason);
         }
 
-        var response = new CheckResponse { Status = new Status { Code = 0 }, OkResponse = new OkHttpResponse() };
+        var metadata = new Struct();
+        metadata.Fields[EgressClassKey] = Value.ForString(decision.AllowLan ? "lan" : "public");
+        var response = new CheckResponse
+        {
+            Status = new Status { Code = 0 },
+            OkResponse = new OkHttpResponse(),
+            DynamicMetadata = metadata,
+        };
         response.OkResponse.HeadersToRemove.AddRange(scopeHeaders);
         return response;
     }
