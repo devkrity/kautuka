@@ -62,7 +62,19 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
         => Call("PrimeWorkspace", () => client.PrimeWorkspaceAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddMinutes(5), cancellationToken: cancellationToken).ResponseAsync);
 
     public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
-        => Call("ProbeMcpContainer", () => client.ProbeMcpContainerAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(BoundedTimeout(request.TimeoutSeconds, 30, 600) + 15), cancellationToken: cancellationToken).ResponseAsync);
+        => Call("ProbeMcpContainer", () => client.ProbeMcpContainerAsync(
+            request,
+            BuildProbeCallOptions(request, DateTime.UtcNow, cancellationToken)).ResponseAsync);
+
+    internal static CallOptions BuildProbeCallOptions(WorkspaceMcpContainerProbeRequest request, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        int connectorTimeoutSeconds = BoundedTimeout(request.TimeoutSeconds, 30, 600);
+        int preparationSeconds = string.IsNullOrWhiteSpace(request.BundlePath) ? 15 : 90;
+        return new CallOptions(
+            KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
+            deadline: utcNow.AddSeconds(connectorTimeoutSeconds + preparationSeconds),
+            cancellationToken: cancellationToken);
+    }
 
     public Task<WorkspaceMcpContainerListToolsResponse> ListMcpContainerToolsAsync(WorkspaceMcpContainerCallRequest request, CancellationToken cancellationToken = default)
         => Call("ListMcpContainerTools", () => client.ListMcpContainerToolsAsync(request, headers: KautukaGrpcCorrelationMetadata.CreateClientHeaders(), deadline: DateTime.UtcNow.AddSeconds(BoundedTimeout(request.TimeoutSeconds, 30, 600) + 15), cancellationToken: cancellationToken).ResponseAsync);

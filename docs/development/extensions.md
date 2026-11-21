@@ -20,6 +20,8 @@ MCP packages enter through the package service, catalog, desired-state publicati
 
 For container connector latency, the Manager debug log records transport preparation, MCP initialization, and the tool request separately. Each timing entry carries the connector and tool names with durations in milliseconds.
 
+Testing an MCP bundle gives Manager extra time to prepare a missing local image. The connector's readiness timeout and request cancellation still apply.
+
 ## Skills
 
 Skills are imported/validated packages that become agent-visible manifests and tools. Keep instructions and executable assets bounded, versioned, and owned by the package. Default Skills and MCPs are product assets; they are not an internal model or built-in agent.

@@ -2,6 +2,31 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class ManagerGrpcServiceClientDeadlineTests
 {
+    [Theory]
+    [InlineData("", 30, 45)]
+    [InlineData("/packages/connector.mcpb", 30, 120)]
+    [InlineData("/packages/connector.mcpb", 10, 100)]
+    public void ProbeDeadlineAllowsPackagePreparationAndPreservesCancellation(
+        string bundlePath,
+        int connectorTimeoutSeconds,
+        int expectedDeadlineSeconds)
+    {
+        DateTime utcNow = new(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        using var cancellation = new CancellationTokenSource();
+        var request = new Manager.Protos.WorkspaceMcpContainerProbeRequest
+        {
+            BundlePath = bundlePath,
+            TimeoutSeconds = connectorTimeoutSeconds,
+        };
+
+        Grpc.Core.CallOptions options = Gateway.Infrastructure.Sandbox.ManagerGrpcServiceClient
+            .BuildProbeCallOptions(request, utcNow, cancellation.Token);
+
+        Assert.Equal(utcNow.AddSeconds(expectedDeadlineSeconds), options.Deadline);
+        Assert.Equal(cancellation.Token, options.CancellationToken);
+        Assert.Equal(connectorTimeoutSeconds, request.TimeoutSeconds);
+    }
+
     [Fact]
     public void DesiredStateActivationDeadlineCoversTwoBoundedColdArtifactBuildsAndPreservesCancellation()
     {
