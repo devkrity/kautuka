@@ -55,6 +55,8 @@ The release builder can produce an appliance candidate with `--appliance-image-p
 
 Release discovery and preparation for an appliance require a signed manifest with an appliance deployment descriptor. A host-service release is ineligible even if it uses the same Linux artifact name. Preparation preserves the verified manifest and signature for independent verification by the host recovery helper.
 
+UpdateService compares the newest published GitHub tag in the selected channel with the installed appliance version. It fetches the signed manifest only for a newer release.
+
 On Linux, Manager's `--verify-appliance-release` command verifies the selected release against the installed public key. It reads the manifest and signature from the root-owned version directory selected by `/opt/kautuka/manager/current`. A successful check verifies the signed image references and required hook ABI. The command exits before starting Manager or any application service.
 
 When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before stopping services or changing `current`. The release directories stay root-owned and allow the service account to traverse them even when the installer runs with a restrictive umask. The installer makes the public release identity readable by Manager, which checks it against the signed manifest. The selected version directory stays in use during preparation, so the candidate needs a different version.

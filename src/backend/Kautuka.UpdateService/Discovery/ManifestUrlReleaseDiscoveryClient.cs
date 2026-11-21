@@ -353,6 +353,13 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
             return (null, null, firstPageETag, ReleaseDiscoveryResult.NoRelease(firstPageETag));
         }
 
+        if (options.ApplianceReleaseVersion is { } installedVersion
+            && UpdateReleaseVersionComparer.TryCompare(selected.Tag, installedVersion, out int comparison)
+            && comparison <= 0)
+        {
+            return (null, null, firstPageETag, ReleaseDiscoveryResult.NoRelease(firstPageETag));
+        }
+
         string manifestUrl = $"https://github.com/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/releases/download/{Uri.EscapeDataString(selected.Tag)}/{Uri.EscapeDataString(options.PlatformReleaseAssetName)}";
         return (manifestUrl, selected.Tag, firstPageETag, null);
     }

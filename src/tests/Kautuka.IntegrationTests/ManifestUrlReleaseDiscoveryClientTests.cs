@@ -246,6 +246,23 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
         }
     }
 
+    [Theory]
+    [InlineData("v1.2.3-preview.9")]
+    [InlineData("v1.2.3-preview.10")]
+    public async Task ApplianceDiscoverySkipsManifestForReleaseThatIsNotNewerAsync(string tag)
+    {
+        var handler = new RouteHttpMessageHandler(request => request.RequestUri!.AbsoluteUri == api + "1"
+            ? JsonResponse(ReleaseRows((tag, false, true, true)))
+            : throw new InvalidOperationException($"Unexpected request: {request.RequestUri}"));
+
+        ReleaseDiscoveryResult result = await CreateClient(handler, "", "v1.2.3-preview.10").DiscoverAsync(
+            new("devkrity", "kautuka", "preview", null), TestContext.Current.CancellationToken);
+
+        Assert.Null(result.AvailableRelease);
+        Assert.Null(result.FailureReason);
+        Assert.Single(handler.Requests);
+    }
+
     [Fact]
     public async Task ApplianceDiscoveryRejectsSignedHostServiceReleaseAsync()
     {
@@ -301,6 +318,7 @@ public sealed class ManifestUrlReleaseDiscoveryClientTests
         => new(new StubHttpClientFactory(handler), Options.Create(new UpdateOptions
         {
             ApplianceReleaseId = applianceReleaseId,
+            ApplianceReleaseVersion = applianceReleaseId?[1..],
             RepositoryOwner = "devkrity",
             RepositoryName = "kautuka",
             ManifestPublicKeyPath = publicKeyPath,
