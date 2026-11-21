@@ -292,6 +292,33 @@ public sealed class WorkspaceGrpcServiceTests
         Assert.Empty(response.LastFailureClass);
     }
 
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    public async Task ApplianceCoreReadyRequiresTheRuntimeAndSupervisedServices(
+        bool runtimeAvailable, bool servicesReady, bool expectedCoreReady)
+    {
+        var service = new WorkspaceGrpcService(
+            null!,
+            CreateReconciledStore(),
+            new WorkspaceReadinessGate(),
+            new WorkspaceExecTracker(),
+            new StubRuntimeHealthProbe(runtimeAvailable),
+            null!,
+            null!,
+            null!,
+            NullLogger<WorkspaceGrpcService>.Instance,
+            applianceServicesReady: () => servicesReady);
+
+        ManagerStatusResponse response = await service.GetHostStatus(
+            new WorkspacePingRequest(),
+            TestServerCallContext.Instance);
+
+        Assert.True(response.Ok);
+        Assert.Equal(expectedCoreReady, response.CoreReady);
+    }
+
     [Fact]
     public async Task GetHostStatusKeepsCoreReadyWhileAgentStateIsReconciling()
     {

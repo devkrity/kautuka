@@ -26,7 +26,8 @@ public sealed partial class WorkspaceGrpcService(
     ILogger<WorkspaceGrpcService> logger,
     Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null,
     Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
-    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null) : ManagerService.ManagerServiceBase
+    Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null,
+    Func<bool>? applianceServicesReady = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;
@@ -93,9 +94,9 @@ public sealed partial class WorkspaceGrpcService(
 
         WorkspaceDesiredStateSnapshot snapshot = this.desiredStateStore.Snapshot;
         bool converged = snapshot.AcceptedVersion > 0 && snapshot.ReconciledVersion == snapshot.AcceptedVersion;
-        // Reaching this RPC is the Manager readiness signal. Podman availability
-        // and agent reconciliation are reported independently below.
-        const bool coreReady = true;
+        // Legacy callers use this RPC as the Manager readiness signal. An appliance
+        // additionally needs its supervised application services and egress boundary.
+        bool coreReady = applianceServicesReady is null || (runtimeAvailable && applianceServicesReady());
         bool agentsReady = runtimeAvailable
             && this.readinessGate.IsReady
             && converged

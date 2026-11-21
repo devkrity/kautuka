@@ -99,6 +99,11 @@ if (applianceEnabled)
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true));
     builder.Services.AddHostedService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
+    builder.Services.AddSingleton<Func<bool>>(sp =>
+    {
+        ApplianceServiceSupervisor supervisor = sp.GetRequiredService<ApplianceServiceSupervisor>();
+        return () => supervisor.IsReady;
+    });
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())

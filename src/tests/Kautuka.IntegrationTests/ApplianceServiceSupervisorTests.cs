@@ -397,9 +397,11 @@ public sealed class ApplianceServiceSupervisorTests
             if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect") imageInspections++;
             return podman.RunAsync(args, 30, cancellation);
         });
+        int webHostPort = 0;
         using var gateway = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
             NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory,
-            superviseObservability: true, superviseUpdateService: release.Deployment.Images.ContainsKey("updateservice"));
+            superviseObservability: true, superviseUpdateService: release.Deployment.Images.ContainsKey("updateservice"),
+            checkWebHostReadiness: cancellation => ApplianceServiceReadiness.CheckWebHostAsync(cancellation, webHostPort));
         try
         {
             foreach (string image in new[] { EgressTopologyManager.BoundaryInitImage, EgressTopologyManager.EnvoyPinnedImage,
@@ -475,8 +477,11 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.True(ready, "Gateway did not recover after restart.");
             if (release.Deployment.Images.ContainsKey("webhost"))
             {
-                await CheckPublishedWebHostAsync(gateway, podman, images, token);
+                webHostPort = await CheckPublishedWebHostAsync(gateway, podman, images, token);
                 await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
+                Assert.False(gateway.IsReady);
+                await gateway.ReconcileServicesAsync(token);
+                Assert.True(gateway.IsReady);
             }
             Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
                 NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
@@ -585,7 +590,7 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.Fail($"OpenObserve did not record service logs for {string.Join(", ", services.Where(name => !seen.Contains(name)))}.");
     }
 
-    private static async Task CheckPublishedWebHostAsync(ApplianceServiceSupervisor supervisor, PodmanCommandRunner podman,
+    private static async Task<int> CheckPublishedWebHostAsync(ApplianceServiceSupervisor supervisor, PodmanCommandRunner podman,
         string images, CancellationToken token)
     {
         PodmanCommandResult load = await podman.RunAsync(["load", "--input", Path.Combine(images, "webhost.tar")], 60, token);
@@ -614,13 +619,13 @@ public sealed class ApplianceServiceSupervisorTests
                     using HttpResponseMessage page = await client.GetAsync(new Uri("/", UriKind.Relative), token);
                     Assert.True(page.IsSuccessStatusCode);
                     Assert.Equal("text/html", page.Content.Headers.ContentType?.MediaType);
-                    return;
+                    return client.BaseAddress.Port;
                 }
             }
             catch (HttpRequestException) when (attempt < 39) { }
             await Task.Delay(TimeSpan.FromMilliseconds(250), token);
         }
-        Assert.Fail("WebHost did not forward the browser request to Gateway.");
+        throw new InvalidOperationException("WebHost did not forward the browser request to Gateway.");
     }
     private static JsonDocument ReadAllowlist(string root)
         => JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "infra-allowlist.json")));

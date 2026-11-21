@@ -11,11 +11,11 @@ namespace Kautuka.Manager.Hosting;
 /// <summary>Checks application service readiness over its authenticated local transport.</summary>
 internal static class ApplianceServiceReadiness
 {
-    internal static async Task<bool> CheckWebHostAsync(CancellationToken cancellationToken)
+    internal static async Task<bool> CheckWebHostAsync(CancellationToken cancellationToken, int port = KautukaHostNetworkPolicy.WebHostPort)
     {
         using var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(3) };
         using var client = new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(3) };
-        return await CheckHttpAsync(client, new Uri($"http://127.0.0.1:{KautukaHostNetworkPolicy.WebHostPort}/health", UriKind.Absolute), cancellationToken)
+        return await CheckHttpAsync(client, new Uri($"http://127.0.0.1:{port}/health", UriKind.Absolute), cancellationToken)
             .ConfigureAwait(false);
     }
 

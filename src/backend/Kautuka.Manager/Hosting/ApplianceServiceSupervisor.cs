@@ -22,7 +22,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     string? gatewayConnectDirectory = null,
     PodmanImageArchiveStore? imageArchives = null,
     bool superviseObservability = false,
-    bool superviseUpdateService = false) : BackgroundService
+    bool superviseUpdateService = false,
+    Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -39,6 +40,9 @@ internal sealed partial class ApplianceServiceSupervisor(
     private readonly Service webHost = new(WebHostRole, "webhost", networked: true);
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
     private readonly Service updater = new(UpdateRole, "updateService", networked: true);
+    private volatile bool cohortReady;
+
+    internal bool IsReady => cohortReady && topology?.IsStartupGateOpen == true;
 
     private sealed class Service(string role, string stateName, bool networked)
     {
@@ -50,6 +54,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         internal string? ActiveContainer { get; set; }
         internal bool Ready { get; set; }
         internal int FailedProbes { get; set; }
+        internal bool IsHealthy => Ready && FailedProbes == 0;
 
         internal void ResetReadiness()
         {
@@ -70,27 +75,9 @@ internal sealed partial class ApplianceServiceSupervisor(
             do
             {
                 if (KautukaMaintenanceMode.IsActive || (superviseObservability && topology?.IsStartupGateOpen != true))
-                {
                     await StopCohortAsync(stoppingToken).ConfigureAwait(false);
-                }
                 else
-                {
-                    if (superviseObservability)
-                        await TryReconcileAsync(observability, stoppingToken).ConfigureAwait(false);
-                    await TryReconcileAsync(credentials, stoppingToken).ConfigureAwait(false);
-                    await TryReconcileAsync(channel, stoppingToken).ConfigureAwait(false);
-                    if (superviseUpdateService && topology?.IsStartupGateOpen == true)
-                        await TryReconcileAsync(updater, stoppingToken).ConfigureAwait(false);
-                    if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready
-                        && (!superviseUpdateService || updater.Ready))
-                        await TryReconcileAsync(gateway, stoppingToken).ConfigureAwait(false);
-                    else
-                        await StopActiveAsync(gateway, stoppingToken).ConfigureAwait(false);
-                    if (gateway.Ready && topology?.IsStartupGateOpen == true)
-                        await TryReconcileAsync(webHost, stoppingToken).ConfigureAwait(false);
-                    else
-                        await StopActiveAsync(webHost, stoppingToken).ConfigureAwait(false);
-                }
+                    await ReconcileServicesAsync(stoppingToken).ConfigureAwait(false);
             }
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
         }
@@ -103,8 +90,30 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
     }
 
+    internal async Task ReconcileServicesAsync(CancellationToken token)
+    {
+        if (superviseObservability)
+            await TryReconcileAsync(observability, token).ConfigureAwait(false);
+        await TryReconcileAsync(credentials, token).ConfigureAwait(false);
+        await TryReconcileAsync(channel, token).ConfigureAwait(false);
+        if (superviseUpdateService && topology?.IsStartupGateOpen == true)
+            await TryReconcileAsync(updater, token).ConfigureAwait(false);
+        if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready
+            && (!superviseUpdateService || updater.Ready))
+            await TryReconcileAsync(gateway, token).ConfigureAwait(false);
+        else
+            await StopActiveAsync(gateway, token).ConfigureAwait(false);
+        if (gateway.Ready && topology?.IsStartupGateOpen == true)
+            await TryReconcileAsync(webHost, token).ConfigureAwait(false);
+        else
+            await StopActiveAsync(webHost, token).ConfigureAwait(false);
+        cohortReady = credentials.IsHealthy && channel.IsHealthy && gateway.IsHealthy && webHost.IsHealthy
+            && (!superviseUpdateService || updater.IsHealthy) && (!superviseObservability || observability.Ready);
+    }
+
     internal async Task<bool> StopCohortAsync(CancellationToken token)
     {
+        cohortReady = false;
         Service[] services = [webHost, gateway, updater, channel, credentials, observability];
         var running = new Dictionary<Service, string>();
         bool stopped = true;
@@ -148,6 +157,7 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     private async Task<bool> StopActiveAsync(Service service, CancellationToken token)
     {
+        service.Ready = false;
         if (service.ActiveContainer is not { } id)
             return true;
         if (!await StopContainerAsync(service, id, token).ConfigureAwait(false))
@@ -179,6 +189,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         catch (Exception ex) when (!token.IsCancellationRequested &&
             ex is IOException or InvalidDataException or InvalidOperationException or JsonException or KeyNotFoundException)
         {
+            service.ResetReadiness();
             LogReconcileFailed(logger, service.Role, ex.Message);
         }
     }
@@ -186,7 +197,11 @@ internal sealed partial class ApplianceServiceSupervisor(
     private async Task ReconcileAsync(Service service, CancellationToken token)
     {
         await EnsureRunningAsync(service, token).ConfigureAwait(false);
-        if (service.Role == ObservabilityRole) return;
+        if (service.Role == ObservabilityRole)
+        {
+            service.Ready = true;
+            return;
+        }
         string socket = Path.Combine(socketRoot, service.Role, service.Role + ".sock");
         string transport = Path.Combine(stateRoot, service.StateName, "transport");
         string security = Path.Combine(stateRoot, "security", "channel");
@@ -194,7 +209,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         bool healthy = service.Role switch
         {
             GatewayRole => await ApplianceServiceReadiness.CheckGatewayAsync(socket, token).ConfigureAwait(false),
-            WebHostRole => await ApplianceServiceReadiness.CheckWebHostAsync(token).ConfigureAwait(false),
+            WebHostRole => await (checkWebHostReadiness?.Invoke(token) ?? ApplianceServiceReadiness.CheckWebHostAsync(token)).ConfigureAwait(false),
             UpdateRole => await ApplianceServiceReadiness.CheckAsync(socket,
                 Path.Combine(stateRoot, service.StateName, ".ca.cer"),
                 Path.Combine(stateRoot, service.StateName, ".updateservice-client.pfx"), token).ConfigureAwait(false),
