@@ -864,6 +864,9 @@ run_build_container \
 
     publish_host src/backend/Kautuka.Manager/Kautuka.Manager.csproj /out/bin
     copy_manager_runtime_assets /out/bin
+    publish_host src/tools/Kautuka.OciHook/Kautuka.OciHook.csproj /out/bin/scripts
+    mv /out/bin/scripts/Kautuka.OciHook /out/bin/scripts/kautuka-oci-hook
+    readelf -h /out/bin/scripts/kautuka-oci-hook >/dev/null
     publish_host src/backend/Kautuka.Gateway/Kautuka.Gateway.csproj /out/services/gateway
     copy_gateway_runtime_assets /out/services/gateway
     publish_host src/backend/Kautuka.CredentialsHost/Kautuka.CredentialsHost.csproj /out/services/credentialshost

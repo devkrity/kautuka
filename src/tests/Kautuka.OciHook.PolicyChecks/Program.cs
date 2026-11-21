@@ -2,6 +2,16 @@ using Kautuka.OciHook;
 
 if (args.Length != 0 && args[0] == "child")
 {
+    if (args[1] == "claim")
+    {
+        try
+        {
+            OwnerRegistry.Claim(args[2], args[3], ulong.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture), args[5], int.Parse(args[6], System.Globalization.CultureInfo.InvariantCulture), ulong.Parse(args[7], System.Globalization.CultureInfo.InvariantCulture));
+            Console.Write("claimed");
+        }
+        catch (IOException) { Console.Write("conflict"); }
+        return;
+    }
     if (args[1] == "sleep") { await Task.Delay(TimeSpan.FromSeconds(30)); return; }
     if (args[1] == "large") { Console.Write(new string('x', 65536)); return; }
     Console.Write(args[1] + ":" + await Console.In.ReadToEndAsync());
@@ -35,7 +45,7 @@ Check("infra_allowlisted", HookPolicy.Decide(parsedState, ["10.247.0.2", "10.248
 void Reject(Action action)
 {
     try { action(); }
-    catch (Exception ex) when (ex is InvalidDataException or System.Text.Json.JsonException or InvalidOperationException) { return; }
+    catch (Exception ex) when (ex is InvalidDataException or IOException or System.Text.Json.JsonException or InvalidOperationException) { return; }
     throw new InvalidOperationException("Expected invalid input to be rejected.");
 }
 Reject(() => HookInput.ParseState("""{"pid":"123"}"""));
@@ -120,4 +130,41 @@ if (OperatingSystem.IsLinux())
     if (!ProcessIdentity.IsLive(identity.Pid, identity.NetworkNamespaceInode, identity.StartTicks)) throw new InvalidOperationException("Live process not recognized.");
     if (ProcessIdentity.IsLive(identity.Pid, identity.NetworkNamespaceInode, identity.StartTicks + 1)) throw new InvalidOperationException("Mismatched process identity accepted.");
     if (ProcessIdentity.IsLive(int.MaxValue, null, null)) throw new InvalidOperationException("Missing process accepted.");
+}
+if (OperatingSystem.IsLinux())
+{
+    string dir = Path.Combine(Path.GetTempPath(), "kautuka-owner-check-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(dir);
+    try
+    {
+        string ownerPath = Path.Combine(dir, "owners.json");
+        string lockPath = Path.Combine(dir, "owners.lock");
+        var identity = ProcessIdentity.TryRead(Environment.ProcessId) ?? throw new InvalidOperationException("Current process identity missing.");
+        if (!OwnerRegistry.Read(ownerPath).Valid) throw new InvalidOperationException("Missing registry rejected.");
+        File.WriteAllText(lockPath, "");
+        File.SetUnixFileMode(lockPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        OwnerRegistry.Claim(ownerPath, lockPath, identity.NetworkNamespaceInode, "one", identity.Pid, identity.StartTicks);
+        string inodeKey = identity.NetworkNamespaceInode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var loadedOwners = OwnerRegistry.Read(ownerPath);
+        if (!loadedOwners.Valid || loadedOwners.Entries[inodeKey]["id"]!.ToString() != "one") throw new InvalidOperationException("Owner round trip failed.");
+        Reject(() => OwnerRegistry.Claim(ownerPath, lockPath, identity.NetworkNamespaceInode, "two", identity.Pid, identity.StartTicks));
+        if (OwnerRegistry.Read(ownerPath).Entries[inodeKey]["id"]!.ToString() != "one") throw new InvalidOperationException("Owner conflict overwrote registry.");
+        if ((File.GetUnixFileMode(lockPath) & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)) != 0) throw new InvalidOperationException("Legacy lock mode not tightened.");
+        File.Delete(ownerPath);
+        string inodeArg = identity.NetworkNamespaceInode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string pidArg = identity.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string ticksArg = identity.StartTicks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Task<HookProcess.Result> firstClaim = HookProcess.RunAsync(executable, [.. childPrefix, "child", "claim", ownerPath, lockPath, inodeArg, "first", pidArg, ticksArg], null, TimeSpan.FromSeconds(10), 1024);
+        Task<HookProcess.Result> secondClaim = HookProcess.RunAsync(executable, [.. childPrefix, "child", "claim", ownerPath, lockPath, inodeArg, "second", pidArg, ticksArg], null, TimeSpan.FromSeconds(10), 1024);
+        HookProcess.Result[] claims = await Task.WhenAll(firstClaim, secondClaim);
+        if (claims.Count(result => result.Stdout == "claimed") != 1 || claims.Count(result => result.Stdout == "conflict") != 1)
+            throw new InvalidOperationException("Concurrent conflicting claims were not serialized.");
+        File.WriteAllText(ownerPath, "{" );
+        if (OwnerRegistry.Read(ownerPath).Valid) throw new InvalidOperationException("Malformed registry accepted.");
+        Reject(() => OwnerRegistry.Claim(ownerPath, lockPath, identity.NetworkNamespaceInode, "one", identity.Pid, identity.StartTicks));
+        File.Delete(ownerPath);
+        File.CreateSymbolicLink(ownerPath, lockPath);
+        if (OwnerRegistry.Read(ownerPath).Valid) throw new InvalidOperationException("Registry symlink accepted.");
+    }
+    finally { Directory.Delete(dir, true); }
 }
