@@ -451,7 +451,9 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.True(ok, failureMessage);
             Assert.False(policyStore.TryEvaluateTemporaryProbeDecision(containerId, "probe-user", "binary-mcpb-probe", "host", "probe.example", 443, out _, out _));
             Assert.Empty(tools);
-            Assert.Contains(calls, args => args[0] == "build");
+            string[] build = Assert.Single(calls, args => args[0] == "build");
+            Assert.Contains("--pull=never", build);
+            Assert.Contains("--network=none", build);
             Assert.Contains(calls, args => args[0] == "tag");
             Assert.Contains(calls, args => args.Length > 2 && args[0] == "image" && args[1] == "inspect"
                 && args[^1].StartsWith("localhost/kautuka-mcpb-binary:", StringComparison.Ordinal));
@@ -1260,7 +1262,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
-    public void UvRuntimeContainerfileInstallsManagedPythonInsideImmutableBundleArtifact()
+    public void UvRuntimeContainerfileUsesToolsFromTheSignedBase()
     {
         string containerfile = McpbImageMaterializer.BuildContainerfile(
             "quay.io/fedora/fedora-minimal:44",
@@ -1271,33 +1273,33 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.Contains("USER root", containerfile, StringComparison.Ordinal);
         Assert.Contains("RUN chown -R node:node /opt/kautuka/mcpb", containerfile, StringComparison.Ordinal);
         Assert.Contains("USER node", containerfile, StringComparison.Ordinal);
-        Assert.Contains("ENV UV_PYTHON_INSTALL_DIR=/opt/kautuka/mcpb/.python", containerfile, StringComparison.Ordinal);
+        Assert.Contains("ENV UV_PYTHON_DOWNLOADS=never", containerfile, StringComparison.Ordinal);
         Assert.Contains("ENV UV_PROJECT_ENVIRONMENT=/opt/kautuka/mcpb/.venv", containerfile, StringComparison.Ordinal);
-        Assert.DoesNotContain("UV_PYTHON_PREFERENCE", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("microdnf", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("uv sync", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("pip install", containerfile, StringComparison.Ordinal);
-        Assert.Contains("uv==0.11.19", installScript, StringComparison.Ordinal);
-        Assert.Contains("--index-url \"$PIP_INDEX_URL\"", installScript, StringComparison.Ordinal);
-        Assert.Contains("$pip_trusted", installScript, StringComparison.Ordinal);
+        Assert.Contains("export UV_PYTHON_DOWNLOADS=never", installScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("uv==0.11.19", installScript, StringComparison.Ordinal);
         Assert.Contains("uv sync --no-dev --index-url \"$UV_INDEX_URL\"", installScript, StringComparison.Ordinal);
         Assert.DoesNotContain("UV_PYTHON_PREFERENCE", installScript, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void NodeRuntimeContainerfileVerifiesNodeTarballChecksum()
+    public void NodeRuntimeContainerfileUsesNodeFromTheSignedBase()
     {
         string containerfile = McpbImageMaterializer.BuildContainerfile(
             "quay.io/fedora/fedora-minimal:44",
             "node",
             hasBundle: true);
 
-        Assert.Contains("sha256sum -c -", containerfile, StringComparison.Ordinal);
-        Assert.Contains("0ce210831380ab75a5fec0d3fb6b5af0958898016b2cae51cc2fa11057d2f77e", containerfile, StringComparison.Ordinal);
+        Assert.Contains("RUN chown -R node:node /opt/kautuka/mcpb", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("microdnf", containerfile, StringComparison.Ordinal);
+        Assert.DoesNotContain("curl", containerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("npm install", containerfile, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void UvSandboxArtifactContainerfileCopiesManagedPythonWithVirtualEnvironment()
+    public void UvSandboxArtifactContainerfileCopiesTheVirtualEnvironmentUsingBasePython()
     {
         const string installRoot = "/home/node/.kautuka/connectors/by-digest/test";
         string systemContainerfile = McpbImageMaterializer.BuildSandboxSystemContainerfile(
@@ -1309,12 +1311,12 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             installRoot);
         string installScript = McpbImageMaterializer.BuildLanguagePackageInstallScript("uv", forSandboxArtifact: true);
 
-        Assert.Contains($"ENV UV_PYTHON_INSTALL_DIR={installRoot}/.python", systemContainerfile, StringComparison.Ordinal);
+        Assert.Contains("ENV UV_PYTHON_DOWNLOADS=never", systemContainerfile, StringComparison.Ordinal);
         Assert.Contains($"ENV UV_PROJECT_ENVIRONMENT={installRoot}/.venv", systemContainerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("UV_PYTHON_PREFERENCE", systemContainerfile, StringComparison.Ordinal);
         Assert.DoesNotContain("uv sync", systemContainerfile, StringComparison.Ordinal);
         Assert.Contains("uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\"", installScript, StringComparison.Ordinal);
-        Assert.Contains("$pip_trusted", installScript, StringComparison.Ordinal);
+        Assert.Contains("uv venv .venv; uv pip install", installScript, StringComparison.Ordinal);
         Assert.Contains($"COPY --from=builder {installRoot}/ /artifact/", scratchContainerfile, StringComparison.Ordinal);
     }
 

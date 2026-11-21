@@ -21,12 +21,10 @@ public sealed class McpbImageMaterializer(
     internal const string BundleWorkdir = "/opt/kautuka/mcpb";
     internal const string SandboxArtifactRoot = "/artifact";
     internal const string SandboxArtifactContractPath = "/contract.json";
-    private const string materializationRecipeVersion = "mcpb-materializer-v8";
+    private const string materializationRecipeVersion = "mcpb-materializer-v9";
     private static readonly SemaphoreSlim imageBuildGate = new(1, 1);
     private const string pipTrustedHostShellInit =
         "pip_trusted=\"\"; if [ -n \"${PIP_TRUSTED_HOST:-}\" ]; then pip_trusted=\"--trusted-host $PIP_TRUSTED_HOST\"; fi; ";
-    private const string nodeTarballUrl = "https://nodejs.org/dist/v26.3.0/node-v26.3.0-linux-x64.tar.xz";
-    private const string nodeTarballSha256 = "0ce210831380ab75a5fec0d3fb6b5af0958898016b2cae51cc2fa11057d2f77e";
     private static readonly string[] languagePackageIndexKeys =
     [
         "NPM_CONFIG_REGISTRY",
@@ -118,6 +116,7 @@ public sealed class McpbImageMaterializer(
                 .RunAsync(
                     [
                         "build",
+                        "--pull=never", "--network=none",
                         "-t", systemImage,
                         "-f", containerfilePath,
                         buildContextPath,
@@ -231,6 +230,7 @@ public sealed class McpbImageMaterializer(
                 .RunAsync(
                     [
                         "build",
+                        "--pull=never", "--network=none",
                         "-t", systemImage,
                         "-f", containerfilePath,
                         buildContextPath,
@@ -267,7 +267,7 @@ public sealed class McpbImageMaterializer(
                     .RunAsync(
                         [
                             "build",
-                            "--pull=never",
+                            "--pull=never", "--network=none",
                             "-t", localImage,
                             "-f", scratchPath,
                             buildContextPath,
@@ -454,15 +454,12 @@ public sealed class McpbImageMaterializer(
         if (string.Equals(serverType, "uv", StringComparison.OrdinalIgnoreCase))
         {
             string uvSync = forSandboxArtifact
-                ? "if [ -f pyproject.toml ]; then uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\"; elif [ -f requirements.txt ]; then uv pip install --python .venv/bin/python --index-url \"$UV_INDEX_URL\" -r requirements.txt; fi"
+                ? "if [ -f pyproject.toml ]; then uv sync --no-dev --no-editable --index-url \"$UV_INDEX_URL\"; elif [ -f requirements.txt ]; then uv venv .venv; uv pip install --python .venv/bin/python --index-url \"$UV_INDEX_URL\" -r requirements.txt; fi"
                 : "if [ -f pyproject.toml ]; then uv sync --no-dev --index-url \"$UV_INDEX_URL\"; elif [ -f requirements.txt ]; then uv pip install --system --index-url \"$UV_INDEX_URL\" -r requirements.txt; fi";
             return string.Concat(
                 "set -eu; ",
-                "if [ -z \"${PIP_INDEX_URL:-}\" ] || [ -z \"${UV_INDEX_URL:-}\" ]; then echo 'PIP_INDEX_URL and UV_INDEX_URL are required' >&2; exit 1; fi; ",
-                pipTrustedHostShellInit,
-                "if ! command -v uv >/dev/null 2>&1 || ! uv --version | grep -q '0.11.19'; then ",
-                "PIP_CONFIG_FILE=/dev/null python3 -m pip install --break-system-packages --no-cache-dir --index-url \"$PIP_INDEX_URL\" $pip_trusted uv==0.11.19; ",
-                "fi; ",
+                "if [ -z \"${UV_INDEX_URL:-}\" ]; then echo 'UV_INDEX_URL is required' >&2; exit 1; fi; ",
+                "export UV_PYTHON_DOWNLOADS=never; ",
                 uvSync);
         }
 
@@ -533,28 +530,17 @@ public sealed class McpbImageMaterializer(
 
     private static string BuildSystemRuntimeLayer(string serverType, string workdirRoot)
     {
-        if (string.Equals(serverType, "node", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(serverType, "node", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(serverType, "python", StringComparison.OrdinalIgnoreCase))
         {
-            return AsRootBuildLayer(string.Join('\n',
-            [
-                "RUN microdnf install -y --setopt=install_weak_deps=0 curl tar xz libatomic && microdnf clean all",
-                $"RUN curl -fSL {nodeTarballUrl} -o /tmp/node.tar.xz && echo \"{nodeTarballSha256}  /tmp/node.tar.xz\" | sha256sum -c - && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz && rm -f /tmp/node.tar.xz",
-            ]), workdirRoot);
-        }
-
-        if (string.Equals(serverType, "python", StringComparison.OrdinalIgnoreCase))
-        {
-            return AsRootBuildLayer(
-                "RUN microdnf install -y --setopt=install_weak_deps=0 python3 python3-pip && microdnf clean all",
-                workdirRoot);
+            return AsRootBuildLayer(string.Empty, workdirRoot);
         }
 
         if (string.Equals(serverType, "uv", StringComparison.OrdinalIgnoreCase))
         {
             return AsRootBuildLayer(string.Join('\n',
             [
-                "RUN microdnf install -y --setopt=install_weak_deps=0 python3 python3-pip && microdnf clean all",
-                $"ENV UV_PYTHON_INSTALL_DIR={workdirRoot}/.python",
+                "ENV UV_PYTHON_DOWNLOADS=never",
                 $"ENV UV_PROJECT_ENVIRONMENT={workdirRoot}/.venv",
             ]), workdirRoot);
         }
