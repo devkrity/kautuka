@@ -72,7 +72,8 @@ public static class BoundaryRulesetRenderer
         bool includeLanGrants = false,
         string? decisionEndpointIp = null,
         IEnumerable<string>? upstreamDnsIps = null,
-        bool includeGatewayConnect = false)
+        bool includeGatewayConnect = false,
+        bool includeApplianceTelemetry = false)
     {
         string decisionEndpointRule = !string.IsNullOrWhiteSpace(decisionEndpointIp)
             ? $"    ip daddr {decisionEndpointIp.Trim()} tcp dport 50051 counter accept comment \"decision_endpoint\""
@@ -87,6 +88,8 @@ public static class BoundaryRulesetRenderer
         string privateRejectRule = NetworkAddressClassifier.RenderNftPrivateRejectRule();
         string gatewayConnectMatch = FormattableString.Invariant(
             $"ip saddr {WorkloadRulesetRenderer.ApplianceGatewayIp} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {GatewayConnectPort}");
+        string telemetryMatch = FormattableString.Invariant(
+            $"ip saddr {{ {WorkloadRulesetRenderer.ApplianceGatewayIp}, {WorkloadRulesetRenderer.ApplianceWebHostIp}, {WorkloadRulesetRenderer.ApplianceCredentialsHostIp}, {WorkloadRulesetRenderer.ApplianceChannelHostIp} }} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {WorkloadRulesetRenderer.TelemetryIngressPort}");
 
         var sb = new StringBuilder();
         sb.AppendLine("table ip kautuka_egress");
@@ -97,6 +100,8 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 tcp dport 53 counter return");
         if (includeGatewayConnect)
             sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter return comment \"gateway_connect_no_redirect\"");
+        if (includeApplianceTelemetry)
+            sb.Append("    ").Append(telemetryMatch).AppendLine(" counter return comment \"telemetry_no_redirect\"");
         sb.AppendLine("    ip saddr 10.247.0.0/16 meta l4proto tcp counter redirect to :15001");
         sb.AppendLine("  }");
         sb.AppendLine("  chain forward {");
@@ -111,6 +116,8 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 meta l4proto { tcp, udp } th dport 53 accept");
         if (includeGatewayConnect)
             sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter accept comment \"gateway_connect_ingress\"");
+        if (includeApplianceTelemetry)
+            sb.Append("    ").Append(telemetryMatch).AppendLine(" counter accept comment \"telemetry_ingress\"");
         sb.AppendLine("    counter drop");
         sb.AppendLine("  }");
         sb.AppendLine("  chain output {");
@@ -131,6 +138,8 @@ public static class BoundaryRulesetRenderer
             sb.AppendLine(lanApprovedRule);
         }
         sb.AppendLine(CultureInfo.InvariantCulture, $"    ip daddr {WorkloadRulesetRenderer.PackageProxyIp} tcp dport {WorkloadRulesetRenderer.PackageProxyPort} counter accept comment \"package_proxy_cluster\"");
+        if (includeApplianceTelemetry)
+            sb.AppendLine(CultureInfo.InvariantCulture, $"    ip daddr {WorkloadRulesetRenderer.ObservabilityIp} tcp dport {WorkloadRulesetRenderer.ObservabilityPort} counter accept comment \"telemetry_cluster\"");
         sb.Append("    ").AppendLine(privateRejectRule);
         sb.AppendLine("    ip daddr 10.247.0.0/16 counter reject comment \"wl_net_reject\"");
         sb.AppendLine("    accept");
@@ -204,7 +213,8 @@ public static class BoundaryRulesetRenderer
     public static string RenderEnvoyConfig(
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
         bool isWindowsMtls = false,
-        bool includeGatewayConnect = false)
+        bool includeGatewayConnect = false,
+        bool includeApplianceTelemetry = false)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
         string gatewayConnect = includeGatewayConnect ? RenderGatewayConnectListener() : string.Empty;
@@ -225,6 +235,8 @@ public static class BoundaryRulesetRenderer
 
         string rendered = template
             .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener() : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
             .Replace("{{MANAGER_AUTHORIZATION_CLUSTER}}", clusterSnippet, StringComparison.Ordinal);
@@ -234,6 +246,62 @@ public static class BoundaryRulesetRenderer
 
         return rendered;
     }
+
+    private static string RenderTelemetryListener() => FormattableString.Invariant($"""
+        - name: appliance_telemetry
+          address:
+            socket_address:
+              address: {EgressTopologyManager.EgressPodIp}
+              port_value: {WorkloadRulesetRenderer.TelemetryIngressPort}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: appliance_telemetry
+                    normalize_path: true
+                    path_with_escaped_slashes_action: REJECT_REQUEST
+                    route_config:
+                      name: telemetry_ingestion
+                      virtual_hosts:
+                        - name: observability
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                safe_regex:
+                                  regex: '^/api/default/v1/(logs|metrics|traces)$'
+                                headers:
+                                  - name: ":method"
+                                    string_match:
+                                      exact: "POST"
+                              route:
+                                cluster: appliance_observability
+                            - match:
+                                prefix: "/"
+                              direct_response:
+                                status: 404
+                    http_filters:
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    """);
+
+    private static string RenderTelemetryCluster() => FormattableString.Invariant($"""
+        - name: appliance_observability
+          type: STATIC
+          connect_timeout: 1s
+          load_assignment:
+            cluster_name: appliance_observability
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: {WorkloadRulesetRenderer.ObservabilityIp}
+                          port_value: {WorkloadRulesetRenderer.ObservabilityPort}
+
+    """);
 
     private static string RenderGatewayConnectListener()
     {

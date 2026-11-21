@@ -15,6 +15,11 @@ public static class WorkloadRulesetRenderer
     public const string PackageProxyIp = "10.247.0.3";
     public const string ApplianceGatewayIp = "10.247.0.4";
     public const string ApplianceWebHostIp = "10.247.0.5";
+    public const string ObservabilityIp = "10.247.0.6";
+    public const string ApplianceCredentialsHostIp = "10.247.0.7";
+    public const string ApplianceChannelHostIp = "10.247.0.8";
+    public const int TelemetryIngressPort = 15005;
+    public const int ObservabilityPort = 5080;
     public const int WebHostPort = 20229;
     public const int GatewayConnectPort = 15004;
     public const int PackageProxyPort = 20101;

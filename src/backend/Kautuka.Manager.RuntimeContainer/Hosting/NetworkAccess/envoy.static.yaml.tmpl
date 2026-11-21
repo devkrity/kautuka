@@ -176,8 +176,8 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
                 stat_prefix: tcp_tls_lan
                 cluster: dfp_lan_egress
-{{GATEWAY_CONNECT_LISTENER}}  clusters:
-    - name: manager-authorization
+{{GATEWAY_CONNECT_LISTENER}}{{TELEMETRY_LISTENER}}  clusters:
+{{TELEMETRY_CLUSTER}}    - name: manager-authorization
       connect_timeout: 0.5s
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
