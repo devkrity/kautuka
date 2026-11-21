@@ -564,9 +564,41 @@ if ! env GENERATED_SOCKET_INSTALLER="$socket_installer" SOCKET_TMPFILES="$socket
   grep -q "^d /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/manager 2750 kautuka kautuka-manager-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
   grep -q "^d /run/kautuka/updateservice 2750 kautuka kautuka-updateservice-client -$" "$SOCKET_TMPFILES" || { cat "$SOCKET_TMPFILES" >&2; exit 1; }
+  install_socket_runtime_dirs kautuka kautuka true
+  for role in manager updateservice gateway credentialshost channelhost; do
+    grep -Fxq "d /run/kautuka/$role 0700 kautuka kautuka -" "$SOCKET_TMPFILES"
+  done
+  if grep -Eq "^d /run/kautuka/.* 2750 " "$SOCKET_TMPFILES"; then exit 1; fi
 '; then
   echo 'error: generated installer did not provision clean-host client socket groups before tmpfiles validation.' >&2
   exit 1
 fi
+
+(
+  source "$tmp/generated-kautuka-install-linux.sh"
+  write_manager_user_unit "$tmp/kautuka-manager.service" /opt/kautuka/manager /var/lib/kautuka false true
+  grep -Fxq 'Environment=Kautuka__Appliance__Enabled=true' "$tmp/kautuka-manager.service"
+  get_service_user_home() { echo /var/lib/kautuka; }
+  run_as_service_user() { [[ "${!#}" == 'kautuka-manager.service' ]]; echo active; }
+  systemctl() { echo "unexpected legacy host unit query: $*" >&2; exit 99; }
+  curl() {
+    local url="${!#}"
+    while [[ "$1" != --output ]]; do shift; done
+    case "$url" in
+      */api/runtime/system-health)
+        echo '{"lifecycle":{"coreReady":true},"workspace":{"status":"healthy"}}' > "$2" ;;
+      */api/auth/setup/status)
+        echo '{"needsSetup":true}' > "$2" ;;
+      *) return 1 ;;
+    esac
+    printf '200'
+  }
+  confirm_first_admin_setup() {
+    [[ "$2" == '/var/lib/kautuka/gateway/setup-token' ]]
+    touch "$tmp/appliance-setup-ready"
+  }
+  wait_for_web_ui "$(id -un)" http://localhost:20229 2 true
+  [[ -f "$tmp/appliance-setup-ready" ]]
+)
 
 echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

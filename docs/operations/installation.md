@@ -65,7 +65,9 @@ Both commands accept `--candidate-version <version>` to inspect a staged release
 
 In appliance mode, Manager's existing `GetHostStatus` RPC reports `core_ready` once the Podman runtime is available, the egress startup gate is open, and the supervised application services pass their local health checks. Manager also checks that the observability container is running.
 
-Manager creates missing application state directories with owner-only access before mounting them into their containers. The host still provisions socket directories and channel trust material before startup.
+On a fresh signed Linux appliance installation, the installer provisions private socket directories and channel trust, then starts Manager as the only Kautuka application host unit. Manager creates missing application state directories with owner-only access and starts the application containers. The channel CA signing key stays in the root-only offline authority directory. The installer waits for the appliance's core readiness through WebHost and reads the first-run setup token from the Gateway state directory.
+
+The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
 
 The recovery helper accepts `--layout appliance` for capture, verification, and restore. It records the layout in the snapshot manifest and checks it before restoring. The appliance layout locates Gateway's databases, keys, and per-agent databases under `gateway/` within the state root. Existing snapshots without a layout field are read as host-service snapshots. During maintenance, Manager lists and stops its managed service containers by ID, including containers left running after a Manager restart. Manager and the containerized database writers share the root-owned `/run/kautuka-db-writer.lock`. On SELinux hosts, the installer registers its shared file context for boot and Manager mounts it read-only. The appliance activation path still needs to invoke recovery under the exclusive database writer lease.
 

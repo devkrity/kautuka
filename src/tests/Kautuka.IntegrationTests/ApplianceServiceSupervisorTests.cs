@@ -20,6 +20,7 @@ public sealed class ApplianceServiceSupervisorTests
 {
     private const string Id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string Role = "credentialshost";
+    private const UnixFileMode PrivateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
 
     [Fact]
     public async Task RefusesToAdoptOrRemoveAContainerOwnedByAnotherProcess()
@@ -224,7 +225,7 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.False(Directory.Exists(runtime));
         string sockets = Path.Combine(runtime, "sockets");
         foreach (string role in new[] { Role, "channelhost", "gateway", "manager", "updateservice" })
-            Directory.CreateDirectory(Path.Combine(sockets, role));
+            Directory.CreateDirectory(Path.Combine(sockets, role), PrivateDirectory);
         string manager = Path.Combine(runtime, "manager");
         Directory.CreateDirectory(manager);
         ChannelSecurityMaterialDirectories securityRoots = ProvisionTrust(runtime, manager);
@@ -300,10 +301,9 @@ public sealed class ApplianceServiceSupervisorTests
         using var supervisor = new ApplianceServiceSupervisor(podman, release, root, runtime, sockets, NullLogger<ApplianceServiceSupervisor>.Instance);
         try
         {
-            const UnixFileMode privateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
             Assert.False(Directory.Exists(Path.Combine(runtime, "credentialsHost")));
             string first = await supervisor.EnsureRunningAsync(Role, cancellation);
-            Assert.Equal(privateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "credentialsHost")));
+            Assert.Equal(PrivateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "credentialsHost")));
             string socket = Path.Combine(sockets, Role, "credentialshost.sock");
             string transport = Path.Combine(runtime, "credentialsHost", "transport");
             await WaitForReadinessAsync(socket, Path.Combine(transport, ".ca.cer"), Path.Combine(transport, ".credentials-client.pfx"), cancellation);
@@ -317,7 +317,7 @@ public sealed class ApplianceServiceSupervisorTests
 
             Assert.False(Directory.Exists(Path.Combine(runtime, "channelHost")));
             string channel = await supervisor.EnsureRunningAsync("channelhost", cancellation);
-            Assert.Equal(privateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "channelHost")));
+            Assert.Equal(PrivateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "channelHost")));
             string channelSocket = Path.Combine(sockets, "channelhost", "channelhost.sock");
             string channelCa = Path.Combine(securityRoots.GatewayTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate);
             string gatewayClient = Path.Combine(securityRoots.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx);
@@ -492,6 +492,7 @@ public sealed class ApplianceServiceSupervisorTests
             if (release.Deployment.Images.ContainsKey("webhost"))
             {
                 webHostPort = await CheckPublishedWebHostAsync(gateway, podman, images, token);
+                Assert.True(File.Exists(Path.Combine(runtime, "gateway", "setup-token")));
                 await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
                 Assert.False(gateway.IsReady);
                 await gateway.ReconcileServicesAsync(token);
@@ -664,6 +665,7 @@ public sealed class ApplianceServiceSupervisorTests
     }
     private static ChannelSecurityMaterialDirectories ProvisionTrust(string runtime, string manager)
     {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         var (server, ca) = LocalCaMtlsBootstrap.EnsureAndLoad(manager, "Manager",
             [new LocalMtlsClientCertificate(ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.ChannelHostCertificateFileName),
              new LocalMtlsClientCertificate(ManagerClientIdentities.GatewayCommonName, ManagerClientIdentities.GatewayCertificateFileName),
@@ -676,6 +678,12 @@ public sealed class ApplianceServiceSupervisorTests
             Path.Combine(security, "channel-private"), Path.Combine(security, "channel-trust"),
             Path.Combine(security, "offline-authority"));
         ChannelSecurityMaterialProvisioner.Provision(roots);
+        foreach (string directory in new[] { roots.GatewayPrivateRoot, roots.GatewayTrustRoot, roots.ChannelPrivateRoot, roots.ChannelTrustRoot })
+        {
+            File.SetUnixFileMode(directory, PrivateDirectory);
+            foreach (string file in Directory.EnumerateFiles(directory))
+                File.SetUnixFileMode(file, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
         return roots;
     }
     private static string NormalizeFixtureCreateCommand(string json, string[] prefix, string fixtureHooks, string writerLock, string runtime)
