@@ -12,7 +12,9 @@ public sealed class InstalledLinuxSmokeContractTests
         Assert.Contains("assert_unit_active user kautuka-updateservice.service", source, StringComparison.Ordinal);
         Assert.Contains("activating auto-restart is a crash loop", source, StringComparison.Ordinal);
         Assert.Contains("KAUTUKA_SMOKE_SETUP_TOKEN", source, StringComparison.Ordinal);
-        Assert.Contains("\"setupToken\":sys.argv[3]", source, StringComparison.Ordinal);
+        Assert.Contains("post_auth setup \"$setup_token\"", source, StringComparison.Ordinal);
+        Assert.Contains("--data-binary @-", source, StringComparison.Ordinal);
+        Assert.Contains("--check-appliance-ready --candidate-version \"$appliance_version\"", source, StringComparison.Ordinal);
     }
 
     [Fact]
