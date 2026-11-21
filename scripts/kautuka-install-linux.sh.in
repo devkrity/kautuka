@@ -351,6 +351,28 @@ install_nac_hook_payload() {
     install -m 0644 -- "$proxy_ruleset_source" "$proxy_ruleset_destination"
 }
 
+install_oci_hook_registration() {
+    local hooks_dir="$1" executable="$2" service_user="$3" service_group="$4"
+    local registration
+    registration="$(mktemp "$hooks_dir/.kautuka-hook.XXXXXX")"
+    cat > "$registration" <<EOF
+{
+  "version": "1.0.0",
+  "hook": {
+    "path": "$executable",
+    "timeout": 45
+  },
+  "when": {
+    "always": true
+  },
+  "stages": ["createRuntime"]
+}
+EOF
+    chmod 0644 "$registration"
+    chown "$service_user:$service_group" "$registration"
+    mv -Tf -- "$registration" "$hooks_dir/kautuka_hook.json"
+}
+
 require_root() {
     if [[ ${EUID} -ne 0 ]]; then
         fail "this installer must run as root"
@@ -662,22 +684,6 @@ hooks_dir = ["$hooks_dir", { append = true }]
 EOF
     chmod 0644 "$containers_conf_dir/99-kautuka-hooks.conf"
     chown "$service_user:$service_group" "$containers_conf_dir/99-kautuka-hooks.conf"
-
-    cat > "$hooks_dir/kautuka_hook.json" <<EOF
-{
-  "version": "1.0.0",
-  "hook": {
-    "path": "$hooks_dir/kautuka_hook.py",
-    "timeout": 45
-  },
-  "when": {
-    "always": true
-  },
-  "stages": ["createRuntime"]
-}
-EOF
-    chmod 0644 "$hooks_dir/kautuka_hook.json"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.json"
 
     loginctl enable-linger "$service_user"
     validate_linger_enabled "$service_user"
@@ -2938,6 +2944,10 @@ PY
     if [[ "$appliance_image_payload" == 'true' ]]; then
         chown -R root:root "$version_root"
         chmod -R go-w "$version_root"
+        local native_hook="$version_root/scripts/kautuka-oci-hook"
+        [[ -f "$native_hook" && ! -L "$native_hook" && -x "$native_hook" &&
+            "$(head -c 4 -- "$native_hook")" == $'\x7fELF' ]] \
+            || fail 'signed appliance release requires an executable native OCI hook'
         echo 'Preparing the signed application images in the service account Podman store.'
         run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
             "$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version" \
@@ -2961,10 +2971,12 @@ PY
     local hooks_dir="$service_home/.config/containers/hooks.d"
     local envoy_selinux_enabled=false
     install_envoy_selinux_policy "$version_root/scripts/kautuka_envoy.cil"
-    install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
-    chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        install_nac_hook_payload "$version_root/scripts/kautuka_hook.py" "$hooks_dir/kautuka_hook.py"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_hook.py"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_workload.nft.json.tmpl"
+        chown "$service_user:$service_group" "$hooks_dir/kautuka_package_proxy.nft.json.tmpl"
+    fi
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
@@ -2981,6 +2993,11 @@ PY
 
     ln -sfn "$version_root" "$next_link"
     mv -Tf "$next_link" "$current_link"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        install_oci_hook_registration "$hooks_dir" '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' "$service_user" "$service_group"
+    else
+        install_oci_hook_registration "$hooks_dir" "$hooks_dir/kautuka_hook.py" "$service_user" "$service_group"
+    fi
 
     write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled"
     chmod 0644 "$unit_path"

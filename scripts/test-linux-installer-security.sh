@@ -50,6 +50,30 @@ helper_install_line="$(grep -nF 'install_apply_release_helper "$tmp_root/extract
   echo 'error: Linux installer must prepare signed appliance images before stopping services and selecting the release.' >&2
   exit 1
 }
+native_hook_check_line="$(grep -nF "fail 'signed appliance release requires an executable native OCI hook'" "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+native_hook_registration_line="$(grep -nF " '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' " "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+[[ "$image_handoff_line" -lt "$native_hook_check_line" && "$native_hook_check_line" -lt "$appliance_stop_line" &&
+   "$activation_line" -lt "$native_hook_registration_line" ]] || {
+  echo 'error: Linux installer must validate the native hook before shutdown and register it for the selected release.' >&2
+  exit 1
+}
+(
+  source "$tmp/generated-kautuka-install-linux.sh"
+  mkdir "$tmp/hooks"
+  install_oci_hook_registration "$tmp/hooks" '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' "$(id -u)" "$(id -g)"
+  python3 - "$tmp/hooks/kautuka_hook.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    assert json.load(stream) == {
+        "version": "1.0.0",
+        "hook": {"path": "/opt/kautuka/manager/current/scripts/kautuka-oci-hook", "timeout": 45},
+        "when": {"always": True},
+        "stages": ["createRuntime"],
+    }
+PY
+)
 
 mock_bin="$tmp/mock-bin"
 mkdir -p "$mock_bin"

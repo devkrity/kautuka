@@ -57,6 +57,8 @@ On Linux, Manager's `--verify-appliance-release` command verifies the selected r
 
 When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before stopping services or changing `current`. The selected version directory stays in use during preparation, so the candidate needs a different version.
 
+The signed appliance payload must include the Native AOT OCI hook. The installer checks the staged hook before stopping services and registers `/opt/kautuka/manager/current/scripts/kautuka-oci-hook` for Podman's `createRuntime` stage.
+
 Manager's `--prepare-appliance-images` command performs the same signature check and prepares the five images in the calling service account's Podman store. It loads missing images from the protected role archives and checks each image's repository digest, service role, and platform. This command completes before application startup.
 
 Both commands accept `--candidate-version <version>` to inspect a staged release under Manager's protected versions directory while the active release continues running. When all five images are already installed, preparation validates them with one Podman inspection and requires no duplicate OCI archives. Manager uses the image IDs from that inspection when it starts the application containers. Missing images still require their signed role archives. These commands leave the active release pointer in place.
