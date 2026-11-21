@@ -44,6 +44,23 @@ const mail = {
 } as Connector;
 
 describe('ConnectorCard managed sign-in connector', () => {
+  it('shows a busy toggle while enabling a connector and then shows Enabled', () => {
+    const connector = connectorSchema.parse({ id: 'kautuka-web-tools', name: 'Kautuka Web Tools', transport: 'container', enabled: false });
+    const onToggle = vi.fn();
+    const props = { canManage: true, onToggle, onEdit: vi.fn(), onDelete: vi.fn() };
+    const { rerender } = render(<ConnectorCard {...props} connector={connector} toggling={false} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Disabled' }));
+    expect(onToggle).toHaveBeenCalledWith(connector.id, true);
+
+    rerender(<ConnectorCard {...props} connector={connector} toggling />);
+    expect(screen.getByRole('button', { name: 'Enabling…' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Disabled' })).not.toBeInTheDocument();
+
+    rerender(<ConnectorCard {...props} connector={{ ...connector, enabled: true }} toggling={false} />);
+    expect(screen.getByRole('button', { name: 'Enabled' })).toBeEnabled();
+  });
+
   it('offers to refresh the saved mail connector and displays its discovered tools', () => {
     render(<ConnectorCard connector={{ ...mail, toolCount: 2, toolNames: ['mail_list', 'mail_read'] }} canManage onToggle={vi.fn()} onEdit={vi.fn()} onDelete={vi.fn()} toggling={false} />);
     expect(screen.getByText('mail_list')).toBeInTheDocument();

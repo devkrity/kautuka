@@ -41,9 +41,7 @@ export function useSaveConnector() {
   return useMutation({
     mutationFn: ({ connectorId, data }: { connectorId: string; data: ConnectorSavePayload }) =>
       saveConnector(connectorId, data),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() }),
   });
 }
 

@@ -19,6 +19,7 @@ interface ConnectorCardProps {
   onEdit: (connector: Connector) => void;
   onDelete: (connector: Connector) => void;
   toggling: boolean;
+  disabled?: boolean;
 }
 
 function RefreshManagedTools({ connector }: { connector: Connector }) {
@@ -54,6 +55,7 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
   onEdit,
   onDelete,
   toggling,
+  disabled,
 }) => {
   const oauth = useConnectorOAuth();
   const managed = (oauth.data ?? []).some((status) => matchesConnectorOAuth(connector.id, status));
@@ -209,11 +211,16 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           </span>
           <StatePill
             active={connector.enabled}
-            disabled={toggling || !canManage}
+            disabled={toggling || disabled || !canManage}
             onClick={() => onToggle(connector.id, !connector.enabled)}
             title={canManage ? undefined : 'Only admins can change system connector settings'}
           >
-            {connector.enabled ? (
+            {toggling ? (
+              <>
+                <Loader2 aria-hidden="true" className="h-3.5 w-3.5 motion-safe:animate-spin" />
+                {connector.enabled ? 'Disabling…' : 'Enabling…'}
+              </>
+            ) : connector.enabled ? (
               <>
                 <CheckCircle2 className="h-3.5 w-3.5" /> Enabled
               </>

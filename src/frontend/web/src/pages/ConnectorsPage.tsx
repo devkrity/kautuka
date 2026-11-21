@@ -71,7 +71,7 @@ export const ConnectorsPage: React.FC = () => {
   const completeOAuth = useCompleteConnectorOAuth();
   const completeOAuthRef = useRef(completeOAuth.mutate);
   completeOAuthRef.current = completeOAuth.mutate;
-  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<Map<string, boolean>>(() => new Map());
 
   useEffect(() => {
     const hash = window.location.hash.startsWith('#')
@@ -136,18 +136,28 @@ export const ConnectorsPage: React.FC = () => {
   const canImportConnectors =
     !!currentUser && (currentUser.role === ROLE_ADMIN || Boolean(currentUser.canImportConnectors));
 
-  const handleToggle = (id: string, enabled: boolean) => {
+  const handleToggle = async (id: string, enabled: boolean) => {
     const current = connectors.find((c) => c.id === id);
     if (!current) return;
     if (!canManageConnector(current)) {
       toast.error('Only admins can change system connector settings.');
       return;
     }
-    setTogglingId(id);
-    saveMutation.mutate(
-      { connectorId: id, data: buildSavePayload({ ...entryToDraft(current), enabled }) },
-      { onSettled: () => setTogglingId(null) }
-    );
+    setPendingToggle((previous) => new Map(previous).set(id, enabled));
+    try {
+      await saveMutation.mutateAsync({
+        connectorId: id,
+        data: buildSavePayload({ ...entryToDraft(current), enabled }),
+      });
+    } catch (error) {
+      toast.error(getErrorMessage(error) ?? 'Could not change connector state.');
+    } finally {
+      setPendingToggle((previous) => {
+        const next = new Map(previous);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   const handleSave = (d: ConnectorDraft, credValues: Record<string, string>) => {
@@ -445,7 +455,8 @@ export const ConnectorsPage: React.FC = () => {
                     onToggle={handleToggle}
                     onEdit={(entry) => setModalTarget(entry)}
                     onDelete={handleDelete}
-                    toggling={togglingId === c.id || deleteMutation.isPending}
+                    toggling={pendingToggle.get(c.id) === !c.enabled}
+                    disabled={pendingToggle.has(c.id) || deleteMutation.isPending}
                   />
                 ))}
               </div>
@@ -467,7 +478,8 @@ export const ConnectorsPage: React.FC = () => {
                     onToggle={handleToggle}
                     onEdit={(entry) => setModalTarget(entry)}
                     onDelete={handleDelete}
-                    toggling={togglingId === c.id || deleteMutation.isPending}
+                    toggling={pendingToggle.get(c.id) === !c.enabled}
+                    disabled={pendingToggle.has(c.id) || deleteMutation.isPending}
                   />
                 ))}
               </div>
