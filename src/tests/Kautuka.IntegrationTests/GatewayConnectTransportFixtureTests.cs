@@ -78,8 +78,8 @@ public sealed class GatewayConnectTransportFixtureTests
         await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Correlation = "correlation-3" }, timeout.Token));
         Assert.Contains("x-kautuka-correlation: correlation-3\r\n", await lastTask, StringComparison.Ordinal);
 
-        using var modelTransport = new GatewayModelHttpTransport(transport);
-        var provider = new OllamaAiClientProvider(checker: new FixtureNetworkAccessChecker(), transportFactory: modelTransport.CreateHandler);
+        using var outbound = new GatewayOutboundHttpTransport(transport);
+        var provider = new OllamaAiClientProvider(checker: new FixtureNetworkAccessChecker(), transportFactory: outbound.CreateModelHandler);
         var settings = new JsonObject { ["base_url"] = "http://models.example.test" };
         HttpRequestException missingIdentity = await Assert.ThrowsAsync<HttpRequestException>(
             () => provider.DiscoverModelsAsync(settings, null, throwOnFailure: true, timeout.Token));
@@ -97,6 +97,27 @@ public sealed class GatewayConnectTransportFixtureTests
         Assert.Contains("x-kautuka-agent: model-agent\r\n", discoveryConnect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-purpose: ai-discovery\r\n", discoveryConnect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-correlation: discovery-request\r\n", discoveryConnect, StringComparison.Ordinal);
+
+        var mcpFactory = new McpHttpClientFactory(new FixtureNetworkAccessChecker(), outbound);
+        var mcpEndpoint = new Uri("http://mcp.example.test/mcp", UriKind.Absolute);
+        var mcpContext = new RemoteMcpRequestContext(mcpEndpoint, "mcp-connector", "mcp-user", false, [], [],
+            static (_, _) => Task.FromResult<IReadOnlyDictionary<string, string>>(new Dictionary<string, string>()));
+        using (NetworkAccessContext.BeginScope("mcp-user", "mcp-agent", correlationId: "mcp-request"))
+        {
+            foreach (bool allowPrivate in new[] { false, true })
+            {
+                Task<string> mcpTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true);
+                using var mcpClient = new HttpClient(mcpFactory.CreateRequestHandler(allowPrivate, mcpContext));
+                Assert.Equal("ok", await mcpClient.GetStringAsync(mcpEndpoint, timeout.Token));
+                string mcpConnect = await mcpTask;
+                Assert.StartsWith("CONNECT mcp.example.test:80 HTTP/1.1\r\n", mcpConnect, StringComparison.Ordinal);
+                Assert.Contains("x-kautuka-user: mcp-user\r\n", mcpConnect, StringComparison.Ordinal);
+                Assert.Contains("x-kautuka-agent: mcp-agent\r\n", mcpConnect, StringComparison.Ordinal);
+                Assert.Contains("x-kautuka-connector: mcp-connector\r\n", mcpConnect, StringComparison.Ordinal);
+                Assert.Contains("x-kautuka-purpose: remote-mcp\r\n", mcpConnect, StringComparison.Ordinal);
+                Assert.Equal(!allowPrivate, mcpConnect.Contains("x-kautuka-public-only: true\r\n", StringComparison.Ordinal));
+            }
+        }
 
         Task<string> originTlsTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true, originTls: true);
         using var originTlsRequest = new HttpRequestMessage(HttpMethod.Get, "https://example.com/");

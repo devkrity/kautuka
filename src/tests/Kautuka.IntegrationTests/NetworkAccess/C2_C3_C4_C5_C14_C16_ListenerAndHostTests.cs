@@ -128,6 +128,7 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             store.SetRule(actor, new RuleWriteSpec("user", "user-a", null, "connector-a", "mcp.example.test", "host", 443, Allowed: true), store.Revision);
             store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "model.example.test", "host", 443, Allowed: true), store.Revision);
             store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "local.example.test", "host", 443, Allowed: true, AllowLan: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "192.168.100.50", "ip", 443, Allowed: true, AllowLan: true), store.Revision);
             var controller = new NacController(store, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => gateOpen);
             string socketPath = Path.Combine(tempDir, "networkaccess.sock");
             await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
@@ -191,6 +192,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             Assert.Equal(0, lanAllowed.Status.Code);
             Assert.Equal("lan", lanAllowed.DynamicMetadata.Fields["egress_class"].StringValue);
             await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-public-only"] = "false", "invalid_gateway_scope");
+            request.Attributes.Request.Http.Headers["x-kautuka-public-only"] = "true";
+            CheckResponse publicOnly = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, publicOnly.Status.Code);
+            Assert.Equal("public", publicOnly.DynamicMetadata.Fields["egress_class"].StringValue);
+            Assert.Contains("x-kautuka-public-only", publicOnly.OkResponse.HeadersToRemove);
+            await AssertDenied(attributes => attributes.Request.Http.Host = "192.168.100.50:443", "not_public");
             gateOpen = false;
             await AssertDenied(static _ => { }, "topology_closed");
 

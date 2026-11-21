@@ -9,7 +9,7 @@ using System.Text;
 namespace Kautuka.Gateway.Infrastructure.Egress;
 
 /// <summary>Identity attached to every CONNECT in a partitioned connection pool.</summary>
-internal sealed record GatewayEgressScope(string User, string? Agent, string? Connector, string Purpose, string? Correlation);
+internal sealed record GatewayEgressScope(string User, string? Agent, string? Connector, string Purpose, string? Correlation, bool PublicOnly = false);
 
 /// <summary>HTTP transport through an authenticated, scope-bound Envoy CONNECT listener.</summary>
 internal sealed class GatewayConnectTransport : IDisposable
@@ -138,10 +138,18 @@ internal sealed class GatewayConnectTransport : IDisposable
             this.release = release;
             foreach (var header in inner.Headers) Headers.TryAddWithoutValidation(header.Key, header.Value);
         }
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => inner.CopyToAsync(stream);
-        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken) => inner.CopyToAsync(stream, cancellationToken);
-        protected override Task<Stream> CreateContentReadStreamAsync() => inner.ReadAsStreamAsync();
-        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) => inner.ReadAsStreamAsync(cancellationToken);
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => SerializeToStreamAsync(stream, context, CancellationToken.None);
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        {
+            try { await inner.CopyToAsync(stream, cancellationToken).ConfigureAwait(false); }
+            finally { ReleaseOnce(); }
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+            => CreateContentReadStreamAsync(CancellationToken.None);
+        protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken)
+            => new TrackedStream(await inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), ReleaseOnce);
         protected override bool TryComputeLength(out long length)
         {
             if (inner.Headers.ContentLength is long known) { length = known; return true; }
@@ -149,7 +157,41 @@ internal sealed class GatewayConnectTransport : IDisposable
         }
         protected override void Dispose(bool disposing)
         {
-            if (disposing && Interlocked.Exchange(ref released, 1) == 0)
+            if (disposing)
+            {
+                try { inner.Dispose(); }
+                finally { ReleaseOnce(); }
+            }
+            base.Dispose(disposing);
+        }
+
+        private void ReleaseOnce()
+        {
+            if (Interlocked.Exchange(ref released, 1) == 0) release();
+        }
+    }
+
+    private sealed class TrackedStream(Stream inner, Action release) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override int Read(Span<byte> buffer) => inner.Read(buffer);
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => inner.ReadAsync(buffer, offset, count, cancellationToken);
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => inner.ReadAsync(buffer, cancellationToken);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
             {
                 try { inner.Dispose(); }
                 finally { release(); }
@@ -180,7 +222,8 @@ internal sealed class GatewayConnectTransport : IDisposable
                 string message = $"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n" +
                     $"x-kautuka-user: {scope.User}\r\n" + Header("x-kautuka-agent", scope.Agent) +
                     Header("x-kautuka-connector", scope.Connector) + $"x-kautuka-purpose: {scope.Purpose}\r\n" +
-                    Header("x-kautuka-correlation", scope.Correlation) + "\r\n";
+                    Header("x-kautuka-correlation", scope.Correlation) +
+                    (scope.PublicOnly ? "x-kautuka-public-only: true\r\n" : string.Empty) + "\r\n";
                 await tls.WriteAsync(Encoding.ASCII.GetBytes(message), token).ConfigureAwait(false);
                 await ReadConnectResponseAsync(tls, token).ConfigureAwait(false);
                 return tls;

@@ -53,7 +53,8 @@ internal static class GatewayServiceCollectionExtensions
     }
 
     private static Func<INetworkAccessChecker?, HttpMessageHandler>? ResolveModelTransport(IServiceProvider services)
-        => services.GetService<GatewayModelHttpTransport>() is { } transport ? transport.CreateHandler : null;
+        => services.GetService<GatewayOutboundHttpTransport>() is { } transport ? transport.CreateModelHandler : null;
+
     public static IServiceCollection AddKautukaMAF(this IServiceCollection services)
     {
         services.AddSingleton<MafSessionStore>();

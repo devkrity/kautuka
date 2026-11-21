@@ -558,12 +558,19 @@ public sealed class NetworkAccessController
         }
     }
 
-    internal NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input)
+    internal NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input, bool publicOnly)
     {
         if (isContainerAuthorizationGateOpen?.Invoke() != true)
         {
             Interlocked.Increment(ref checks);
             return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, input.Host, input.Port, "topology_closed");
+        }
+
+        if (publicOnly && NetworkDestinationNormalizer.TryNormalizeIpv4(input.Host, out string normalized, out _)
+            && NetworkAddressClassifier.IsNonPublicV4(normalized))
+        {
+            Interlocked.Increment(ref checks);
+            return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, normalized, input.Port, "not_public");
         }
 
         return EvaluateOutboundCheck(input);

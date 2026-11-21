@@ -121,7 +121,7 @@ internal static partial class GatewayAppBootstrap
         });
         builder.Services.AddOpenApi();
         builder.Services.AddKautukaPlatform(builder.Configuration);
-        builder.Services.AddSingleton(sp => GatewayModelHttpTransport.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
+        builder.Services.AddSingleton(sp => GatewayOutboundHttpTransport.FromConfiguration(sp.GetRequiredService<IConfiguration>()));
         builder.Services.AddKautukaRuntimePlane();
 
         // Manager mTLS certs (stable CA + rotating client leaf)

@@ -149,8 +149,9 @@ request() {
 }
 expect_tunnel() {
     local host="$1" expected_address="$2" expected_source="$3"
+    shift 3
     local status
-    if ! status="$(request "$host" gateway)"; then
+    if ! status="$(request "$host" gateway "$@")"; then
         echo "$host failed to open a tunnel ($status)" >&2
         cat "$temp/auth.log" >&2
         podman logs "$envoy" >&2
@@ -179,7 +180,10 @@ expect_denied() {
 }
 
 expect_tunnel fixture-public.test 93.184.216.34 93.184.216.34
+expect_tunnel fixture-public.test 93.184.216.34 93.184.216.34 --proxy-header 'x-kautuka-public-only: true'
 expect_tunnel fixture-lan.test 192.168.88.2 10.248.0.3
+expect_denied fixture-lan.test gateway 503 --proxy-header 'x-kautuka-public-only: true'
+expect_denied fixture-lan.test gateway 403 --proxy-header 'x-kautuka-public-only: false'
 expect_denied fixture-lan.test '' 000
 expect_denied fixture-lan.test wrong 000
 expect_denied fixture-lan.test gateway 403 --proxy-header 'x-kautuka-agent: other-agent'

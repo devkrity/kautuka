@@ -4,30 +4,30 @@ using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.Gateway.Infrastructure.Egress;
 
-internal sealed class GatewayModelHttpTransport : IDisposable
+internal sealed class GatewayOutboundHttpTransport : IDisposable
 {
     private const string certificateDirectory = "/run/kautuka-gateway-connect";
     private readonly GatewayConnectTransport? connect;
     private readonly X509Certificate2? trustedRoot;
     private readonly X509Certificate2? clientCertificate;
 
-    internal GatewayModelHttpTransport(GatewayConnectTransport? connect = null)
+    internal GatewayOutboundHttpTransport(GatewayConnectTransport? connect = null)
     {
         this.connect = connect;
     }
 
-    private GatewayModelHttpTransport(GatewayConnectTransport connect, X509Certificate2 trustedRoot, X509Certificate2 clientCertificate)
+    private GatewayOutboundHttpTransport(GatewayConnectTransport connect, X509Certificate2 trustedRoot, X509Certificate2 clientCertificate)
         : this(connect)
     {
         this.trustedRoot = trustedRoot;
         this.clientCertificate = clientCertificate;
     }
 
-    internal static GatewayModelHttpTransport FromConfiguration(IConfiguration configuration)
+    internal static GatewayOutboundHttpTransport FromConfiguration(IConfiguration configuration)
     {
         if (configuration["Kautuka:Appliance:Enabled"] is not { } value || !bool.Parse(value))
         {
-            return new GatewayModelHttpTransport();
+            return new GatewayOutboundHttpTransport();
         }
 
         X509Certificate2 trustedRoot = X509CertificateLoader.LoadCertificateFromFile($"{certificateDirectory}/ca.crt");
@@ -36,7 +36,7 @@ internal sealed class GatewayModelHttpTransport : IDisposable
         {
             clientCertificate = X509CertificateLoader.LoadPkcs12FromFile($"{certificateDirectory}/client.pfx", null, X509KeyStorageFlags.EphemeralKeySet);
             var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate);
-            return new GatewayModelHttpTransport(connect, trustedRoot, clientCertificate);
+            return new GatewayOutboundHttpTransport(connect, trustedRoot, clientCertificate);
         }
         catch
         {
@@ -46,14 +46,27 @@ internal sealed class GatewayModelHttpTransport : IDisposable
         }
     }
 
-    internal HttpMessageHandler CreateHandler(INetworkAccessChecker? checker)
+    internal HttpMessageHandler? CreateScopedHandler(Func<GatewayEgressScope> resolveScope)
+        => connect is null ? null : new ScopedConnectHandler(connect, resolveScope);
+
+    internal HttpMessageHandler CreateModelHandler(INetworkAccessChecker? checker)
     {
 #pragma warning disable CA2000 // The returned delegating handler owns the selected transport.
-        HttpMessageHandler transport = connect is null
-            ? new SocketsHttpHandler { AllowAutoRedirect = false }
-            : new ScopedConnectHandler(connect);
+        HttpMessageHandler transport = CreateScopedHandler(ResolveModelScope)
+            ?? new SocketsHttpHandler { AllowAutoRedirect = false };
         return new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, transport);
 #pragma warning restore CA2000
+    }
+
+    private static GatewayEgressScope ResolveModelScope()
+    {
+        NetworkAccessScope? caller = NetworkAccessContext.Current;
+        if (caller?.UserId is not { Length: > 0 } user)
+        {
+            throw new HttpRequestException("Gateway model egress requires a caller identity.");
+        }
+
+        return new GatewayEgressScope(user, caller.AgentId, caller.ConnectorId, caller.Purpose ?? "model", caller.CorrelationId);
     }
 
     public void Dispose()
@@ -63,18 +76,9 @@ internal sealed class GatewayModelHttpTransport : IDisposable
         trustedRoot?.Dispose();
     }
 
-    private sealed class ScopedConnectHandler(GatewayConnectTransport connect) : HttpMessageHandler
+    private sealed class ScopedConnectHandler(GatewayConnectTransport connect, Func<GatewayEgressScope> resolveScope) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            NetworkAccessScope? caller = NetworkAccessContext.Current;
-            if (caller?.UserId is not { Length: > 0 } user)
-            {
-                throw new HttpRequestException("Gateway model egress requires a caller identity.");
-            }
-
-            var scope = new GatewayEgressScope(user, caller.AgentId, caller.ConnectorId, caller.Purpose ?? "model", caller.CorrelationId);
-            return connect.SendAsync(request, scope, cancellationToken);
-        }
+            => connect.SendAsync(request, resolveScope(), cancellationToken);
     }
 }

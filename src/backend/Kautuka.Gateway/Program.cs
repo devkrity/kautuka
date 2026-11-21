@@ -14,7 +14,7 @@ GatewayAppBootstrap.ConfigureProductionServer(builder, IPAddress.Loopback);
 GatewayAppBootstrap.ConfigureServices(builder);
 
 var app = builder.Build();
-_ = app.Services.GetRequiredService<GatewayModelHttpTransport>();
+_ = app.Services.GetRequiredService<GatewayOutboundHttpTransport>();
 string buildVersion = typeof(GatewayProgramLog).Assembly
     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
     .InformationalVersion
