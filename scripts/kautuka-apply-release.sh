@@ -940,6 +940,90 @@ verify_envoy_selinux_policy_compatibility() {
 verify_nac_hook_compatibility() {
     local candidate="$1" service_home="$2"
     local hooks_dir="$service_home/.config/containers/hooks.d" file
+    local manager_current="${3:-/opt/kautuka/manager/current}"
+    # Native installations point at the versioned Manager payload. The update
+    # transaction switches that stable pointer only after this preflight passes.
+    if python3 - "$hooks_dir/kautuka_hook.json" "$manager_current/scripts/kautuka-oci-hook" <<'PY'
+import json, sys
+try:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result: raise ValueError('duplicate property')
+            result[key] = value
+        return result
+    with open(sys.argv[1], encoding='utf-8') as source:
+        hook = json.load(source, object_pairs_hook=unique)
+    valid = (hook == {'version': '1.0.0', 'hook': {'path': sys.argv[2], 'timeout': 45},
+                      'when': {'always': True}, 'stages': ['createRuntime']}
+             and type(hook['hook']['timeout']) is int and hook['when']['always'] is True)
+except (OSError, ValueError, TypeError, KeyError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+    then
+        local manager_root resolved active candidate_hook checked mode owner
+        manager_root="$(dirname "$manager_current")"
+        [[ -L "$manager_current" && "$(stat -c '%u' "$manager_current")" == 0 ]] || {
+            echo 'error: native NAC hook Manager pointer is not trusted.' >&2; return 1;
+        }
+        resolved="$(readlink -f "$manager_current")" || return 1
+        [[ "$resolved" == "$manager_root/versions/"* && "${resolved#"$manager_root/versions/"}" != */* ]] || {
+            echo 'error: native NAC hook Manager pointer is outside its version directory.' >&2; return 1;
+        }
+        active="$resolved/scripts/kautuka-oci-hook"
+        candidate_hook="$candidate/scripts/kautuka-oci-hook"
+        for checked in "$(dirname "$manager_root")" "$manager_root" "$manager_root/versions" "$resolved" "$resolved/scripts" "$active"; do
+            [[ ! -L "$checked" && -e "$checked" ]] || { echo 'error: native NAC hook path is missing or symbolic.' >&2; return 1; }
+            owner="$(stat -c '%u' "$checked")" || return 1
+            mode="$(stat -c '%a' "$checked")" || return 1
+            [[ "$owner" == 0 && "$mode" =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 8#022) == 0 )) || {
+                echo 'error: native NAC hook Manager path is not root-owned and protected.' >&2; return 1;
+            }
+        done
+        for checked in "$active" "$candidate_hook"; do
+            [[ -f "$checked" && ! -L "$checked" && -x "$checked" ]] || {
+                echo 'error: native NAC hook executable is missing or not executable.' >&2; return 1;
+            }
+        done
+        [[ ! -L "$candidate/scripts" ]] || { echo 'error: native NAC hook candidate scripts directory is symbolic.' >&2; return 1; }
+        if ! python3 - "$active" "$candidate_hook" <<'PY'
+import os, platform, struct, sys
+machine = {'x86_64': 62, 'aarch64': 183}.get(platform.machine())
+try:
+    if machine is None: raise ValueError('unsupported architecture')
+    for path in sys.argv[1:]:
+        with open(path, 'rb') as source:
+            header = source.read(64)
+            if (len(header) != 64 or header[:4] != b'\x7fELF' or header[4:7] != b'\x02\x01\x01'
+                or struct.unpack_from('<H', header, 16)[0] not in (2, 3)
+                or struct.unpack_from('<H', header, 18)[0] != machine
+                or struct.unpack_from('<I', header, 20)[0] != 1
+                or struct.unpack_from('<H', header, 52)[0] != 64
+                or struct.unpack_from('<H', header, 54)[0] != 56):
+                raise ValueError('invalid ELF header')
+            offset = struct.unpack_from('<Q', header, 32)[0]
+            count = struct.unpack_from('<H', header, 56)[0]
+            if count == 0 or offset < 64 or offset + count * 56 > os.fstat(source.fileno()).st_size:
+                raise ValueError('invalid ELF program headers')
+            source.seek(offset)
+            program_headers = source.read(count * 56)
+            if not any(struct.unpack_from('<I', program_headers, i * 56)[0] == 1
+                       and struct.unpack_from('<I', program_headers, i * 56 + 4)[0] & 1
+                       for i in range(count)):
+                raise ValueError('missing executable ELF segment')
+except (OSError, ValueError, struct.error):
+    sys.exit(1)
+PY
+        then
+            echo 'error: native NAC hook is not a supported ELF executable.' >&2; return 1
+        fi
+        if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | cmp -s - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+            echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
+            return 1
+        fi
+        return 0
+    fi
     for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
         if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! cmp -s "$candidate/scripts/$file" "$hooks_dir/$file"; then
             echo 'error: the installed NAC hook differs from this release; run the current signed Linux installer before updating.' >&2

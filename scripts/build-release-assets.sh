@@ -113,6 +113,7 @@ PY
 assert_packed_appliance_network_seal() {
   local rootfs_output="$1"
   local kautuka_uid="${2:-}"
+  local packed_version="$3"
 
   local sockets_conf
   sockets_conf="$(tar -xOf "$rootfs_output" ./usr/lib/tmpfiles.d/kautuka-sockets.conf 2>/dev/null || true)"
@@ -138,13 +139,47 @@ assert_packed_appliance_network_seal() {
   }
 
   local hook_root='./var/lib/kautuka/.config/containers'
-  local hook_file
-  for hook_file in hooks.d/kautuka_hook.py hooks.d/kautuka_workload.nft.json.tmpl hooks.d/kautuka_package_proxy.nft.json.tmpl hooks.d/kautuka_hook.json containers.conf.d/99-kautuka-hooks.conf; do
-    tar -xOf "$rootfs_output" "$hook_root/$hook_file" >/dev/null || {
-      echo "error: packed appliance is missing NAC hook configuration: $hook_file" >&2
-      return 1
-    }
-  done
+  python3 - "$rootfs_output" "$hook_root" "$packed_version" <<'PY' || return 1
+import json, sys, tarfile, tomllib
+
+archive, hook_root, version = sys.argv[1:]
+manager = './opt/kautuka/manager'
+target = f'versions/{version}'
+hook = f'{manager}/{target}/scripts/kautuka-oci-hook'
+try:
+    with tarfile.open(archive, 'r:gz') as rootfs:
+        current = rootfs.getmember(f'{manager}/current')
+        if not current.issym() or current.linkname != target or current.uid != 0:
+            raise ValueError('Manager current does not select the packaged release')
+        for directory in ('./opt/kautuka', manager, f'{manager}/versions', f'{manager}/{target}', f'{manager}/{target}/scripts'):
+            member = rootfs.getmember(directory)
+            if not member.isdir() or member.uid != 0 or member.mode & 0o022:
+                raise ValueError(f'untrusted native hook directory {directory}')
+        binary = rootfs.getmember(hook)
+        if not binary.isfile() or binary.uid != 0 or binary.mode & 0o022 or not binary.mode & 0o001:
+            raise ValueError('packaged native hook is not a root-owned executable')
+        with rootfs.extractfile(binary) as stream:
+            header = stream.read(20)
+        if header[:6] != b'\x7fELF\x02\x01' or header[18:20] != b'\x3e\x00':
+            raise ValueError('packaged native hook is not a Linux x64 ELF binary')
+        with rootfs.extractfile(f'{hook_root}/hooks.d/kautuka_hook.json') as stream:
+            registration = json.load(stream)
+        if registration != {
+            'version': '1.0.0',
+            'hook': {'path': '/opt/kautuka/manager/current/scripts/kautuka-oci-hook', 'timeout': 45},
+            'when': {'always': True},
+            'stages': ['createRuntime'],
+        }:
+            raise ValueError('packed OCI registration does not select the versioned native hook')
+        if f'{hook_root}/hooks.d/kautuka_hook.py' in rootfs.getnames():
+            raise ValueError('legacy Python hook present in fresh WSL hook directory')
+        with rootfs.extractfile(f'{hook_root}/containers.conf.d/99-kautuka-hooks.conf') as stream:
+            configuration = tomllib.load(stream)
+        if configuration != {'engine': {'hooks_dir': ['/var/lib/kautuka/.config/containers/hooks.d', {'append': True}]}}:
+            raise ValueError('packed Podman configuration does not register the WSL hook directory')
+except (OSError, KeyError, ValueError, tarfile.TarError) as error:
+    raise SystemExit(f'error: invalid WSL native hook packaging: {error}') from error
+PY
 
   if [[ -n "$kautuka_uid" ]]; then
     local restart_dropin
@@ -991,20 +1026,21 @@ else
 fi
 
 stage_nac_hook_for_rootfs() {
-  local root="$1" payload="$2" uid="$3" gid="$4"
+  local root="$1" version_root="$2" uid="$3" gid="$4"
   local hook_dir="$root/var/lib/kautuka/.config/containers/hooks.d"
   local conf_dir="$root/var/lib/kautuka/.config/containers/containers.conf.d"
-  local file
-  for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-    [[ -f "$payload/scripts/$file" ]] || { echo "error: required NAC hook payload is missing: $file" >&2; return 1; }
-  done
+  local native_hook="$version_root/scripts/kautuka-oci-hook"
+  if [[ ! -f "$native_hook" || -L "$native_hook" || ! -x "$native_hook" ]] ||
+    ! readelf -h "$native_hook" >/dev/null 2>&1; then
+    echo "error: required native OCI hook executable is missing or invalid: $native_hook" >&2
+    return 1
+  fi
+  sudo chown root:root "$version_root" "$version_root/scripts" "$native_hook"
+  sudo chmod 0755 "$version_root" "$version_root/scripts" "$native_hook"
   sudo install -d -m 0755 -o "$uid" -g "$gid" "$root/var/lib/kautuka/.config" "$root/var/lib/kautuka/.config/containers" "$hook_dir" "$conf_dir"
-  sudo install -m 0755 -o "$uid" -g "$gid" "$payload/scripts/kautuka_hook.py" "$hook_dir/kautuka_hook.py"
-  for file in kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-    sudo install -m 0644 -o "$uid" -g "$gid" "$payload/scripts/$file" "$hook_dir/$file"
-  done
+  sudo rm -f -- "$hook_dir/kautuka_hook.py" "$hook_dir/kautuka_workload.nft.json.tmpl" "$hook_dir/kautuka_package_proxy.nft.json.tmpl"
   printf '[engine]\nhooks_dir = ["/var/lib/kautuka/.config/containers/hooks.d", { append = true }]\n' | sudo tee "$conf_dir/99-kautuka-hooks.conf" >/dev/null
-  printf '%s\n' '{"version":"1.0.0","hook":{"path":"/var/lib/kautuka/.config/containers/hooks.d/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' | sudo tee "$hook_dir/kautuka_hook.json" >/dev/null
+  printf '%s\n' '{"version":"1.0.0","hook":{"path":"/opt/kautuka/manager/current/scripts/kautuka-oci-hook","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' | sudo tee "$hook_dir/kautuka_hook.json" >/dev/null
   sudo chown "$uid:$gid" "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
   sudo chmod 0644 "$conf_dir/99-kautuka-hooks.conf" "$hook_dir/kautuka_hook.json"
 }
@@ -1367,7 +1403,8 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   sudo mkdir -p "$version_root" "$visible_root/logs/manager" "$visible_root/workspaces" "$visible_root/oci-images" "$internal_state_root/manager" "$wants_dir" "$linger_dir" "$user_unit_dir/kautuka.target.wants" "$rootfs_dir/etc/kautuka"
   sudo cp -a "$manager_content_root/." "$version_root/"
   sudo chmod +x "$version_root/kautuka-manager"
-  stage_nac_hook_for_rootfs "$rootfs_dir" "$manager_content_root" "$kautuka_uid" "$kautuka_gid"
+  sudo install -d -m 0755 -o root -g root "$rootfs_dir/opt/kautuka" "$install_root" "$install_root/versions"
+  stage_nac_hook_for_rootfs "$rootfs_dir" "$version_root" "$kautuka_uid" "$kautuka_gid"
   sudo ln -sfn "versions/$version" "$current_link"
   sudo touch "$linger_dir/kautuka"
   stage_oci_image_archives "$rootfs_dir"
@@ -1672,7 +1709,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
     exit 1
   }
 
-  assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid"
+  assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid" "$version"
 }
 
 log_phase "Prewarming WSL appliance rootfs"

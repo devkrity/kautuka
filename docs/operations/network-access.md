@@ -250,7 +250,9 @@ Connector catalogue availability does not change the network workload fingerprin
 
 Linux installation includes both the workload and package-proxy nft ruleset templates alongside the OCI hook.
 
-The Manager live rules verifier and the Native AOT OCI hook share the nftables canonicalizer. The native hook binds each managed launch to a verified network namespace, claims it under a file lock, and verifies the applied rules before allowing startup. The Linux fixture in `scripts/nac/test-native-hook-runtime.sh` exercises this path through rootless Podman with isolated storage. The installed hook still uses the existing release registration while native release wiring is in progress.
+The Manager live rules verifier and the Native AOT OCI hook share the nftables canonicalizer. The native hook binds each managed launch to a verified network namespace, claims it under a file lock, and verifies the applied rules before allowing startup. The Linux fixture in `scripts/nac/test-native-hook-runtime.sh` exercises this path through rootless Podman with isolated storage.
+
+Fresh WSL rootfs builds register `/opt/kautuka/manager/current/scripts/kautuka-oci-hook`. The executable lives in the root-owned Manager release directory, so activation and pre-commit rollback select the hook through the same Manager version pointer. The update helper verifies the installed registration and candidate ELF before switching that pointer. Existing Python-hook installations retain their existing registration and preflight.
 
 Registry rebuilding happens during topology initialization, not during ordinary workspace supervisor reconciliation. Routine reconciliation preserves verified workload identities.
 Active short-lived connectors remain tracked until cleanup, and the orphan sweep checks current connector activity immediately before removing a candidate.

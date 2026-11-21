@@ -7,6 +7,12 @@ set -euo pipefail
     echo 'error: requires root and KAUTUKA_DISPOSABLE_TEST=1 in a disposable system' >&2
     exit 1
 }
+[[ $# -le 1 ]] || { echo 'usage: test-apply-release-transaction.sh [native-oci-hook]' >&2; exit 2; }
+native_hook=''
+if [[ $# -eq 1 ]]; then
+    native_hook="$(realpath -- "$1")"
+    [[ -f "$native_hook" && -x "$native_hook" ]] || { echo 'error: native OCI hook fixture is missing' >&2; exit 2; }
+fi
 for path in /opt/kautuka /etc/kautuka /var/lib/kautuka /var/lib/kautuka-recovery /usr/local/lib/kautuka /run/user/992 /run/kautuka-apply.rollback /run/kautuka-db-writer.lock; do
     [[ ! -e "$path" && ! -L "$path" ]] || { echo "error: fixture path already exists: $path" >&2; exit 1; }
 done
@@ -31,11 +37,15 @@ chmod 644 /etc/kautuka/manifest-public-key.pem
 
 hooks_dir=/var/lib/kautuka/.config/containers/hooks.d
 mkdir -p "$hooks_dir" /var/lib/kautuka/.config/containers/containers.conf.d
-for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-    cp "$script_dir/nac/$file" "$hooks_dir/$file"
-done
 printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" > /var/lib/kautuka/.config/containers/containers.conf.d/99-kautuka-hooks.conf
-printf '{"version":"1.0.0","hook":{"path":"%s/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}\n' "$hooks_dir" > "$hooks_dir/kautuka_hook.json"
+if [[ -n "$native_hook" ]]; then
+    printf '%s\n' '{"version":"1.0.0","hook":{"path":"/opt/kautuka/manager/current/scripts/kautuka-oci-hook","timeout":45},"when":{"always":true},"stages":["createRuntime"]}' > "$hooks_dir/kautuka_hook.json"
+else
+    for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
+        cp "$script_dir/nac/$file" "$hooks_dir/$file"
+    done
+    printf '{"version":"1.0.0","hook":{"path":"%s/kautuka_hook.py","timeout":45},"when":{"always":true},"stages":["createRuntime"]}\n' "$hooks_dir" > "$hooks_dir/kautuka_hook.json"
+fi
 
 services=(manager updateservice webhost gateway channelhost credentialshost)
 for service in "${services[@]}"; do
@@ -44,6 +54,10 @@ for service in "${services[@]}"; do
     chmod 755 "/opt/kautuka/$service/versions/v1.0.0/kautuka-$service"
     ln -s "versions/v1.0.0" "/opt/kautuka/$service/current"
 done
+if [[ -n "$native_hook" ]]; then
+    install -D -m 0755 -- "$native_hook" /opt/kautuka/manager/versions/v1.0.0/scripts/kautuka-oci-hook
+    cp -- "$hooks_dir/kautuka_hook.json" "$temp_dir/initial-hook.json"
+fi
 printf '%s\n' 'kautuka-maintenance-page-v1' > /opt/kautuka/webhost/current/.maintenance-page-v1
 mkdir -p "/var/lib/kautuka/credentialsHost/vault/vault-keys"
 python3 - <<'PY'
@@ -102,7 +116,11 @@ make_signed_release() {
         chmod 755 "$destination/kautuka-$service"
     done
     mkdir -p "$payload/bin/scripts"
-    cp "$script_dir/nac/kautuka_hook.py" "$script_dir/nac/kautuka_workload.nft.json.tmpl" "$script_dir/nac/kautuka_package_proxy.nft.json.tmpl" "$payload/bin/scripts/"
+    if [[ -n "$native_hook" ]]; then
+        install -m 0755 -- "$native_hook" "$payload/bin/scripts/kautuka-oci-hook"
+    else
+        cp "$script_dir/nac/kautuka_hook.py" "$script_dir/nac/kautuka_workload.nft.json.tmpl" "$script_dir/nac/kautuka_package_proxy.nft.json.tmpl" "$payload/bin/scripts/"
+    fi
     printf '%s\n' 'kautuka-maintenance-page-v1' > "$payload/services/webhost/.maintenance-page-v1"
     if [[ "$protocol" == current ]]; then
         cp "$script_dir/kautuka-apply-release.sh" "$payload/bin/kautuka-apply-release"
@@ -136,6 +154,15 @@ run_helper() {
     PATH="$temp_dir/mock:$PATH" KAUTUKA_DISPOSABLE_TEST=1 KAUTUKA_TEST_HEALTH_OK=1 \
       KAUTUKA_APPLY_DETACHED=1 KAUTUKA_APPLY_LOCK="$temp_dir/lock" \
       /usr/local/lib/kautuka/apply-release "$@"
+}
+
+assert_native_selection() {
+    local version="$1"
+    [[ -n "$native_hook" ]] || return 0
+    local active=/opt/kautuka/manager/current/scripts/kautuka-oci-hook
+    [[ "$(readlink -f "$active")" == "/opt/kautuka/manager/versions/$version/scripts/kautuka-oci-hook" ]]
+    cmp -s -- "$native_hook" "$active"
+    cmp -s -- "$temp_dir/initial-hook.json" "$hooks_dir/kautuka_hook.json"
 }
 
 [[ "$(run_helper --capabilities)" == 'safe-state-recovery-v6' ]]
@@ -208,6 +235,7 @@ run_helper --artifact /var/lib/kautuka/updateService/updates/staging/test/kautuk
 [[ "$(python3 -c 'import json;print(json.load(open("/var/lib/kautuka-recovery/operation.json"))["phase"])')" == verifying ]]
 [[ "$(python3 -c 'import json;print(len(json.load(open("/var/lib/kautuka-recovery/operation.json"))["snapshotManifestSha256"]))')" == 64 ]]
 [[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.1 ]]
+assert_native_selection 1.0.1
 run_helper --commit --version 1.0.1
 [[ ! -e /var/lib/kautuka-recovery/maintenance.json ]]
 [[ -d /var/lib/kautuka-recovery/backups/last-known-good/state ]]
@@ -279,6 +307,7 @@ chmod 755 "$temp_dir/mock/runuser"
 run_helper --boot-recover
 [[ -f /var/lib/kautuka-recovery/maintenance.json ]]
 [[ "$(readlink -f /opt/kautuka/manager/current)" == /opt/kautuka/manager/versions/1.0.1 ]]
+assert_native_selection 1.0.1
 [[ "$(python3 -c 'import json;print(json.load(open("/var/lib/kautuka-recovery/operation.json"))["phase"])')" == recovered ]]
 python3 - <<'PY'
 import sqlite3
