@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -610,16 +611,31 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 WorkspaceMcpContainerLifecycleState.Starting,
                 "call-start");
 
+            long prepareStarted = Stopwatch.GetTimestamp();
             transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
             containerPrepared = NormalizeExecutionContext(executionContext) != WorkspaceMcpExecutionContext.AgentSandbox;
             using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, transportLaunch.CancellationToken);
+            long initializeStarted = Stopwatch.GetTimestamp();
             McpClient client = await McpClient.CreateAsync(transportLaunch.Transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: launchCancellation.Token).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
+                long initialized = Stopwatch.GetTimestamp();
                 await ReleaseLaunchLeaseAsync(transportLaunch).ConfigureAwait(false);
                 var toolInput = McpToolContractCodec.ParseInput(toolInputJson);
+                long callStarted = Stopwatch.GetTimestamp();
                 CallToolResult result = await client.CallToolAsync(toolName, toolInput, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (logger.IsEnabled(LogLevel.Debug))
+                {
+                    logger.LogDebug(
+                        "[ContainerConnector] Tool timing for '{ToolName}' on '{ConnectorId}': prepare {PrepareMs:F1} ms, MCP initialize {InitializeMs:F1} ms, tool call {ToolCallMs:F1} ms",
+                        toolName,
+                        connector.ConnectorId,
+                        Stopwatch.GetElapsedTime(prepareStarted, initializeStarted).TotalMilliseconds,
+                        Stopwatch.GetElapsedTime(initializeStarted, initialized).TotalMilliseconds,
+                        Stopwatch.GetElapsedTime(callStarted).TotalMilliseconds);
+                }
+
                 string resultJson = ViewFileMaterializer.Materialize(
                     McpToolContractCodec.SerializeResult(result),
                     hostArtifactDirectory);
