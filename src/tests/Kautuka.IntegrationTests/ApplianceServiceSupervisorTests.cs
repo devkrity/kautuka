@@ -518,6 +518,21 @@ public sealed class ApplianceServiceSupervisorTests
                 Assert.Equal(serviceCount, containerInspections[0]);
                 Assert.All(containerInspections.Skip(1), count => Assert.Equal(1, count));
                 Assert.True(gateway.IsReady);
+
+                Assert.True(await ApplianceServiceReadiness.CheckTelemetryAsync(podman, "kautuka-appliance-webhost", token),
+                    "Envoy did not accept all three OTLP requests before the collector stopped.");
+                Assert.Equal(0, (await podman.RunAsync(["stop", collector], 30, token)).ExitCode);
+                Assert.False(await ApplianceServiceReadiness.CheckTelemetryAsync(podman, "kautuka-appliance-webhost", token),
+                    "Envoy accepted OTLP with the collector stopped.");
+                Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
+                await WaitForCollectorAsync(podman, collector, token);
+                bool telemetryReady = false;
+                for (int attempt = 0; attempt < 20 && !telemetryReady; attempt++)
+                {
+                    telemetryReady = await ApplianceServiceReadiness.CheckTelemetryAsync(podman, "kautuka-appliance-webhost", token);
+                    if (!telemetryReady) await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+                }
+                Assert.True(telemetryReady, "Envoy did not recover all three OTLP routes after the collector restarted.");
             }
             Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
                 NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);

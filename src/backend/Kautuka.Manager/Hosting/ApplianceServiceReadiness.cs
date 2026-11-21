@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Security;
 using System.Security.Authentication;
@@ -5,12 +6,39 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
 using Kautuka.Hosting.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 
 namespace Kautuka.Manager.Hosting;
 
 /// <summary>Checks application service readiness over its authenticated local transport.</summary>
 internal static class ApplianceServiceReadiness
 {
+    internal static async Task<bool> CheckTelemetryAsync(
+        PodmanCommandRunner podman, string webHostContainerId, CancellationToken cancellationToken)
+    {
+        PodmanCommandResult inspection = await podman.RunAsync(
+            ["inspect", "--format", "{{.State.Pid}}", webHostContainerId], 4, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (inspection.ExitCode != 0 ||
+            !int.TryParse(inspection.StdOut.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int pid) || pid <= 0)
+            return false;
+
+        string url = FormattableString.Invariant(
+            $"http://{WorkloadRulesetRenderer.EgressPodIp}:{WorkloadRulesetRenderer.TelemetryIngressPort}/api/default/v1");
+        // Empty protobuf export requests exercise the real OTLP route without adding telemetry records.
+        PodmanCommandResult probes = await podman.RunAsync(
+            ["unshare", "nsenter", "-t", pid.ToString(CultureInfo.InvariantCulture), "-n", "curl",
+             "--noproxy", "*", "--max-time", "2", "--fail-early", "--silent", "--output", "/dev/null",
+             "--write-out", "%{http_code}\n", "--header", "Content-Type: application/x-protobuf", "--data-binary", "",
+             url + "/logs", "--output", "/dev/null", url + "/metrics", "--output", "/dev/null", url + "/traces"],
+            8, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        return probes.ExitCode == 0 &&
+            probes.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .SequenceEqual(["200", "200", "200"], StringComparer.Ordinal);
+    }
+
     internal static async Task<bool> CheckWebHostAsync(CancellationToken cancellationToken, int port = KautukaHostNetworkPolicy.WebHostPort)
     {
         using var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(3) };

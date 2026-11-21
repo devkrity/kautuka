@@ -44,9 +44,10 @@ internal sealed partial class ApplianceServiceSupervisor(
     private readonly Service updater = new(UpdateRole, "updateService", networked: true);
     private volatile bool cohortReady;
     private volatile bool verificationPackageReady;
+    private volatile bool verificationTelemetryReady;
 
     internal bool IsReady => cohortReady && topology?.IsStartupGateOpen == true
-        && (!verificationMode || (verificationPackageReady && topology.IsPackageProxyReady));
+        && (!verificationMode || (verificationTelemetryReady && verificationPackageReady && topology.IsPackageProxyReady));
 
     private sealed class Service(string role, string stateName, bool networked)
     {
@@ -127,8 +128,25 @@ internal sealed partial class ApplianceServiceSupervisor(
         cohortReady = credentials.IsHealthy && channel.IsHealthy && gateway.IsHealthy && webHost.IsHealthy
             && (!superviseUpdateService || updater.IsHealthy) && (!superviseObservability || observability.Ready);
 
-        if (verificationMode && verificationSidecars is not null)
-            verificationPackageReady = await verificationSidecars.EnsurePackageProxyReadyForVerificationAsync(token).ConfigureAwait(false);
+        if (verificationMode)
+        {
+            try
+            {
+                verificationTelemetryReady = !superviseObservability ||
+                    (cohortReady && webHost.ActiveContainer is { } webHostId &&
+                        await ApplianceServiceReadiness.CheckTelemetryAsync(podman, webHostId, token).ConfigureAwait(false));
+                if (cohortReady && !verificationTelemetryReady)
+                    LogReconcileFailed(logger, ObservabilityRole, "Envoy OTLP readiness probe failed.");
+            }
+            catch (Exception error) when (!token.IsCancellationRequested
+                && error is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                verificationTelemetryReady = false;
+                LogReconcileFailed(logger, ObservabilityRole, error.Message);
+            }
+            if (verificationSidecars is not null)
+                verificationPackageReady = await verificationSidecars.EnsurePackageProxyReadyForVerificationAsync(token).ConfigureAwait(false);
+        }
     }
 
     private async Task<JsonDocument?> InspectReadyCohortAsync(CancellationToken token)
@@ -160,6 +178,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     {
         cohortReady = false;
         verificationPackageReady = false;
+        verificationTelemetryReady = false;
         Service[] services = [webHost, gateway, updater, channel, credentials, observability];
         var running = new Dictionary<Service, string>();
         bool stopped = true;

@@ -114,3 +114,5 @@ Manager can start a selected signed release for pre-commit verification when the
 Manager's authenticated host status reports its selected signed release ID and whether it booted in verification mode. Appliance UpdateService uses that status only when both values match its own release and mode.
 
 Candidate readiness also requires a healthy package proxy with verified egress rules. Manager reconciles the proxy during the fenced boot without starting the workspace supervisor.
+
+During a fenced boot, Manager sends empty OTLP requests for logs, metrics, and traces from WebHost's network namespace through the existing Envoy ingestion listener. Candidate readiness requires all three requests to succeed.
