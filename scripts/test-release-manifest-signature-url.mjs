@@ -146,6 +146,26 @@ try {
     assert.deepEqual(await fs.readFile(path.join(outputDir, "kautuka-platform-release.json")), applianceBytes);
   }
 
+  const platformPayload = path.join(tempRoot, "linux-payload");
+  await fs.mkdir(path.join(platformPayload, "service-images"), { recursive: true });
+  const tar = spawnSync("tar", ["-czf", path.join(outputDir, "kautuka-linux-amd64.tar.gz"),
+    "-C", platformPayload, "service-images"], { encoding: "utf8" });
+  assert.equal(tar.status, 0, tar.stderr || tar.stdout);
+  await fs.writeFile(deploymentPath, JSON.stringify(deployment));
+  generate(["--appliance-deployment", deploymentPath]);
+  const publicKeyPath = path.join(tempRoot, "signing-public.pem");
+  await fs.writeFile(publicKeyPath, publicKeyPem);
+  const verification = spawnSync(process.execPath, [
+    path.join(repoRoot, "scripts", "verify-release-artifacts.mjs"),
+    "--directory", outputDir,
+    "--version", "0.1.20-preview.1",
+    "--channel", "preview",
+    "--source-sha", "7ad4cf15dd8df78e9f97ebe25ad0ba15ce2c1731",
+    "--public-key", publicKeyPath,
+  ], { encoding: "utf8" });
+  assert.notEqual(verification.status, 0, "a valid signature is insufficient when the actual appliance image is missing");
+  assert.match(verification.stderr, /appliance image archive is missing or not a regular file: credentialshost/);
+
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");
   assert.match(buildAssets, /manifest_args\+\=\(--signature-url "\$signature_url"\)/, "release builder passes the explicit URL into the signed manifest generator");
   assert.match(localRelease, /--signature-url "\$public_base_url\/manifest\.sig"/, "local release feed uses the installer-derived signature route");
