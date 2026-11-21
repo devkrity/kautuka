@@ -19,6 +19,8 @@ Options:
   --artifact-base-url <url>         Absolute URL prefix for artifact `url` fields in the signed platform manifest.
   --signature-url <url>             Optional exact signature URL in the signed release manifest.
   --manifest-public-key <pem>       Required for full builds: public key PEM baked into the prewarmed rootfs.
+  --appliance-image-prefix <repo>   Package the five core service OCI images and sign their digests.
+  --appliance-runtime-base <image>  Digest-pinned Fedora minimal base for --appliance-image-prefix.
   --rebuild-images                  Rebuild the cached WSL base rootfs and Linux release build image.
   --prewarm-only                    Layer an existing platform tarball into the cached WSL base rootfs. Skips compile.
   --platform-tarball <tar.gz>       Platform archive for --prewarm-only.
@@ -214,6 +216,8 @@ manifest_url=''
 manifest_public_key=''
 artifact_base_url=''
 signature_url=''
+appliance_image_prefix=''
+appliance_runtime_base=''
 rebuild_images='false'
 prewarm_only='false'
 platform_tarball_override=''
@@ -272,6 +276,14 @@ while [[ $# -gt 0 ]]; do
       manifest_public_key="$2"
       shift 2
       ;;
+    --appliance-image-prefix)
+      appliance_image_prefix="$2"
+      shift 2
+      ;;
+    --appliance-runtime-base)
+      appliance_runtime_base="$2"
+      shift 2
+      ;;
     --rebuild-images)
       rebuild_images='true'
       shift
@@ -316,6 +328,13 @@ if [[ "$prewarm_only" == 'true' ]]; then
 elif [[ -z "$output_root" || -z "$private_key" ]]; then
   usage >&2
   exit 1
+fi
+
+if [[ -n "$appliance_image_prefix" || -n "$appliance_runtime_base" ]]; then
+  if [[ -z "$appliance_image_prefix" || -z "$appliance_runtime_base" || "$prewarm_only" == 'true' ]]; then
+    echo 'error: appliance image packaging requires both appliance image options on a full build.' >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "$manifest_url" && -n "$artifact_base_url" ]]; then
@@ -988,6 +1007,12 @@ chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/services/webhost/kautuka-webhost"
 mkdir -p "$stage_dir/services/webhost/wwwroot"
 cp -a "$source_root/src/frontend/web/dist/." "$stage_dir/services/webhost/wwwroot/"
+
+if [[ -n "$appliance_image_prefix" ]]; then
+  log_phase "Building digest-pinned appliance service images"
+  bash "$source_root/scripts/build-appliance-service-images.sh" \
+    "$stage_dir/services" "$stage_dir/service-images" "$appliance_runtime_base" "$appliance_image_prefix" "$version"
+fi
 
 assert_staged_sidecar_seal "$stage_dir"
 
@@ -1727,6 +1752,9 @@ if [[ -n "$minimum_updater_version" ]]; then
 fi
 if [[ -n "$signature_url" ]]; then
   manifest_args+=(--signature-url "$signature_url")
+fi
+if [[ -n "$appliance_image_prefix" ]]; then
+  manifest_args+=(--appliance-deployment "$stage_dir/service-images/appliance-deployment.json")
 fi
 
 log_phase "Generating signed release manifest"

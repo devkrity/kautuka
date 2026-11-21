@@ -51,4 +51,6 @@ The appliance deployment section of a signed platform manifest declares the hook
 
 For a signed Linux install, the installer preserves the exact verified manifest and detached signature in Manager's version directory before switching the `current` link. Both files are owned by root and readable by the Manager service account.
 
+The release builder can produce an appliance candidate with `--appliance-image-prefix` and `--appliance-runtime-base`. It packages the same staged Native AOT service payloads, including Gateway's connector bundles and WebHost's built UI. The Linux platform archive includes the five OCI archives under `service-images/`, and the platform manifest signs each archived image's manifest digest. Normal service startup and updates need Manager's appliance activation path before they can use these images.
+
 On Linux, Manager's `--verify-appliance-release` command verifies the selected release against the installed public key. It reads the manifest and signature from the root-owned version directory selected by `/opt/kautuka/manager/current`. A successful check verifies the signed image references and required hook ABI. The command exits before starting Manager or any application service.
