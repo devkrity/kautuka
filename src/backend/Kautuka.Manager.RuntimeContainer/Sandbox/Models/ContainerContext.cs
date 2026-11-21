@@ -16,6 +16,10 @@ public sealed record ContainerContext(
     IReadOnlyList<string> BaseCapabilities,
     IReadOnlyDictionary<string, string> ContainerEnvironment)
 {
+    public bool IsSkillScope() => ScopeType is "skill" or "skill-with-agent-files";
+
+    public bool HasReadOnlyWorkspace() => ScopeType == "skill-with-agent-files";
+
     public string? AgentId { get; init; }
 
     public long DesiredStateVersion { get; init; }

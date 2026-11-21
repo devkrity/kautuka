@@ -43,6 +43,15 @@ internal sealed class AgentSkillAttachmentDefinition
     public string SkillId { get; init; } = string.Empty;
 
     public SkillAttachmentMode Mode { get; init; } = SkillAttachmentMode.Disabled;
+
+    public string Context { get; init; } = SkillExecutionContext.AgentSandbox;
+}
+
+internal static class SkillExecutionContext
+{
+    internal const string Isolated = "OwnContext";
+    internal const string WithAgentFiles = "OwnContextWithAgentFiles";
+    internal const string AgentSandbox = "AgentContext";
 }
 
 internal enum EffectiveSkillSourceScope
@@ -59,6 +68,8 @@ internal sealed class EffectiveSkillManifestEntry
     public string? SourceOwnerId { get; init; }
 
     public SkillAttachmentMode Mode { get; init; } = SkillAttachmentMode.Disabled;
+
+    public string Context { get; init; } = SkillExecutionContext.AgentSandbox;
 
     public bool HasResources { get; init; }
 

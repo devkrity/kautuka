@@ -2,10 +2,12 @@ import { z } from 'zod';
 import { ownershipScopeSchema } from '@/features/connectors';
 
 export const skillAttachmentModeSchema = z.enum(['disabled', 'trusted', 'require_approval']);
+export const skillExecutionContextSchema = z.enum(['OwnContext', 'OwnContextWithAgentFiles', 'AgentContext']);
 
 export const agentSkillAttachmentSchema = z.object({
   skillId: z.string(),
   mode: skillAttachmentModeSchema,
+  context: skillExecutionContextSchema.default('AgentContext'),
 });
 
 export const skillSchema = z.object({
@@ -91,6 +93,7 @@ export const normalizeAgentSkillAttachments = (value: unknown): AgentSkillAttach
       return {
         skillId,
         mode: normalizeSkillAttachmentMode(record.mode),
+        context: skillExecutionContextSchema.safeParse(record.context).data ?? 'AgentContext',
       };
     })
     .filter((entry): entry is AgentSkillAttachment => entry !== null);

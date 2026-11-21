@@ -4,6 +4,16 @@ internal interface IWorkspaceRuntimeTool
 {
     WorkspaceRuntimeContext DescribeAgentWorkspace(string agentId, string? userId = null);
 
+    WorkspaceRuntimeContext DescribeSkillWorkspace(string agentId, string? userId, string skillId, string executionContext)
+        => executionContext == SkillExecutionContext.AgentSandbox
+            ? DescribeAgentWorkspace(agentId, userId)
+            : throw new NotSupportedException("This workspace runtime does not support isolated skills.");
+
+    Task<WorkspaceCommandResult> RunSkillShellAsync(
+        WorkspaceRuntimeContext workspace, string command, IReadOnlyDictionary<string, string> environment,
+        int? timeoutSeconds, CancellationToken cancellationToken)
+        => throw new NotSupportedException("This workspace runtime does not support isolated skills.");
+
     WorkspaceRuntimeContext RebuildAgentWorkspace(string agentId, string? userId = null);
 
     Task<WorkspaceRuntimeContext> RebuildAgentWorkspaceAsync(string agentId, string? userId = null, CancellationToken cancellationToken = default)

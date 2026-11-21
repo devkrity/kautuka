@@ -27,4 +27,4 @@ Assume each example concerns the same host and port, no brake or hard deny-all a
 5. The platform allows the host and Alice blocks it: Alice's connection is blocked.
 6. Alice allows Web Tools but blocks the same host for Secretary: Secretary using Web Tools is blocked; a different agent using Alice's Web Tools is allowed.
 
-Skill scripts run in the agent sandbox and use the platform, user and user-and-agent rules. Individual skills are not separately attributed.
+Skill attachments can run in the agent sandbox, in a separate sandbox with its own workspace, or in a separate sandbox with read-only access to that user's agent files. Existing attachments keep the agent sandbox placement. New attachments default to isolation. The isolated sandboxes start on first use and are scoped by user, agent, and skill. All three placements use the platform, user, and user-and-agent network rules.

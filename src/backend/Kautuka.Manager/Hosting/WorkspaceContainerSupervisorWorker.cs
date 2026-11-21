@@ -311,7 +311,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         Stopwatch sandboxStartupStopwatch = Stopwatch.StartNew();
         var sandboxFailures = new ConcurrentQueue<string>();
         await Parallel.ForEachAsync(
-            desiredWorkspaces,
+            desiredWorkspaces.Where(static workspace => !workspace.IsSkillScope()),
             new ParallelOptions
             {
                 MaxDegreeOfParallelism = sandboxMaxParallelism,

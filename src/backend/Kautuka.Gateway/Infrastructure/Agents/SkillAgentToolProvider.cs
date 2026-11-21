@@ -337,19 +337,19 @@ internal sealed class SkillAgentToolProvider(
             context.WorkspaceBinding.ScopeType,
             context.WorkspaceBinding.ScopeId);
 
-        WorkspaceRuntimeContext workspace = context.WorkspaceTool.DescribeAgentWorkspace(context.AgentId, context.UserId);
+        bool shared = manifest.Context == SkillExecutionContext.AgentSandbox;
+        WorkspaceRuntimeContext workspace = context.WorkspaceTool.DescribeSkillWorkspace(
+            context.AgentId, context.UserId, manifest.SkillId, manifest.Context);
         skillPackageService.StagePackageForWorkspace(skill, workspace.HostWorkspacePath, workspace.ContainerWorkspacePath);
         string scriptContent = skillPackageService.ReadScriptText(skill, scriptPath);
         Dictionary<string, string> env = await ResolveSkillEnvAsync(skill, context.UserId ?? string.Empty, cancellationToken).ConfigureAwait(false);
         string command = BuildInlineExecutionCommand(scriptContent, arguments);
 
-        WorkspaceCommandResult result = await context.WorkspaceTool.RunAgentShellWithEnvironmentAsync(
-            context.AgentId,
-            command,
-            env,
-            context.UserId,
-            boundedTimeoutSeconds,
-            cancellationToken).ConfigureAwait(false);
+        WorkspaceCommandResult result = shared
+            ? await context.WorkspaceTool.RunAgentShellWithEnvironmentAsync(
+                context.AgentId, command, env, context.UserId, boundedTimeoutSeconds, cancellationToken).ConfigureAwait(false)
+            : await context.WorkspaceTool.RunSkillShellAsync(
+                workspace, command, env, boundedTimeoutSeconds, cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
         {

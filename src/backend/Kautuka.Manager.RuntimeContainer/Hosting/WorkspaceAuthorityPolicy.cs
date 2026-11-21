@@ -25,7 +25,22 @@ internal static class WorkspaceAuthorityPolicy
             }
 
             string hostPath = ValidateDescendant(root, workspace.HostWorkspacePath);
-            if (!hostPaths.Add(hostPath))
+            if (workspace.IsSkillScope())
+            {
+                ContainerContext? agent = desiredWorkspaces.FirstOrDefault(candidate =>
+                    candidate.ScopeType == "agent"
+                    && string.Equals(candidate.AgentId, workspace.AgentId, StringComparison.Ordinal)
+                    && string.Equals(candidate.UserId, workspace.UserId, StringComparison.Ordinal));
+                if (agent is null || string.IsNullOrWhiteSpace(workspace.UserId) || string.IsNullOrWhiteSpace(workspace.AgentId))
+                    throw new InvalidOperationException("A skill workspace requires an authorized user and agent workspace.");
+                string expected = workspace.HasReadOnlyWorkspace()
+                    ? ValidateDescendant(root, agent.HostWorkspacePath)
+                    : Path.Combine(root, "skills", workspace.ScopeId);
+                if (!string.Equals(hostPath, expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    throw new InvalidOperationException("The skill workspace is outside its assigned location.");
+            }
+
+            if (!workspace.HasReadOnlyWorkspace() && !hostPaths.Add(hostPath))
             {
                 throw new InvalidOperationException("Desired state contains two workspaces for the same host path.");
             }

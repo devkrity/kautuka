@@ -47,6 +47,7 @@ internal sealed class EffectiveSkillManifestResolver : IEffectiveSkillManifestRe
             SourceScope = EffectiveSkillSourceScope.Agent,
             SourceOwnerId = agentId,
             Mode = attachment.Mode,
+            Context = attachment.Context,
             HasResources = skill.HasResources,
             HasScripts = skill.HasScripts,
             Name = skill.Name,

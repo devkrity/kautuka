@@ -830,8 +830,11 @@ public sealed class SkillAgentToolProviderTests
         }
     }
 
-    [Fact]
-    public async Task BuildToolsRegistersRunSkillScriptWhenManifestHasScriptsFalseButMarkdownHasBashBlock()
+    [Theory]
+    [InlineData(SkillExecutionContext.AgentSandbox)]
+    [InlineData(SkillExecutionContext.Isolated)]
+    [InlineData(SkillExecutionContext.WithAgentFiles)]
+    public async Task BuildToolsRegistersRunSkillScriptWhenManifestHasScriptsFalseButMarkdownHasBashBlock(string executionContext)
     {
         // Simulate a skill imported before EnsureGeneratedScript existed:
         // HasScripts = false in the manifest, no scripts/ directory on disk, but SKILL.md has a bash block.
@@ -874,7 +877,7 @@ public sealed class SkillAgentToolProviderTests
                     Id = "agent-alpha",
                     Name = "Agent Alpha",
                     Sandbox = new AgentSandboxDefinition { Enabled = true },
-                    SkillAttachments = [new AgentSkillAttachmentDefinition { SkillId = "roll-dice", Mode = SkillAttachmentMode.Trusted }],
+                    SkillAttachments = [new AgentSkillAttachmentDefinition { SkillId = "roll-dice", Mode = SkillAttachmentMode.Trusted, Context = executionContext }],
                 },
                 "agent-alpha",
                 UserId: null,
@@ -888,6 +891,7 @@ public sealed class SkillAgentToolProviderTests
                         SourceScope = EffectiveSkillSourceScope.Agent,
                         SourceOwnerId = "agent-alpha",
                         Mode = SkillAttachmentMode.Trusted,
+                        Context = executionContext,
                         HasScripts = false, // stale
                         HasResources = false,
                         Name = "Roll Dice",
@@ -918,6 +922,7 @@ public sealed class SkillAgentToolProviderTests
                 }),
                 TestContext.Current.CancellationToken);
             Assert.Contains("/usr/bin/bash \"$tmp_script\" '20'", workspaceTool.LastAgentCommand, StringComparison.Ordinal);
+            Assert.Equal(executionContext == SkillExecutionContext.AgentSandbox ? null : executionContext, workspaceTool.LastIsolatedSkillContext);
 
             // The generated script file should now exist on disk (self-healed)
             Assert.True(
@@ -1411,6 +1416,7 @@ public sealed class SkillAgentToolProviderTests
     private sealed class CapturingWorkspaceTool(string hostWorkspacePath = "D:/temp/agent") : IWorkspaceRuntimeTool
     {
         public string? LastAgentCommand { get; private set; }
+        public string? LastIsolatedSkillContext { get; private set; }
         public Dictionary<string, string> LastEnvironment { get; private set; }
             = new Dictionary<string, string>(StringComparer.Ordinal);
         public WorkspaceCommandResult Result { get; set; }
@@ -1428,6 +1434,19 @@ public sealed class SkillAgentToolProviderTests
                 DefaultTimeoutSeconds: 30,
                 BaseCapabilities: [],
                 ContainerEnvironment: new Dictionary<string, string>());
+
+        public WorkspaceRuntimeContext DescribeSkillWorkspace(string agentId, string? userId, string skillId, string executionContext)
+            => executionContext == SkillExecutionContext.AgentSandbox
+                ? DescribeAgentWorkspace(agentId, userId)
+                : DescribeAgentWorkspace(agentId, userId) with { ScopeType = executionContext };
+
+        public Task<WorkspaceCommandResult> RunSkillShellAsync(
+            WorkspaceRuntimeContext workspace, string command, IReadOnlyDictionary<string, string> environment,
+            int? timeoutSeconds, CancellationToken cancellationToken)
+        {
+            LastIsolatedSkillContext = workspace.ScopeType;
+            return RunAgentShellWithEnvironmentAsync(workspace.ScopeId, command, environment, workspace.UserId, timeoutSeconds, cancellationToken);
+        }
 
         public WorkspaceRuntimeContext RebuildAgentWorkspace(string agentId, string? userId = null) => DescribeAgentWorkspace(agentId, userId);
         public bool DeleteAgentWorkspace(string agentId) => true;

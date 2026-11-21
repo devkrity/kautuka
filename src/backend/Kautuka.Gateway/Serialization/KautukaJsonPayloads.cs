@@ -222,6 +222,8 @@ internal sealed class GatewayAgentSkillAttachmentPayload
     public string SkillId { get; init; } = string.Empty;
 
     public string Mode { get; init; } = "disabled";
+
+    public string? Context { get; init; }
 }
 
 internal sealed class GatewayAgentSessionPayload

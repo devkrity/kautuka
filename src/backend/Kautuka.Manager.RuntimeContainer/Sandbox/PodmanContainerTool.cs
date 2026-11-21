@@ -54,6 +54,8 @@ public sealed class PodmanContainerTool(
     {
         ArgumentNullException.ThrowIfNull(context);
         context = NormalizeDesiredRuntimeContext(context, requireDesired: true);
+        if (context.HasReadOnlyWorkspace())
+            throw new InvalidOperationException("A skill cannot rebuild the agent workspace.");
         string containerName = BuildContainerName(context);
         await using var lease = (await containerLocks.AcquireAsync(containerName, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
         await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
@@ -66,6 +68,8 @@ public sealed class PodmanContainerTool(
     {
         ArgumentNullException.ThrowIfNull(context);
         context = NormalizeDesiredRuntimeContext(context);
+        if (context.HasReadOnlyWorkspace())
+            throw new InvalidOperationException("A skill cannot delete the agent workspace.");
         string containerName = BuildContainerName(context);
         await using var lease = (await containerLocks.AcquireAsync(containerName, cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
         await StopAndDeleteContainerCoreAsync(context, cancellationToken).ConfigureAwait(false);
@@ -882,19 +886,19 @@ public sealed class PodmanContainerTool(
 
         string image = QualifyLocalImage(context.Image);
         bool hasUserAgentIdentity = !string.IsNullOrWhiteSpace(context.UserId)
-            && IsAgentScope(context)
+            && HasAgentIdentity(context)
             && !string.IsNullOrWhiteSpace(context.ScopeId);
 
         var spec = new Hosting.NetworkAccess.WorkloadContainerSpec(containerName, image, ip)
         {
             UserId = context.UserId ?? string.Empty,
-            AgentId = IsAgentScope(context) ? context.AgentId ?? context.ScopeId : string.Empty,
+            AgentId = HasAgentIdentity(context) ? context.AgentId ?? context.ScopeId : string.Empty,
             ExecContext = "agent-sandbox",
             Kind = "agent-sandbox",
             Egress = hasUserAgentIdentity ? "normal" : "deny-all",
             Persistent = true,
             WorkingDirectory = context.ContainerWorkspacePath,
-            Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath)],
+            Mounts = [new Hosting.NetworkAccess.WorkloadMount(context.HostWorkspacePath, context.ContainerWorkspacePath, ReadOnly: context.HasReadOnlyWorkspace())],
             AllowedMountRoots = context.WorkspaceBaseRoot is null ? [] : [context.WorkspaceBaseRoot],
             // The hardened default user is 65532, while /home/node in the base image
             // belongs to UID 1000. Mount the home path itself so the sandbox user can
@@ -923,8 +927,9 @@ public sealed class PodmanContainerTool(
     private static string QualifyLocalImage(string image)
         => image.Contains('/', StringComparison.Ordinal) ? image : $"localhost/{image}";
 
-    private static bool IsAgentScope(ContainerContext context)
-        => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase);
+    private static bool HasAgentIdentity(ContainerContext context)
+        => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            || (context.IsSkillScope() && !string.IsNullOrWhiteSpace(context.AgentId));
 
     internal static Kautuka.NetworkAccessController.RegistryEntry BuildSandboxRegistryEntry(
         ContainerContext context,
@@ -933,8 +938,8 @@ public sealed class PodmanContainerTool(
     {
         ArgumentNullException.ThrowIfNull(context);
         bool hasUserIdentity = !string.IsNullOrWhiteSpace(context.UserId);
-        bool hasAgentIdentity = hasUserIdentity && IsAgentScope(context) && !string.IsNullOrWhiteSpace(context.ScopeId);
-        bool hasAgentScope = IsAgentScope(context) && !string.IsNullOrWhiteSpace(context.ScopeId);
+        bool hasAgentScope = HasAgentIdentity(context) && !string.IsNullOrWhiteSpace(context.ScopeId);
+        bool hasAgentIdentity = hasUserIdentity && hasAgentScope;
         return new Kautuka.NetworkAccessController.RegistryEntry(
             allocatedIp,
             hasUserIdentity ? context.UserId : null,

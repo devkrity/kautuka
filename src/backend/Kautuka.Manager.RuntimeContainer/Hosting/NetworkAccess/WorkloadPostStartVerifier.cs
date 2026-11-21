@@ -245,7 +245,9 @@ public sealed class WorkloadPostStartVerifier
             }
 
             RegistryEntry? workloadIdentity = registry?.FindByIp(allocatedIp);
-            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots(workloadIdentity);
+            string? workloadName = container.TryGetProperty("Name", out JsonElement nameElement)
+                ? nameElement.GetString()?.TrimStart('/') : null;
+            IReadOnlyList<string> allowedMountRoots = ResolveAllowedWorkspaceRoots(workloadIdentity, workloadName);
             foreach (JsonElement mount in mountsElem.EnumerateArray())
             {
                 string mountType = mount.TryGetProperty("Type", out JsonElement typeElem) && typeElem.ValueKind == JsonValueKind.String
@@ -258,6 +260,12 @@ public sealed class WorkloadPostStartVerifier
 
                 string source = mount.TryGetProperty("Source", out JsonElement srcElem) ? srcElem.GetString() ?? string.Empty : string.Empty;
                 string dest = mount.TryGetProperty("Destination", out JsonElement dstElem) ? dstElem.GetString() ?? string.Empty : string.Empty;
+                if (workloadName?.StartsWith("kautuka-skill-with-agent-files-", StringComparison.Ordinal) == true
+                    && mountType.Equals("bind", StringComparison.OrdinalIgnoreCase)
+                    && (!mount.TryGetProperty("RW", out JsonElement writable) || writable.ValueKind != JsonValueKind.False))
+                {
+                    throw new InvalidOperationException("Mount check failed: skills must mount agent files read-only.");
+                }
 
                 if (!mountType.Equals("tmpfs", StringComparison.OrdinalIgnoreCase)
                     && (string.IsNullOrWhiteSpace(source) || !IsWithinAllowedRoot(source, allowedMountRoots)))
@@ -404,7 +412,7 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity)
+    private IReadOnlyList<string> ResolveAllowedWorkspaceRoots(RegistryEntry? workloadIdentity, string? workloadName)
     {
         if (workloadIdentity is null
             || string.IsNullOrWhiteSpace(workloadIdentity.AgentId)
@@ -413,8 +421,11 @@ public sealed class WorkloadPostStartVerifier
             return [];
         }
 
+        bool isSkill = workloadName?.StartsWith("kautuka-skill-", StringComparison.Ordinal) == true;
         return [.. desiredStateStore.Snapshot.DesiredWorkspaces
-            .Where(context => string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase)
+            .Where(context => (isSkill
+                    ? context.IsSkillScope() && string.Equals(PodmanContainerTool.BuildContainerName(context), workloadName, StringComparison.Ordinal)
+                    : string.Equals(context.ScopeType, "agent", StringComparison.OrdinalIgnoreCase))
                 && (string.Equals(context.AgentId, workloadIdentity.AgentId, StringComparison.Ordinal)
                     || string.Equals(context.ScopeId, workloadIdentity.AgentId, StringComparison.Ordinal))
                 && string.Equals(context.UserId, workloadIdentity.UserId, StringComparison.Ordinal))
