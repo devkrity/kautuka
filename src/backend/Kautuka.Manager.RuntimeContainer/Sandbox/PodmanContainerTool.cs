@@ -916,7 +916,10 @@ public sealed class PodmanContainerTool(
             AddHosts = [$"kautuka-pkgs-proxy:{Kautuka.NetworkAccessController.NetworkAddressClassifier.PackageProxyServiceAddress}"],
         };
 
-        return spec.Render().ToList();
+        List<string> arguments = spec.Render().ToList();
+        // In the rootless namespace, GID 0 maps to the service account's workspace group.
+        arguments.Insert(1, "--group-add=0");
+        return arguments;
     }
 
     /// <summary>

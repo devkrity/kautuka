@@ -112,6 +112,8 @@ public sealed class PodmanContainerToolTests
         Assert.Equal(3, new[] { shared, isolated, withFiles }.Select(PodmanContainerTool.BuildContainerName).Distinct().Count());
         List<string> ownArguments = InvokeBuildRunArguments(isolated, "skill-own");
         List<string> filesArguments = InvokeBuildRunArguments(withFiles, "skill-files");
+        Assert.Contains("--group-add=0", ownArguments);
+        Assert.Contains("--group-add=0", filesArguments);
         Assert.DoesNotContain(ownArguments, item => item.StartsWith(shared.HostWorkspacePath + ":", StringComparison.Ordinal));
         Assert.Contains(filesArguments, item => item.StartsWith(shared.HostWorkspacePath + ":", StringComparison.Ordinal)
             && item.EndsWith(":ro", StringComparison.Ordinal));
