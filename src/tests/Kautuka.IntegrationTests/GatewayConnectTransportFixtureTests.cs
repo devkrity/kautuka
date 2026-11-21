@@ -52,7 +52,8 @@ public sealed class GatewayConnectTransportFixtureTests
         Task<string> serverTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token);
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://EXAMPLE.COM/path") { Version = HttpVersion.Version30, VersionPolicy = HttpVersionPolicy.RequestVersionExact };
         var scope = new GatewayEgressScope("user-1", "agent-1", "connector-1", "model", "correlation-1");
-        await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(request, scope, timeout.Token));
+        HttpRequestException denied = await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(request, scope, timeout.Token));
+        Assert.StartsWith("Network Access blocked this connection.", RemoteMcpFailureMessages.Describe(denied), StringComparison.Ordinal);
         Assert.Equal(HttpVersion.Version20, request.Version);
         Assert.Equal(HttpVersionPolicy.RequestVersionOrLower, request.VersionPolicy);
         string connect = await serverTask;

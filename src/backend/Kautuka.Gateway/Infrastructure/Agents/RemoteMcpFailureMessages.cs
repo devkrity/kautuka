@@ -1,6 +1,9 @@
 using System.Net.Sockets;
 using System.Security.Authentication;
 
+using Kautuka.Gateway.Infrastructure.Egress;
+using Kautuka.NetworkAccess.Client;
+
 namespace Kautuka.Gateway.Infrastructure.Agents;
 
 internal static class RemoteMcpFailureMessages
@@ -9,6 +12,20 @@ internal static class RemoteMcpFailureMessages
     {
         ArgumentNullException.ThrowIfNull(exception);
         if (exception is RemoteMcpConfigurationException configured) return configured.Message;
+
+        const string accessBlocked = "Network Access blocked this connection. Review the rules and pending requests before retrying.";
+        if (Find<NetworkAccessDeniedException>(exception) is { } denial)
+        {
+            return denial.Kind switch
+            {
+                NetworkAccessDenialKind.Paused => "Network access is paused. Resume it in Network Access before retrying.",
+                NetworkAccessDenialKind.Unavailable => "Network access control is unavailable. Try again when it is back online.",
+                _ when !string.IsNullOrWhiteSpace(denial.RequestId) => "Network approval is required. Review the request in Network Access, then test again.",
+                _ => accessBlocked,
+            };
+        }
+        if (Find<GatewayConnectDeniedException>(exception) is not null)
+            return accessBlocked;
 
         SocketException? socket = Find<SocketException>(exception);
         if (socket?.SocketErrorCode is SocketError.HostNotFound or SocketError.NoData or SocketError.TryAgain)

@@ -7,6 +7,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 using Kautuka.Gateway.Domain.Connectors;
+using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.IntegrationTests;
 
@@ -34,6 +35,18 @@ public sealed class RemoteMcpTlsIdentityTests
         Assert.Contains("secure connection", RemoteMcpFailureMessages.Describe(new AuthenticationException("certificate failed")), StringComparison.Ordinal);
         Assert.Contains("not allowed", RemoteMcpFailureMessages.Describe(new HttpRequestException("This destination is not allowed by connector network policy.")), StringComparison.Ordinal);
         Assert.Contains("not allowed", RemoteMcpFailureMessages.Describe(new HttpRequestException("This destination isn't allowed by connector network policy.")), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(NetworkAccessDenialKind.Denied, "request-id", "Network approval is required")]
+    [InlineData(NetworkAccessDenialKind.Denied, null, "Network Access blocked")]
+    [InlineData(NetworkAccessDenialKind.Paused, null, "Network access is paused")]
+    [InlineData(NetworkAccessDenialKind.Unavailable, null, "Network access control is unavailable")]
+    public void RemoteMcpNetworkDenialsGiveTheOwnerAnAction(NetworkAccessDenialKind kind, string? requestId, string expected)
+    {
+        var denied = new NetworkAccessDeniedException("mcp.example.test", 443, "https", kind, "fixture", requestId);
+        var error = new HttpRequestException("MCP initialize failed", denied);
+        Assert.StartsWith(expected, RemoteMcpFailureMessages.Describe(error), StringComparison.Ordinal);
     }
 
     [Theory]

@@ -11,6 +11,13 @@ namespace Kautuka.Gateway.Infrastructure.Egress;
 /// <summary>Identity attached to every CONNECT in a partitioned connection pool.</summary>
 internal sealed record GatewayEgressScope(string User, string? Agent, string? Connector, string Purpose, string? Correlation, bool PublicOnly = false);
 
+internal sealed class GatewayConnectDeniedException : IOException
+{
+    public GatewayConnectDeniedException() : base("Envoy denied the CONNECT request.") { }
+    public GatewayConnectDeniedException(string message) : base(message) { }
+    public GatewayConnectDeniedException(string message, Exception innerException) : base(message, innerException) { }
+}
+
 /// <summary>HTTP transport through an authenticated, scope-bound Envoy CONNECT listener.</summary>
 internal sealed class GatewayConnectTransport : IDisposable
 {
@@ -316,6 +323,8 @@ internal sealed class GatewayConnectTransport : IDisposable
                 if (bytes[i] is < 0x20 or > 0x7e && bytes[i] is not (byte)'\r' and not (byte)'\n' and not (byte)'\t') throw new IOException("Invalid CONNECT response headers.");
         }
         string[] lines = Encoding.ASCII.GetString(bytes, 0, length - 4).Split("\r\n", StringSplitOptions.None);
+        if (lines[0].StartsWith("HTTP/1.1 403 ", StringComparison.Ordinal) || lines[0] == "HTTP/1.1 403")
+            throw new GatewayConnectDeniedException();
         if (!lines[0].StartsWith("HTTP/1.1 200 ", StringComparison.Ordinal) && lines[0] != "HTTP/1.1 200") throw new IOException("CONNECT was refused.");
         foreach (string line in lines.Skip(1))
         {
