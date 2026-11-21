@@ -341,19 +341,41 @@ public static class Program
         }
 
         string upstreamPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
+        const string wheelName = "six-1.17.0-py2.py3-none-any.whl";
+        Task<PodmanCommandResult> DownloadWheelAsync(string version, string destination) =>
+            podman.RunAsync(
+                ["exec", "--env", "PIP_CONFIG_FILE=/dev/null", builderName, "python3", "-m", "pip",
+                 "--isolated", "download", "--no-cache-dir", "--no-deps", "--only-binary=:all:",
+                 "--disable-pip-version-check", "--retries", "0", "--timeout", "10",
+                 "--index-url", $"http://{serviceHost}:20101/pypi/simple/", "--trusted-host", serviceHost,
+                 "--dest", destination, $"six=={version}"], 30, CancellationToken.None);
+        const string onlineWheelDirectory = "/tmp/pypi-online";
+        const string cachedWheelDirectory = "/tmp/pypi-cached";
+        const string uncachedWheelDirectory = "/tmp/pypi-miss";
+        PodmanCommandResult onlineWheel = await DownloadWheelAsync("1.17.0", onlineWheelDirectory).ConfigureAwait(false);
+        if (onlineWheel.ExitCode != 0)
+            throw new InvalidOperationException($"Online wheel download through the package proxy failed: {PodmanFailureFormatter.FormatDetails(onlineWheel)}");
+
         var upstreamRequest = new[]
         {
             "exec", builderName, "npm", "view", "is-odd", "version", "--registry", npmRegistry,
             "--cache", "/tmp/nac-upstream-deny-cache"
         };
-        (_, NetworkAccessRuleView upstreamDeny) = controller.PolicyStore.SetRule(
-            admin,
-            new RuleWriteSpec("system", null, null, null, "registry.npmjs.org", "host", 443, Allowed: false),
-            controller.PolicyStore.Revision);
         PodmanCommandResult deniedUpstreamFetch;
+        PodmanCommandResult deniedWheel;
         string cachedPackageHash;
+        var upstreamDenies = new List<NetworkAccessRuleView>();
         try
         {
+            foreach (string host in new[] { "registry.npmjs.org", "pypi.org", "files.pythonhosted.org" })
+            {
+                (_, NetworkAccessRuleView rule) = controller.PolicyStore.SetRule(
+                    admin,
+                    new RuleWriteSpec("system", null, null, null, host, "host", 443, Allowed: false),
+                    controller.PolicyStore.Revision);
+                upstreamDenies.Add(rule);
+            }
+
             // The policy applies when Envoy authorizes a new TCP connection. Restart the
             // proxy so the request cannot reuse a connection opened before this deny.
             PodmanCommandResult restart = await podman.RunAsync(["restart", proxyName], 30, CancellationToken.None).ConfigureAwait(false);
@@ -375,10 +397,22 @@ public static class Program
             // curl has no client cache. A fresh HTTP request must return the same
             // archive from the proxy's persistent cache while upstream is denied.
             cachedPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
+            PodmanCommandResult cachedWheel = await DownloadWheelAsync("1.17.0", cachedWheelDirectory).ConfigureAwait(false);
+            if (cachedWheel.ExitCode != 0)
+                throw new InvalidOperationException($"Cached wheel download with PyPI denied failed: {PodmanFailureFormatter.FormatDetails(cachedWheel)}");
+            PodmanCommandResult comparison = await podman.RunAsync(
+                ["exec", builderName, "python3", "-c",
+                 "import filecmp, sys; sys.exit(not filecmp.cmp(sys.argv[1], sys.argv[2], shallow=False))",
+                 $"{onlineWheelDirectory}/{wheelName}", $"{cachedWheelDirectory}/{wheelName}"],
+                10, CancellationToken.None).ConfigureAwait(false);
+            if (comparison.ExitCode != 0)
+                throw new InvalidOperationException($"Cached wheel comparison failed: {PodmanFailureFormatter.FormatDetails(comparison)}");
+            deniedWheel = await DownloadWheelAsync("1.16.0", uncachedWheelDirectory).ConfigureAwait(false);
         }
         finally
         {
-            controller.PolicyStore.DeleteRule(admin, upstreamDeny.Rule.Id, controller.PolicyStore.Revision);
+            foreach (NetworkAccessRuleView rule in upstreamDenies)
+                controller.PolicyStore.DeleteRule(admin, rule.Rule.Id, controller.PolicyStore.Revision);
         }
 
         PodmanCommandResult recoveredUpstreamFetch = await podman.RunAsync(upstreamRequest, 45, CancellationToken.None).ConfigureAwait(false);
@@ -386,6 +420,9 @@ public static class Program
         {
             throw new InvalidOperationException($"Proxy upstream did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredUpstreamFetch)}");
         }
+        PodmanCommandResult recoveredWheel = await DownloadWheelAsync("1.16.0", uncachedWheelDirectory).ConfigureAwait(false);
+        if (recoveredWheel.ExitCode != 0)
+            throw new InvalidOperationException($"PyPI did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredWheel)}");
 
         return [
         AcceptanceHarness.Record(
@@ -411,6 +448,12 @@ public static class Program
             $"available={string.Equals(upstreamPackageHash, cachedPackageHash, StringComparison.Ordinal)}",
             "available=True",
             $"available={deniedUpstreamFetch.ExitCode == 0}",
+            "available=False", comparisonField: "available"),
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_PYPI_WHEEL_CACHE",
+            $"available={onlineWheel.ExitCode == 0}",
+            "available=True",
+            $"available={deniedWheel.ExitCode == 0}",
             "available=False", comparisonField: "available")];
     }
     private const string UserBrakeDisabledHookObservation =
