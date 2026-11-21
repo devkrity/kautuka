@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -44,14 +45,18 @@ function stable(value) {
 
 async function fileMetadata(rootDir, relativePath, name, platform) {
   const fullPath = path.join(rootDir, relativePath);
-  const fileBytes = await fs.readFile(fullPath);
-  const stats = await fs.stat(fullPath);
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of createReadStream(fullPath)) {
+    hash.update(chunk);
+    size += chunk.length;
+  }
   return {
     name,
     platform,
     path: relativePath,
-    sha256: createHash("sha256").update(fileBytes).digest("hex").toLowerCase(),
-    size: stats.size,
+    sha256: hash.digest("hex"),
+    size,
   };
 }
 
@@ -170,6 +175,10 @@ async function main() {
     }
   }
 
+  const linuxApplianceOnly = options["linux-appliance-only"] === "true";
+  if (linuxApplianceOnly && (options.channel !== "preview" || !options["appliance-deployment"])) {
+    throw new Error("Linux appliance-only releases require the preview channel and an appliance deployment descriptor.");
+  }
   const artifacts = [
     await fileMetadata(
       outputDir,
@@ -177,16 +186,15 @@ async function main() {
       "kautuka-linux-amd64.tar.gz",
       "linux-x64",
     ),
-    await fileMetadata(
+  ];
+  if (!linuxApplianceOnly) {
+    artifacts.push(await fileMetadata(
       outputDir,
       "kautuka-wsl-appliance.tar.gz",
       "kautuka-wsl-appliance.tar.gz",
       "wsl-amd64",
-    ),
-  ].map((artifact) => ({
-    ...artifact,
-    url: artifactUrlFor(artifact.path, artifactBaseUrl),
-  }));
+    ));
+  }
 
   const runtimeImages = await loadRuntimeImages(options["runtime-images"]);
   const applianceDeployment = options["appliance-deployment"]
@@ -202,7 +210,10 @@ async function main() {
     sourceSha: options["source-sha"],
     publishedAt,
     minimumUpdaterVersion: options["minimum-updater-version"] || null,
-    artifacts,
+    artifacts: artifacts.map((artifact) => ({
+      ...artifact,
+      url: artifactUrlFor(artifact.path, artifactBaseUrl),
+    })),
     runtimeImages,
     applianceDeployment,
     signature: {

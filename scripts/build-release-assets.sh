@@ -21,6 +21,7 @@ Options:
   --manifest-public-key <pem>       Required for full builds: public key PEM baked into the prewarmed rootfs.
   --appliance-image-prefix <repo>   Package the five core service OCI images and sign their digests.
   --appliance-runtime-base <image>  Digest-pinned Fedora minimal base for --appliance-image-prefix.
+  --linux-appliance-only           Build a signed Linux appliance preview and skip WSL prewarming.
   --rebuild-images                  Rebuild the cached WSL base rootfs and Linux release build image.
   --prewarm-only                    Layer an existing platform tarball into the cached WSL base rootfs. Skips compile.
   --platform-tarball <tar.gz>       Platform archive for --prewarm-only.
@@ -218,6 +219,7 @@ artifact_base_url=''
 signature_url=''
 appliance_image_prefix=''
 appliance_runtime_base=''
+linux_appliance_only='false'
 rebuild_images='false'
 prewarm_only='false'
 platform_tarball_override=''
@@ -284,6 +286,10 @@ while [[ $# -gt 0 ]]; do
       appliance_runtime_base="$2"
       shift 2
       ;;
+    --linux-appliance-only)
+      linux_appliance_only='true'
+      shift
+      ;;
     --rebuild-images)
       rebuild_images='true'
       shift
@@ -335,6 +341,12 @@ if [[ -n "$appliance_image_prefix" || -n "$appliance_runtime_base" ]]; then
     echo 'error: appliance image packaging requires both appliance image options on a full build.' >&2
     exit 1
   fi
+fi
+
+if [[ "$linux_appliance_only" == 'true' ]] &&
+   [[ "$channel" != 'preview' || -z "$appliance_image_prefix" || -z "$artifact_base_url" ]]; then
+  echo 'error: --linux-appliance-only requires the preview channel, appliance image options, and --artifact-base-url.' >&2
+  exit 1
 fi
 
 if [[ -z "$manifest_url" && -n "$artifact_base_url" ]]; then
@@ -1024,32 +1036,6 @@ mkdir -p "$(dirname "$platform_tarball")"
 tar -czf "$platform_tarball" -C "$stage_dir" .
 fi
 
-# drvfs/Windows mounts often reject chmod; invoke via bash instead of relying on +x.
-chmod +x "$source_root/scripts/build-wsl-rootfs.sh" 2>/dev/null || true
-
-rootfs_cache_key="$(compute_hash "$(hash_file "$source_root/scripts/build-wsl-rootfs.sh")" "$rootfs_releasever" "$rootfs_arch" "$rootfs_image")"
-base_rootfs="$rootfs_cache_dir/kautuka-wsl-rootfs-${rootfs_cache_key:0:16}.tar.gz"
-
-log_phase "Preparing cached WSL base rootfs"
-if [[ -n "${KAUTUKA_RELEASE_WSL_ROOTFS_PATH:-}" ]]; then
-  if [[ ! -s "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" ]]; then
-    echo "error: pinned WSL rootfs archive is missing or empty: $KAUTUKA_RELEASE_WSL_ROOTFS_PATH" >&2
-    exit 1
-  fi
-  cp "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" "$base_rootfs"
-  printf 'Using the reviewed WSL base rootfs from %s\n' "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH"
-elif [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
-  printf 'Building cached WSL base rootfs: %s\n' "$base_rootfs"
-  bash "$source_root/scripts/build-wsl-rootfs.sh" \
-    --releasever "$rootfs_releasever" \
-    --arch "$rootfs_arch" \
-    --image "$rootfs_image" \
-    --container-runtime "$container_runtime" \
-    --output "$base_rootfs"
-else
-  printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
-fi
-
 stage_nac_hook_for_rootfs() {
   local root="$1" version_root="$2" uid="$3" gid="$4"
   local hook_dir="$root/var/lib/kautuka/.config/containers/hooks.d"
@@ -1737,8 +1723,33 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
   assert_packed_appliance_network_seal "$rootfs_output" "$kautuka_uid" "$version"
 }
 
-log_phase "Prewarming WSL appliance rootfs"
-prewarm_rootfs "$base_rootfs" "$final_rootfs"
+if [[ "$linux_appliance_only" != 'true' ]]; then
+  rootfs_cache_key="$(compute_hash "$(hash_file "$source_root/scripts/build-wsl-rootfs.sh")" "$rootfs_releasever" "$rootfs_arch" "$rootfs_image")"
+  base_rootfs="$rootfs_cache_dir/kautuka-wsl-rootfs-${rootfs_cache_key:0:16}.tar.gz"
+
+  log_phase "Preparing cached WSL base rootfs"
+  if [[ -n "${KAUTUKA_RELEASE_WSL_ROOTFS_PATH:-}" ]]; then
+    if [[ ! -s "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" ]]; then
+      echo "error: pinned WSL rootfs archive is missing or empty: $KAUTUKA_RELEASE_WSL_ROOTFS_PATH" >&2
+      exit 1
+    fi
+    cp "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH" "$base_rootfs"
+    printf 'Using the reviewed WSL base rootfs from %s\n' "$KAUTUKA_RELEASE_WSL_ROOTFS_PATH"
+  elif [[ "$rebuild_images" == 'true' || ! -f "$base_rootfs" ]]; then
+    printf 'Building cached WSL base rootfs: %s\n' "$base_rootfs"
+    bash "$source_root/scripts/build-wsl-rootfs.sh" \
+      --releasever "$rootfs_releasever" \
+      --arch "$rootfs_arch" \
+      --image "$rootfs_image" \
+      --container-runtime "$container_runtime" \
+      --output "$base_rootfs"
+  else
+    printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
+  fi
+
+  log_phase "Prewarming WSL appliance rootfs"
+  prewarm_rootfs "$base_rootfs" "$final_rootfs"
+fi
 
 if [[ "$prewarm_only" == 'true' ]]; then
   printf 'Prewarmed appliance rootfs written to %s\n' "$final_rootfs"
@@ -1747,6 +1758,12 @@ if [[ "$prewarm_only" == 'true' ]]; then
 fi
 
 manifest_args=()
+checksummed_assets=(kautuka-linux-amd64.tar.gz)
+if [[ "$linux_appliance_only" == 'true' ]]; then
+  manifest_args+=(--linux-appliance-only true)
+else
+  checksummed_assets+=(kautuka-wsl-appliance.tar.gz)
+fi
 if [[ -n "$minimum_updater_version" ]]; then
   manifest_args+=(--minimum-updater-version "$minimum_updater_version")
 fi
@@ -1771,9 +1788,16 @@ run_repo_node "$source_root/scripts/generate-release-manifest.mjs" \
   --runtime-images "$source_root/src/backend/Kautuka.Manager/runtime-images.json" \
   "${manifest_args[@]}"
 
+if [[ "$linux_appliance_only" == 'true' ]]; then
+  bash "$source_root/scripts/generate-linux-installer.sh" \
+    --output "$release_dir/kautuka-install-linux.sh" --version "$version" --release-channel "$channel" \
+    --manifest-url "$manifest_url" --manifest-public-key "$manifest_public_key"
+  checksummed_assets+=(kautuka-install-linux.sh)
+fi
+
 (
   cd "$release_dir"
-  sha256sum kautuka-linux-amd64.tar.gz kautuka-wsl-appliance.tar.gz kautuka-platform-release.json kautuka-platform-release.sig > kautuka-release-assets.sha256
+  sha256sum "${checksummed_assets[@]}" kautuka-platform-release.json kautuka-platform-release.sig > kautuka-release-assets.sha256
 )
 
 printf 'Release artifacts written to %s\n' "$release_dir"

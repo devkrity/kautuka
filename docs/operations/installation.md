@@ -75,6 +75,10 @@ On a fresh signed Linux appliance installation, the installer provisions private
 
 The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
 
+Build a Linux-only signed preview with `scripts/build-release-assets.sh --linux-appliance-only`, the existing appliance image options, and the preview's exact artifact base URL. The output includes the Linux archive, signed manifest, and Linux installer. Verify this artifact set with `scripts/verify-release-artifacts.mjs --linux-appliance-only true` and the usual release identity and public key arguments.
+
+Use a dedicated distribution path for these artifacts. The shared Windows Preview installer currently selects the newest eligible tag before checking for a Windows artifact.
+
 On a fresh signed Linux appliance, pass `--web-port 23084` to publish WebHost on a different localhost port. Manager saves the port in its systemd user unit. The default is `20229`. The container listener and its egress rules stay the same.
 
 The host recovery helper sets `KAUTUKA_APPLIANCE_VERIFY=1` when booting a candidate for verification. This holds the existing admission and worker fences for the lifetime of the process while leaving health checks available. Gateway's readiness check can still call CredentialsHost's authenticated health RPC.

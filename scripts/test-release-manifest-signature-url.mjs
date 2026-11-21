@@ -155,16 +155,31 @@ try {
   generate(["--appliance-deployment", deploymentPath]);
   const publicKeyPath = path.join(tempRoot, "signing-public.pem");
   await fs.writeFile(publicKeyPath, publicKeyPem);
-  const verification = spawnSync(process.execPath, [
+  const verify = (extraArgs = []) => spawnSync(process.execPath, [
     path.join(repoRoot, "scripts", "verify-release-artifacts.mjs"),
     "--directory", outputDir,
     "--version", "0.1.20-preview.1",
     "--channel", "preview",
     "--source-sha", "7ad4cf15dd8df78e9f97ebe25ad0ba15ce2c1731",
     "--public-key", publicKeyPath,
+    ...extraArgs,
   ], { encoding: "utf8" });
+  const verification = verify();
   assert.notEqual(verification.status, 0, "a valid signature is insufficient when the actual appliance image is missing");
   assert.match(verification.stderr, /appliance image archive is missing or not a regular file: credentialshost/);
+
+  await fs.unlink(path.join(outputDir, "kautuka-wsl-appliance.tar.gz"));
+  assert.match(generateRaw(["--linux-appliance-only", "true"]).stderr, /require the preview channel and an appliance deployment descriptor/);
+  assert.match(generateRaw(["--linux-appliance-only", "true", "--channel", "stable", "--appliance-deployment", deploymentPath]).stderr,
+    /require the preview channel/);
+  generate(["--linux-appliance-only", "true", "--appliance-deployment", deploymentPath]);
+  const linuxBytes = await fs.readFile(path.join(outputDir, "kautuka-platform-release.json"));
+  const linuxManifest = JSON.parse(linuxBytes.toString("utf8"));
+  const linuxSignature = Buffer.from((await fs.readFile(path.join(outputDir, "kautuka-platform-release.sig"), "utf8")).trim(), "base64");
+  assert.deepEqual(linuxManifest.artifacts.map(({ path, platform }) => [path, platform]), [["kautuka-linux-amd64.tar.gz", "linux-x64"]]);
+  assert.equal(cryptoVerify("sha256", linuxBytes, publicKey, linuxSignature), true);
+  assert.match(verify().stderr, /do not match required release files/);
+  assert.match(verify(["--linux-appliance-only", "true"]).stderr, /appliance image archive is missing or not a regular file: credentialshost/);
 
   assert.match(buildAssets, /--signature-url\)/, "release builder parses the optional exact signature URL");
   assert.match(buildAssets, /manifest_args\+\=\(--signature-url "\$signature_url"\)/, "release builder passes the explicit URL into the signed manifest generator");

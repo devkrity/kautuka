@@ -19,7 +19,7 @@ const fail = (message) => {
 };
 
 if (!options.directory || !options.version || !options.channel || !options['source-sha'] || !options['public-key']) {
-  fail('usage: verify-release-artifacts.mjs --directory DIR --version VERSION --channel preview|stable --source-sha SHA --public-key PEM');
+  fail('usage: verify-release-artifacts.mjs --directory DIR --version VERSION --channel preview|stable --source-sha SHA --public-key PEM [--linux-appliance-only true]');
 }
 
 const expectedFileNames = (options['expected-files'] ?? '').split(',').filter(Boolean).sort();
@@ -57,7 +57,19 @@ if (manifest.version !== options.version) fail(`manifest version ${manifest.vers
 if (manifest.channel !== options.channel) fail(`manifest channel ${manifest.channel} does not match ${options.channel}`);
 if (manifest.sourceSha !== options['source-sha']) fail(`manifest source SHA ${manifest.sourceSha} does not match ${options['source-sha']}`);
 const manifestArtifactNames = (manifest.artifacts ?? []).map((artifact) => path.basename(artifact.path)).sort();
-const requiredArtifactNames = ['kautuka-linux-amd64.tar.gz', 'kautuka-wsl-appliance.tar.gz'].sort();
+const linuxApplianceOnly = options['linux-appliance-only'] === 'true';
+const requiredArtifactNames = ['kautuka-linux-amd64.tar.gz'];
+if (linuxApplianceOnly) {
+  if (options.channel !== 'preview' || !manifest.applianceDeployment) {
+    fail('Linux appliance-only releases require the preview channel and an appliance deployment descriptor.');
+  }
+  const linux = manifest.artifacts?.[0];
+  if (linux?.name !== requiredArtifactNames[0] || linux.path !== linux.name || linux.platform !== 'linux-x64') {
+    fail('Linux appliance-only releases require the canonical Linux artifact name, path, and platform.');
+  }
+} else {
+  requiredArtifactNames.push('kautuka-wsl-appliance.tar.gz');
+}
 if (JSON.stringify(manifestArtifactNames) !== JSON.stringify(requiredArtifactNames)) {
   fail(`manifest artifact file names [${manifestArtifactNames.join(', ')}] do not match required release files [${requiredArtifactNames.join(', ')}]`);
 }
@@ -107,7 +119,7 @@ async function verifyPlatformPayload(archive, deployment) {
       }
     }
 
-    if (options['platform-archive']) await verifyPlatformIdentity(tempRoot);
+    if (options['platform-archive'] || linuxApplianceOnly) await verifyPlatformIdentity(tempRoot);
   } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -146,4 +158,5 @@ if (options['platform-archive'] || manifest.applianceDeployment) {
   }
 }
 
-console.log(`release artifact checks passed: ${options.version} (${options.channel}) ${options['source-sha'].slice(0, 7)}; signature valid; ${manifest.artifacts?.length ?? 0} artifact checksums valid${options['dotnet-binary'] ? '; .NET InformationalVersion valid' : ''}${options['frontend-bundle'] || options['platform-archive'] ? '; frontend version/SHA valid' : ''}${options['platform-archive'] ? '; all Linux service InformationalVersions valid' : ''}${manifest.applianceDeployment ? '; all appliance OCI archive digests valid' : ''}${options['container-tag'] ? '; container tag valid' : ''}`);
+const verifiedPlatformIdentity = options['platform-archive'] || linuxApplianceOnly;
+console.log(`release artifact checks passed: ${options.version} (${options.channel}) ${options['source-sha'].slice(0, 7)}; signature valid; ${manifest.artifacts?.length ?? 0} artifact checksums valid${options['dotnet-binary'] ? '; .NET InformationalVersion valid' : ''}${options['frontend-bundle'] || verifiedPlatformIdentity ? '; frontend version/SHA valid' : ''}${verifiedPlatformIdentity ? '; all Linux service InformationalVersions valid' : ''}${manifest.applianceDeployment ? '; all appliance OCI archive digests valid' : ''}${options['container-tag'] ? '; container tag valid' : ''}`);
