@@ -54,6 +54,20 @@ internal sealed class SkillAgentToolProvider(
             return ValueTask.FromResult(new AgentToolSurfaceContribution([], Complete: true));
         }
 
+        ToolPolicyDecision exposureDecision = toolExecutionPolicyService.EvaluateExposure(
+            ToolPolicyCategory.Skill,
+            context.AgentDefinition);
+        if (!exposureDecision.Allowed)
+        {
+#pragma warning disable CA1848, CA1873 // LoggerMessage deferred; policy-denial path is non-hot
+            logger.LogInformation(
+                "[Skills] Skill tools are not exposed for agent '{AgentId}' due to policy reason '{ReasonCode}'.",
+                context.AgentId,
+                exposureDecision.ReasonCode);
+#pragma warning restore CA1848, CA1873
+            return ValueTask.FromResult(new AgentToolSurfaceContribution([], Complete: true));
+        }
+
         // Pre-inspect all skills so we use the real on-disk state (including self-healed scripts)
         // rather than the cached HasScripts flag from SQLite, which may be stale for packages
         // imported before script generation was introduced.
@@ -70,20 +84,6 @@ internal sealed class SkillAgentToolProvider(
                 logger.LogWarning(ex, "[Skills] Failed to inspect skill '{SkillId}' for agent '{AgentId}'. Falling back to manifest metadata.", skillId, context.AgentId);
             }
 #pragma warning restore CA1031, CA1848
-        }
-
-        ToolPolicyDecision exposureDecision = toolExecutionPolicyService.EvaluateExposure(
-            ToolPolicyCategory.Skill,
-            context.AgentDefinition);
-        if (!exposureDecision.Allowed)
-        {
-#pragma warning disable CA1848, CA1873 // LoggerMessage deferred; policy-denial path is non-hot
-            logger.LogInformation(
-                "[Skills] Skill tools are not exposed for agent '{AgentId}' due to policy reason '{ReasonCode}'.",
-                context.AgentId,
-                exposureDecision.ReasonCode);
-#pragma warning restore CA1848, CA1873
-            return ValueTask.FromResult(new AgentToolSurfaceContribution([], Complete: true));
         }
 
         bool hasAnyResources = manifestById.Values.Any(static m => m.HasResources)
@@ -295,11 +295,6 @@ internal sealed class SkillAgentToolProvider(
                 [System.ComponentModel.Description("Optional timeout in seconds.")] int? timeoutSeconds = null) =>
             {
                 EffectiveSkillManifestEntry manifest = GetManifestEntry(manifestById, skillId);
-                if (!manifest.HasScripts)
-                {
-                    throw new InvalidOperationException($"Skill '{skillId}' does not expose scripts.");
-                }
-
                 SkillDefinition skill = skillsById[manifest.SkillId];
                 SkillPackageInspection inspection = skillPackageService.Inspect(skill);
                 string resolvedScriptPath = ResolveScriptPath(inspection, scriptPath);

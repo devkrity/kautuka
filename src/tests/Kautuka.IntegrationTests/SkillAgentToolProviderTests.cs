@@ -660,9 +660,7 @@ public sealed class SkillAgentToolProviderTests
     {
         using var temp = new TemporarySqliteDatabase();
         string skillRoot = OwnedSkillRoot(temp.Path, "roll-dice");
-        Directory.CreateDirectory(Path.Combine(skillRoot, "scripts"));
         await File.WriteAllTextAsync(Path.Combine(skillRoot, "SKILL.md"), "# Roll Dice\n\nUse this skill to roll dice.\n\n```bash\necho $((RANDOM % <sides> + 1))\n```", TestContext.Current.CancellationToken);
-        await File.WriteAllTextAsync(Path.Combine(skillRoot, "scripts", "generated-from-markdown.sh"), "echo 17", TestContext.Current.CancellationToken);
 
         try
         {
@@ -732,6 +730,7 @@ public sealed class SkillAgentToolProviderTests
 
             IReadOnlyList<AIFunction> tools = [.. await provider.BuildToolsAsync(context, TestContext.Current.CancellationToken)];
             Assert.Empty(tools);
+            Assert.False(Directory.Exists(Path.Combine(skillRoot, "scripts")));
         }
         finally
         {
@@ -868,7 +867,7 @@ public sealed class SkillAgentToolProviderTests
                 new ToolExecutionPolicyService(),
                 NullLogger<SkillAgentToolProvider>.Instance);
 
-            var workspaceTool = new CapturingWorkspaceTool();
+            var workspaceTool = new CapturingWorkspaceTool(Path.Combine(Path.GetDirectoryName(temp.Path)!, "workspace"));
             var context = new AgentToolContext(
                 new AgentDefinition
                 {
@@ -900,8 +899,7 @@ public sealed class SkillAgentToolProviderTests
 
             IReadOnlyList<AIFunction> tools = [.. await provider.BuildToolsAsync(context, TestContext.Current.CancellationToken)];
 
-            // run_skill_script MUST be registered despite HasScripts = false in the manifest
-            Assert.Contains(tools, static tool => string.Equals(tool.Name, "run_skill_script", StringComparison.Ordinal));
+            AIFunction runSkillTool = Assert.Single(tools, static tool => string.Equals(tool.Name, "run_skill_script", StringComparison.Ordinal));
 
             // load_skill MUST advertise the script tool
             AIFunction loadSkillTool = Assert.Single(tools, static tool => string.Equals(tool.Name, "load_skill", StringComparison.Ordinal));
@@ -911,6 +909,15 @@ public sealed class SkillAgentToolProviderTests
             JsonElement payload = Assert.IsType<JsonElement>(rawResult);
             Assert.Equal("run_skill_script", payload.GetProperty("script_tool_name").GetString());
             Assert.NotEmpty(payload.GetProperty("scripts").EnumerateArray().ToList());
+
+            await runSkillTool.InvokeAsync(
+                new AIFunctionArguments(new Dictionary<string, object?>
+                {
+                    ["skillId"] = "roll-dice",
+                    ["namedArguments"] = new JsonObject { ["sides"] = "20" },
+                }),
+                TestContext.Current.CancellationToken);
+            Assert.Contains("/usr/bin/bash \"$tmp_script\" '20'", workspaceTool.LastAgentCommand, StringComparison.Ordinal);
 
             // The generated script file should now exist on disk (self-healed)
             Assert.True(
