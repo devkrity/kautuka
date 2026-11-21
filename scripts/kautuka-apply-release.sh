@@ -322,7 +322,7 @@ write_durable_record() {
     local destination="$1" operation_id="$2" phase="$3" source_release="$4" target_release="$5" snapshot="$6"
     shift 6
     python3 - "$destination" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "$database_root" "$@" <<'PY'
-import json, os, sys, tempfile
+import json, os, sys, tempfile, time
 path, operation, phase, source, target, snapshot, data_root, *pairs = sys.argv[1:]
 pointers = {}
 manifest_sha256 = None
@@ -341,6 +341,7 @@ document = {
     'snapshot': snapshot,
     'dataRoot': data_root,
     'sourcePointers': pointers,
+    'updatedUnixMilliseconds': time.time_ns() // 1_000_000,
 }
 if manifest_sha256 is not None:
     document['snapshotManifestSha256'] = manifest_sha256

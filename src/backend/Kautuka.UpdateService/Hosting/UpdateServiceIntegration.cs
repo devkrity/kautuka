@@ -56,6 +56,7 @@ public sealed class UpdateServiceIntegration(
         int activeExecCount = 0;
         bool isReady = false;
         bool hostStatusObserved = false;
+        Kautuka.Manager.Protos.ApplianceRecoveryStatus? applianceRecovery = null;
 
         try
         {
@@ -67,6 +68,7 @@ public sealed class UpdateServiceIntegration(
             {
                 isReady = status.CoreReady;
                 activeExecCount = status.ActiveExecCount;
+                applianceRecovery = status.ApplianceRecovery;
             }
         }
         catch (RpcException)
@@ -79,7 +81,15 @@ public sealed class UpdateServiceIntegration(
         if (updateOptions.ApplianceReleaseId is { } releaseId)
             return new UpdateServiceContext(runtimePaths.RuntimeRoot, AppContext.BaseDirectory, releaseId,
                 updateOptions.ApplianceReleaseVersion!, isReady, activeExecCount, hostStatusObserved,
-                RuntimeUnitsActive: false, CurrentPointersConsistent: false);
+                RuntimeUnitsActive: false, CurrentPointersConsistent: false,
+                RecoveryRequired: applianceRecovery?.RecoveryRequired == true,
+                RecoveryOperationId: applianceRecovery?.OperationId,
+                RecoveryPhase: applianceRecovery?.Phase,
+                RecoverySourceRelease: applianceRecovery is { SourceVersion.Length: > 0 } ? "v" + applianceRecovery.SourceVersion : null,
+                RecoveryTargetRelease: applianceRecovery is { TargetVersion.Length: > 0 } ? "v" + applianceRecovery.TargetVersion : null,
+                ApplianceBootConfirmed: isReady && !KautukaMaintenanceMode.IsApplianceVerification
+                    && applianceRecovery is { RecoveryRequired: false },
+                ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecovery?.UpdatedUnixMilliseconds ?? 0);
 
         string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
         string managerVersion = ResolveManagerVersion(managerInstallRoot);

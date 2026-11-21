@@ -639,6 +639,7 @@ public sealed class UpdateServiceIntegrationTests
                 CoreReady = true,
                 ApplianceReleaseId = managerRelease,
                 ApplianceVerificationMode = verificationModeMatches == KautukaMaintenanceMode.IsApplianceVerification,
+                ApplianceRecovery = new ApplianceRecoveryStatus { Phase = "completed", SourceVersion = "1.2.3", TargetVersion = "1.2.4" },
                 ActiveExecCount = 3,
                 Message = "status",
             });
@@ -663,6 +664,8 @@ public sealed class UpdateServiceIntegrationTests
                 Assert.Equal("1.2.3", hostContext.ManagerVersion);
                 Assert.False(hostContext.RuntimeUnitsActive);
                 Assert.False(hostContext.CurrentPointersConsistent);
+                Assert.Equal(statusMatches && !KautukaMaintenanceMode.IsApplianceVerification, hostContext.RuntimeConverged);
+                Assert.Equal(statusMatches ? "v1.2.4" : null, hostContext.RecoveryTargetRelease);
                 Assert.False(await integration.TryContinuePendingActivationAsync(TestContext.Current.CancellationToken));
             }
             else Assert.Equal(UpdateServiceIntegration.ResolveManagerInstallRoot(AppContext.BaseDirectory), hostContext.InstallRoot);
@@ -1803,14 +1806,18 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Theory]
-    [InlineData("0.1.0", "release-0.2.0", UpdateWorkflowState.Available)]
-    [InlineData("0.1.0", "release-0.3.0", UpdateWorkflowState.Applying)]
-    [InlineData("0.3.0", "release-0.2.0", UpdateWorkflowState.Applying)]
+    [InlineData("0.1.0", "release-0.2.0", null, 0, UpdateWorkflowState.Available)]
+    [InlineData("0.1.0", "release-0.3.0", null, 0, UpdateWorkflowState.Applying)]
+    [InlineData("0.3.0", "release-0.2.0", null, 0, UpdateWorkflowState.Applying)]
+    [InlineData("0.1.0", "release-0.2.0", true, -1, UpdateWorkflowState.Applying)]
+    [InlineData("0.1.0", "release-0.2.0", false, 1, UpdateWorkflowState.Applying)]
+    [InlineData("0.1.0", "release-0.2.0", true, 1, UpdateWorkflowState.Available)]
     public async Task CompletedRecoveryOnlyClearsTheMatchingApplyingOperation(
-        string journalSource, string journalTarget, UpdateWorkflowState expected)
+        string journalSource, string journalTarget, bool? applianceBootConfirmed, int journalSeconds, UpdateWorkflowState expected)
     {
         UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
         UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        DateTimeOffset requestedAt = DateTimeOffset.UtcNow;
         var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
         {
             State = UpdateWorkflowState.Applying,
@@ -1818,10 +1825,12 @@ public sealed class UpdateServiceIntegrationTests
             CurrentRelease = source,
             AvailableRelease = target,
             StagedRelease = target,
-            StateChangedAtUtc = DateTimeOffset.UtcNow,
+            StateChangedAtUtc = requestedAt,
         });
         var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), source.Version,
-            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget);
+            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget,
+            applianceBootConfirmed: applianceBootConfirmed,
+            applianceRecoveryUpdated: requestedAt.AddSeconds(journalSeconds).ToUnixTimeMilliseconds());
         var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
             new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
 
@@ -2249,14 +2258,16 @@ public sealed class UpdateServiceIntegrationTests
         bool recoveryRequired = false,
         string? recoveryPhase = null,
         string? recoverySource = null,
-        string? recoveryTarget = null) : IUpdateServiceIntegration
+        string? recoveryTarget = null,
+        bool? applianceBootConfirmed = null,
+        long applianceRecoveryUpdated = 0) : IUpdateServiceIntegration
     {
         public string? ActivatedReleaseId { get; private set; }
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {

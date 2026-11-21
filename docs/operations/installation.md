@@ -129,4 +129,6 @@ The same helper accepts `--activate-appliance --artifact PATH --version VERSION`
 
 Fresh appliance installs enable a systemd path unit that watches UpdateService's private updates directory for an activation request. UpdateService's appliance handoff accepts the canonical staged Linux archive and publishes the version file with an atomic rename. It preserves an existing request. The host helper consumes the request under the release lock, accepts only a version, and derives the archive path itself. It uses the same signed-bundle verification and recovery transaction as a locally staged update.
 
+UpdateService reads the host recovery status through Manager's authenticated socket. A candidate's fenced verification boot cannot complete an update in the app. Rollback status requires a healthy source release and a recovery journal entry for the current attempt.
+
 Standalone configuration updates are deferred. Appliance configuration changes ship in the signed release bundle. A release can retain the same pinned service image digests and reuse those images from the local Podman store. Keep the bundle workflow until a specific configuration change needs to ship independently.

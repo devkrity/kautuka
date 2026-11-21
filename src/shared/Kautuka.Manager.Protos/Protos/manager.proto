@@ -139,6 +139,16 @@ message ManagerStatusResponse {
   repeated string drift_actions = 15;
   string appliance_release_id = 16;
   bool appliance_verification_mode = 17;
+  ApplianceRecoveryStatus appliance_recovery = 18;
+}
+
+message ApplianceRecoveryStatus {
+  bool recovery_required = 1;
+  string operation_id = 2;
+  string phase = 3;
+  string source_version = 4;
+  string target_version = 5;
+  int64 updated_unix_milliseconds = 6;
 }
 
 message ManagerRuntimeContainerMessage {

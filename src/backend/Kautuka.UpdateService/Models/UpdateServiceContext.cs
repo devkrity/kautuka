@@ -16,4 +16,10 @@ public sealed record UpdateServiceContext(
     string? RecoveryPhase = null,
     string? RecoverySourceRelease = null,
     string? RecoveryTargetRelease = null,
-    string? RecoverySnapshot = null);
+    string? RecoverySnapshot = null,
+    bool? ApplianceBootConfirmed = null,
+    long ApplianceRecoveryUpdatedUnixMilliseconds = 0)
+{
+    internal bool RuntimeConverged => ApplianceBootConfirmed
+        ?? (RuntimeUnitsActive && CurrentPointersConsistent && UpdateServiceRunningCurrent);
+}

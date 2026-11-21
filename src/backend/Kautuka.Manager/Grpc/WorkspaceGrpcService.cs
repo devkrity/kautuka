@@ -97,6 +97,18 @@ public sealed partial class WorkspaceGrpcService(
         // Legacy callers use this RPC as the Manager readiness signal. An appliance
         // additionally needs its supervised application services and egress boundary.
         var appliance = applianceStatus?.Invoke();
+        ApplianceRecoveryStatus? recoveryStatus = null;
+        if (appliance is not null && OperatingSystem.IsLinux())
+        {
+            try
+            {
+                recoveryStatus = TrustedApplianceReleaseFiles.ReadRecoveryStatus(Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
+            }
+            catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException)
+            {
+                recoveryStatus = new() { RecoveryRequired = true };
+            }
+        }
         bool coreReady = appliance is null || (runtimeAvailable && appliance.Value.Ready);
         bool agentsReady = runtimeAvailable
             && this.readinessGate.IsReady
@@ -120,6 +132,7 @@ public sealed partial class WorkspaceGrpcService(
             CoreReady = coreReady,
             ApplianceReleaseId = appliance?.ReleaseId ?? string.Empty,
             ApplianceVerificationMode = appliance?.VerificationMode ?? false,
+            ApplianceRecovery = recoveryStatus,
             AgentsPending = agentsPending,
             AgentsReady = agentsReady,
             Lifecycle = lifecycle,

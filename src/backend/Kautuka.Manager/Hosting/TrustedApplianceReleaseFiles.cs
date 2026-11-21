@@ -2,6 +2,8 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Manager.Protos;
+
 using Microsoft.Win32.SafeHandles;
 
 namespace Kautuka.Manager.Hosting;
@@ -34,6 +36,35 @@ internal static class TrustedApplianceReleaseFiles
             !record.TryGetProperty("phase", out JsonElement phase) || phase.ValueKind != JsonValueKind.String || phase.GetString() != "verifying" ||
             !record.TryGetProperty("targetRelease", out JsonElement target) || target.ValueKind != JsonValueKind.String || target.GetString() != version)
             throw new InvalidDataException("The selected appliance release is not the active verification target.");
+    }
+
+    internal static ApplianceRecoveryStatus ReadRecoveryStatus(string recoveryDirectory)
+    {
+        using SafeFileHandle recovery = OpenAbsoluteDirectory(recoveryDirectory);
+        bool fenced = ReadOptionalFile(recovery, "maintenance.json") is not null;
+        byte[]? journalBytes = ReadOptionalFile(recovery, "operation.json");
+        fenced |= ReadOptionalFile(recovery, "maintenance.json") is not null;
+        if (journalBytes is null)
+            return new() { RecoveryRequired = fenced };
+
+        using JsonDocument journal = JsonDocument.Parse(journalBytes);
+        JsonElement record = journal.RootElement;
+        string phase = record.GetProperty("phase").GetString() ?? string.Empty;
+        return new()
+        {
+            RecoveryRequired = fenced || phase is not ("committed" or "completed" or "aborted"),
+            Phase = phase,
+            OperationId = record.GetProperty("operationId").GetString() ?? string.Empty,
+            SourceVersion = record.GetProperty("sourceRelease").GetString() ?? string.Empty,
+            TargetVersion = record.GetProperty("targetRelease").GetString() ?? string.Empty,
+            UpdatedUnixMilliseconds = record.TryGetProperty("updatedUnixMilliseconds", out JsonElement updated) && updated.TryGetInt64(out long value) ? value : 0,
+        };
+    }
+
+    private static byte[]? ReadOptionalFile(SafeFileHandle directory, string name)
+    {
+        try { return ReadFile(directory, name, 16 * 1024); }
+        catch (FileNotFoundException) { return null; }
     }
 
     internal static TrustedApplianceReleaseInput Read(string managerRoot, string trustedKeyDirectory, string? candidateVersion = null)
@@ -140,7 +171,12 @@ internal static class TrustedApplianceReleaseFiles
     {
         int parentFd = parent is null ? -100 : parent.DangerousGetHandle().ToInt32();
         int fd = OpenAt(parentFd, name, flags);
-        if (fd < 0) throw new IOException("Unable to open trusted appliance release input.");
+        if (fd < 0)
+        {
+            if (Marshal.GetLastPInvokeError() == 2) // ENOENT
+                throw new FileNotFoundException("Trusted appliance release input was not found.", name);
+            throw new IOException("Unable to open trusted appliance release input.");
+        }
         var handle = new SafeFileHandle((IntPtr)fd, true);
         if (Statx(fd, "", 0x1000, RequiredStat, out StatxResult stat) == 0 &&
             (stat.Mask & RequiredStat) == RequiredStat && (stat.Mode & TypeMask) == expectedType &&

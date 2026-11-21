@@ -279,9 +279,7 @@ internal sealed class UpdateCoordinator(
             RecoveryRequired: false,
             HostStatusObserved: true,
             IsReady: true,
-            RuntimeUnitsActive: true,
-            CurrentPointersConsistent: true,
-            UpdateServiceRunningCurrent: true,
+            RuntimeConverged: true,
         } && string.Equals(observed.ManagerReleaseId, original.ManagerReleaseId, StringComparison.OrdinalIgnoreCase);
 
     public async ValueTask<UpdateStatusSnapshot> RevertToLastKnownGoodAsync(CancellationToken cancellationToken = default)
@@ -527,9 +525,12 @@ internal sealed class UpdateCoordinator(
             UpdateStateRecord recovery = persistedState with
             {
                 State = UpdateWorkflowState.Applying,
-                LastError = "An interrupted update needs administrator recovery. The appliance will not switch releases until the recovery marker is resolved.",
+                LastError = hostContext.ApplianceBootConfirmed.HasValue
+                    ? null
+                    : "An interrupted update needs administrator recovery. The appliance will not switch releases until the recovery marker is resolved.",
             };
-            await stateStore.SaveAsync(recovery, cancellationToken).ConfigureAwait(false);
+            if (!hostContext.ApplianceBootConfirmed.HasValue)
+                await stateStore.SaveAsync(recovery, cancellationToken).ConfigureAwait(false);
             return (recovery, hostContext);
         }
 
@@ -612,8 +613,7 @@ internal sealed class UpdateCoordinator(
         if (state.State == UpdateWorkflowState.Applying && state.StagedRelease is not null
             && state.StateChangedAtUtc is not null
             && DateTimeOffset.UtcNow - state.StateChangedAtUtc > GetApplyingRecoveryThreshold()
-            && (!hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-                || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent
+            && (!hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged
                 || (state.CurrentRelease is not null
                     && !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)))
@@ -797,9 +797,7 @@ internal sealed class UpdateCoordinator(
             || !string.Equals(state.StagedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
             || !hostContext.HostStatusObserved || !hostContext.IsReady
             || hostContext.RecoveryRequired
-            || !hostContext.CurrentPointersConsistent
-            || !hostContext.RuntimeUnitsActive
-            || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.RuntimeConverged)
         {
             finalizedState = state;
             return false;
@@ -843,7 +841,9 @@ internal sealed class UpdateCoordinator(
         bool completedRecovery = !hostContext.RecoveryRequired
             && string.Equals(hostContext.RecoveryPhase, "completed", StringComparison.Ordinal)
             && string.Equals(hostContext.RecoverySourceRelease, hostContext.ManagerReleaseId, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase);
+            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase)
+            && (!hostContext.ApplianceBootConfirmed.HasValue || (state.StateChangedAtUtc is { } requestedAt
+                && hostContext.ApplianceRecoveryUpdatedUnixMilliseconds >= requestedAt.ToUnixTimeMilliseconds()));
         DateTimeOffset? applyingSinceUtc = state.StateChangedAtUtc;
         if (!completedRecovery && applyingSinceUtc is not null
             && DateTimeOffset.UtcNow - applyingSinceUtc <= GetApplyingRecoveryThreshold())
@@ -856,8 +856,7 @@ internal sealed class UpdateCoordinator(
         // is coherently back on the current release, not after a partial switch.
         if (state.CurrentRelease is null
             || !string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
-            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged)
         {
             recoveredState = state;
             return false;
@@ -899,8 +898,7 @@ internal sealed class UpdateCoordinator(
         if (state.State != UpdateWorkflowState.Applying || state.StagedRelease is not null
             || state.CurrentRelease is null
             || !string.Equals(observedRelease.Version, hostContext.ManagerVersion, StringComparison.OrdinalIgnoreCase)
-            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeUnitsActive
-            || !hostContext.CurrentPointersConsistent || !hostContext.UpdateServiceRunningCurrent)
+            || !hostContext.HostStatusObserved || !hostContext.IsReady || !hostContext.RuntimeConverged)
         {
             recoveredState = state;
             return false;
