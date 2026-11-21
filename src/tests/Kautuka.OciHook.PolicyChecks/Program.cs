@@ -244,3 +244,18 @@ Check("appliance_observability_identity_mismatch", HookPolicy.Decide(collector w
     new Dictionary<string, HookPolicy.Infrastructure> { [collector.Id] = new("other", [observabilityAddress]) }, owners, "100"));
 string observerHash = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(observabilityAddress, applianceRole: observabilityRole);
 if (observerHash.Length != 64) throw new InvalidOperationException("Invalid observability ruleset hash.");
+foreach ((string role, string address) in new[] { ("appliance-credentialshost", "10.247.0.7"), ("appliance-channelhost", "10.247.0.8") })
+{
+    var peer = new HookPolicy.State("peer", 123, role, gatewayImage);
+    var peerAllowlist = new Dictionary<string, HookPolicy.Infrastructure> { [peer.Id] = new(role, [address], ImageDigest: gatewayImage) };
+    string reason = role.Replace('-', '_');
+    Check(reason + "_rules", HookPolicy.Decide(peer, [], peerAllowlist, owners, "100"));
+    Check(reason + "_identity_mismatch", HookPolicy.Decide(peer with { ImageId = webImage }, [address], peerAllowlist, owners, "100"));
+    Check(reason + "_identity_mismatch", HookPolicy.Decide(peer with { Role = null }, [address],
+        new Dictionary<string, HookPolicy.Infrastructure> { [peer.Id] = new("other", [address]) }, owners, "100"));
+    string rules = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.Render(address, applianceRole: role);
+    if (!rules.Contains("ip daddr 10.247.0.2 tcp dport 15005 accept", StringComparison.Ordinal) ||
+        rules.Contains("tcp dport 15004 accept", StringComparison.Ordinal) ||
+        rules.Contains("meta l4proto tcp accept", StringComparison.Ordinal))
+        throw new InvalidOperationException($"Invalid telemetry-only rules for {role}.");
+}

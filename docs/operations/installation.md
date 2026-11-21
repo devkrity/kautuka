@@ -57,7 +57,7 @@ On Linux, Manager's `--verify-appliance-release` command verifies the selected r
 
 Manager's `--prepare-appliance-images` command performs the same signature check and prepares the five images in the calling service account's Podman store. It loads missing images from the protected role archives and checks each image's repository digest, service role, and platform. This command completes before application startup.
 
-The opt-in `Kautuka:Appliance:Enabled` startup setting enables initial application supervision on Linux in production mode. It verifies the selected signed release, prepares the images, and reconciles CredentialsHost and ChannelHost against that release with separate state and Unix socket mounts. ChannelHost receives its own server key, public Gateway trust material, and its own Manager client credential. Both containers use network isolation during staged integration. The installers currently leave this setting disabled.
+The opt-in `Kautuka:Appliance:Enabled` startup setting enables initial application supervision on Linux in production mode. It verifies the selected signed release, prepares the images, and reconciles CredentialsHost and ChannelHost against that release with separate state and Unix socket mounts. ChannelHost receives its own server key, public Gateway trust material, and its own Manager client credential. Both namespaces allow outbound TCP only to the Envoy telemetry listener. ChannelHost's Slack and Telegram access is pending. The installers currently leave this setting disabled.
 
 Gateway's model and remote MCP clients use caller-scoped Envoy CONNECT when started with `Kautuka:Appliance:Enabled`. Gateway requires the Envoy CA certificate and its own client credential at `/run/kautuka-gateway-connect/ca.crt` and `/run/kautuka-gateway-connect/client.pfx` at startup. Model requests require a caller identity. Remote MCP connections carry the authorized user, agent, and connector. Connectors with public-only destinations use the Envoy public route even when a network rule would allow LAN access.
 
@@ -69,11 +69,11 @@ If Podman assigns the Gateway address after the `createRuntime` hook, the hook c
 
 Appliance socket directories are distinct from the state root so a peer socket mount cannot include the peer's private key directory.
 
-Manager publishes WebHost only at `127.0.0.1:20229` in appliance mode. WebHost starts after Gateway and mounts Gateway's local socket read-only. Its namespace allows incoming IPv4 HTTP and replies to established connections. It drops new outbound connections and IPv6.
+Manager publishes WebHost only at `127.0.0.1:20229` in appliance mode. WebHost starts after Gateway and mounts Gateway's local socket read-only. Its namespace allows incoming IPv4 HTTP, replies to established connections, and outgoing TCP to the Envoy telemetry listener. It drops other new outbound connections and IPv6.
 
 The Linux appliance service integration test starts the production Envoy and CoreDNS topology in an isolated rootless Podman store. The native hook and startup canary must open the gate before the test starts Gateway and verifies the published WebHost route. The fixture uses locally cached, digest-pinned egress images through a read-only additional image store.
 
-The appliance telemetry listener accepts HTTP OTLP POST requests for logs, metrics, and traces at Envoy's internal address, `10.247.0.2:15005`. Gateway's exporters use this endpoint and its namespace allows TCP traffic to the listener. The boundary rules allow Envoy to reach OpenObserve at `10.247.0.6:5080`. The listener returns 404 for other methods and paths, including OpenObserve's query and administration APIs. Export and network rules for the other application containers are pending.
+The appliance telemetry listener accepts HTTP OTLP POST requests for logs, metrics, and traces at Envoy's internal address, `10.247.0.2:15005`. Gateway, WebHost, CredentialsHost, and ChannelHost export to this endpoint. The boundary rules allow Envoy to reach OpenObserve at `10.247.0.6:5080`. The listener returns 404 for other methods and paths, including OpenObserve's query and administration APIs.
 
 The native hook has an appliance OpenObserve profile for `10.247.0.6`. It requires a Manager-authorized container ID and image ID, accepts requests on port 5080 from Envoy, and permits replies on established connections. It drops new outbound connections and IPv6. Manager uses the same profile to verify the live ruleset after startup.
 

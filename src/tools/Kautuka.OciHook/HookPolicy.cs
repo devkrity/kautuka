@@ -67,12 +67,13 @@ internal static class HookPolicy
                 if (owners.TryGetValue(inode, out string? applianceOwner) && applianceOwner != state.Id) return Refuse("shared_netns");
                 return new Decision(true, prefix + "_rules", entry.Role);
             }
-            if (state.Role == "appliance-webhost" || ips.Contains(WorkloadRulesetRenderer.ApplianceWebHostIp, StringComparer.Ordinal))
-                return Refuse("appliance_webhost_identity_mismatch");
-            if (state.Role == "appliance-gateway" || ips.Contains(WorkloadRulesetRenderer.ApplianceGatewayIp, StringComparer.Ordinal))
-                return Refuse("appliance_gateway_identity_mismatch");
-            if (state.Role == "appliance-observability" || ips.Contains(WorkloadRulesetRenderer.ObservabilityIp, StringComparer.Ordinal))
-                return Refuse("appliance_observability_identity_mismatch");
+            if (applianceAddress is not null)
+                return Refuse(state.Role!.Replace('-', '_') + "_identity_mismatch");
+            foreach (string ip in ips)
+            {
+                if (WorkloadRulesetRenderer.FindApplianceRole(ip) is { } reservedRole)
+                    return Refuse(reservedRole.Replace('-', '_') + "_identity_mismatch");
+            }
             if (entry.Role != "pkgs-proxy") return Allow("infra_allowlisted");
             if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != "10.247.0.3" ||
                 state.Role != "package-proxy" || entry.ImageDigest is null || state.ImageId != entry.ImageDigest)

@@ -1,5 +1,6 @@
-using System.Text.Json;
 using System.Buffers.Binary;
+using System.Text;
+using System.Text.Json;
 
 using Kautuka.Hosting;
 using Kautuka.Manager.Hosting;
@@ -242,7 +243,7 @@ public sealed class ApplianceServiceSupervisorTests
                     : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks
                     : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token, standardInput: standardInput);
             if (result.ExitCode == 0 && fixtureHooks is not null && args.Count == 3 && args[0] == "container" && args[1] == "inspect"
-                && args[2] is "kautuka-appliance-gateway" or "kautuka-appliance-webhost" or "kautuka-appliance-observability")
+                && args[2].StartsWith("kautuka-appliance-", StringComparison.Ordinal))
                 return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, runtime) };
             return result;
         });
@@ -385,6 +386,12 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.Equal(0, (await podman.RunAsync(["stop", collector], 30, token)).ExitCode);
             Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
             await WaitForCollectorAsync(podman, collector, token);
+            string credentials = await gateway.EnsureRunningAsync(Role, token);
+            string channel = await gateway.EnsureRunningAsync("channelhost", token);
+            Assert.Equal(credentials, await gateway.EnsureRunningAsync(Role, token));
+            Assert.Equal(channel, await gateway.EnsureRunningAsync("channelhost", token));
+            await CheckCollectorRelayAsync(podman, credentials, token);
+            await CheckCollectorRelayAsync(podman, channel, token);
             imageInspections = 0;
             string id = await gateway.EnsureRunningAsync("gateway", token);
             Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
@@ -417,12 +424,16 @@ public sealed class ApplianceServiceSupervisorTests
             }
             Assert.True(ready, "Gateway did not recover after restart.");
             if (release.Deployment.Images.ContainsKey("webhost"))
+            {
                 await CheckPublishedWebHostAsync(gateway, podman, images, token);
+                await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
+            }
         }
         finally
         {
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-webhost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
+            await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-channelhost", "kautuka-appliance-credentialshost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-observability"], 20, CancellationToken.None);
             await topology.StopAsync(CancellationToken.None);
             await podman.RunAsync(["pod", "rm", "--force", "--ignore", EgressTopologyManager.EgressPodName], 30, CancellationToken.None);
@@ -444,9 +455,9 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.Fail("OpenObserve did not answer its local readiness probe.");
     }
 
-    private static async Task CheckCollectorRelayAsync(PodmanCommandRunner podman, string gateway, CancellationToken token)
+    private static async Task CheckCollectorRelayAsync(PodmanCommandRunner podman, string container, CancellationToken token)
     {
-        PodmanCommandResult pid = await podman.RunAsync(["inspect", "--format", "{{.State.Pid}}", gateway], 10, token);
+        PodmanCommandResult pid = await podman.RunAsync(["inspect", "--format", "{{.State.Pid}}", container], 10, token);
         Assert.Equal(0, pid.ExitCode);
 
         byte[] body = "fixture-otlp"u8.ToArray();
@@ -463,6 +474,40 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.Equal("200", post.StdOut.Trim());
     }
 
+    private static async Task WaitForServiceLogsAsync(PodmanCommandRunner podman, string collector, string authorization, CancellationToken token)
+    {
+        PodmanCommandResult pid = await podman.RunAsync(["inspect", "--format", "{{.State.Pid}}", collector], 10, token);
+        Assert.Equal(0, pid.ExitCode);
+        string[] services = ["kautuka-channelhost", "kautuka-credentialshost", "kautuka-gateway", "kautuka-webhost"];
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (int attempt = 0; attempt < 24; attempt++)
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
+            string query = JsonSerializer.Serialize(new
+            {
+                query = new { sql = "select distinct service_name from default", start_time = now - 120_000_000, end_time = now + 10_000_000, from = 0, size = 50 },
+            });
+            string escapedQuery = query.Replace("\"", "\\\"", StringComparison.Ordinal);
+            string config = $"header = \"Authorization: Basic {authorization}\"\n"
+                + $"data = \"{escapedQuery}\"\n";
+            using var input = new MemoryStream(Encoding.UTF8.GetBytes(config));
+            PodmanCommandResult result = await podman.RunAsync(["unshare", "nsenter", "-t", pid.StdOut.Trim(), "-n", "curl",
+                "--noproxy", "*", "--max-time", "2", "--silent", "--fail",
+                "--header", "Content-Type: application/json", "--config", "-",
+                "http://127.0.0.1:5080/api/default/_search?type=logs"], 4, token, standardInput: input);
+            if (result.ExitCode == 0)
+            {
+                using JsonDocument response = JsonDocument.Parse(result.StdOut);
+                foreach (JsonElement row in response.RootElement.GetProperty("hits").EnumerateArray())
+                    if (row.TryGetProperty("service_name", out JsonElement name) && name.GetString() is { } value)
+                        seen.Add(value);
+                if (services.All(seen.Contains)) return;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(500), token);
+        }
+        Assert.Fail($"OpenObserve did not record service logs for {string.Join(", ", services.Where(name => !seen.Contains(name)))}.");
+    }
+
     private static async Task CheckPublishedWebHostAsync(ApplianceServiceSupervisor supervisor, PodmanCommandRunner podman,
         string images, CancellationToken token)
     {
@@ -470,6 +515,7 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.True(load.ExitCode == 0, load.StdErr);
         string id = await supervisor.EnsureRunningAsync("webhost", token);
         Assert.Equal(id, await supervisor.EnsureRunningAsync("webhost", token));
+        await CheckCollectorRelayAsync(podman, id, token);
         PodmanCommandResult port = await podman.RunAsync(["port", id, "20229/tcp"], 10, token);
         Assert.Equal(0, port.ExitCode);
         Assert.StartsWith("127.0.0.1:", port.StdOut, StringComparison.Ordinal);

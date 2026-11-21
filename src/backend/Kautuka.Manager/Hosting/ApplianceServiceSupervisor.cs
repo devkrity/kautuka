@@ -31,18 +31,18 @@ internal sealed partial class ApplianceServiceSupervisor(
     private const string WebHostRole = "webhost";
     private const string ObservabilityRole = "observability";
     private static readonly TimeSpan reconcileDelay = TimeSpan.FromSeconds(5);
-    private readonly Service credentials = new(CredentialsRole, "credentialsHost");
-    private readonly Service channel = new(ChannelRole, "channelHost");
-    private readonly Service gateway = new(GatewayRole, "gateway");
-    private readonly Service webHost = new(WebHostRole, "webhost");
-    private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName);
+    private readonly Service credentials = new(CredentialsRole, "credentialsHost", superviseObservability);
+    private readonly Service channel = new(ChannelRole, "channelHost", superviseObservability);
+    private readonly Service gateway = new(GatewayRole, "gateway", networked: true);
+    private readonly Service webHost = new(WebHostRole, "webhost", networked: true);
+    private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
 
-    private sealed class Service(string role, string stateName)
+    private sealed class Service(string role, string stateName, bool networked)
     {
         internal string Role { get; } = role;
         internal string StateName { get; } = stateName;
         internal string ContainerName { get; } = $"kautuka-appliance-{role}";
-        internal string? NetworkRole => Role is GatewayRole or WebHostRole or ObservabilityRole ? $"appliance-{Role}" : null;
+        internal string? NetworkRole { get; } = networked ? $"appliance-{role}" : null;
         internal string? RuntimeImageId { get; set; }
         internal string? ActiveContainer { get; set; }
         internal bool Ready { get; set; }
@@ -64,19 +64,14 @@ internal sealed partial class ApplianceServiceSupervisor(
             using var timer = new PeriodicTimer(reconcileDelay);
             do
             {
-                if (KautukaMaintenanceMode.IsActive)
+                if (KautukaMaintenanceMode.IsActive || (superviseObservability && topology?.IsStartupGateOpen != true))
                 {
                     await StopCohortAsync(stoppingToken).ConfigureAwait(false);
                 }
                 else
                 {
                     if (superviseObservability)
-                    {
-                        if (topology?.IsStartupGateOpen == true)
-                            await TryReconcileAsync(observability, stoppingToken).ConfigureAwait(false);
-                        else
-                            await StopActiveAsync(observability, stoppingToken).ConfigureAwait(false);
-                    }
+                        await TryReconcileAsync(observability, stoppingToken).ConfigureAwait(false);
                     await TryReconcileAsync(credentials, stoppingToken).ConfigureAwait(false);
                     await TryReconcileAsync(channel, stoppingToken).ConfigureAwait(false);
                     if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready)
@@ -278,7 +273,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
         else args.Add("--network=none");
 
-        if (service.Role == GatewayRole && superviseObservability)
+        if (superviseObservability && service.Role != ObservabilityRole)
         {
             string endpoint = FormattableString.Invariant($"http://{WorkloadRulesetRenderer.EgressPodIp}:{WorkloadRulesetRenderer.TelemetryIngressPort}/api/default");
             args.AddRange([

@@ -40,13 +40,20 @@ public static class WorkloadRulesetRenderer
     public static readonly IReadOnlyList<string> RequiredApplianceComments =
     ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
 
-    public static string? FindApplianceAddress(string? role) => role switch
-    {
-        "appliance-gateway" => ApplianceGatewayIp,
-        "appliance-webhost" => ApplianceWebHostIp,
-        "appliance-observability" => ObservabilityIp,
-        _ => null,
-    };
+    private static readonly (string Role, string Address)[] ApplianceAddresses =
+    [
+        ("appliance-gateway", ApplianceGatewayIp),
+        ("appliance-webhost", ApplianceWebHostIp),
+        ("appliance-observability", ObservabilityIp),
+        ("appliance-credentialshost", ApplianceCredentialsHostIp),
+        ("appliance-channelhost", ApplianceChannelHostIp),
+    ];
+
+    public static string? FindApplianceAddress(string? role)
+        => Array.Find(ApplianceAddresses, entry => entry.Role == role).Address;
+
+    public static string? FindApplianceRole(string address)
+        => Array.Find(ApplianceAddresses, entry => entry.Address == address).Role;
 
     /// <summary>
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
@@ -69,6 +76,7 @@ public static class WorkloadRulesetRenderer
                 "appliance-gateway" => RenderApplianceGateway(),
                 "appliance-webhost" => RenderApplianceWebHost(),
                 "appliance-observability" => RenderObservability(),
+                "appliance-credentialshost" or "appliance-channelhost" => RenderTelemetryOnly(normalizedIp),
                 _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
             };
         }
@@ -137,6 +145,7 @@ public static class WorkloadRulesetRenderer
           chain input { type filter hook input priority 0; policy drop;
             meta nfproto ipv6 counter drop comment "input_ipv6_drop"
             iifname "lo" accept
+            ct state established accept
             tcp dport {{WebHostPort}} accept
             counter drop comment "input_drop"
           }
@@ -145,6 +154,7 @@ public static class WorkloadRulesetRenderer
             oifname "lo" accept
             oifname != "lo" ip saddr != {{ApplianceWebHostIp}} counter drop comment "spoof_drop"
             ct state established accept
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
             counter drop comment "final_drop"
           }
         }
@@ -171,13 +181,37 @@ public static class WorkloadRulesetRenderer
 
         """;
 
+    private static string RenderTelemetryOnly(string address) => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ct state established accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{address}} counter drop comment "spoof_drop"
+            ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+
     public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         if (applianceRole is not null)
         {
             ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
-            string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{applianceRole.Replace('-', '_')}.nft.json.tmpl");
+            string profile = applianceRole is "appliance-credentialshost" or "appliance-channelhost"
+                ? "appliance_telemetry_only" : applianceRole.Replace('-', '_');
+            string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{profile}.nft.json.tmpl")
+                .Replace("{{IP}}", allocatedIp, StringComparison.Ordinal);
             return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceComments, allocatedIp);
         }
         string templateName = isPackageProxy ? "kautuka_package_proxy.nft.json.tmpl" : "kautuka_workload.nft.json.tmpl";
