@@ -14,9 +14,10 @@ using Microsoft.Extensions.Options;
 
 bool verifyAppliance = KautukaMaintenanceMode.IsApplianceVerification;
 bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
-if (prepareApplianceImages || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
+bool checkApplianceReadiness = args.Contains("--check-appliance-ready", StringComparer.Ordinal);
+if (prepareApplianceImages || checkApplianceReadiness || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
 {
-    bool commandFirst = args[0] is "--verify-appliance-release" or "--prepare-appliance-images";
+    bool commandFirst = args[0] is "--verify-appliance-release" or "--prepare-appliance-images" or "--check-appliance-ready";
     bool selectCandidate = args is [_, "--candidate-version", _];
     if (!OperatingSystem.IsLinux() || !commandFirst || (args.Length != 1 && !selectCandidate))
     {
@@ -29,6 +30,19 @@ if (prepareApplianceImages || args.Contains("--verify-appliance-release", String
         const string managerRoot = "/opt/kautuka/manager";
         VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
             TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka", selectCandidate ? args[2] : null));
+        if (checkApplianceReadiness)
+        {
+            if (verifyAppliance)
+                TrustedApplianceReleaseFiles.RequireVerificationTarget(release.Version, Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!);
+            if (!await ApplianceServiceReadiness.CheckManagerAsync(release.ReleaseId, verifyAppliance, CancellationToken.None)
+                    .ConfigureAwait(false))
+            {
+                await Console.Error.WriteLineAsync($"Manager has not reported readiness for {release.ReleaseId} in the requested boot mode.").ConfigureAwait(false);
+                return 1;
+            }
+            await Console.Out.WriteLineAsync($"Manager reports {release.ReleaseId} ready.").ConfigureAwait(false);
+            return 0;
+        }
         if (prepareApplianceImages)
         {
             var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());

@@ -116,3 +116,5 @@ Manager's authenticated host status reports its selected signed release ID and w
 Candidate readiness also requires a healthy package proxy with verified egress rules. Manager reconciles the proxy during the fenced boot without starting the workspace supervisor.
 
 During a fenced boot, Manager sends empty OTLP requests for logs, metrics, and traces from WebHost's network namespace through the existing Envoy ingestion listener. Candidate readiness requires all three requests to succeed.
+
+On the Linux appliance, `kautuka-manager --check-appliance-ready` checks the selected signed release over Manager's authenticated Unix socket. Pass `--candidate-version VERSION` to expect a specific installed release. With `KAUTUKA_APPLIANCE_VERIFY=1`, the check also requires the protected recovery marker to name that verification target.
