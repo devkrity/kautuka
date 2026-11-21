@@ -232,6 +232,23 @@ public static class LocalCaMtlsBootstrap
 
     private static X509Certificate2 GenerateCa(string caKeyPath, string caCertPath, string serviceName)
     {
+        X509Certificate2 caCert = CreateCertificateAuthority(serviceName);
+        try
+        {
+            using ECDsa key = caCert.GetECDsaPrivateKey() ?? throw new CryptographicException("Local CA private key is missing.");
+            WriteAtomic(caKeyPath, key.ExportECPrivateKey());
+            WriteAtomic(caCertPath, caCert.Export(X509ContentType.Cert));
+            return caCert;
+        }
+        catch
+        {
+            caCert.Dispose();
+            throw;
+        }
+    }
+
+    internal static X509Certificate2 CreateCertificateAuthority(string serviceName)
+    {
         using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
         var req = new CertificateRequest(
@@ -246,24 +263,15 @@ public static class LocalCaMtlsBootstrap
         req.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(req.PublicKey, critical: false));
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
-        X509Certificate2 caCert = req.CreateSelfSigned(now.AddSeconds(-5), now.AddYears(10));
-
-        // Persist CA private key (PKCS8 EC private key DER)
-        byte[] keyBytes = ecdsa.ExportECPrivateKey();
-        WriteAtomic(caKeyPath, keyBytes);
-
-        // Persist CA public cert (DER)
-        byte[] certBytes = caCert.Export(X509ContentType.Cert);
-        WriteAtomic(caCertPath, certBytes);
-
-        return caCert;
+        return req.CreateSelfSigned(now.AddSeconds(-5), now.AddYears(10));
     }
 
-    private static X509Certificate2 IssueCert(
+    internal static X509Certificate2 IssueCert(
         X509Certificate2 ca,
         string subjectCn,
         Oid ekuOid,
-        Action<SubjectAlternativeNameBuilder>? sanBuilder)
+        Action<SubjectAlternativeNameBuilder>? sanBuilder,
+        int validityDays = 30)
     {
         using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 
@@ -292,7 +300,7 @@ public static class LocalCaMtlsBootstrap
         byte[] serial = new byte[8];
         RandomNumberGenerator.Fill(serial);
 
-        X509Certificate2 signed = req.Create(ca, now.AddSeconds(-5), now.AddDays(30), serial);
+        X509Certificate2 signed = req.Create(ca, now.AddSeconds(-5), now.AddDays(validityDays), serial);
         var ephemeralCert = signed.CopyWithPrivateKey(ecdsa);
         signed.Dispose();
 

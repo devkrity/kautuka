@@ -1402,6 +1402,26 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
     }
 
     [Fact]
+    public void ApplianceConnectMountsOnlyListenerFilesAndAdmitsOnlyGatewaySource()
+    {
+        string certificates = Path.Combine(tempDir, "gateway-connect", "envoy");
+        IReadOnlyList<string> args = EgressTopologyManager.BuildEnvoyCreateArgs(
+            Path.Combine(tempDir, "envoy.yaml"), "sockets", "admin", gatewayConnectEnvoyDirectory: certificates);
+        Assert.Equal(new[] { "server.crt", "server.key", "gateway-ca.crt" }
+            .Select(file => $"{Path.Combine(certificates, file)}:/etc/kautuka-connect/{file}:ro,Z"),
+            args.Where(arg => arg.Contains(":/etc/kautuka-connect", StringComparison.Ordinal)));
+        Assert.DoesNotContain("--user", args);
+
+        const string sourceAndDestination = "ip saddr 10.247.0.4 ip daddr 10.247.0.2 tcp dport 15004";
+        string boundary = BoundaryRulesetRenderer.RenderBoundaryNft(includeGatewayConnect: true);
+        int exemption = boundary.IndexOf($"{sourceAndDestination} counter return", StringComparison.Ordinal);
+        int redirect = boundary.IndexOf("redirect to :15001", StringComparison.Ordinal);
+        Assert.True(exemption >= 0 && exemption < redirect);
+        Assert.Contains($"{sourceAndDestination} counter accept", boundary, StringComparison.Ordinal);
+        Assert.DoesNotContain("15004", BoundaryRulesetRenderer.RenderBoundaryNft(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DnsAndEnvoyConfigsUseDedicatedReadOnlyRelabeledDirectoryMounts_WithNegativeControl()
     {
         string dnsDir = Path.Combine(tempDir, "nac", "dns");

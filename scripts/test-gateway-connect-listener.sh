@@ -110,6 +110,17 @@ in_fixture_net python3 "$temp/origin.py" "$temp/origin.pid" >"$temp/origin.log" 
 origin_pid=$!
 
 mkdir "$temp/admin"
+# Check the production file binds against the pinned image's non-root default user.
+install -d -m 0700 "$temp/listener"
+listener_binds=()
+for file in server.crt server.key gateway-ca.crt; do
+    install -m 0444 "$temp/certs/$file" "$temp/listener/$file"
+    listener_binds+=(-v "$temp/listener/$file:/etc/kautuka-connect/$file:ro,Z")
+done
+podman run --rm --pull=never --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+    -v "$temp/authorization/envoy.yaml:/run/kautuka-nac/envoy.yaml:ro,Z" \
+    "${listener_binds[@]}" "$envoy_image" --config-path /run/kautuka-nac/envoy.yaml --mode validate --log-level error
+
 # The fixture authorization socket belongs to a temporary host process.
 # The appliance has its own SELinux policy for Manager's authorization socket.
 envoy_args=(--pull=never --network "container:$dns" --security-opt label=disable --user 0 --entrypoint /usr/local/bin/envoy

@@ -12,5 +12,6 @@
     <Compile Include="../../backend/Kautuka.Manager.RuntimeContainer/Hosting/NetworkAccess/NftRulesetCanonicalizer.cs" Link="NftRulesetCanonicalizer.cs" />
     <EmbeddedResource Include="../../../scripts/nac/kautuka_workload.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_workload.nft.json.tmpl" />
     <EmbeddedResource Include="../../../scripts/nac/kautuka_package_proxy.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_package_proxy.nft.json.tmpl" />
+    <EmbeddedResource Include="kautuka_appliance_gateway.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_appliance_gateway.nft.json.tmpl" />
   </ItemGroup>
 </Project>

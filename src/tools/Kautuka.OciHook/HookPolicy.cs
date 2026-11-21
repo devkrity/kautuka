@@ -1,3 +1,5 @@
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+
 using System.Net;
 using System.Net.Sockets;
 
@@ -23,7 +25,7 @@ internal static class HookPolicy
         if (ips is null || ips.Count == 0) return Refuse("no_ip");
         if (!ips.Any(static ip => ip.StartsWith("10.247.", StringComparison.Ordinal) || ip == "10.247"))
         {
-            if (state.Role == "workload")
+            if (state.Role is "workload" or "appliance-gateway")
                 return Refuse(ownersValid ? "workload_off_network" : ownersReason ?? "owners_unreadable");
             return Allow("outside_boundary");
         }
@@ -45,12 +47,25 @@ internal static class HookPolicy
                 }
             }
             if (!matches) return Refuse("infra_ip_mismatch");
+            if (entry.Role == "appliance-gateway")
+            {
+                if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != WorkloadRulesetRenderer.ApplianceGatewayIp ||
+                    state.Role != "appliance-gateway" || !IsImmutableImageId(entry.ImageDigest) || state.ImageId != entry.ImageDigest)
+                    return Refuse("appliance_gateway_identity_mismatch");
+                if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
+                if (inode is null) return Refuse("missing_netns_inode");
+                if (owners.TryGetValue(inode, out string? gatewayOwner) && gatewayOwner != state.Id) return Refuse("shared_netns");
+                return Allow("appliance_gateway_rules");
+            }
+            if (state.Role == "appliance-gateway" || ips.Contains(WorkloadRulesetRenderer.ApplianceGatewayIp, StringComparer.Ordinal))
+                return Refuse("appliance_gateway_identity_mismatch");
             if (entry.Role != "pkgs-proxy") return Allow("infra_allowlisted");
             if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != "10.247.0.3" ||
                 state.Role != "package-proxy" || entry.ImageDigest is null || state.ImageId != entry.ImageDigest)
                 return Refuse("package_proxy_identity_mismatch");
             return Allow("package_proxy_rules");
         }
+        if (state.Role == "appliance-gateway") return Refuse("appliance_gateway_identity_mismatch");
         if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
         if (ips.Any(static ip => ip.StartsWith("10.247.0.", StringComparison.Ordinal) && ip.Split('.').Length == 4))
             return Refuse("reserved_range");
@@ -64,6 +79,10 @@ internal static class HookPolicy
         if (owners.TryGetValue(inode, out string? owner) && owner != state.Id) return Refuse("shared_netns");
         return Allow("workload_rules");
     }
+
+    private static bool IsImmutableImageId(string? value) => value is { Length: 71 } &&
+        value.StartsWith("sha256:", StringComparison.Ordinal) &&
+        value.Skip(7).All(static ch => ch is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool ValidSet(IReadOnlyList<string> ips) => ips.Count > 0 &&
         ips.All(static ip => IPAddress.TryParse(ip, out IPAddress? parsed) &&

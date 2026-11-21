@@ -68,6 +68,7 @@ managerDataRoot = Path.GetFullPath(managerDataRoot);
 KautukaEndpoint managerEndpoint = KautukaHostNetworkPolicy.Resolve(builder.Configuration).Manager;
 string socketRoot = KautukaHostNetworkPolicy.ResolveSocketRoot(builder.Configuration);
 var podmanCommandRunner = new PodmanCommandRunner();
+string? gatewayConnectEnvoyDirectory = null;
 if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
 {
     if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
@@ -79,6 +80,8 @@ if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
     const string managerRoot = "/opt/kautuka/manager";
     VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
         TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+    GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
+    gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
     builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), socketRoot,
@@ -160,7 +163,8 @@ builder.Services.AddSingleton(sp =>
             OperatingSystem.IsLinux(), builder.Environment.IsDevelopment(),
             Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX"),
             Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX")),
-        imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>()));
+        imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
+        gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());

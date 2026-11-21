@@ -13,6 +13,8 @@ public static class WorkloadRulesetRenderer
     public const string WorkloadTableName = "kautuka_workload";
     public const string EgressPodIp = "10.247.0.2";
     public const string PackageProxyIp = "10.247.0.3";
+    public const string ApplianceGatewayIp = "10.247.0.4";
+    public const int GatewayConnectPort = 15004;
     public const int PackageProxyPort = 20101;
     public const int EnvoyPort = 15001;
     public const int DnsPort = 53;
@@ -28,17 +30,27 @@ public static class WorkloadRulesetRenderer
         "final_drop",
     ];
 
+    public static readonly IReadOnlyList<string> RequiredApplianceGatewayComments =
+    ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
+
     /// <summary>
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool isPackageProxy = false)
+    public static string Render(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
         if (!IPAddress.TryParse(normalizedIp, out IPAddress? parsed) || parsed.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         {
             throw new ArgumentException($"Invalid workload IPv4 address: '{allocatedIp}'.", nameof(allocatedIp));
+        }
+
+        if (isApplianceGateway)
+        {
+            if (isPackageProxy || normalizedIp != ApplianceGatewayIp)
+                throw new ArgumentException("Invalid appliance Gateway ruleset identity.", nameof(allocatedIp));
+            return RenderApplianceGateway();
         }
 
         var sb = new StringBuilder();
@@ -75,9 +87,42 @@ public static class WorkloadRulesetRenderer
         return sb.ToString();
     }
 
-    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false)
+    private static string RenderApplianceGateway() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ct state established,related accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ApplianceGatewayIp}} counter drop comment "spoof_drop"
+            ip daddr {{EgressPodIp}} tcp dport {{GatewayConnectPort}} accept
+            ip daddr {{EgressPodIp}} meta l4proto { udp, tcp } th dport {{DnsPort}} accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+
+    private static string ComputeGatewayExpectedHash()
+    {
+        string golden = BoundaryRulesetRenderer.ResolveTemplate("kautuka_appliance_gateway.nft.json.tmpl");
+        return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceGatewayComments, ApplianceGatewayIp);
+    }
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        if (isApplianceGateway)
+        {
+            if (isPackageProxy || allocatedIp != ApplianceGatewayIp)
+                throw new ArgumentException("Invalid appliance Gateway ruleset identity.", nameof(allocatedIp));
+            return ComputeGatewayExpectedHash();
+        }
         string templateName = isPackageProxy ? "kautuka_package_proxy.nft.json.tmpl" : "kautuka_workload.nft.json.tmpl";
         string tmpl = BoundaryRulesetRenderer.ResolveTemplate(templateName);
         string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);

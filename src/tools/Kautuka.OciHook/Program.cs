@@ -68,8 +68,9 @@ try
 
     failure = "apply_failed";
     bool packageProxy = decision.Reason == "package_proxy_rules";
+    bool applianceGateway = decision.Reason == "appliance_gateway_rules";
     string address = addresses[0];
-    string rules = WorkloadRulesetRenderer.Render(address, packageProxy);
+    string rules = WorkloadRulesetRenderer.Render(address, packageProxy, applianceGateway);
     string nftTool = FindSystemTool("nft");
     var apply = await target.RunAsync(nftTool, ["-f", "-"], rules).ConfigureAwait(false);
     if (apply.ExitCode != 0)
@@ -79,8 +80,8 @@ try
     if (verify.ExitCode != 0)
         return Finish(false, failure);
     string observedHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
-        verify.Stdout, WorkloadRulesetRenderer.RequiredWorkloadComments, address);
-    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy))
+        verify.Stdout, applianceGateway ? WorkloadRulesetRenderer.RequiredApplianceGatewayComments : WorkloadRulesetRenderer.RequiredWorkloadComments, address);
+    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy, applianceGateway))
         return Finish(false, failure);
     if (!ProcessIdentity.IsLive(state.Pid, inode, target.Identity.StartTicks))
         return Finish(false, "container_identity_changed");
@@ -104,7 +105,7 @@ int Finish(bool allowed, string reason)
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
     {
         Console.Error.WriteLine("The Kautuka OCI hook could not write its audit record.");
-        if (allowed && reason is "workload_rules" or "package_proxy_rules")
+        if (allowed && reason is "workload_rules" or "package_proxy_rules" or "appliance_gateway_rules")
             return 1;
     }
 

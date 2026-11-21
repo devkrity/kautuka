@@ -146,6 +146,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private volatile bool packageProxyStartupReady;
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly string? gatewayConnectEnvoyDirectory;
+
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
         WorkloadAddressAllocator addressAllocator,
@@ -163,7 +165,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         ImageCompatibilityStore? imageCompatibilityStore = null,
         NetworkAccessPolicyStore? policyStore = null,
         bool useDevelopmentSelinuxDomain = false,
-        PodmanImageArchiveStore? imageArchives = null)
+        PodmanImageArchiveStore? imageArchives = null,
+        string? gatewayConnectEnvoyDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -179,6 +182,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.policyStore = policyStore;
         this.useDevelopmentSelinuxDomain = useDevelopmentSelinuxDomain;
         this.imageArchives = imageArchives;
+        this.gatewayConnectEnvoyDirectory = gatewayConnectEnvoyDirectory;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -1473,10 +1477,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         CancellationToken cancellationToken)
     {
         // Render boundary and configs
-        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp]);
+        bool includeGatewayConnect = gatewayConnectEnvoyDirectory is not null;
+        string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp], includeGatewayConnect);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
-            isWindowsMtls: isWindowsHostNativeDev);
+            isWindowsMtls: isWindowsHostNativeDev,
+            includeGatewayConnect: includeGatewayConnect);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
@@ -1641,7 +1647,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 decisionEndpointIp,
                 envoyCertificateDirectory,
                 useDevelopmentSelinuxDomain,
-                podSelinuxLevel),
+                podSelinuxLevel,
+                gatewayConnectEnvoyDirectory),
             allowlistEntries,
             cancellationToken).ConfigureAwait(false);
 
@@ -2041,7 +2048,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string? decisionEndpointIp = null,
         string? envoyCertificateDirectory = null,
         bool useDevelopmentSelinuxDomain = false,
-        string? podSelinuxLevel = null)
+        string? podSelinuxLevel = null,
+        string? gatewayConnectEnvoyDirectory = null)
     {
         List<string> args =
         [
@@ -2066,6 +2074,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             args.Insert(6, "keep-groups");
             args.AddRange(["-v", $"{envoySocketHostDir}:/run/kautuka-nac:z"]);
             args.AddRange(["-v", $"{adminSocketDir}:/run/kautuka-admin:z"]);
+            if (gatewayConnectEnvoyDirectory is not null)
+            {
+                foreach (string file in new[] { "server.crt", "server.key", "gateway-ca.crt" })
+                    args.AddRange(["-v", $"{Path.Combine(gatewayConnectEnvoyDirectory, file)}:/etc/kautuka-connect/{file}:ro,Z"]);
+            }
         }
         else
         {

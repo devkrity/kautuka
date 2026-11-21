@@ -168,3 +168,30 @@ if (OperatingSystem.IsLinux())
     }
     finally { Directory.Delete(dir, true); }
 }
+string gatewayImage = "sha256:" + new string('a', 64);
+var gatewayState = new HookPolicy.State("gateway-id", 123, "appliance-gateway", gatewayImage);
+var gatewayAllowlist = new Dictionary<string, HookPolicy.Infrastructure>
+{
+    ["gateway-id"] = new("appliance-gateway", ["10.247.0.4"], ImageDigest: gatewayImage),
+};
+Check("appliance_gateway_rules", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, owners, "100"));
+Check("workload_off_network", HookPolicy.Decide(gatewayState, ["192.0.2.4"], gatewayAllowlist, owners, "100"));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState, ["10.247.1.4"], empty, owners, "100"));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "sha256:" + new string('b', 64) }, ["10.247.0.4"], gatewayAllowlist, owners, "100"));
+Check("shared_netns", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, new Dictionary<string, string?> { ["100"] = "other" }, "100"));
+Check("owners_unreadable", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, owners, "100", ownersValid: false));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(new("generic", 123), ["10.247.0.4"],
+    new Dictionary<string, HookPolicy.Infrastructure> { ["generic"] = new("other", ["10.247.0.4"]) }, owners, "100"));
+string gatewayRules = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.Render("10.247.0.4", isApplianceGateway: true);
+if (!gatewayRules.Contains("tcp dport 15004 accept", StringComparison.Ordinal) ||
+    gatewayRules.Contains("meta l4proto tcp accept", StringComparison.Ordinal) ||
+    gatewayRules.IndexOf("input_ipv6_drop", StringComparison.Ordinal) > gatewayRules.IndexOf("iifname", StringComparison.Ordinal) ||
+    gatewayRules.IndexOf("ipv6_drop", gatewayRules.IndexOf("chain output", StringComparison.Ordinal), StringComparison.Ordinal) > gatewayRules.IndexOf("oifname", StringComparison.Ordinal))
+    throw new InvalidOperationException("Gateway rules are not restricted.");
+string gatewayHash = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash("10.247.0.4", isApplianceGateway: true);
+if (gatewayHash != "821fea6deb4eaf3fd18478e9c680bd6490cfdaecb64a1890b360b562a45fa4c9") throw new InvalidOperationException("Gateway golden hash differs from the verified Fedora nft output.");
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { Role = null }, ["10.247.0.4"], gatewayAllowlist, owners, "100"));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "not-immutable" }, ["10.247.0.4"],
+    new Dictionary<string, HookPolicy.Infrastructure> { ["gateway-id"] = new("appliance-gateway", ["10.247.0.4"], ImageDigest: "not-immutable") }, owners, "100"));
+Check("reserved_range", HookPolicy.Decide(new("unknown", 123), ["10.247.0.4"], empty, owners, "100"));
+Check("missing_netns_inode", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, owners, null));

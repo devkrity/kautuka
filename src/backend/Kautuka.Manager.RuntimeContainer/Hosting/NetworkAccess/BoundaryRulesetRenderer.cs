@@ -12,7 +12,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 public static class BoundaryRulesetRenderer
 {
     public const string BoundaryTableName = "kautuka_egress";
-    internal const int GatewayConnectPort = 15004;
+    internal const int GatewayConnectPort = WorkloadRulesetRenderer.GatewayConnectPort;
 
     public static readonly IReadOnlyList<string> RequiredBoundaryComments =
     [
@@ -71,7 +71,8 @@ public static class BoundaryRulesetRenderer
     public static string RenderBoundaryNft(
         bool includeLanGrants = false,
         string? decisionEndpointIp = null,
-        IEnumerable<string>? upstreamDnsIps = null)
+        IEnumerable<string>? upstreamDnsIps = null,
+        bool includeGatewayConnect = false)
     {
         string decisionEndpointRule = !string.IsNullOrWhiteSpace(decisionEndpointIp)
             ? $"    ip daddr {decisionEndpointIp.Trim()} tcp dport 50051 counter accept comment \"decision_endpoint\""
@@ -84,6 +85,8 @@ public static class BoundaryRulesetRenderer
             : string.Empty;
 
         string privateRejectRule = NetworkAddressClassifier.RenderNftPrivateRejectRule();
+        string gatewayConnectMatch = FormattableString.Invariant(
+            $"ip saddr {WorkloadRulesetRenderer.ApplianceGatewayIp} ip daddr {EgressTopologyManager.EgressPodIp} tcp dport {GatewayConnectPort}");
 
         var sb = new StringBuilder();
         sb.AppendLine("table ip kautuka_egress");
@@ -92,6 +95,8 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("  chain prerouting {");
         sb.AppendLine("    type nat hook prerouting priority dstnat; policy accept;");
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 tcp dport 53 counter return");
+        if (includeGatewayConnect)
+            sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter return comment \"gateway_connect_no_redirect\"");
         sb.AppendLine("    ip saddr 10.247.0.0/16 meta l4proto tcp counter redirect to :15001");
         sb.AppendLine("  }");
         sb.AppendLine("  chain forward {");
@@ -104,6 +109,8 @@ public static class BoundaryRulesetRenderer
         sb.AppendLine("    ct state established,related accept");
         sb.AppendLine("    ip saddr 10.247.0.0/16 tcp dport 15001 accept");
         sb.AppendLine("    ip saddr 10.247.0.0/16 ip daddr 10.247.0.2 meta l4proto { tcp, udp } th dport 53 accept");
+        if (includeGatewayConnect)
+            sb.Append("    ").Append(gatewayConnectMatch).AppendLine(" counter accept comment \"gateway_connect_ingress\"");
         sb.AppendLine("    counter drop");
         sb.AppendLine("  }");
         sb.AppendLine("  chain output {");
