@@ -1338,6 +1338,31 @@ EOF
     chmod 0440 /etc/sudoers.d/kautuka-apply-release
 }
 
+install_appliance_update_path() {
+    cat > /etc/systemd/system/kautuka-appliance-update.path <<'EOF'
+[Unit]
+Description=Watch for a prepared Kautuka appliance update
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
+
+[Path]
+PathExists=/var/lib/kautuka/updateService/updates/activate-appliance
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    cat > /etc/systemd/system/kautuka-appliance-update.service <<'EOF'
+[Unit]
+Description=Apply a prepared Kautuka appliance update
+
+[Service]
+Type=oneshot
+Environment=KAUTUKA_APPLY_DETACHED=1
+ExecStart=/usr/local/lib/kautuka/apply-release --consume-appliance-request
+EOF
+    chmod 0644 /etc/systemd/system/kautuka-appliance-update.{path,service}
+}
+
 validate_exact_material_inventory() {
     local directory="$1"
     shift
@@ -2181,6 +2206,11 @@ uninstall_release() {
     local delete_data="$6"
     local service_group="$service_user"
     local preserved_state_root=''
+
+    best_effort_systemctl disable --now kautuka-appliance-update.path
+    best_effort_systemctl stop kautuka-appliance-update.service
+    best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.path
+    best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.service
 
     local service_units=(
         "$unit_name"
@@ -3049,6 +3079,9 @@ PY
 
     clear_generated_agent_workspace_state "$visible_root"
     install_apply_release_helper "$tmp_root/extracted"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        install_appliance_update_path
+    fi
     if [[ -n "$manifest_url" ]]; then
         if [[ "$github_release_candidate" == 'true' ]]; then
             # UpdateService independently discovers the selected signed channel
@@ -3167,6 +3200,9 @@ PY
     fi
 
     systemctl enable kautuka-update-recovery.service
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        systemctl enable --now kautuka-appliance-update.path
+    fi
 
     if [[ "$appliance_image_payload" == 'true' ]]; then
         run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \

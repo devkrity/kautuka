@@ -11,6 +11,7 @@ Usage:
   kautuka-apply-release --artifact <tar.gz> --version <version>
   kautuka-apply-release --stage-appliance --artifact <tar.gz> --version <version>
   kautuka-apply-release --activate-appliance --artifact <tar.gz> --version <version>
+  kautuka-apply-release --consume-appliance-request
   kautuka-apply-release --recover
   kautuka-apply-release --boot-recover
   kautuka-apply-release --commit --version <version>
@@ -34,6 +35,7 @@ complete_recovery='false'
 capabilities='false'
 stage_appliance='false'
 activate_appliance='false'
+consume_appliance_request='false'
 recovery_layout=host-service
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -105,6 +107,10 @@ while [[ $# -gt 0 ]]; do
             activate_appliance='true'
             shift
             ;;
+        --consume-appliance-request)
+            consume_appliance_request='true'
+            shift
+            ;;
         --recover)
             recover='true'
             shift
@@ -138,6 +144,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$activate_appliance" == 'true' && "$stage_appliance" == 'true' ]] ||
+    [[ "$consume_appliance_request" == 'true' && ( -n "$artifact" || -n "$version" ||
+       "$activate_appliance" == 'true' || "$stage_appliance" == 'true' || "$recover" == 'true' ||
+       "$boot_recover" == 'true' || "$commit" == 'true' || "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]] ||
     [[ ( "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ) &&
        ( "$recover" == 'true' || "$boot_recover" == 'true' || "$commit" == 'true' ||
          "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]]; then
@@ -1915,9 +1924,15 @@ if [[ "$boot_recover" == 'true' \
 fi
 
 exec 9>"$lock_path"
-if ! flock -n 9; then
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    flock 9
+elif ! flock -n 9; then
     echo "error: another apply-release is already running." >&2
     exit 1
+fi
+
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    activate_appliance='true'
 fi
 
 if [[ "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ]]; then
@@ -1931,6 +1946,40 @@ elif [[ "$recover" == 'true' || "$boot_recover" == 'true' ]]; then
         recover_appliance_operation "$boot_recover"
         exit $?
     fi
+fi
+
+if [[ "$consume_appliance_request" == 'true' ]]; then
+    version="$(python3 - <<'PY'
+import os, re, stat
+from contextlib import ExitStack
+
+name = 'activate-appliance'
+with ExitStack() as stack:
+    directory = None
+    try:
+        for part in ('/var/lib', 'kautuka', 'updateService', 'updates'):
+            directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            stack.callback(os.close, directory)
+        request = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    except OSError as error:
+        if directory is not None and error.filename == name:
+            os.unlink(name, dir_fd=directory)
+        raise SystemExit(f'error: cannot open appliance update request: {error.strerror}')
+    stack.callback(os.close, request)
+    os.unlink(name, dir_fd=directory)
+    metadata = os.fstat(request)
+    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 128:
+        raise SystemExit('error: invalid appliance update request file')
+    value = os.read(request, 129)
+    if not re.fullmatch(rb'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\n', value):
+        raise SystemExit('error: invalid appliance update version')
+    print(value[:-1].decode('ascii'))
+PY
+)"
+    [[ -n "$version" ]] || exit 0
+    artifact="/var/lib/kautuka/updateService/updates/staging/v${version}/kautuka-linux-amd64.tar.gz"
 fi
 
 if [[ "$capabilities" == 'true' ]]; then
