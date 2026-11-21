@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -323,7 +324,8 @@ public sealed class ApplianceServiceSupervisorTests
             if (gatewayEnabled)
             {
                 Assert.True(OperatingSystem.IsLinux());
-                await RunGatewayFixtureAsync(root, runtime, sockets, images, gatewayHook!, podman, release, hooks => fixtureHooks = hooks, cancellation);
+                await RunGatewayFixtureAsync(root, runtime, sockets, images, gatewayHook!, writerLock,
+                    podman, release, hooks => fixtureHooks = hooks, cancellation);
             }
         }
         catch (Exception ex)
@@ -344,7 +346,7 @@ public sealed class ApplianceServiceSupervisorTests
     }
 
     private static async Task RunGatewayFixtureAsync(string root, string runtime, string sockets, string images, string nativeHook,
-        PodmanCommandRunner podman, VerifiedApplianceRelease release, Action<string> setFixtureHooks, CancellationToken token)
+        string writerLock, PodmanCommandRunner podman, VerifiedApplianceRelease release, Action<string> setFixtureHooks, CancellationToken token)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         string version = ProvisionHook(root, runtime);
@@ -479,6 +481,7 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
                 NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
 
+            Assert.Equal(75, await TryAcquireExclusiveWriterLeaseAsync(writerLock, token));
             using var restartedSupervisor = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
                 NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory,
                 superviseObservability: true, superviseUpdateService: release.Deployment.Images.ContainsKey("updateservice"));
@@ -487,6 +490,7 @@ public sealed class ApplianceServiceSupervisorTests
                 ["ps", "--filter", "label=io.kautuka.appliance.service", "--format", "{{.Names}}"], 15, token);
             Assert.Equal(0, running.ExitCode);
             Assert.True(string.IsNullOrWhiteSpace(running.StdOut), running.StdOut);
+            Assert.Equal(0, await TryAcquireExclusiveWriterLeaseAsync(writerLock, token));
             Assert.False(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
                 NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
         }
@@ -501,6 +505,17 @@ public sealed class ApplianceServiceSupervisorTests
             await podman.RunAsync(["pod", "rm", "--force", "--ignore", EgressTopologyManager.EgressPodName], 30, CancellationToken.None);
             await podman.RunAsync(["network", "rm", EgressTopologyManager.WorkloadNetworkName, EgressTopologyManager.OutsideNetworkName], 20, CancellationToken.None);
         }
+    }
+
+    private static async Task<int> TryAcquireExclusiveWriterLeaseAsync(string writerLock, CancellationToken token)
+    {
+        using Process flock = Process.Start(new ProcessStartInfo("flock")
+        {
+            UseShellExecute = false,
+            ArgumentList = { "--exclusive", "--nonblock", "--conflict-exit-code", "75", writerLock, "true" },
+        }) ?? throw new InvalidOperationException("Could not start flock.");
+        await flock.WaitForExitAsync(token);
+        return flock.ExitCode;
     }
 
     private static async Task WaitForCollectorAsync(PodmanCommandRunner podman, string container, CancellationToken token)
