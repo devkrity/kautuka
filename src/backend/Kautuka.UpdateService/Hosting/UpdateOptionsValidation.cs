@@ -64,9 +64,7 @@ internal sealed class UpdateOptionsValidation : IValidateOptions<UpdateOptions>
 
         if (!options.AllowUnsignedLocalFeeds)
         {
-            if ((hasReleaseManifestUrl || hasRepositorySource)
-                && (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath)
-                    || !File.Exists(options.ManifestPublicKeyPath)))
+            if ((hasReleaseManifestUrl || hasRepositorySource) && !options.HasManifestPublicKey)
             {
                 return ValidateOptionsResult.Fail(
                     "Update:ManifestPublicKeyPath must point to an existing trusted public key when AllowUnsignedLocalFeeds is false.");

@@ -166,7 +166,7 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
 
         if (!options.AllowUnsignedLocalFeeds || appliance is not null)
         {
-            if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath) || !File.Exists(options.ManifestPublicKeyPath))
+            if (!options.HasManifestPublicKey)
             {
                 return ReleaseDiscoveryResult.Unsupported("No trusted public key is configured for signed release discovery.", eTag);
             }
@@ -180,7 +180,7 @@ internal sealed class ManifestUrlReleaseDiscoveryClient(
             try
             {
                 signatureBytes = await DownloadBytesAsync(client, signatureAssetUrl, cancellationToken).ConfigureAwait(false);
-                string publicKey = await File.ReadAllTextAsync(options.ManifestPublicKeyPath, cancellationToken).ConfigureAwait(false);
+                string publicKey = await options.ReadManifestPublicKeyAsync(cancellationToken).ConfigureAwait(false);
                 string signature = Encoding.UTF8.GetString(signatureBytes);
                 if (!PlatformReleaseSignatureVerifier.TryVerify(manifestBytes, signature, publicKey, out string? verificationError))
                 {

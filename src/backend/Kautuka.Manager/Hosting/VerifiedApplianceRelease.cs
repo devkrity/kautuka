@@ -8,6 +8,8 @@ namespace Kautuka.Manager.Hosting;
 /// <summary>Authenticates a selected Manager release before its service image map may be used.</summary>
 internal sealed record VerifiedApplianceRelease(string ReleaseId, string Version, ApplianceDeploymentDescriptor Deployment)
 {
+    internal string? ManifestPublicKeyPem { get; init; }
+
     private const int SupportedHookAbi = 1;
 
     internal static VerifiedApplianceRelease Verify(TrustedApplianceReleaseInput input)
@@ -50,7 +52,7 @@ internal sealed record VerifiedApplianceRelease(string ReleaseId, string Version
             throw new InvalidDataException("The signed appliance deployment requires an unsupported OCI hook ABI.");
         }
 
-        return new(releaseId, version, deployment);
+        return new(releaseId, version, deployment) { ManifestPublicKeyPem = input.PublicKeyPem };
     }
 
     private static bool IsReleaseToken(string value)

@@ -7,6 +7,7 @@ public sealed class UpdateOptions
     public bool Enabled { get; set; } = true;
     internal string? ApplianceReleaseId { get; set; }
     internal string? ApplianceReleaseVersion { get; set; }
+    internal string? ManifestPublicKeyPem { get; set; }
 
     public string? RepositoryOwner { get; set; }
 
@@ -48,4 +49,12 @@ public sealed class UpdateOptions
     public TimeSpan DiscoveryInterval { get; set; } = TimeSpan.FromDays(1);
 
     public TimeSpan CatalogRefreshInterval { get; set; } = TimeSpan.FromDays(1);
+
+    internal bool HasManifestPublicKey
+        => !string.IsNullOrWhiteSpace(ManifestPublicKeyPem) || File.Exists(ManifestPublicKeyPath);
+
+    internal async ValueTask<string> ReadManifestPublicKeyAsync(CancellationToken token)
+        => !string.IsNullOrWhiteSpace(ManifestPublicKeyPem)
+            ? ManifestPublicKeyPem
+            : await File.ReadAllTextAsync(ManifestPublicKeyPath!, token).ConfigureAwait(false);
 }

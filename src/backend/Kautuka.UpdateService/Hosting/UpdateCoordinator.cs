@@ -1293,12 +1293,12 @@ internal sealed class UpdateCoordinator(
         }
         else
         {
-            if (string.IsNullOrWhiteSpace(options.ManifestPublicKeyPath))
+            if (!options.HasManifestPublicKey)
             {
                 throw new InvalidOperationException("Platform release signature was published, but no trusted manifest public key path was configured.");
             }
 
-            string publicKeyPem = await File.ReadAllTextAsync(options.ManifestPublicKeyPath, cancellationToken).ConfigureAwait(false);
+            string publicKeyPem = await options.ReadManifestPublicKeyAsync(cancellationToken).ConfigureAwait(false);
             string signatureContent = Encoding.UTF8.GetString(await DownloadBytesAsync(signatureUrl, cancellationToken).ConfigureAwait(false));
             if (!PlatformReleaseSignatureVerifier.TryVerify(manifestBytes, signatureContent, publicKeyPem, out string? verificationError))
             {

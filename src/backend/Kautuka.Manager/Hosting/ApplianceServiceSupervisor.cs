@@ -506,6 +506,8 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
         if (service.Role == UpdateRole)
         {
+            if (release.ManifestPublicKeyPem is { } publicKey)
+                args.AddRange(["--env", $"Kautuka__Appliance__ManifestPublicKeyPem={publicKey}"]);
             args.AddRange([
                 "--dns", WorkloadRulesetRenderer.EgressPodIp,
                 "--env", $"Kautuka__Appliance__ReleaseId={release.ReleaseId}",

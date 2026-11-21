@@ -19,6 +19,7 @@ public sealed class VerifiedApplianceReleaseTests
 
         Assert.Equal("v1.2.3-preview.1", release.ReleaseId);
         Assert.Equal("1.2.3-preview.1", release.Version);
+        Assert.Equal(key.ExportSubjectPublicKeyInfoPem(), release.ManifestPublicKeyPem);
         Assert.Equal(1, release.Deployment.HookAbi);
         Assert.Equal(roles.Length, release.Deployment.Images.Count);
         Assert.Equal(Image("gateway"), release.Deployment.Images["gateway"]);

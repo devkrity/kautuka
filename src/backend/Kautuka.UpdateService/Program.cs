@@ -44,6 +44,12 @@ builder.Services.AddOptions<UpdateOptions>()
         {
             options.ApplianceReleaseId = applianceReleaseId;
             options.ApplianceReleaseVersion = applianceReleaseVersion;
+            options.ManifestPublicKeyPem = builder.Configuration["Kautuka:Appliance:ManifestPublicKeyPem"];
+            options.ManifestPublicKeyPath = null;
+            options.RepositoryOwner = "devkrity";
+            options.RepositoryName = "kautuka";
+            options.ReleaseManifestUrl = null;
+            options.ReleaseChannel = applianceReleaseVersion!.Contains("-preview.", StringComparison.Ordinal) ? "preview" : "stable";
             options.Enabled = false;
             options.AllowUnsignedLocalFeeds = false;
             return;
