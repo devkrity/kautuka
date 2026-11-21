@@ -244,7 +244,7 @@ Check("appliance_observability_identity_mismatch", HookPolicy.Decide(collector w
     new Dictionary<string, HookPolicy.Infrastructure> { [collector.Id] = new("other", [observabilityAddress]) }, owners, "100"));
 string observerHash = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(observabilityAddress, applianceRole: observabilityRole);
 if (observerHash.Length != 64) throw new InvalidOperationException("Invalid observability ruleset hash.");
-foreach ((string role, string address) in new[] { ("appliance-credentialshost", "10.247.0.7"), ("appliance-channelhost", "10.247.0.8") })
+foreach ((string role, string address) in new[] { ("appliance-credentialshost", "10.247.0.7"), ("appliance-channelhost", "10.247.0.8"), ("appliance-updateservice", "10.247.0.9") })
 {
     var peer = new HookPolicy.State("peer", 123, role, gatewayImage);
     var peerAllowlist = new Dictionary<string, HookPolicy.Infrastructure> { [peer.Id] = new(role, [address], ImageDigest: gatewayImage) };
@@ -257,5 +257,12 @@ foreach ((string role, string address) in new[] { ("appliance-credentialshost", 
     if (!rules.Contains("ip daddr 10.247.0.2 tcp dport 15005 accept", StringComparison.Ordinal) ||
         rules.Contains("tcp dport 15004 accept", StringComparison.Ordinal) ||
         rules.Contains("meta l4proto tcp accept", StringComparison.Ordinal))
-        throw new InvalidOperationException($"Invalid telemetry-only rules for {role}.");
+        throw new InvalidOperationException($"Invalid appliance rules for {role}.");
+    if (role == "appliance-updateservice")
+    {
+        if (!rules.Contains("ip daddr 198.18.250.250 tcp dport 443 accept", StringComparison.Ordinal)
+            || !rules.Contains("ip daddr 10.247.0.2 meta l4proto { udp, tcp } th dport 53 accept", StringComparison.Ordinal))
+            throw new InvalidOperationException("UpdateService must use the appliance DNS and TLS route.");
+        _ = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, applianceRole: role);
+    }
 }

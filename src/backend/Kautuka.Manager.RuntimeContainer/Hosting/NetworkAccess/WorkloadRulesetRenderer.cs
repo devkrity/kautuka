@@ -79,8 +79,8 @@ public static class WorkloadRulesetRenderer
                 "appliance-gateway" => RenderApplianceGateway(),
                 "appliance-webhost" => RenderApplianceWebHost(),
                 "appliance-observability" => RenderObservability(),
-                "appliance-credentialshost" or "appliance-updateservice" => RenderTelemetryOnly(normalizedIp),
-                "appliance-channelhost" => RenderTelemetryOnly(normalizedIp, channelProviders: true),
+                "appliance-credentialshost" => RenderTelemetryOnly(normalizedIp),
+                "appliance-channelhost" or "appliance-updateservice" => RenderTelemetryOnly(normalizedIp, providerTls: true),
                 _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
             };
         }
@@ -185,9 +185,9 @@ public static class WorkloadRulesetRenderer
 
         """;
 
-    private static string RenderTelemetryOnly(string address, bool channelProviders = false)
+    private static string RenderTelemetryOnly(string address, bool providerTls = false)
     {
-        string providerRules = channelProviders
+        string providerRules = providerTls
             ? $"    ip daddr {EgressPodIp} meta l4proto {{ udp, tcp }} th dport {DnsPort} accept\n    ip daddr {ProviderDnsAnswer} tcp dport 443 accept\n"
             : string.Empty;
         return $$"""
@@ -218,8 +218,12 @@ public static class WorkloadRulesetRenderer
         if (applianceRole is not null)
         {
             ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
-            string profile = applianceRole is "appliance-credentialshost" or "appliance-updateservice"
-                ? "appliance_telemetry_only" : applianceRole.Replace('-', '_');
+            string profile = applianceRole switch
+            {
+                "appliance-credentialshost" => "appliance_telemetry_only",
+                "appliance-updateservice" => "appliance_channelhost",
+                _ => applianceRole.Replace('-', '_'),
+            };
             string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{profile}.nft.json.tmpl")
                 .Replace("{{IP}}", allocatedIp, StringComparison.Ordinal);
             return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceComments, allocatedIp);

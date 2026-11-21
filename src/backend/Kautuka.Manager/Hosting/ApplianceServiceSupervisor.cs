@@ -507,6 +507,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (service.Role == UpdateRole)
         {
             args.AddRange([
+                "--dns", WorkloadRulesetRenderer.EgressPodIp,
                 "--env", $"Kautuka__Appliance__ReleaseId={release.ReleaseId}",
                 "--env", $"Kautuka__Appliance__ReleaseVersion={release.Version}",
                 "--volume", $"{RequireMountSource(Path.Combine(socketRoot, "manager"), directory: true)}:/run/kautuka/manager:ro,z",

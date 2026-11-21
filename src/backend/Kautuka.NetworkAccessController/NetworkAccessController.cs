@@ -274,6 +274,17 @@ public sealed class NetworkAccessController
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "channel_provider_denied");
         }
 
+        if (entry.Ip == NetworkAddressClassifier.ApplianceUpdateServiceAddress)
+        {
+            if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
+                && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
+                && normalizedDestination is "api.github.com" or "github.com" or "release-assets.githubusercontent.com")
+                return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
+                    "release_provider", ClusterDfpPublic, openInternetBadge: false);
+
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "release_provider_denied");
+        }
+
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
         if (isProbe && policyStore.TryEvaluateTemporaryProbeDecision(
                 entry.ContainerId,

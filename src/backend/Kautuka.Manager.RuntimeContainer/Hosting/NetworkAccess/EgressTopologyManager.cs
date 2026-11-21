@@ -1297,8 +1297,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous) || previous.Id != containerId) return;
             SetApplianceAllowlistEntry(role, null, previous);
-            if (role == "appliance-channelhost")
-                registry.Deregister(NetworkAddressClassifier.ApplianceChannelHostAddress, containerId);
+            if (UsesApplianceProviderEgress(role))
+                registry.Deregister(GetApplianceAddress(role), containerId);
         }
     }
 
@@ -1324,22 +1324,25 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             : postStartVerifier.VerifyWorkloadRulesetAsync(containerId, address,
                 applianceRole: role, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
-        if (role == "appliance-channelhost")
+        if (UsesApplianceProviderEgress(role))
         {
             lock (infraAllowlistLock)
             {
                 if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? authorized) || authorized.Id != verifiedId)
-                    throw new InvalidOperationException("The appliance ChannelHost identity is no longer authorized.");
+                    throw new InvalidOperationException($"The {role} identity is no longer authorized.");
                 RegistryEntry? existing = registry.FindByIp(address);
                 if (existing is not null && (existing.ContainerId != verifiedId || existing.Purpose != role))
-                    throw new InvalidOperationException("The appliance ChannelHost address has a different registered identity.");
+                    throw new InvalidOperationException($"The {role} address has a different registered identity.");
                 if (existing is null)
-                    registry.Register(new RegistryEntry(address, "system", "channelhost", verifiedId, "agent-sandbox", null,
+                    registry.Register(new RegistryEntry(address, "system", role["appliance-".Length..], verifiedId, "agent-sandbox", null,
                         "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, Purpose: role));
             }
         }
         return verifiedId;
     }
+
+    private static bool UsesApplianceProviderEgress(string? role)
+        => role is "appliance-channelhost" or "appliance-updateservice";
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
     {
@@ -3135,7 +3138,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             {
                 // The appliance supervisor verifies this profile and its image identity every cycle.
                 // The sandbox verifier has a different ruleset and would quarantine a healthy service.
-                if (entry.Purpose == "appliance-channelhost" && entry.Ip == NetworkAddressClassifier.ApplianceChannelHostAddress)
+                if (UsesApplianceProviderEgress(entry.Purpose) && entry.Ip == WorkloadRulesetRenderer.FindApplianceAddress(entry.Purpose))
                     continue;
 
                 try
