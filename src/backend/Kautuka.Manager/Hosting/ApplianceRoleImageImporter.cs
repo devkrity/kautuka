@@ -6,6 +6,8 @@ using System.Text.Json;
 using Kautuka.Hosting;
 using Kautuka.Manager.RuntimeContainer.Hosting;
 
+using Microsoft.Win32.SafeHandles;
+
 
 namespace Kautuka.Manager.Hosting;
 
@@ -35,26 +37,30 @@ internal sealed class ApplianceRoleImageImporter
             Architecture.Arm64 => "arm64",
             _ => throw new PlatformNotSupportedException("Unsupported appliance image platform."),
         };
-        using var images = TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseVersionDirectory);
-        foreach (string role in Roles)
+        using SafeFileHandle releaseDirectory = TrustedApplianceReleaseFiles.OpenApplianceReleaseDirectory(releaseVersionDirectory);
+        SafeFileHandle? images = null;
+        try
         {
-            string reference = descriptor.Images[role];
-            if (!IsDigestReference(reference)) throw new InvalidDataException("Invalid signed image reference.");
-            PodmanCommandResult exists = await runner.RunAsync(["image", "exists", reference], 30, cancellationToken).ConfigureAwait(false);
-            if (exists.ExitCode == 0)
+            foreach (string role in Roles)
             {
+                string reference = descriptor.Images[role];
+                if (!IsDigestReference(reference)) throw new InvalidDataException("Invalid signed image reference.");
+                PodmanCommandResult exists = await runner.RunAsync(["image", "exists", reference], 30, cancellationToken).ConfigureAwait(false);
+                if (exists.ExitCode == 1)
+                {
+                    images ??= TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseDirectory);
+                    using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, role);
+                    using var stream = new FileStream(archive, FileAccess.Read);
+                    ValidateArchiveIndex(stream, reference);
+                    stream.Position = 0;
+                    PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
+                    if (loaded.ExitCode != 0) throw new InvalidOperationException("Offline appliance image import failed.");
+                }
+                else if (exists.ExitCode != 0) throw new InvalidOperationException("Podman image lookup failed.");
                 await InspectAsync(reference, role, architecture, cancellationToken).ConfigureAwait(false);
-                continue;
             }
-            if (exists.ExitCode != 1) throw new InvalidOperationException("Podman image lookup failed.");
-            using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, role);
-            using var stream = new FileStream(archive, FileAccess.Read);
-            ValidateArchiveIndex(stream, reference);
-            stream.Position = 0;
-            PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
-            if (loaded.ExitCode != 0) throw new InvalidOperationException("Offline appliance image import failed.");
-            await InspectAsync(reference, role, architecture, cancellationToken).ConfigureAwait(false);
         }
+        finally { images?.Dispose(); }
     }
 
 #pragma warning restore CA2000

@@ -22,6 +22,15 @@ public sealed class TrustedApplianceReleaseFilesTests
             File.WriteAllText(Path.Combine(keys, "manifest-public-key.pem"), "key");
             string pointer = Path.Combine(manager, "current");
             Directory.CreateSymbolicLink(pointer, "versions/v1");
+            string candidate = Path.Combine(manager, "versions", "v2");
+            Directory.CreateDirectory(candidate);
+            File.Copy(Path.Combine(version, "kautuka-platform-release.json"), Path.Combine(candidate, "kautuka-platform-release.json"));
+            File.Copy(Path.Combine(version, "kautuka-platform-release.sig"), Path.Combine(candidate, "kautuka-platform-release.sig"));
+            File.WriteAllText(Path.Combine(candidate, "release-id.txt"), "v2\n");
+            Assert.Equal("v2", TrustedApplianceReleaseFiles.Read(manager, keys, "v2").InstalledReleaseId);
+            Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.Read(manager, keys, "../keys"));
+            Directory.CreateSymbolicLink(Path.Combine(manager, "versions", "alias"), candidate);
+            Assert.Throws<IOException>(() => TrustedApplianceReleaseFiles.Read(manager, keys, "alias"));
             TrustedApplianceReleaseInput actual = TrustedApplianceReleaseFiles.Read(manager, keys);
             Assert.Equal("v1", actual.VersionDirectoryName);
             Assert.Equal("v1", actual.InstalledReleaseId);

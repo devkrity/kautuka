@@ -38,6 +38,21 @@ PY
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$work/signing-key.pem"
 openssl pkey -in "$work/signing-key.pem" -pubout -out "$work/trust/manifest-public-key.pem"
 openssl dgst -sha256 -sign "$work/signing-key.pem" "$manifest" | base64 > "$signature"
+candidate=1.2.3-preview.2
+mkdir "$work/candidate"
+python3 - "$manifest" "$work/candidate/kautuka-platform-release.json" "$candidate" <<'PY'
+import json
+import sys
+
+source_path, target_path, version = sys.argv[1:]
+with open(source_path, encoding="utf-8") as source:
+    release = json.load(source)
+release.update(version=version, releaseId=f"v{version}", releaseTag=f"v{version}")
+with open(target_path, "w", encoding="utf-8") as target:
+    json.dump(release, target)
+PY
+printf 'v%s\n' "$candidate" > "$work/candidate/release-id.txt"
+openssl dgst -sha256 -sign "$work/signing-key.pem" "$work/candidate/kautuka-platform-release.json" | base64 > "$work/candidate/kautuka-platform-release.sig"
 rm -- "$work/signing-key.pem"
 
 cat > "$work/bin/podman" <<'PODMAN'
@@ -55,15 +70,24 @@ podman unshare bwrap --unshare-net \
     --bind "$work" /work \
     --ro-bind "$manager" /work/manager \
     --ro-bind "$work/version" "$installed" \
+    --ro-bind "$work/candidate" "/opt/kautuka/manager/versions/$candidate" \
     --ro-bind "$images" "$installed/service-images" \
     --ro-bind "$work/trust" /etc/kautuka \
     --symlink "versions/$version" /opt/kautuka/manager/current \
     --setenv HOME /work --setenv XDG_RUNTIME_DIR /work/xdg \
     --setenv PATH /work/bin:/usr/bin \
     -- /bin/bash -ec '
+        /work/manager --verify-appliance-release --candidate-version 1.2.3-preview.2
+        if /work/manager --prepare-appliance-images --candidate-version 1.2.3-preview.2; then
+            echo "Cold candidate without images unexpectedly prepared." >&2
+            exit 1
+        fi
+        test "$(grep -cx load /work/podman-commands || true)" -eq 0
         /work/manager --prepare-appliance-images
         test "$(grep -xc load /work/podman-commands)" -eq 5
         /work/manager --prepare-appliance-images
+        /work/manager --prepare-appliance-images --candidate-version 1.2.3-preview.2
         test "$(grep -xc load /work/podman-commands)" -eq 5
+        test "$(readlink /opt/kautuka/manager/current)" = versions/1.2.3-preview.1
     '
-echo 'Native Manager imported all five signed images offline and reused them on a second prepare.'
+echo 'Native Manager imported all five signed images offline and prepared a candidate reusing them without switching the active release.'

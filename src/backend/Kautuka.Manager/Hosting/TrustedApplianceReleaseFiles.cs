@@ -24,11 +24,13 @@ internal static class TrustedApplianceReleaseFiles
     private const ushort FileType = 0x8000;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    internal static TrustedApplianceReleaseInput Read(string managerRoot, string trustedKeyDirectory)
+    internal static TrustedApplianceReleaseInput Read(string managerRoot, string trustedKeyDirectory, string? candidateVersion = null)
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         using SafeFileHandle manager = OpenAbsoluteDirectory(managerRoot);
-        string version = ReadCurrentTarget(manager, managerRoot);
+        string version = candidateVersion ?? ReadCurrentTarget(manager, managerRoot);
+        if (!IsVersionDirectoryName(version))
+            throw new InvalidDataException("Invalid Manager release version.");
         using SafeFileHandle versions = OpenChecked(manager, "versions", DirectoryFlags, DirectoryType);
         using SafeFileHandle release = OpenChecked(versions, version, DirectoryFlags, DirectoryType);
         using SafeFileHandle keys = OpenAbsoluteDirectory(trustedKeyDirectory);
@@ -41,16 +43,23 @@ internal static class TrustedApplianceReleaseFiles
         return new(manifest, signature, publicKey, releaseId, version);
     }
 
-    internal static SafeFileHandle OpenApplianceImagesDirectory(string releaseVersionDirectory)
+    internal static SafeFileHandle OpenApplianceReleaseDirectory(string releaseVersionDirectory)
     {
         const string prefix = "/opt/kautuka/manager/versions/";
         if (!releaseVersionDirectory.StartsWith(prefix, StringComparison.Ordinal))
             throw new InvalidDataException("Invalid Manager release directory.");
         string version = releaseVersionDirectory[prefix.Length..];
-        if (version.Length == 0 || version is "." or ".." || version.Any(static ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_')))
+        if (!IsVersionDirectoryName(version))
             throw new InvalidDataException("Invalid Manager release version.");
-        return OpenAbsoluteDirectory(releaseVersionDirectory + "/service-images");
+        return OpenAbsoluteDirectory(releaseVersionDirectory);
     }
+
+    internal static SafeFileHandle OpenApplianceImagesDirectory(SafeFileHandle releaseDirectory)
+        => OpenChecked(releaseDirectory, "service-images", DirectoryFlags, DirectoryType);
+
+    private static bool IsVersionDirectoryName(string version)
+        => version.Length is > 0 and <= 128 && char.IsAsciiLetterOrDigit(version[0])
+            && version.All(static ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_');
 
     internal static SafeFileHandle OpenApplianceImageArchive(SafeFileHandle directory, string role)
     {

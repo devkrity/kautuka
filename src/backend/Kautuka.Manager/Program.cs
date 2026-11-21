@@ -15,9 +15,11 @@ using Microsoft.Extensions.Options;
 bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
 if (prepareApplianceImages || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
 {
-    if (!OperatingSystem.IsLinux() || args.Length != 1)
+    bool commandFirst = args[0] is "--verify-appliance-release" or "--prepare-appliance-images";
+    bool selectCandidate = args is [_, "--candidate-version", _];
+    if (!OperatingSystem.IsLinux() || !commandFirst || (args.Length != 1 && !selectCandidate))
     {
-        await Console.Error.WriteLineAsync("Appliance release commands require Linux and accept no other arguments.").ConfigureAwait(false);
+        await Console.Error.WriteLineAsync("Appliance release commands require Linux and accept an optional --candidate-version argument.").ConfigureAwait(false);
         return 1;
     }
 
@@ -25,7 +27,7 @@ if (prepareApplianceImages || args.Contains("--verify-appliance-release", String
     {
         const string managerRoot = "/opt/kautuka/manager";
         VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
-            TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+            TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka", selectCandidate ? args[2] : null));
         if (prepareApplianceImages)
         {
             var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());
