@@ -58,7 +58,7 @@ rm -- "$work/signing-key.pem"
 cat > "$work/bin/podman" <<'PODMAN'
 #!/bin/bash
 set -euo pipefail
-printf '%s\n' "$1" >> /work/podman-commands
+printf '%s\n' "$*" >> /work/podman-commands
 exec /usr/bin/podman --storage-driver vfs --root /work/storage --runroot /work/run "$@"
 PODMAN
 chmod 0755 "$work/bin/podman"
@@ -85,9 +85,11 @@ podman unshare bwrap --unshare-net \
         test "$(grep -cx load /work/podman-commands || true)" -eq 0
         /work/manager --prepare-appliance-images
         test "$(grep -xc load /work/podman-commands)" -eq 5
+        : > /work/podman-commands
         /work/manager --prepare-appliance-images
         /work/manager --prepare-appliance-images --candidate-version 1.2.3-preview.2
-        test "$(grep -xc load /work/podman-commands)" -eq 5
+        test "$(wc -l < /work/podman-commands)" -eq 2
+        test "$(grep -Ec "^image inspect( [^ ]+){5}$" /work/podman-commands)" -eq 2
         test "$(readlink /opt/kautuka/manager/current)" = versions/1.2.3-preview.1
     '
-echo 'Native Manager imported all five signed images offline and prepared a candidate reusing them without switching the active release.'
+echo 'Native Manager imported all five signed images offline and prepared each warm release with one image inspection.'

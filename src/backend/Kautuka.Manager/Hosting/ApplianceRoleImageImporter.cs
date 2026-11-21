@@ -38,13 +38,30 @@ internal sealed class ApplianceRoleImageImporter
             _ => throw new PlatformNotSupportedException("Unsupported appliance image platform."),
         };
         using SafeFileHandle releaseDirectory = TrustedApplianceReleaseFiles.OpenApplianceReleaseDirectory(releaseVersionDirectory);
+        string[] references = Roles.Select(role => descriptor.Images[role]).ToArray();
+        if (references.Any(reference => !IsDigestReference(reference)))
+            throw new InvalidDataException("Invalid signed image reference.");
+
+        // Warm starts and config-only candidates validate the entire cohort in one Podman call.
+        PodmanCommandResult installed = await runner.RunAsync(["image", "inspect", .. references], 30, cancellationToken)
+            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (installed.ExitCode == 0)
+        {
+            using JsonDocument inspection = JsonDocument.Parse(installed.StdOut);
+            JsonElement entries = inspection.RootElement;
+            if (entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() != Roles.Length ||
+                !Roles.All(role => entries.EnumerateArray().Any(image => ImageMatches(image, descriptor.Images[role], role, architecture))))
+                throw new InvalidDataException("Installed appliance images do not match the signed roles, digests and platform.");
+            return;
+        }
+
         SafeFileHandle? images = null;
         try
         {
             foreach (string role in Roles)
             {
                 string reference = descriptor.Images[role];
-                if (!IsDigestReference(reference)) throw new InvalidDataException("Invalid signed image reference.");
                 PodmanCommandResult exists = await runner.RunAsync(["image", "exists", reference], 30, cancellationToken).ConfigureAwait(false);
                 if (exists.ExitCode == 1)
                 {
@@ -77,18 +94,24 @@ internal sealed class ApplianceRoleImageImporter
         {
             using JsonDocument document = JsonDocument.Parse(json);
             if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() != 1) return false;
-            JsonElement image = document.RootElement[0];
-            if (image.ValueKind != JsonValueKind.Object || !image.TryGetProperty("Digest", out JsonElement digest) || digest.GetString() != reference[(reference.LastIndexOf('@') + 1)..] ||
-                !image.TryGetProperty("RepoDigests", out JsonElement references) || references.ValueKind != JsonValueKind.Array ||
-                !references.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.String && item.GetString() == reference) ||
-                !image.TryGetProperty("Os", out JsonElement os) || os.GetString() != "linux" ||
-                !image.TryGetProperty("Architecture", out JsonElement arch) || arch.GetString() != architecture ||
-                !image.TryGetProperty("Config", out JsonElement config) || !config.TryGetProperty("Labels", out JsonElement labels) ||
-                !labels.TryGetProperty("io.kautuka.service.role", out JsonElement actualRole) || actualRole.GetString() != role) return false;
-            return true;
+            return ImageMatches(document.RootElement[0], reference, role, architecture);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or ArgumentOutOfRangeException) { return false; }
     }
+
+    private static bool ImageMatches(JsonElement image, string reference, string role, string architecture)
+        => image.ValueKind == JsonValueKind.Object
+            && image.TryGetProperty("Digest", out JsonElement digest) && IsString(digest, reference[(reference.LastIndexOf('@') + 1)..])
+            && image.TryGetProperty("RepoDigests", out JsonElement references) && references.ValueKind == JsonValueKind.Array
+            && references.EnumerateArray().Any(item => IsString(item, reference))
+            && image.TryGetProperty("Os", out JsonElement os) && IsString(os, "linux")
+            && image.TryGetProperty("Architecture", out JsonElement arch) && IsString(arch, architecture)
+            && image.TryGetProperty("Config", out JsonElement config) && config.ValueKind == JsonValueKind.Object
+            && config.TryGetProperty("Labels", out JsonElement labels) && labels.ValueKind == JsonValueKind.Object
+            && labels.TryGetProperty("io.kautuka.service.role", out JsonElement actualRole) && IsString(actualRole, role);
+
+    private static bool IsString(JsonElement value, string expected)
+        => value.ValueKind == JsonValueKind.String && value.GetString() == expected;
 
     internal static void ValidateArchiveIndex(Stream stream, string reference)
     {
