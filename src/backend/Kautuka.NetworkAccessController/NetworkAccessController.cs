@@ -262,6 +262,18 @@ public sealed class NetworkAccessController
         if (match.Kind == ScopeMatchKind.BlockedByRule)
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
 
+        if (entry.Ip == NetworkAddressClassifier.ApplianceChannelHostAddress)
+        {
+            if (entry.Purpose == "appliance-channelhost" && entry.UserId == "system" && entry.AgentId == "channelhost"
+                && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
+                && (normalizedDestination is "api.telegram.org" or "slack.com"
+                    || normalizedDestination.EndsWith(".slack.com", StringComparison.Ordinal)))
+                return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
+                    "channel_provider", ClusterDfpPublic, openInternetBadge: false);
+
+            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "channel_provider_denied");
+        }
+
         // 5. Ephemeral in-memory probe grant/block check (v7-14) BEFORE persistent rule evaluation.
         if (isProbe && policyStore.TryEvaluateTemporaryProbeDecision(
                 entry.ContainerId,

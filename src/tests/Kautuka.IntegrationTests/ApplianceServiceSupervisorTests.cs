@@ -341,12 +341,14 @@ public sealed class ApplianceServiceSupervisorTests
         var registry = new WorkloadRegistry();
         using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
         using var logs = LoggerFactory.Create(builder => builder.AddSimpleConsole());
+        bool useEnvoySelinuxDomain = Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX") == "1";
         await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(networkState, "ip.json")),
             new WorkloadPostStartVerifier(podman), registry, networkState,
             logs.CreateLogger<EgressTopologyManager>(), envoySocketHostDir: envoySockets, hookStateDirectory: hookState,
-            policyStore: policy,
+            policyStore: policy, useDevelopmentSelinuxDomain: useEnvoySelinuxDomain,
             gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory, telemetryAuthorization: telemetryAuthorization);
-        var controller = new NetworkAccessController.NetworkAccessController(policy, registry,
+        using var audit = new NetworkAccessAuditRing(Path.Combine(networkState, "audit.jsonl"));
+        var controller = new NetworkAccessController.NetworkAccessController(policy, registry, audit,
             isContainerAuthorizationGateOpen: () => topology.IsStartupGateOpen);
         await using var authorization = EnvoyAuthorizationHost.Create(controller, new EnvoyAuthorizationHostOptions
         {
@@ -388,6 +390,7 @@ public sealed class ApplianceServiceSupervisorTests
             await WaitForCollectorAsync(podman, collector, token);
             string credentials = await gateway.EnsureRunningAsync(Role, token);
             string channel = await gateway.EnsureRunningAsync("channelhost", token);
+            Assert.Equal(channel, registry.FindByIp(NetworkAddressClassifier.ApplianceChannelHostAddress)?.ContainerId);
             Assert.Equal(credentials, await gateway.EnsureRunningAsync(Role, token));
             Assert.Equal(channel, await gateway.EnsureRunningAsync("channelhost", token));
             await CheckCollectorRelayAsync(podman, credentials, token);
@@ -428,6 +431,8 @@ public sealed class ApplianceServiceSupervisorTests
                 await CheckPublishedWebHostAsync(gateway, podman, images, token);
                 await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
             }
+            Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
+                NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
         }
         finally
         {

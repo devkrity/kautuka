@@ -334,6 +334,8 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
         if (service.Role == ChannelRole)
         {
+            if (service.NetworkRole is not null)
+                args.AddRange(["--dns", WorkloadRulesetRenderer.EgressPodIp]);
             string security = Path.Combine(stateRoot, "security", "channel");
             string privateRoot = RequireMountSource(Path.Combine(security, "channel-private"), directory: true);
             string trustRoot = RequireMountSource(Path.Combine(security, "channel-trust"), directory: true);

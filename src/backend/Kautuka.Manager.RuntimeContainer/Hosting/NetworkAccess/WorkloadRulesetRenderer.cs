@@ -25,6 +25,7 @@ public static class WorkloadRulesetRenderer
     public const int PackageProxyPort = 20101;
     public const int EnvoyPort = 15001;
     public const int DnsPort = 53;
+    private const string ProviderDnsAnswer = "198.18.250.250";
 
     public static readonly IReadOnlyList<string> RequiredWorkloadComments =
     [
@@ -76,7 +77,8 @@ public static class WorkloadRulesetRenderer
                 "appliance-gateway" => RenderApplianceGateway(),
                 "appliance-webhost" => RenderApplianceWebHost(),
                 "appliance-observability" => RenderObservability(),
-                "appliance-credentialshost" or "appliance-channelhost" => RenderTelemetryOnly(normalizedIp),
+                "appliance-credentialshost" => RenderTelemetryOnly(normalizedIp),
+                "appliance-channelhost" => RenderTelemetryOnly(normalizedIp, channelProviders: true),
                 _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
             };
         }
@@ -181,7 +183,12 @@ public static class WorkloadRulesetRenderer
 
         """;
 
-    private static string RenderTelemetryOnly(string address) => $$"""
+    private static string RenderTelemetryOnly(string address, bool channelProviders = false)
+    {
+        string providerRules = channelProviders
+            ? $"    ip daddr {EgressPodIp} meta l4proto {{ udp, tcp }} th dport {DnsPort} accept\n    ip daddr {ProviderDnsAnswer} tcp dport 443 accept\n"
+            : string.Empty;
+        return $$"""
         table inet kautuka_workload
         delete table inet kautuka_workload
         table inet kautuka_workload {
@@ -196,11 +203,12 @@ public static class WorkloadRulesetRenderer
             oifname "lo" accept
             oifname != "lo" ip saddr != {{address}} counter drop comment "spoof_drop"
             ip daddr {{EgressPodIp}} tcp dport {{TelemetryIngressPort}} accept
-            counter drop comment "final_drop"
+        {{providerRules}}    counter drop comment "final_drop"
           }
         }
 
         """;
+    }
 
     public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
@@ -208,7 +216,7 @@ public static class WorkloadRulesetRenderer
         if (applianceRole is not null)
         {
             ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
-            string profile = applianceRole is "appliance-credentialshost" or "appliance-channelhost"
+            string profile = applianceRole is "appliance-credentialshost"
                 ? "appliance_telemetry_only" : applianceRole.Replace('-', '_');
             string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{profile}.nft.json.tmpl")
                 .Replace("{{IP}}", allocatedIp, StringComparison.Ordinal);

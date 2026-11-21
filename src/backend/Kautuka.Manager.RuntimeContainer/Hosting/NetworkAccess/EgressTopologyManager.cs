@@ -1297,6 +1297,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous) || previous.Id != containerId) return;
             SetApplianceAllowlistEntry(role, null, previous);
+            if (role == "appliance-channelhost")
+                registry.Deregister(NetworkAddressClassifier.ApplianceChannelHostAddress, containerId);
         }
     }
 
@@ -1313,14 +1315,30 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    public Task<string> VerifyApplianceServiceAsync(string role, string containerId, JsonElement? inspection, CancellationToken cancellationToken)
+    public async Task<string> VerifyApplianceServiceAsync(string role, string containerId, JsonElement? inspection, CancellationToken cancellationToken)
     {
         string address = GetApplianceAddress(role);
-        return inspection is { } container
+        string verifiedId = await (inspection is { } container
             ? postStartVerifier.VerifyInspectedWorkloadRulesetAsync(container, containerId, address,
                 isPackageProxy: false, role, cancellationToken)
             : postStartVerifier.VerifyWorkloadRulesetAsync(containerId, address,
-                applianceRole: role, cancellationToken: cancellationToken);
+                applianceRole: role, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (role == "appliance-channelhost")
+        {
+            lock (infraAllowlistLock)
+            {
+                if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? authorized) || authorized.Id != verifiedId)
+                    throw new InvalidOperationException("The appliance ChannelHost identity is no longer authorized.");
+                RegistryEntry? existing = registry.FindByIp(address);
+                if (existing is not null && (existing.ContainerId != verifiedId || existing.Purpose != role))
+                    throw new InvalidOperationException("The appliance ChannelHost address has a different registered identity.");
+                if (existing is null)
+                    registry.Register(new RegistryEntry(address, "system", "channelhost", verifiedId, "agent-sandbox", null,
+                        "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, Purpose: role));
+            }
+        }
+        return verifiedId;
     }
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
@@ -3113,6 +3131,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
             if (isActive)
             {
+                // The appliance supervisor verifies this profile and its image identity every cycle.
+                // The sandbox verifier has a different ruleset and would quarantine a healthy service.
+                if (entry.Purpose == "appliance-channelhost" && entry.Ip == NetworkAddressClassifier.ApplianceChannelHostAddress)
+                    continue;
+
                 try
                 {
                     if (isPackageProxy && !await IsPreviouslyAuthorizedPackageProxyAsync(liveCid!, cancellationToken).ConfigureAwait(false))
