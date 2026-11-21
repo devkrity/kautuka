@@ -320,6 +320,27 @@ public static class Program
             throw new InvalidOperationException($"Package request did not recover after removing the explicit system deny: {PodmanFailureFormatter.FormatDetails(recoveredFetch)}");
         }
 
+        string packageUrl = npmRegistry + "is-number/-/is-number-7.0.0.tgz";
+        const string downloadedPackage = "/tmp/kautuka-package-cache-proof.tgz";
+        async Task<string> DownloadPackageHashAsync()
+        {
+            PodmanCommandResult result = await podman.RunAsync(
+                ["exec", builderName, "curl", "--fail", "--silent", "--show-error", "--max-time", "10",
+                 "--output", downloadedPackage, "--write-out", "%{http_code}", packageUrl], 15, CancellationToken.None).ConfigureAwait(false);
+            if (result.ExitCode != 0 || result.StdOut.Trim() != "200")
+                throw new InvalidOperationException($"Package archive fetch failed: {PodmanFailureFormatter.FormatDetails(result)}");
+            PodmanCommandResult archive = await podman.RunAsync(
+                ["exec", builderName, "tar", "-tzf", downloadedPackage], 10, CancellationToken.None).ConfigureAwait(false);
+            if (archive.ExitCode != 0 || !archive.StdOut.Split('\n', StringSplitOptions.TrimEntries).Contains("package/package.json", StringComparer.Ordinal))
+                throw new InvalidOperationException("The package response was not a valid npm archive.");
+            PodmanCommandResult hash = await podman.RunAsync(
+                ["exec", builderName, "sha256sum", downloadedPackage], 10, CancellationToken.None).ConfigureAwait(false);
+            if (hash.ExitCode != 0 || string.IsNullOrWhiteSpace(hash.StdOut))
+                throw new InvalidOperationException("Could not hash the downloaded package archive.");
+            return hash.StdOut.Trim();
+        }
+
+        string upstreamPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
         var upstreamRequest = new[]
         {
             "exec", builderName, "npm", "view", "is-odd", "version", "--registry", npmRegistry,
@@ -330,6 +351,7 @@ public static class Program
             new RuleWriteSpec("system", null, null, null, "registry.npmjs.org", "host", 443, Allowed: false),
             controller.PolicyStore.Revision);
         PodmanCommandResult deniedUpstreamFetch;
+        string cachedPackageHash;
         try
         {
             // The policy applies when Envoy authorizes a new TCP connection. Restart the
@@ -350,6 +372,9 @@ public static class Program
                 PodmanCommandResult proxyLogs = await podman.RunAsync(["logs", "--tail", "30", proxyName], 10, CancellationToken.None).ConfigureAwait(false);
                 throw new InvalidOperationException($"An explicit Manager system deny did not block the package proxy's upstream connection through Envoy. Recent proxy decisions: {decisions}; proxy logs: {proxyLogs.StdOut} {proxyLogs.StdErr}");
             }
+            // curl has no client cache. A fresh HTTP request must return the same
+            // archive from the proxy's persistent cache while upstream is denied.
+            cachedPackageHash = await DownloadPackageHashAsync().ConfigureAwait(false);
         }
         finally
         {
@@ -380,7 +405,13 @@ public static class Program
             $"blocked={deniedUpstreamFetch.ExitCode != 0}",
             "blocked=True",
             $"blocked={recoveredUpstreamFetch.ExitCode != 0}",
-            "blocked=False", comparisonField: "blocked")];
+            "blocked=False", comparisonField: "blocked"),
+        AcceptanceHarness.Record(
+            "PROD_PACKAGE_PROXY_PERSISTENT_ARCHIVE_CACHE",
+            $"available={string.Equals(upstreamPackageHash, cachedPackageHash, StringComparison.Ordinal)}",
+            "available=True",
+            $"available={deniedUpstreamFetch.ExitCode == 0}",
+            "available=False", comparisonField: "available")];
     }
     private const string UserBrakeDisabledHookObservation =
         "existingStopped=False:otherUserRunning=True:newLaunchRejected=True:releaseLaunchRunning=True:responseContainsUser=True";
