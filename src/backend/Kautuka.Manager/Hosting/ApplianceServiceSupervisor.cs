@@ -377,12 +377,11 @@ internal sealed partial class ApplianceServiceSupervisor(
 
         bool isGateway = service.Role == GatewayRole;
         string statePath = Path.Combine(stateRoot, service.StateName);
-        if (isGateway || service.Role == UpdateRole)
-        {
-            if (isGateway && File.Exists(Path.Combine(stateRoot, "kautuka.db")))
-                throw new InvalidOperationException("Gateway data is still in the host-service layout. Appliance activation requires a completed data migration.");
-            Directory.CreateDirectory(statePath);
-        }
+        if (isGateway && File.Exists(Path.Combine(stateRoot, "kautuka.db")))
+            throw new InvalidOperationException("Gateway data is still in the host-service layout. Appliance activation requires a completed data migration.");
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Appliance service state requires Linux.");
+        Directory.CreateDirectory(statePath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         string stateDirectory = RequireMountSource(statePath, directory: true);
         string socketDirectory = RequireMountSource(Path.Combine(socketRoot, service.Role), directory: true);
         string dataRoot = isGateway ? Path.GetFullPath(stateRoot) : "/data";

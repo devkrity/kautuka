@@ -218,14 +218,13 @@ public sealed class ApplianceServiceSupervisorTests
         string? fixture = Environment.GetEnvironmentVariable("KAUTUKA_CREDENTIALS_CONTAINER_TEST_ROOT");
         Assert.SkipUnless(OperatingSystem.IsLinux() && !string.IsNullOrEmpty(fixture),
             "Requires a dedicated Linux rootless Podman fixture and service archives.");
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
         string root = Path.GetFullPath(fixture!);
         string runtime = Path.Combine(root, "runtime");
         Assert.False(Directory.Exists(runtime));
-        Directory.CreateDirectory(Path.Combine(runtime, "credentialsHost"));
         string sockets = Path.Combine(runtime, "sockets");
         foreach (string role in new[] { Role, "channelhost", "gateway", "manager", "updateservice" })
             Directory.CreateDirectory(Path.Combine(sockets, role));
-        Directory.CreateDirectory(Path.Combine(runtime, "channelHost"));
         string manager = Path.Combine(runtime, "manager");
         Directory.CreateDirectory(manager);
         ChannelSecurityMaterialDirectories securityRoots = ProvisionTrust(runtime, manager);
@@ -301,7 +300,10 @@ public sealed class ApplianceServiceSupervisorTests
         using var supervisor = new ApplianceServiceSupervisor(podman, release, root, runtime, sockets, NullLogger<ApplianceServiceSupervisor>.Instance);
         try
         {
+            const UnixFileMode privateDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            Assert.False(Directory.Exists(Path.Combine(runtime, "credentialsHost")));
             string first = await supervisor.EnsureRunningAsync(Role, cancellation);
+            Assert.Equal(privateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "credentialsHost")));
             string socket = Path.Combine(sockets, Role, "credentialshost.sock");
             string transport = Path.Combine(runtime, "credentialsHost", "transport");
             await WaitForReadinessAsync(socket, Path.Combine(transport, ".ca.cer"), Path.Combine(transport, ".credentials-client.pfx"), cancellation);
@@ -313,7 +315,9 @@ public sealed class ApplianceServiceSupervisorTests
             await WaitForReadinessAsync(socket, Path.Combine(transport, ".ca.cer"), Path.Combine(transport, ".credentials-client.pfx"), cancellation);
             Assert.Equal(originalCa, await File.ReadAllBytesAsync(Path.Combine(transport, ".ca.cer"), cancellation));
 
+            Assert.False(Directory.Exists(Path.Combine(runtime, "channelHost")));
             string channel = await supervisor.EnsureRunningAsync("channelhost", cancellation);
+            Assert.Equal(privateDirectory, File.GetUnixFileMode(Path.Combine(runtime, "channelHost")));
             string channelSocket = Path.Combine(sockets, "channelhost", "channelhost.sock");
             string channelCa = Path.Combine(securityRoots.GatewayTrustRoot, ChannelSecurityMaterialProvisioner.CaCertificate);
             string gatewayClient = Path.Combine(securityRoots.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx);
