@@ -2898,20 +2898,20 @@ PY
     extract_release "$artifact" "$tmp_root/extracted"
     if [[ "$appliance_image_payload" == 'true' ]]; then
         validate_appliance_image_payload "$tmp_root/extracted/service-images"
-    fi
-    install_apply_release_helper "$tmp_root/extracted"
-
-    if [[ -n "$manifest_url" ]]; then
-        if [[ "$github_release_candidate" == 'true' ]]; then
-            # UpdateService independently discovers the selected signed channel
-            # snapshot; never persist a version-pinned bootstrap manifest as its source.
-            write_update_source_document '' "$service_user" "$service_group"
-        else
-            write_update_source_document "$manifest_url" "$service_user" "$service_group"
+        local directory selected
+        for directory in /opt /opt/kautuka "$install_root" "$versions_root"; do
+            [[ -d "$directory" && ! -L "${directory%/}" &&
+                "$(stat -c '%u' -- "$directory")" == 0 &&
+                -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] \
+                || fail "unsafe appliance installation directory: $directory"
+        done
+        if [[ -e "$current_link" || -L "$current_link" ]]; then
+            selected="$(readlink -f -- "$current_link")" || fail 'could not resolve the active Manager release'
+            [[ "$selected" != "$(realpath -m -- "$version_root")" ]] \
+                || fail 'appliance candidate is already selected; stage a different release version'
         fi
     fi
     write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
-    write_service_scope_document "$service_user" 'kautuka.target'
 
     local content_root="$tmp_root/extracted"
     if [[ -d "$tmp_root/extracted/bin" ]]; then
@@ -2921,10 +2921,9 @@ PY
     echo 'Preparing Kautuka images with the service account rootless Podman before starting services.'
     prepare_install_images "$content_root" "$service_user" "$service_home" "$xdg_runtime_dir"
 
-    stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
-
-    # Clear generated workspace runtime state only after the old services stop.
-    clear_generated_agent_workspace_state "$visible_root"
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+    fi
 
     rm -rf "$version_root"
     mkdir -p "$version_root"
@@ -2936,6 +2935,28 @@ PY
         install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"
     fi
     chmod +x "$version_root/kautuka-manager"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        chown -R root:root "$version_root"
+        chmod -R go-w "$version_root"
+        echo 'Preparing the signed application images in the service account Podman store.'
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
+            "$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version" \
+            || fail 'could not prepare signed appliance service images'
+        stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
+    fi
+
+    clear_generated_agent_workspace_state "$visible_root"
+    install_apply_release_helper "$tmp_root/extracted"
+    if [[ -n "$manifest_url" ]]; then
+        if [[ "$github_release_candidate" == 'true' ]]; then
+            # UpdateService independently discovers the selected signed channel
+            # snapshot; never persist a version-pinned bootstrap manifest as its source.
+            write_update_source_document '' "$service_user" "$service_group"
+        else
+            write_update_source_document "$manifest_url" "$service_user" "$service_group"
+        fi
+    fi
+    write_service_scope_document "$service_user" 'kautuka.target'
 
     local hooks_dir="$service_home/.config/containers/hooks.d"
     local envoy_selinux_enabled=false
@@ -2947,12 +2968,6 @@ PY
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
-    if [[ "$appliance_image_payload" == 'true' ]]; then
-        echo 'Preparing the signed application images in the service account Podman store.'
-        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
-            "$version_root/kautuka-manager" --prepare-appliance-images --candidate-version "$version" \
-            || fail 'could not prepare signed appliance service images'
-    fi
     local channel_security_root="$internal_state_root/security"
     chown_tree_excluding "$internal_state_root" "$service_user:$service_group" "$channel_security_root"
     if [[ "$visible_root" != "$internal_state_root" ]]; then

@@ -55,7 +55,7 @@ The release builder can produce an appliance candidate with `--appliance-image-p
 
 On Linux, Manager's `--verify-appliance-release` command verifies the selected release against the installed public key. It reads the manifest and signature from the root-owned version directory selected by `/opt/kautuka/manager/current`. A successful check verifies the signed image references and required hook ABI. The command exits before starting Manager or any application service.
 
-When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before it changes `current`.
+When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before stopping services or changing `current`. The selected version directory stays in use during preparation, so the candidate needs a different version.
 
 Manager's `--prepare-appliance-images` command performs the same signature check and prepares the five images in the calling service account's Podman store. It loads missing images from the protected role archives and checks each image's repository digest, service role, and platform. This command completes before application startup.
 
