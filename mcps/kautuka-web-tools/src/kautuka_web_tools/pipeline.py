@@ -11,8 +11,6 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup, Tag
-from markitdown import MarkItDown
-import trafilatura
 
 
 DEFAULT_TIMEOUT_SECONDS = 15
@@ -731,6 +729,8 @@ def strip_html_boilerplate(content: bytes) -> tuple[bytes, dict[str, int]]:
 
 
 def convert_html_with_trafilatura_recall(content: bytes, source_url: str) -> str:
+    import trafilatura
+
     html = content.decode("utf-8", errors="ignore")
     markdown = trafilatura.extract(
         html,
@@ -827,6 +827,8 @@ def build_block_signature(block: str) -> str:
 
 
 def convert_html_to_markdown(content: bytes, source_url: str | None = None) -> str:
+    from markitdown import MarkItDown
+
     converter = MarkItDown(enable_plugins=False)
     result = converter.convert_stream(
         BytesIO(content),
