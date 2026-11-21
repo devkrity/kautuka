@@ -93,23 +93,61 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     internal async Task ReconcileServicesAsync(CancellationToken token)
     {
+        using JsonDocument? inspection = cohortReady ? await InspectReadyCohortAsync(token).ConfigureAwait(false) : null;
+        JsonElement? FindContainer(Service service)
+        {
+            if (inspection is null) return null;
+            foreach (JsonElement container in inspection.RootElement.EnumerateArray())
+            {
+                if (container.ValueKind == JsonValueKind.Object && container.TryGetProperty("Name", out JsonElement name)
+                    && name.ValueKind == JsonValueKind.String && name.ValueEquals(service.ContainerName))
+                    return container;
+            }
+            return null;
+        }
+
         if (superviseObservability)
-            await TryReconcileAsync(observability, token).ConfigureAwait(false);
-        await TryReconcileAsync(credentials, token).ConfigureAwait(false);
-        await TryReconcileAsync(channel, token).ConfigureAwait(false);
+            await TryReconcileAsync(observability, FindContainer(observability), token).ConfigureAwait(false);
+        await TryReconcileAsync(credentials, FindContainer(credentials), token).ConfigureAwait(false);
+        await TryReconcileAsync(channel, FindContainer(channel), token).ConfigureAwait(false);
         if (superviseUpdateService && topology?.IsStartupGateOpen == true)
-            await TryReconcileAsync(updater, token).ConfigureAwait(false);
+            await TryReconcileAsync(updater, FindContainer(updater), token).ConfigureAwait(false);
         if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready
             && (!superviseUpdateService || updater.Ready))
-            await TryReconcileAsync(gateway, token).ConfigureAwait(false);
+            await TryReconcileAsync(gateway, FindContainer(gateway), token).ConfigureAwait(false);
         else
             await StopActiveAsync(gateway, token).ConfigureAwait(false);
         if (gateway.Ready && topology?.IsStartupGateOpen == true)
-            await TryReconcileAsync(webHost, token).ConfigureAwait(false);
+            await TryReconcileAsync(webHost, FindContainer(webHost), token).ConfigureAwait(false);
         else
             await StopActiveAsync(webHost, token).ConfigureAwait(false);
         cohortReady = credentials.IsHealthy && channel.IsHealthy && gateway.IsHealthy && webHost.IsHealthy
             && (!superviseUpdateService || updater.IsHealthy) && (!superviseObservability || observability.Ready);
+    }
+
+    private async Task<JsonDocument?> InspectReadyCohortAsync(CancellationToken token)
+    {
+        List<string> args = ["container", "inspect", credentials.ContainerName, channel.ContainerName,
+            gateway.ContainerName, webHost.ContainerName];
+        if (superviseObservability) args.Add(observability.ContainerName);
+        if (superviseUpdateService) args.Add(updater.ContainerName);
+
+        try
+        {
+            // A missing container can make Podman fail the batch. Let the ordinary
+            // per-service inspection handle missing and unhealthy containers.
+            PodmanCommandResult result = await podman.RunAsync(args, 15, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (result.ExitCode != 0) return null;
+            JsonDocument document = JsonDocument.Parse(result.StdOut);
+            if (document.RootElement.ValueKind == JsonValueKind.Array) return document;
+            document.Dispose();
+            return null;
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested && ex is IOException or InvalidOperationException or JsonException)
+        {
+            return null;
+        }
     }
 
     internal async Task<bool> StopCohortAsync(CancellationToken token)
@@ -181,11 +219,11 @@ internal sealed partial class ApplianceServiceSupervisor(
         return true;
     }
 
-    private async Task TryReconcileAsync(Service service, CancellationToken token)
+    private async Task TryReconcileAsync(Service service, JsonElement? inspection, CancellationToken token)
     {
         try
         {
-            await ReconcileAsync(service, token).ConfigureAwait(false);
+            await ReconcileAsync(service, inspection, token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!token.IsCancellationRequested &&
             ex is IOException or InvalidDataException or InvalidOperationException or JsonException or KeyNotFoundException)
@@ -195,9 +233,9 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
     }
 
-    private async Task ReconcileAsync(Service service, CancellationToken token)
+    private async Task ReconcileAsync(Service service, JsonElement? inspection, CancellationToken token)
     {
-        await EnsureRunningAsync(service, token).ConfigureAwait(false);
+        await EnsureRunningAsync(service, inspection, token).ConfigureAwait(false);
         if (service.Role == ObservabilityRole)
         {
             service.Ready = true;
@@ -244,9 +282,9 @@ internal sealed partial class ApplianceServiceSupervisor(
             ObservabilityRole when superviseObservability => observability,
             UpdateRole when superviseUpdateService => updater,
             _ => throw new ArgumentOutOfRangeException(nameof(role)),
-        }, token);
+        }, inspection: null, token);
 
-    private async Task<string> EnsureRunningAsync(Service service, CancellationToken token)
+    private async Task<string> EnsureRunningAsync(Service service, JsonElement? inspection, CancellationToken token)
     {
         string image = service.Role == ObservabilityRole ? EgressTopologyManager.ObservabilityPinnedImage : release.Deployment.Images[service.Role];
         string? role = service.NetworkRole;
@@ -255,20 +293,29 @@ internal sealed partial class ApplianceServiceSupervisor(
         string? runtimeImage = role is not null
             ? service.RuntimeImageId ??= await ResolveImageIdAsync(service, image, token).ConfigureAwait(false)
             : null;
-        PodmanCommandResult inspection = await podman.RunAsync(["container", "inspect", service.ContainerName], 15, token)
-            .ConfigureAwait(false);
+        if (inspection is { } container)
+            return await ReconcileInspectedContainerAsync(service, image, runtimeImage, container, token).ConfigureAwait(false);
+
+        PodmanCommandResult result = await podman.RunAsync(["container", "inspect", service.ContainerName], 15, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
-        if (inspection.ExitCode != 0)
+        if (result.ExitCode != 0)
         {
             PodmanCommandResult exists = await podman.RunAsync(["container", "exists", service.ContainerName], 10, token)
                 .ConfigureAwait(false);
             if (exists.ExitCode == 1)
                 return await CreateAndStartAsync(service, image, runtimeImage, token).ConfigureAwait(false);
-            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"{service.Role} inspect", inspection));
+            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"{service.Role} inspect", result));
         }
 
-        using JsonDocument document = JsonDocument.Parse(inspection.StdOut);
-        JsonElement container = document.RootElement.EnumerateArray().Single();
+        using JsonDocument document = JsonDocument.Parse(result.StdOut);
+        return await ReconcileInspectedContainerAsync(service, image, runtimeImage, document.RootElement.EnumerateArray().Single(), token)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<string> ReconcileInspectedContainerAsync(
+        Service service, string image, string? runtimeImage, JsonElement container, CancellationToken token)
+    {
+        string? role = service.NetworkRole;
         string id = RequireContainerId(container.GetProperty("Id").GetString());
         JsonElement labels = container.GetProperty("Config").GetProperty("Labels");
         if (labels.ValueKind != JsonValueKind.Object || !HasLabel(labels, ManagedLabel, service.Role))

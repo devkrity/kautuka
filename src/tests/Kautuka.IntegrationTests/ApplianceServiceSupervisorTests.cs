@@ -287,7 +287,7 @@ public sealed class ApplianceServiceSupervisorTests
                     ? $"{writerLock}:/run/kautuka-db-writer.lock:ro"
                     : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks
                     : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token, standardInput: standardInput);
-            if (result.ExitCode == 0 && fixtureHooks is not null && args.Count == 3 && args[0] == "container" && args[1] == "inspect"
+            if (result.ExitCode == 0 && fixtureHooks is not null && args.Count >= 3 && args[0] == "container" && args[1] == "inspect"
                 && args[2].StartsWith("kautuka-appliance-", StringComparison.Ordinal))
                 return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, runtime) };
             return result;
@@ -407,9 +407,17 @@ public sealed class ApplianceServiceSupervisorTests
             LockFilePath = Path.Combine(networkState, "networkaccess.lock"),
         });
         int imageInspections = 0;
+        var containerInspections = new List<int>();
+        bool failBatch = false;
         var gatewayPodman = new PodmanCommandRunner((args, cancellation) =>
         {
             if (args.Count >= 2 && args[0] == "image" && args[1] == "inspect") imageInspections++;
+            if (args.Count >= 3 && args[0] == "container" && args[1] == "inspect")
+            {
+                containerInspections.Add(args.Count - 2);
+                if (failBatch && args.Count > 3)
+                    return Task.FromResult(new PodmanCommandResult(125, "", "fixture: batch failed"));
+            }
             return podman.RunAsync(args, 30, cancellation);
         });
         int webHostPort = 0;
@@ -497,6 +505,18 @@ public sealed class ApplianceServiceSupervisorTests
                 await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
                 Assert.False(gateway.IsReady);
                 await gateway.ReconcileServicesAsync(token);
+                Assert.True(gateway.IsReady);
+                int serviceCount = release.Deployment.Images.ContainsKey("updateservice") ? 6 : 5;
+                containerInspections.Clear();
+                await gateway.ReconcileServicesAsync(token);
+                Assert.Equal([serviceCount], containerInspections);
+                Assert.True(gateway.IsReady);
+                containerInspections.Clear();
+                failBatch = true;
+                await gateway.ReconcileServicesAsync(token);
+                Assert.Equal(serviceCount + 1, containerInspections.Count);
+                Assert.Equal(serviceCount, containerInspections[0]);
+                Assert.All(containerInspections.Skip(1), count => Assert.Equal(1, count));
                 Assert.True(gateway.IsReady);
             }
             Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
@@ -689,20 +709,23 @@ public sealed class ApplianceServiceSupervisorTests
     }
     private static string NormalizeFixtureCreateCommand(string json, string[] prefix, string fixtureHooks, string writerLock, string runtime)
     {
-        System.Text.Json.Nodes.JsonNode root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
-        System.Text.Json.Nodes.JsonArray command = root[0]!["Config"]!["CreateCommand"]!.AsArray();
-        for (int i = 0; i < prefix.Length; i++)
+        var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsArray();
+        foreach (System.Text.Json.Nodes.JsonNode? container in root)
         {
-            Assert.Equal(prefix[i], command[1]!.GetValue<string>());
-            command.RemoveAt(1);
-        }
-        for (int i = 0; i < command.Count; i++)
-        {
-            string value = command[i]!.GetValue<string>();
-            if (value == fixtureHooks) command[i] = Path.Combine(runtime, ".config", "containers", "hooks.d");
-            else if (value == "127.0.0.1::20229") command[i] = "127.0.0.1:20229:20229";
-            else if (value == $"{writerLock}:/run/kautuka-db-writer.lock:ro")
-                command[i] = "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro";
+            System.Text.Json.Nodes.JsonArray command = container!["Config"]!["CreateCommand"]!.AsArray();
+            for (int i = 0; i < prefix.Length; i++)
+            {
+                Assert.Equal(prefix[i], command[1]!.GetValue<string>());
+                command.RemoveAt(1);
+            }
+            for (int i = 0; i < command.Count; i++)
+            {
+                string value = command[i]!.GetValue<string>();
+                if (value == fixtureHooks) command[i] = Path.Combine(runtime, ".config", "containers", "hooks.d");
+                else if (value == "127.0.0.1::20229") command[i] = "127.0.0.1:20229:20229";
+                else if (value == $"{writerLock}:/run/kautuka-db-writer.lock:ro")
+                    command[i] = "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro";
+            }
         }
         return root.ToJsonString();
     }
