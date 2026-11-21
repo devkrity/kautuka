@@ -232,13 +232,15 @@ public sealed class WorkspaceSidecarSupervisor(
         }
 
         ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
-        if (state.IsRunning && await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false))
+        bool hasScheduledPackageHealth = isPackageProxy && sidecar.HealthCheck is null
+            && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
+        if (state.IsRunning && (hasScheduledPackageHealth || await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false)))
         {
-            string? drift = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
+            (string? drift, string imageId) = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
             if (drift is null)
             {
                 if (IsPackageProxy(sidecar)
-                    && !await AuthorizeExistingPackageProxyAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false))
+                    && !await AuthorizeExistingPackageProxyAsync(sidecar, state.InspectJson!, imageId, cancellationToken).ConfigureAwait(false))
                 {
                     return false;
                 }
@@ -318,7 +320,7 @@ public sealed class WorkspaceSidecarSupervisor(
             ready = verifiedState.IsRunning
                 && string.Equals(verifiedState.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase)
                 && verifiedState.InspectJson is not null
-                && await AuthorizeExistingPackageProxyAsync(sidecar, verifiedState.InspectJson, cancellationToken).ConfigureAwait(false);
+                && await AuthorizeExistingPackageProxyAsync(sidecar, verifiedState.InspectJson, imageId: null, cancellationToken).ConfigureAwait(false);
             if (!ready)
             {
                 if (verifiedState.InspectJson is not null)
@@ -345,7 +347,7 @@ public sealed class WorkspaceSidecarSupervisor(
         return ready;
     }
 
-    private async Task<string?> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)
+    private async Task<(string? Drift, string ImageId)> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)
     {
         PodmanCommandResult image = await this.podmanCommandRunner.RunAsync(
             ["image", "inspect", "--format", "{{.Id}}", sidecar.Image],
@@ -359,20 +361,21 @@ public sealed class WorkspaceSidecarSupervisor(
 
         try
         {
+            string imageId = image.StdOut.Trim();
             string? drift = LiveContainerSpec.DescribeSidecarDrift(
                 inspectJson,
                 sidecar.Image,
                 sidecar.Ports,
-                image.StdOut.Trim(),
+                imageId,
                 sidecar.Volumes,
                 sidecar.Environment,
                 ResolveNetwork(sidecar));
             if (drift is null && IsPackageProxy(sidecar))
             {
-                drift = DescribePackageProxyIdentityDrift(inspectJson, NormalizeImageId(image.StdOut.Trim()));
+                drift = DescribePackageProxyIdentityDrift(inspectJson, NormalizeImageId(imageId));
             }
 
-            return drift;
+            return (drift, imageId);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
         {
@@ -798,6 +801,7 @@ public sealed class WorkspaceSidecarSupervisor(
     private async Task<bool> AuthorizeExistingPackageProxyAsync(
         WorkspaceSidecarDefinition sidecar,
         string inspectJson,
+        string? imageId,
         CancellationToken cancellationToken)
     {
         if (egressTopologyManager is null)
@@ -806,11 +810,14 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        PodmanCommandResult imageInspect = await podmanCommandRunner.RunAsync(
-            ["image", "inspect", "--format", "{{.Id}}", sidecar.Image], 10, cancellationToken).ConfigureAwait(false);
-        string imageId = NormalizeImageId(imageInspect.StdOut.Trim());
-        if (imageInspect.ExitCode != 0
-            || !IsImageId(imageId)
+        if (imageId is null)
+        {
+            PodmanCommandResult imageInspect = await podmanCommandRunner.RunAsync(
+                ["image", "inspect", "--format", "{{.Id}}", sidecar.Image], 10, cancellationToken).ConfigureAwait(false);
+            imageId = imageInspect.ExitCode == 0 ? imageInspect.StdOut.Trim() : string.Empty;
+        }
+        imageId = NormalizeImageId(imageId);
+        if (!IsImageId(imageId)
             || !IsPackageProxyInspectAuthorized(inspectJson, imageId, requireRunningIp: true))
         {
             logger.LogWarning("Existing package proxy failed Manager identity/image/IP verification.");

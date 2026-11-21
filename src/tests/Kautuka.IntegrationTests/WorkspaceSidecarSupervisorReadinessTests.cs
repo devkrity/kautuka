@@ -112,6 +112,66 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
     }
 
     [Fact]
+    public async Task WarmPackageProxyUsesScheduledHealthAndOneImageLookupButStillVerifiesRulesAsync()
+    {
+        const string name = "kautuka-pkgs-proxy";
+        const string image = "localhost/kautuka-pkgs-proxy:local";
+        string containerId = new('b', 64);
+        string imageId = "sha256:" + new string('a', 64);
+        string inspect = JsonSerializer.Serialize(new
+        {
+            Id = containerId,
+            Image = imageId,
+            HostConfig = new { NetworkMode = "bridge", Dns = new[] { EgressTopologyManager.EgressPodIp } },
+            Config = new
+            {
+                Image = image,
+                Annotations = new Dictionary<string, string> { ["io.kautuka.role"] = "package-proxy", ["io.kautuka.image-id"] = imageId },
+                Labels = new Dictionary<string, string>
+                {
+                    ["io.kautuka.user"] = "system",
+                    ["io.kautuka.agent"] = "package-proxy",
+                    ["io.kautuka.kind"] = "agent-sandbox",
+                    ["io.kautuka.exec-context"] = "agent-sandbox",
+                    ["io.kautuka.egress"] = "normal",
+                },
+            },
+            State = new { Status = "running", Health = new { Status = "healthy" } },
+            NetworkSettings = new
+            {
+                Networks = new Dictionary<string, object>
+                {
+                    [EgressTopologyManager.WorkloadNetworkName] = new { IPAddress = WorkloadRulesetRenderer.PackageProxyIp },
+                },
+            },
+        });
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            calls.Add(string.Join(' ', args.Take(2)));
+            return Task.FromResult(args[0] switch
+            {
+                "inspect" when args[1] == name => new PodmanCommandResult(0, inspect, ""),
+                "image" when args[1] == "inspect" => new PodmanCommandResult(0, imageId, ""),
+                "inspect" when args[1] == containerId => new PodmanCommandResult(1, "", "fixture ruleset inspection unavailable"),
+                "rm" => new PodmanCommandResult(0, "", ""),
+                _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
+            });
+        });
+        DirectoryInfo temp = Directory.CreateTempSubdirectory("kautuka-warm-proxy-");
+        try
+        {
+            await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")),
+                new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), temp.FullName, hookStateDirectory: temp.FullName);
+            WorkspaceSidecarSupervisor supervisor = CreateSupervisor(new WorkspaceSidecarDefinition(name, image, [],
+                new Dictionary<string, string>(), [], null, null, null, RequiredForReady: true, ManagerInfrastructure: true), podman, topology);
+            Assert.False(await supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken));
+            Assert.Equal(new[] { $"inspect {name}", "image inspect", $"inspect {containerId}", "rm -f" }, calls);
+        }
+        finally { temp.Delete(recursive: true); }
+    }
+
+    [Fact]
     public async Task PackageProxyMachineAllowlistSyncCompletesBeforePodmanStartAsync()
     {
         string root = Path.Combine(Path.GetTempPath(), "kautuka-proxy-machine-sync-" + Guid.NewGuid().ToString("N"));
