@@ -55,7 +55,7 @@ The release builder can produce an appliance candidate with `--appliance-image-p
 
 On Linux, Manager's `--verify-appliance-release` command verifies the selected release against the installed public key. It reads the manifest and signature from the root-owned version directory selected by `/opt/kautuka/manager/current`. A successful check verifies the signed image references and required hook ABI. The command exits before starting Manager or any application service.
 
-When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before stopping services or changing `current`. The selected version directory stays in use during preparation, so the candidate needs a different version.
+When the Linux installer receives a signed appliance payload, it stages it under `/opt/kautuka/manager/versions` and runs the staged Manager's image preparation command as the service account before stopping services or changing `current`. The release directories stay root-owned and allow the service account to traverse them even when the installer runs with a restrictive umask. The selected version directory stays in use during preparation, so the candidate needs a different version.
 
 The signed appliance payload must include the Native AOT OCI hook. The installer checks the staged hook before stopping services and registers `/opt/kautuka/manager/current/scripts/kautuka-oci-hook` for Podman's `createRuntime` stage.
 
@@ -65,7 +65,7 @@ Both commands accept `--candidate-version <version>` to inspect a staged release
 
 In appliance mode, Manager's existing `GetHostStatus` RPC reports `core_ready` once the Podman runtime is available, the egress startup gate is open, and the supervised application services pass their local health checks. Manager also checks that the observability container is running.
 
-On a fresh signed Linux appliance installation, the installer provisions private socket directories and channel trust, then starts Manager as the only Kautuka application host unit. Manager creates missing application state directories with owner-only access and starts the application containers. The channel CA signing key stays in the root-only offline authority directory. The installer waits for the appliance's core readiness through WebHost and reads the first-run setup token from the Gateway state directory.
+On a fresh signed Linux appliance installation, the installer provisions private socket directories and channel trust, then enables and starts Manager as the only Kautuka application host unit. Manager starts with the service account's systemd user target on subsequent boots. Manager creates missing application state directories with owner-only access and starts the application containers. The channel CA signing key stays in the root-only offline authority directory. The installer waits for the appliance's core readiness through WebHost and reads the first-run setup token from the Gateway state directory.
 
 The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
 

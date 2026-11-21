@@ -57,6 +57,10 @@ native_hook_registration_line="$(grep -nF " '/opt/kautuka/manager/current/script
   echo 'error: Linux installer must validate the native hook before shutdown and register it for the selected release.' >&2
   exit 1
 }
+user_target_line="$(grep -nF 'install_user_target_unit "$unit_dir" "$activation_target_units"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+user_target_owner_line="$(grep -nF 'chown -R "$service_user:$service_group" "$unit_dir"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+appliance_enable_line="$(grep -nF 'systemctl --user enable --now "${installed_units[@]}"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+[[ "$user_target_line" -lt "$user_target_owner_line" && "$user_target_owner_line" -lt "$appliance_enable_line" ]]
 (
   source "$tmp/generated-kautuka-install-linux.sh"
   getenforce() { echo Enforcing; }

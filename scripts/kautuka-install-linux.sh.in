@@ -2592,7 +2592,7 @@ confirm_first_admin_setup() {
         echo 'The administrator account controls Kautuka configuration and access. The token is deleted after successful use.'
         echo 'Copy the token now. Do not share it or include it in support logs.'
         printf 'Setup token: %s\n' "$setup_token"
-        echo 'Recovery command if you close this terminal: sudo cat /var/lib/kautuka/setup-token'
+        printf 'Recovery command if you close this terminal: sudo cat %s\n' "$token_file"
     } > /dev/tty
 
     while true; do
@@ -2972,7 +2972,13 @@ PY
 
     ensure_dotnet_host_libraries
 
-    mkdir -p "$versions_root"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        [[ ! -L /opt/kautuka && ! -L "${install_root%/}" && ! -L "$versions_root" ]] \
+            || fail 'appliance installation directories must not be symbolic links'
+        install -d -o root -g root -m 0755 /opt/kautuka "$install_root" "$versions_root"
+    else
+        mkdir -p "$versions_root"
+    fi
     mkdir -p "$internal_state_root/manager"
     mkdir -p "$visible_root/logs/manager"
     mkdir -p "$visible_root/workspaces"
@@ -3024,6 +3030,7 @@ PY
     if [[ "$appliance_image_payload" == 'true' ]]; then
         chown -R root:root "$version_root"
         chmod -R go-w "$version_root"
+        chmod 0755 "$version_root"
         local native_hook="$version_root/scripts/kautuka-oci-hook"
         [[ -f "$native_hook" && ! -L "$native_hook" && -x "$native_hook" &&
             "$(head -c 4 -- "$native_hook")" == $'\x7fELF' ]] \
@@ -3088,7 +3095,6 @@ PY
 
     write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled" "$appliance_image_payload"
     chmod 0644 "$unit_path"
-    chown -R "$service_user:$service_group" "$unit_dir"
 
     local installed_units=()
     local installed_system_units=()
@@ -3123,6 +3129,7 @@ PY
     local activation_target_units=''
     activation_target_units="$(printf '%s\n' "${installed_units[@]}" | paste -sd' ' -)"
     install_user_target_unit "$unit_dir" "$activation_target_units"
+    chown -R "$service_user:$service_group" "$unit_dir"
 
     installed_units+=('kautuka.target')
 
@@ -3156,8 +3163,13 @@ PY
 
     systemctl enable kautuka-update-recovery.service
 
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" enable "${installed_units[@]}"
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka-manager.service
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        run_as_service_user "$service_user" "$service_home" "$xdg_runtime_dir" \
+            systemctl --user enable --now "${installed_units[@]}"
+    else
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" enable "${installed_units[@]}"
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka-manager.service
+    fi
     if (( ${#installed_system_units[@]} > 0 )); then
         systemctl enable "${installed_system_units[@]}"
         if [[ " ${installed_system_units[*]} " == *' kautuka-credentialshost.service '* ]]; then
@@ -3170,7 +3182,9 @@ PY
             systemctl start kautuka-gateway.service
         fi
     fi
-    best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
+    if [[ "$appliance_image_payload" != 'true' ]]; then
+        best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
+    fi
     wait_for_web_ui "$service_user" '' '' "$appliance_image_payload"
 
     echo "Installed Manager version '$version'."
