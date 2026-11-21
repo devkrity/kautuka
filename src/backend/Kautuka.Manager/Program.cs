@@ -93,11 +93,12 @@ if (applianceEnabled)
     string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
     telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podmanCommandRunner, stateRoot, CancellationToken.None)
         .ConfigureAwait(false);
-    builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
+    builder.Services.AddSingleton(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true));
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())
@@ -292,6 +293,13 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 using WebApplication app = builder.Build();
+
+if (KautukaMaintenanceMode.IsActive &&
+    app.Services.GetService<ApplianceServiceSupervisor>() is { } applianceSupervisor &&
+    !await applianceSupervisor.StopCohortAsync(CancellationToken.None).ConfigureAwait(false))
+{
+    throw new InvalidOperationException("Could not stop the appliance service containers for maintenance.");
+}
 
 app.GrantSocketGroupAccessWhenStarted(managerEndpoint);
 

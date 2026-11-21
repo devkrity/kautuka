@@ -51,6 +51,38 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.Equal(0, calls);
     }
 
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task MaintenanceDrainsOnlyOwnedContainersAfterManagerRestart(int stopExitCode, bool expected)
+    {
+        List<string> stopped = [];
+        var podman = new PodmanCommandRunner((args, _) => Task.FromResult(args[0] switch
+        {
+            "ps" => new PodmanCommandResult(0, $$$"""
+                [
+                  {"Id":"{{{Id}}}","Names":["kautuka-appliance-credentialshost"],"Labels":{"io.kautuka.appliance.service":"credentialshost"}},
+                  {"Names":["unmanaged"],"Labels":{"io.kautuka.appliance.service":"channelhost"}},
+                  {"Names":["kautuka-appliance-gateway"],"Labels":{"io.kautuka.appliance.service":"webhost"}}
+                ]
+                """, ""),
+            "stop" => Stop(args[^1]),
+            _ => throw new InvalidOperationException($"Unexpected Podman call: {string.Join(' ', args)}"),
+        }));
+        var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
+            new Dictionary<string, string>()));
+        using var supervisor = CreateSupervisor(podman, release, Path.GetTempPath());
+
+        Assert.Equal(expected, await supervisor.StopCohortAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(new[] { Id }, stopped);
+
+        PodmanCommandResult Stop(string id)
+        {
+            stopped.Add(id);
+            return new PodmanCommandResult(stopExitCode, "", "");
+        }
+    }
+
     [Fact]
     public async Task GatewayAllowlistBindsAndRevokesExactContainerAndImage()
     {
@@ -445,6 +477,17 @@ public sealed class ApplianceServiceSupervisorTests
                 await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
             }
             Assert.True(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
+                NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
+
+            using var restartedSupervisor = new ApplianceServiceSupervisor(gatewayPodman, release, version, runtime, sockets,
+                NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory,
+                superviseObservability: true, superviseUpdateService: release.Deployment.Images.ContainsKey("updateservice"));
+            Assert.True(await restartedSupervisor.StopCohortAsync(token));
+            PodmanCommandResult running = await podman.RunAsync(
+                ["ps", "--filter", "label=io.kautuka.appliance.service", "--format", "{{.Names}}"], 15, token);
+            Assert.Equal(0, running.ExitCode);
+            Assert.True(string.IsNullOrWhiteSpace(running.StdOut), running.StdOut);
+            Assert.False(controller.EvaluateContainerConnection(NetworkAddressClassifier.ApplianceChannelHostAddress,
                 NetworkAddressClassifier.SinkholeAddress, 443, true, "slack.com").Allowed);
         }
         finally

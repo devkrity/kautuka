@@ -101,30 +101,71 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
     }
 
-    private async Task StopCohortAsync(CancellationToken token)
+    internal async Task<bool> StopCohortAsync(CancellationToken token)
     {
-        await StopActiveAsync(webHost, token).ConfigureAwait(false);
-        await StopActiveAsync(gateway, token).ConfigureAwait(false);
-        await StopActiveAsync(updater, token).ConfigureAwait(false);
-        await StopActiveAsync(channel, token).ConfigureAwait(false);
-        await StopActiveAsync(credentials, token).ConfigureAwait(false);
-        await StopActiveAsync(observability, token).ConfigureAwait(false);
+        Service[] services = [webHost, gateway, updater, channel, credentials, observability];
+        var running = new Dictionary<Service, string>();
+        bool stopped = true;
+        try
+        {
+            PodmanCommandResult result = await podman.RunAsync(
+                ["ps", "--no-trunc", "--filter", $"label={ManagedLabel}", "--format", "json"], 15, token)
+                .ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (result.ExitCode != 0)
+                throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure("List running appliance containers", result));
+
+            using JsonDocument containers = JsonDocument.Parse(result.StdOut);
+            foreach (JsonElement container in containers.RootElement.EnumerateArray())
+            {
+                JsonElement labels = container.GetProperty("Labels");
+                JsonElement names = container.GetProperty("Names");
+                Service? service = services.FirstOrDefault(service => labels.ValueKind == JsonValueKind.Object
+                    && HasLabel(labels, ManagedLabel, service.Role)
+                    && names.EnumerateArray().Any(name => name.GetString() == service.ContainerName));
+                if (service is not null)
+                    running.Add(service, RequireContainerId(container.GetProperty("Id").GetString()));
+            }
+        }
+        catch (Exception ex) when (!token.IsCancellationRequested &&
+            ex is IOException or InvalidDataException or InvalidOperationException or JsonException or KeyNotFoundException or ArgumentException)
+        {
+            LogReconcileFailed(logger, "cohort", ex.Message);
+            stopped = false;
+        }
+
+        foreach (Service service in services)
+        {
+            string? trackedId = service.ActiveContainer;
+            stopped &= await StopActiveAsync(service, token).ConfigureAwait(false);
+            if (running.TryGetValue(service, out string? id) && id != trackedId)
+                stopped &= await StopContainerAsync(service, id, token).ConfigureAwait(false);
+        }
+        return stopped;
     }
 
-    private async Task StopActiveAsync(Service service, CancellationToken token)
+    private async Task<bool> StopActiveAsync(Service service, CancellationToken token)
     {
         if (service.ActiveContainer is not { } id)
-            return;
+            return true;
+        if (!await StopContainerAsync(service, id, token).ConfigureAwait(false))
+            return false;
+        service.ActiveContainer = null;
+        service.ResetReadiness();
+        return true;
+    }
+
+    private async Task<bool> StopContainerAsync(Service service, string id, CancellationToken token)
+    {
         PodmanCommandResult result = await podman.RunAsync(["stop", "--ignore", "--time", "10", id], 20, token)
             .ConfigureAwait(false);
         if (result.ExitCode != 0)
         {
             LogReconcileFailed(logger, service.Role, PodmanFailureFormatter.FormatFailure("Container stop", result));
-            return;
+            return false;
         }
         if (service.NetworkRole is { } role) topology?.RevokeApplianceService(role, id);
-        service.ActiveContainer = null;
-        service.ResetReadiness();
+        return true;
     }
 
     private async Task TryReconcileAsync(Service service, CancellationToken token)
