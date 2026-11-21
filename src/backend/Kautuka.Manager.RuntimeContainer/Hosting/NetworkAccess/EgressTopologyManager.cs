@@ -3082,6 +3082,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
+        bool packageProxyStopped = false;
         // Deregister dead containers (matching both canonical hex container IDs and pre-start registered names).
         foreach (RegistryEntry entry in registry.GetAll())
         {
@@ -3093,6 +3094,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             bool isPackageProxy = string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal);
             if (isPackageProxy && !isActive)
             {
+                packageProxyStopped |= packageProxyStartupReady;
                 packageProxyStartupReady = false;
             }
             bool isQuarantined = desiredStateStore?.IsWorkloadQuarantined(entry.ContainerId) == true
@@ -3226,6 +3228,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             transientWorkloadDenials.TryRemove(entry.Ip, out _);
             registry.Deregister(entry.Ip, entry.ContainerId);
         }
+        if (packageProxyStopped)
+            _ = desiredStateStore?.SignalReconcile(WorkspaceReconcileTriggerKind.RecoveryRetry);
         return cleanupComplete;
     }
 

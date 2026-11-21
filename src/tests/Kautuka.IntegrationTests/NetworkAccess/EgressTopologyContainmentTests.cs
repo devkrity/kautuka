@@ -89,6 +89,35 @@ public sealed class EgressTopologyContainmentTests
     }
 
     [Fact]
+    public async Task StoppedPackageProxySignalsTheWorkspaceSupervisorOnce()
+    {
+        string root = Path.Combine(Path.GetTempPath(), $"nac-package-proxy-recovery-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string containerId = new('a', 64);
+            var registry = new WorkloadRegistry();
+            var store = new WorkspaceDesiredStateStore();
+            var podman = new PodmanCommandRunner((_, _) => Task.FromResult(new PodmanCommandResult(
+                0, $$"""[{"Id":"{{containerId}}","State":"exited"}]""", "")));
+            await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+                new WorkloadPostStartVerifier(podman), registry, root, desiredStateStore: store);
+            manager.RegisterVerifiedPackageProxyContainer(containerId);
+            manager.SetPackageProxyReady(true);
+            MethodInfo reconcile = typeof(EgressTopologyManager).GetMethod("ReconcileWorkloadRegistryAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            Assert.True(await (Task<bool>)reconcile.Invoke(manager, [registry, TestContext.Current.CancellationToken])!);
+            Assert.False(manager.IsPackageProxyReady);
+            Assert.True(store.Updates.TryRead(out WorkspaceReconcileTriggerKind trigger));
+            Assert.Equal(WorkspaceReconcileTriggerKind.RecoveryRetry, trigger);
+
+            Assert.True(await (Task<bool>)reconcile.Invoke(manager, [registry, TestContext.Current.CancellationToken])!);
+            Assert.False(store.Updates.TryRead(out _));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task ReconcileBoundaryDrift_StopsRegisteredRunningWorkload()
     {
         string root = Path.Combine(Path.GetTempPath(), $"nac-containment-{Guid.NewGuid():N}");
