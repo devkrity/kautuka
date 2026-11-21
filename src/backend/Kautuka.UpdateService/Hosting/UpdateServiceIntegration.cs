@@ -6,6 +6,7 @@ using System.Text.Json;
 
 using Grpc.Core;
 
+using Kautuka.Hosting.Hosting;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
 
@@ -57,9 +58,14 @@ public sealed class UpdateServiceIntegration(
         try
         {
             Kautuka.Manager.Protos.ManagerStatusResponse status = await managerStatusClient.GetHostStatusAsync(cancellationToken).ConfigureAwait(false);
-            isReady = status.CoreReady;
-            activeExecCount = status.ActiveExecCount;
-            hostStatusObserved = true;
+            hostStatusObserved = updateOptions.ApplianceReleaseId is not { } expectedRelease
+                || (status.Ok && string.Equals(status.ApplianceReleaseId, expectedRelease, StringComparison.Ordinal)
+                    && status.ApplianceVerificationMode == KautukaMaintenanceMode.IsApplianceVerification);
+            if (hostStatusObserved)
+            {
+                isReady = status.CoreReady;
+                activeExecCount = status.ActiveExecCount;
+            }
         }
         catch (RpcException)
         {

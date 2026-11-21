@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 
+using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Hosting;
@@ -556,9 +557,13 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task GetHostContextAsyncUsesManagerStatusFacts(bool appliance)
+    [InlineData(false, "", true, true)]
+    [InlineData(true, "v1.2.3", true, true)]
+    [InlineData(true, "v1.2.2", true, false)]
+    [InlineData(true, "", true, false)]
+    [InlineData(true, "v1.2.3", false, false)]
+    public async Task GetHostContextAsyncUsesManagerStatusFacts(
+        bool appliance, string managerRelease, bool verificationModeMatches, bool statusMatches)
     {
         string tempRoot = CreateTempDirectory();
 
@@ -584,6 +589,8 @@ public sealed class UpdateServiceIntegrationTests
             {
                 Ok = true,
                 CoreReady = true,
+                ApplianceReleaseId = managerRelease,
+                ApplianceVerificationMode = verificationModeMatches == KautukaMaintenanceMode.IsApplianceVerification,
                 ActiveExecCount = 3,
                 Message = "status",
             });
@@ -612,9 +619,9 @@ public sealed class UpdateServiceIntegrationTests
             }
             else Assert.Equal(UpdateServiceIntegration.ResolveManagerInstallRoot(AppContext.BaseDirectory), hostContext.InstallRoot);
             Assert.False(string.IsNullOrWhiteSpace(hostContext.ManagerVersion));
-            Assert.True(hostContext.IsReady);
-            Assert.True(hostContext.HostStatusObserved);
-            Assert.Equal(3, hostContext.ActiveExecCount);
+            Assert.Equal(statusMatches, hostContext.IsReady);
+            Assert.Equal(statusMatches, hostContext.HostStatusObserved);
+            Assert.Equal(statusMatches ? 3 : 0, hostContext.ActiveExecCount);
         }
         finally
         {

@@ -309,7 +309,7 @@ public sealed class WorkspaceGrpcServiceTests
             null!,
             null!,
             NullLogger<WorkspaceGrpcService>.Instance,
-            applianceServicesReady: () => servicesReady);
+            applianceStatus: () => ("v1.2.3", true, servicesReady));
 
         ManagerStatusResponse response = await service.GetHostStatus(
             new WorkspacePingRequest(),
@@ -317,6 +317,8 @@ public sealed class WorkspaceGrpcServiceTests
 
         Assert.True(response.Ok);
         Assert.Equal(expectedCoreReady, response.CoreReady);
+        Assert.Equal("v1.2.3", response.ApplianceReleaseId);
+        Assert.True(response.ApplianceVerificationMode);
     }
 
     [Fact]

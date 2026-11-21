@@ -27,7 +27,7 @@ public sealed partial class WorkspaceGrpcService(
     Kautuka.NetworkAccessController.NetworkAccessController? networkAccessController = null,
     Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.ImageCompatibilityStore? imageCompatibilityStore = null,
     Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager? egressTopologyManager = null,
-    Func<bool>? applianceServicesReady = null) : ManagerService.ManagerServiceBase
+    Func<(string ReleaseId, bool VerificationMode, bool Ready)>? applianceStatus = null) : ManagerService.ManagerServiceBase
 {
     private readonly IContainerTool workspaceTool = workspaceTool;
     private readonly WorkspaceDesiredStateStore desiredStateStore = desiredStateStore;
@@ -96,7 +96,8 @@ public sealed partial class WorkspaceGrpcService(
         bool converged = snapshot.AcceptedVersion > 0 && snapshot.ReconciledVersion == snapshot.AcceptedVersion;
         // Legacy callers use this RPC as the Manager readiness signal. An appliance
         // additionally needs its supervised application services and egress boundary.
-        bool coreReady = applianceServicesReady is null || (runtimeAvailable && applianceServicesReady());
+        var appliance = applianceStatus?.Invoke();
+        bool coreReady = appliance is null || (runtimeAvailable && appliance.Value.Ready);
         bool agentsReady = runtimeAvailable
             && this.readinessGate.IsReady
             && converged
@@ -117,6 +118,8 @@ public sealed partial class WorkspaceGrpcService(
         {
             Ok = true,
             CoreReady = coreReady,
+            ApplianceReleaseId = appliance?.ReleaseId ?? string.Empty,
+            ApplianceVerificationMode = appliance?.VerificationMode ?? false,
             AgentsPending = agentsPending,
             AgentsReady = agentsReady,
             Lifecycle = lifecycle,

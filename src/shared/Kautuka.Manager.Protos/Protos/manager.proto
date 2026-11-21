@@ -137,6 +137,8 @@ message ManagerStatusResponse {
   int32 degraded_count = 13;
   int32 failed_count = 14;
   repeated string drift_actions = 15;
+  string appliance_release_id = 16;
+  bool appliance_verification_mode = 17;
 }
 
 message ManagerRuntimeContainerMessage {

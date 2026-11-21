@@ -115,10 +115,10 @@ if (applianceEnabled)
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
         verificationMode: verifyAppliance));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
-    builder.Services.AddSingleton<Func<bool>>(sp =>
+    builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {
         ApplianceServiceSupervisor supervisor = sp.GetRequiredService<ApplianceServiceSupervisor>();
-        return () => supervisor.IsReady;
+        return () => (release.ReleaseId, verifyAppliance, supervisor.IsReady);
     });
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
