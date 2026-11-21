@@ -59,6 +59,12 @@ native_hook_registration_line="$(grep -nF " '/opt/kautuka/manager/current/script
 }
 (
   source "$tmp/generated-kautuka-install-linux.sh"
+  getenforce() { echo Enforcing; }
+  restorecon() { return 0; }
+  semanage() { printf '%s\n' "$*" >> "$tmp/selinux-contexts"; }
+  ensure_selinux_runtime_exec_policy true
+  grep -Fxq 'fcontext -a -t container_file_t /run/kautuka-db-writer\.lock' "$tmp/selinux-contexts"
+  grep -Fq "'z /run/kautuka-db-writer.lock - - - -'" "$tmp/generated-kautuka-install-linux.sh"
   mkdir "$tmp/hooks"
   install_oci_hook_registration "$tmp/hooks" '/opt/kautuka/manager/current/scripts/kautuka-oci-hook' "$(id -u)" "$(id -g)"
   python3 - "$tmp/hooks/kautuka_hook.json" <<'PY'

@@ -391,7 +391,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             "--env", $"Kautuka__ContainerStateRoot={dataRoot}",
             "--volume", $"{stateDirectory}:{stateMount}:Z",
             "--volume", $"{socketDirectory}:/run/kautuka/{service.Role}:z",
-            "--volume", $"{KautukaDatabaseWriterLease.LockPath}:{KautukaDatabaseWriterLease.LockPath}:ro,z",
+            "--volume", $"{KautukaDatabaseWriterLease.LockPath}:{KautukaDatabaseWriterLease.LockPath}:ro",
         ]);
         if (isGateway)
         {

@@ -292,6 +292,7 @@ copy_runtime_payload() {
 }
 
 ensure_selinux_runtime_exec_policy() {
+    local appliance_image_payload="${1:-false}"
     local selinux_state=''
     if ! command -v getenforce >/dev/null 2>&1; then
         return 0
@@ -311,6 +312,13 @@ ensure_selinux_runtime_exec_policy() {
     local rule='/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+'
     if ! semanage fcontext -a -t bin_t "$rule" >/dev/null 2>&1; then
         semanage fcontext -m -t bin_t "$rule" >/dev/null 2>&1 || fail "could not register SELinux executable labeling rule for Kautuka; install policycoreutils-python-utils and check SELinux policy permissions"
+    fi
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local writer_lock_rule='/run/kautuka-db-writer\.lock'
+        if ! semanage fcontext -a -t container_file_t "$writer_lock_rule" >/dev/null 2>&1; then
+            semanage fcontext -m -t container_file_t "$writer_lock_rule" >/dev/null 2>&1 \
+                || fail 'could not register the SELinux label for the shared database writer lock'
+        fi
     fi
 }
 
@@ -1204,6 +1212,7 @@ grant_socket_group_membership() {
 install_socket_runtime_dirs() {
     local service_user="$1"
     local service_group="${2:-$1}"
+    local appliance_image_payload="${3:-false}"
     local tmpfiles_path='/usr/lib/tmpfiles.d/kautuka-sockets.conf'
 
     install -d -m 0755 /usr/lib/tmpfiles.d
@@ -1224,6 +1233,10 @@ install_socket_runtime_dirs() {
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
             'd /run/kautuka 0755 root root -' \
             'f /run/kautuka-db-writer.lock 0644 root root -'
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            # Apply the installed file context to the shared root-owned inode.
+            printf '%s\n' 'z /run/kautuka-db-writer.lock - - - -'
+        fi
         printf 'd /run/kautuka/networkaccess-envoy 0710 %s %s -\n' "$service_user" "$service_group"
 
         local entry
@@ -2859,7 +2872,7 @@ PY
     fi
 
     # Do not alter SELinux policy until the signed manifest and archive pass.
-    ensure_selinux_runtime_exec_policy
+    ensure_selinux_runtime_exec_policy "$appliance_image_payload"
 
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"
     # Seed the installed release's channel only on a fresh install. Preserve any
@@ -2874,7 +2887,7 @@ PY
     usermod --append --groups "$service_group" kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-gateway
     usermod --append --groups kautuka-credentials-client kautuka-credentials
-    install_socket_runtime_dirs "$service_user" "$service_group"
+    install_socket_runtime_dirs "$service_user" "$service_group" "$appliance_image_payload"
     if id -nG kautuka-channelhost | tr ' ' '\n' | grep -Fxq "$service_group"; then
         fail "kautuka-channelhost must not belong to the broad appliance group: $service_group"
     fi
