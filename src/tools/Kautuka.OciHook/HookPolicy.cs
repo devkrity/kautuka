@@ -17,12 +17,20 @@ internal static class HookPolicy
         IReadOnlyDictionary<string, Infrastructure> allowlist,
         IReadOnlyDictionary<string, string?> owners, string? inode,
         bool allowlistValid = true, string? allowlistReason = null,
-        bool ownersValid = true, string? ownersReason = null)
+        bool ownersValid = true, string? ownersReason = null, bool allowPendingGatewayAddress = false)
     {
         static Decision Refuse(string reason) => new(false, reason);
         static Decision Allow(string reason) => new(true, reason);
         if (state is null || state.Pid <= 0) return Refuse("missing_pid");
-        if (ips is null || ips.Count == 0) return Refuse("no_ip");
+        if (ips is null) return Refuse("no_ip");
+        if (ips.Count == 0)
+        {
+            // Some keep-id runtimes attach the veth after createRuntime. Only the
+            // exact allowlisted Gateway can proceed to the normal identity and
+            // owner checks below; the caller must preserve the observed empty set.
+            if (!allowPendingGatewayAddress || state.Role != "appliance-gateway") return Refuse("no_ip");
+            ips = [WorkloadRulesetRenderer.ApplianceGatewayIp];
+        }
         if (!ips.Any(static ip => ip.StartsWith("10.247.", StringComparison.Ordinal) || ip == "10.247"))
         {
             if (state.Role is "workload" or "appliance-gateway")

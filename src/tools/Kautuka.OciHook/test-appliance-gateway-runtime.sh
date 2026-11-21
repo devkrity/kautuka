@@ -36,11 +36,17 @@ image_id=$("${runtime[@]}" image inspect --format '{{.Id}}' "$image")
 [[ "$image_id" == sha256:* ]] || image_id="sha256:$image_id"
 cid=$("${runtime[@]}" --hooks-dir "$work/hooks" create --pull=never --name "$gateway" \
   --network "$network:ip=10.247.0.4" --annotation io.kautuka.role=appliance-gateway \
-  --annotation "io.kautuka.image-id=$image_id" --cap-drop ALL --read-only "$image" sleep 120)
+  --annotation "io.kautuka.image-id=$image_id" --userns=keep-id:uid=65532,gid=65532 --user=65532:65532 --cap-drop ALL --read-only "$image" sleep 120)
 (umask 077; jq -n --arg id "$cid" --arg digest "$image_id" \
   '{entries:[{id:$id,role:"appliance-gateway",expected_ipv4:["10.247.0.4"],image_digest:$digest}]}' > "$work/state/kautuka/nac/infra-allowlist.json")
 "${runtime[@]}" --hooks-dir "$work/hooks" start "$cid" >/dev/null
 pid=$("${runtime[@]}" inspect --format '{{.State.Pid}}' "$cid")
+actual_inode=$(stat -Lc '%i' "/proc/$pid/ns/net")
+audit_inode=$(jq -r --arg cid "$cid" 'select(.id == $cid and .reason == "appliance_gateway_rules") | .netns_inode' "$work/state/kautuka/nac/hook.log")
+[[ "$actual_inode" == "$audit_inode" ]]
+jq -e --arg cid "$cid" 'select(.id == $cid and .reason == "appliance_gateway_rules" and .ips == [])' "$work/state/kautuka/nac/hook.log" >/dev/null
+"${runtime[@]}" unshare nsenter -t "$pid" -n ip -j -4 addr show | jq -e '[.[].addr_info[]?.local] | index("10.247.0.4") != null' >/dev/null
+printf 'Hook-time and post-start namespace inode matched: %s; post-start IP 10.247.0.4\n' "$actual_inode"
 "${runtime[@]}" unshare nsenter -t "$pid" -n nft -j list table inet kautuka_workload > "$work/applied.json"
 [[ -z "${KAUTUKA_GATEWAY_GOLDEN_OUTPUT:-}" ]] || cp -- "$work/applied.json" "$KAUTUKA_GATEWAY_GOLDEN_OUTPUT"
 jq -e --arg cid "$cid" 'select(.id == $cid and .action == "allow" and .reason == "appliance_gateway_rules" and (.rules_sha256 | test("^[0-9a-f]{64}$")))' "$work/state/kautuka/nac/hook.log" >/dev/null

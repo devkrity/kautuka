@@ -195,3 +195,11 @@ Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with
     new Dictionary<string, HookPolicy.Infrastructure> { ["gateway-id"] = new("appliance-gateway", ["10.247.0.4"], ImageDigest: "not-immutable") }, owners, "100"));
 Check("reserved_range", HookPolicy.Decide(new("unknown", 123), ["10.247.0.4"], empty, owners, "100"));
 Check("missing_netns_inode", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, owners, null));
+Check("appliance_gateway_rules", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
+Check("no_ip", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, owners, "100"));
+Check("no_ip", HookPolicy.Decide(workload, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
+Check("missing_allowlist", HookPolicy.Decide(gatewayState, [], empty, owners, "100", allowlistValid: false, allowPendingGatewayAddress: true));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState, [], empty, owners, "100", allowPendingGatewayAddress: true));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "sha256:" + new string('b', 64) }, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
+Check("shared_netns", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, new Dictionary<string, string?> { ["100"] = "other" }, "100", allowPendingGatewayAddress: true));
+Check("workload_off_network", HookPolicy.Decide(gatewayState, ["192.0.2.10"], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));

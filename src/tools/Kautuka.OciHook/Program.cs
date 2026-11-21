@@ -56,7 +56,8 @@ try
     var allowlist = AllowlistFile.Read(Path.Combine(stateDirectory, "infra-allowlist.json"));
     var owners = OwnerRegistry.Read(ownersPath);
     var decision = HookPolicy.Decide(state, addresses, allowlist.Entries, owners.Ids,
-        inode.Value.ToString(CultureInfo.InvariantCulture), allowlist.Valid, allowlist.Reason, owners.Valid, owners.Reason);
+        inode.Value.ToString(CultureInfo.InvariantCulture), allowlist.Valid, allowlist.Reason, owners.Valid, owners.Reason,
+        allowPendingGatewayAddress: true);
     if (!decision.Allowed)
         return Finish(false, decision.Reason);
 
@@ -69,7 +70,7 @@ try
     failure = "apply_failed";
     bool packageProxy = decision.Reason == "package_proxy_rules";
     bool applianceGateway = decision.Reason == "appliance_gateway_rules";
-    string address = addresses[0];
+    string address = applianceGateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : addresses[0];
     string rules = WorkloadRulesetRenderer.Render(address, packageProxy, applianceGateway);
     string nftTool = FindSystemTool("nft");
     var apply = await target.RunAsync(nftTool, ["-f", "-"], rules).ConfigureAwait(false);
