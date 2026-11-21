@@ -46,6 +46,32 @@ public sealed class WorkspaceSidecarSupervisor(
 
     public IReadOnlyList<string> ManagedContainerNames => catalog.Sidecars.Select(static sidecar => sidecar.Name).ToArray();
 
+    public async Task<bool> EnsurePackageProxyReadyForVerificationAsync(CancellationToken cancellationToken)
+    {
+        if (!applianceMode || egressTopologyManager?.IsStartupGateOpen != true)
+            return false;
+
+        WorkspaceSidecarDefinition? sidecar = catalog.Sidecars.FirstOrDefault(IsPackageProxy);
+        if (sidecar is null || !ShouldEnableSidecar(sidecar))
+        {
+            egressTopologyManager.SetPackageProxyReady(false);
+            logger.LogWarning("The package proxy is missing or disabled in the candidate release.");
+            return false;
+        }
+
+        try
+        {
+            return await EnsureSidecarAsync(sidecar, cancellationToken).ConfigureAwait(false)
+                && egressTopologyManager.IsPackageProxyReady;
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            egressTopologyManager.SetPackageProxyReady(false);
+            logger.LogWarning(error, "Could not verify the candidate release's package proxy.");
+            return false;
+        }
+    }
+
     public IReadOnlyList<string> TakeDriftNotes()
     {
         var notes = new List<string>();
@@ -552,6 +578,10 @@ public sealed class WorkspaceSidecarSupervisor(
                     return true;
                 }
             }
+
+            if (applianceMode && IsPackageProxy(sidecar) && imageArchives is not null
+                && allowlist.Images.FirstOrDefault(static entry => entry.Id == "git-pkgs-proxy") is { } baseImage)
+                await imageArchives.TryEnsureImageAsync(baseImage.Image, cancellationToken).ConfigureAwait(false);
 
             return await BuildImageAsync(sidecar, dockerfile, expectedSourceHash, cancellationToken).ConfigureAwait(false);
         }

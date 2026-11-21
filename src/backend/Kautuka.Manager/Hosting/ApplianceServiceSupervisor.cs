@@ -24,7 +24,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     bool superviseObservability = false,
     bool superviseUpdateService = false,
     Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null,
-    bool verificationMode = false) : BackgroundService
+    bool verificationMode = false,
+    WorkspaceSidecarSupervisor? verificationSidecars = null) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -42,8 +43,10 @@ internal sealed partial class ApplianceServiceSupervisor(
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
     private readonly Service updater = new(UpdateRole, "updateService", networked: true);
     private volatile bool cohortReady;
+    private volatile bool verificationPackageReady;
 
-    internal bool IsReady => cohortReady && topology?.IsStartupGateOpen == true;
+    internal bool IsReady => cohortReady && topology?.IsStartupGateOpen == true
+        && (!verificationMode || (verificationPackageReady && topology.IsPackageProxyReady));
 
     private sealed class Service(string role, string stateName, bool networked)
     {
@@ -123,6 +126,9 @@ internal sealed partial class ApplianceServiceSupervisor(
             await StopActiveAsync(webHost, token).ConfigureAwait(false);
         cohortReady = credentials.IsHealthy && channel.IsHealthy && gateway.IsHealthy && webHost.IsHealthy
             && (!superviseUpdateService || updater.IsHealthy) && (!superviseObservability || observability.Ready);
+
+        if (verificationMode && verificationSidecars is not null)
+            verificationPackageReady = await verificationSidecars.EnsurePackageProxyReadyForVerificationAsync(token).ConfigureAwait(false);
     }
 
     private async Task<JsonDocument?> InspectReadyCohortAsync(CancellationToken token)
@@ -153,6 +159,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     internal async Task<bool> StopCohortAsync(CancellationToken token)
     {
         cohortReady = false;
+        verificationPackageReady = false;
         Service[] services = [webHost, gateway, updater, channel, credentials, observability];
         var running = new Dictionary<Service, string>();
         bool stopped = true;

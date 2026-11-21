@@ -113,7 +113,8 @@ if (applianceEnabled)
         stateRoot, socketRoot,
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
-        verificationMode: verifyAppliance));
+        verificationMode: verifyAppliance,
+        verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {

@@ -111,8 +111,10 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         Assert.Equal(2, inspectCount);
     }
 
-    [Fact]
-    public async Task WarmPackageProxyUsesScheduledHealthAndOneImageLookupButStillVerifiesRulesAsync()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WarmPackageProxyUsesScheduledHealthAndOneImageLookupButStillVerifiesRulesAsync(bool verification)
     {
         const string name = "kautuka-pkgs-proxy";
         const string image = "localhost/kautuka-pkgs-proxy:local";
@@ -163,9 +165,15 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         {
             await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")),
                 new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), temp.FullName, hookStateDirectory: temp.FullName);
+            typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
             WorkspaceSidecarSupervisor supervisor = CreateSupervisor(new WorkspaceSidecarDefinition(name, image, [],
-                new Dictionary<string, string>(), [], null, null, null, RequiredForReady: true, ManagerInfrastructure: true), podman, topology);
-            Assert.False(await supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken));
+                new Dictionary<string, string>(), [], null, null, null, RequiredForReady: true, ManagerInfrastructure: true),
+                podman, topology, applianceMode: verification);
+            bool ready = verification
+                ? await supervisor.EnsurePackageProxyReadyForVerificationAsync(TestContext.Current.CancellationToken)
+                : await supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken);
+            Assert.False(ready);
+            Assert.False(topology.IsPackageProxyReady);
             Assert.Equal(new[] { $"inspect {name}", "image inspect", $"inspect {containerId}", "rm -f" }, calls);
         }
         finally { temp.Delete(recursive: true); }
