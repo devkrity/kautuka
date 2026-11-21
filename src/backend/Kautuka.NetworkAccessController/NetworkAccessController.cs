@@ -430,8 +430,19 @@ public sealed class NetworkAccessController
                 state, null, null, null, destKind, normalizedDestination, input.Port);
             if (platformRules.Any(static rule => !rule.Allowed))
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            bool slackChannel = agentId == "channelhost" && destKind == "host" && input.Port == 443
+                && (normalizedDestination == "slack.com" || normalizedDestination.EndsWith(".slack.com", StringComparison.Ordinal));
             NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port);
+            if (slackChannel && normalizedDestination != "slack.com")
+            {
+                NetworkAccessRule? channelRule = FindSystemExplicitRule(state.Rules, agentId, destKind, "slack.com", input.Port);
+                if (channelRule is { Allowed: false } || explicitSystemRule is null)
+                    explicitSystemRule = channelRule;
+            }
             if (explicitSystemRule is { Allowed: false })
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, slackChannel ? "slack.com" : normalizedDestination, input.Port);
+            if (explicitSystemRule is null && seedRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
                 && (platformRules.Any(static rule => rule.Allowed) || explicitSystemRule is { Allowed: true })
@@ -450,7 +461,6 @@ public sealed class NetworkAccessController
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             }
 
-            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, normalizedDestination, input.Port);
             if (seedRule is not null && seedRule.Allowed)
             {
                 return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed");

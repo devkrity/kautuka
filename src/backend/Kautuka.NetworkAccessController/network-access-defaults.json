@@ -68,7 +68,7 @@
       "destination": "api.telegram.org",
       "destKind": "host",
       "port": 443,
-      "allowed": true,
+      "allowed": false,
       "allowLan": false
     },
     {
@@ -78,7 +78,7 @@
       "destination": "slack.com",
       "destKind": "host",
       "port": 443,
-      "allowed": true,
+      "allowed": false,
       "allowLan": false
     },
     {
@@ -88,7 +88,7 @@
       "destination": "files.slack.com",
       "destKind": "host",
       "port": 443,
-      "allowed": true,
+      "allowed": false,
       "allowLan": false
     },
     {
@@ -98,7 +98,7 @@
       "destination": "wss-primary.slack.com",
       "destKind": "host",
       "port": 443,
-      "allowed": true,
+      "allowed": false,
       "allowLan": false
     },
     {
@@ -108,7 +108,7 @@
       "destination": "wss-backup.slack.com",
       "destKind": "host",
       "port": 443,
-      "allowed": true,
+      "allowed": false,
       "allowLan": false
     },
     {

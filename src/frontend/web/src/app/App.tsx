@@ -6,6 +6,7 @@ import { StartupScreen } from '@/components/layout/StartupScreen';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/features/auth';
+import { useBuiltInToolRefresh } from '@/features/connectors';
 import {
   applyUpdate,
   fetchUpdateStatus,
@@ -86,6 +87,8 @@ function AppShell() {
   }, [dismissedUpdateBannerKey, dismissedUpdateBannerStorageItemName]);
 
   const isAdmin = currentUser?.role?.toLowerCase() === ROLE_ADMIN.toLowerCase();
+
+  useBuiltInToolRefresh(authenticated && isAdmin);
 
   // System Setup Guard
   useOnboardingGuard(authenticated, isAdmin);

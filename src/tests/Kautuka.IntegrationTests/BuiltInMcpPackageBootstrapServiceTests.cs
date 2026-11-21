@@ -197,8 +197,10 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
         }
     }
 
-    [Fact]
-    public async Task StartAsyncExistingConnectorPreservesEnabledState()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task StartAsyncExistingConnectorPreservesEnabledState(bool enabled)
     {
         string root = CreateTempDirectory();
         try
@@ -228,7 +230,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                     600,
                     null,
                     null,
-                    false,
+                    enabled,
                     false,
                     DateTimeOffset.UtcNow.ToString("O"),
                     DateTimeOffset.UtcNow.ToString("O"),
@@ -273,7 +275,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             Assert.Equal(1, catalog.SaveCallCount);
             Assert.Equal("kautuka-web-tools", catalog.SavedServerId);
             Assert.NotNull(catalog.SavedRequest);
-            Assert.False(catalog.SavedRequest!.Enabled);
+            Assert.Equal(enabled, catalog.SavedRequest!.Enabled);
             Assert.Equal("kautuka-web-tools", catalog.SavedRequest.PresetId);
             Assert.Equal(McpCommandTransportMapper.NodeImage, catalog.SavedRequest.ContainerImage);
             ContainerImageProvenancePolicy.EnsureTrusted(
@@ -473,8 +475,11 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
         }
     }
 
-    [Fact]
-    public async Task StartAsyncImportsMicrosoftMailBundleEnabled()
+    [Theory]
+    [InlineData("kautuka-m365-mail")]
+    [InlineData("kautuka-google-mail")]
+    [InlineData("kautuka-web-tools")]
+    public async Task StartAsyncImportsBuiltInBundleDisabled(string connectorId)
     {
         string root = CreateTempDirectory();
         try
@@ -482,7 +487,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             string bundleDirectory = Path.Combine(root, "built-in-mcpb");
             Directory.CreateDirectory(bundleDirectory);
             await File.WriteAllTextAsync(
-                Path.Combine(bundleDirectory, "kautuka-m365-mail.mcpb"),
+                Path.Combine(bundleDirectory, $"{connectorId}.mcpb"),
                 "placeholder",
                 TestContext.Current.CancellationToken).ConfigureAwait(true);
 
@@ -490,7 +495,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             var mcpb = new FakeMcpbPackageService
             {
                 Inspection = new McpbConnectorInspection(
-                    "kautuka-m365-mail",
+                    connectorId,
                     new GatewayConnectorUpsertRequest
                     {
                         Name = "Microsoft 365 Mail",
@@ -505,7 +510,7 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
                     },
                     "0.4",
                     "binary",
-                    "kautuka-m365-mail")
+                    connectorId)
             };
 
             var service = new BuiltInMcpPackageBootstrapService(
@@ -517,10 +522,10 @@ public sealed class BuiltInMcpPackageBootstrapServiceTests
             await StartAndWaitForBootstrapAsync(service, TestContext.Current.CancellationToken).ConfigureAwait(true);
 
             Assert.Equal(1, mcpb.InspectCallCount);
-            Assert.Equal("kautuka-m365-mail", catalog.SavedServerId);
+            Assert.Equal(connectorId, catalog.SavedServerId);
             Assert.NotNull(catalog.SavedRequest);
-            Assert.True(catalog.SavedRequest!.Enabled);
-            Assert.Equal("kautuka-m365-mail", catalog.SavedRequest.PresetId);
+            Assert.False(catalog.SavedRequest!.Enabled);
+            Assert.Equal(connectorId, catalog.SavedRequest.PresetId);
             Assert.Equal("binary", catalog.SavedRequest.ServerType);
         }
         finally

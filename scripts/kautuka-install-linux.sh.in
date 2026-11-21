@@ -573,10 +573,16 @@ install_envoy_selinux_policy() {
     case "$(getenforce)" in Enforcing|Permissive) ;; *) return 0 ;; esac
     [[ -r "$policy_file" ]] || { echo 'error: the Envoy SELinux policy is missing from the release.' >&2; return 1; }
     if [[ ! -r "$templates/base_container.cil" || ! -r "$templates/net_container.cil" ]]; then
-        if command -v dnf >/dev/null 2>&1; then dnf install -y udica; fi
+        if command -v dnf >/dev/null 2>&1; then
+            dnf install -y udica || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y udica || true
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive install udica || true
+        fi
     fi
     [[ -r "$templates/base_container.cil" && -r "$templates/net_container.cil" ]] || {
-        echo 'error: SELinux is enabled but udica policy templates are unavailable.' >&2; return 1;
+        echo 'error: SELinux is enabled but udica policy templates are unavailable. Install udica with your distribution package manager and rerun the installer.' >&2; return 1;
     }
     command -v semodule >/dev/null 2>&1 || { echo 'error: SELinux policy installation requires semodule.' >&2; return 1; }
     local installed_modules

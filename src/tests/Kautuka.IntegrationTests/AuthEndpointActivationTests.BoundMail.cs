@@ -3,6 +3,7 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Infrastructure.Connectors;
+using Kautuka.NetworkAccess.Client;
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,6 +12,44 @@ namespace Kautuka.IntegrationTests;
 
 public sealed partial class AuthEndpointActivationTests
 {
+    [Fact]
+    public async Task MailNetworkChecksUseAuthenticatedUserAndConnector()
+    {
+        var checker = new MailNetworkChecker();
+        var config = new Dictionary<string, string?> { ["Kautuka:Auth:AttemptLimit"] = "1000", ["Kautuka:ConnectorAuth:Host"] = "https://auth.kautuka.test" };
+        await using AuthApiFixture fixture = await AuthApiFixture.CreateAsync(config, null, null, services =>
+        {
+            services.AddSingleton(new ConnectorAuthCatalog([GoogleMailConnectorTests.BrokerProfile()]));
+            services.AddSingleton<INetworkAccessChecker>(checker);
+        });
+        fixture.AddMailConnector("kautuka-google-mail");
+        string bearer = await fixture.LoginAsBootstrapAdminAsync();
+        using HttpResponseMessage auth = await PostExternalAsync(fixture, "/api/connectors/kautuka-google-mail/oauth/network-check/auth", new { }, applianceOrigin, bearer);
+        Assert.Equal(HttpStatusCode.OK, auth.StatusCode);
+        Assert.Equal("auth.kautuka.test", checker.Target!.Host);
+        Assert.False(string.IsNullOrWhiteSpace(checker.Target.UserId));
+        Assert.Equal("kautuka-google-mail", checker.Target.ConnectorId);
+        Assert.Null(checker.Target.AgentId);
+        using JsonDocument payload = JsonDocument.Parse(await auth.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("approval-1", payload.RootElement.GetProperty("requestId").GetString());
+        using HttpResponseMessage mail = await PostExternalAsync(fixture, "/api/connectors/kautuka-google-mail/oauth/network-check/mail", new { }, applianceOrigin, bearer);
+        Assert.Equal(HttpStatusCode.OK, mail.StatusCode);
+        Assert.Equal("gmail.googleapis.com", checker.Target!.Host);
+        Assert.Equal("kautuka-google-mail", checker.Target.ConnectorId);
+        using HttpResponseMessage invalid = await PostExternalAsync(fixture, "/api/connectors/kautuka-google-mail/oauth/network-check/other", new { }, applianceOrigin, bearer);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+
+    private sealed class MailNetworkChecker : INetworkAccessChecker
+    {
+        public OutboundTarget? Target { get; private set; }
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            Target = target;
+            return Task.FromResult(NetworkAccessCheckResult.CreateDenied("approval_required", "approval-1"));
+        }
+    }
+
     [Fact]
     public async Task BoundMailEndpointsRequireOriginalBrowserAndCompleteOnlyOnce()
     {

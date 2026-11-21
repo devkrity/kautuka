@@ -123,7 +123,7 @@ export function useNetworkRequests(sinceRevision?: number, enabled: boolean = tr
 }
 
 /**
- * Lightweight hook to poll pending request count for the navigation badge every 15s.
+ * Poll pending requests for the navigation badge and notifications.
  */
 export function useNetworkPendingCount(enabled: boolean = true) {
   return useQuery({
@@ -137,7 +137,7 @@ export function useNetworkPendingCount(enabled: boolean = true) {
       return { count: pending.length, requests: pending, brake: data?.brake };
     },
     enabled,
-    refetchInterval: 15000,
+    refetchInterval: 3000,
     refetchIntervalInBackground: false,
   });
 }

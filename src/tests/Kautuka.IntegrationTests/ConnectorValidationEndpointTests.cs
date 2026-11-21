@@ -1560,6 +1560,38 @@ public sealed class ConnectorValidationEndpointTests
     }
 
     [Fact]
+    public async Task EnablingSystemConnectorDiscoversToolsForTheAdministrator()
+    {
+        string digest = "sha256:" + new string('a', 64);
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        {
+            Ok = true,
+            ToolCount = 1,
+            Tools = { new WorkspaceMcpToolMessage { Name = "fetch", JsonSchema = "{\"type\":\"object\"}" } },
+        });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        await fixture.ReplayInternalConnectorSave("enable-test", "example/image@" + digest, enabled: false);
+
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/enable-test", new
+        {
+            name = "Schema test",
+            transport = "container",
+            containerImage = "example/image@" + digest,
+            containerCommand = "server",
+            enabled = true,
+        }, token).ConfigureAwait(true);
+
+        WorkspaceMcpContainerProbeRequest probe = Assert.Single(manager.ContainerProbeRequests);
+        Assert.EndsWith("enable-test", probe.ConnectorId, StringComparison.Ordinal);
+        Assert.True(probe.SaveDiscovery);
+        Assert.Equal(fixture.AdminUserId(), probe.UserId);
+        McpServerDefinition server = fixture.ReadStoredConnector("enable-test");
+        Assert.Equal(digest, server.LocalImageDigest);
+        Assert.Equal("fetch", Assert.Single(server.LocalToolDefinitions!).Name);
+    }
+
+    [Fact]
     public async Task DisablingExistingConnectorDoesNotRunDiscovery()
     {
         var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse { Ok = true, ToolCount = 1, Tools = { new WorkspaceMcpToolMessage { Name = "web_fetch" } } });
@@ -1923,9 +1955,9 @@ public sealed class ConnectorValidationEndpointTests
         public McpServerDefinition ReadStoredConnector(string id)
             => app.Services.GetRequiredService<IPlatformConfigurationProvider>().GetCurrent().McpServers.Single(server => server.Id == id);
 
-        public async Task ReplayInternalConnectorSave(string id, string image)
+        public async Task ReplayInternalConnectorSave(string id, string image, bool enabled = true)
             => _ = await app.Services.GetRequiredService<IGatewayCatalogStore>().SaveSystemMcpServerAsync(id,
-                new GatewayConnectorUpsertRequest { Name = "Schema test", Transport = "container", ContainerImage = image, ContainerCommand = "server", Enabled = true }, TestContext.Current.CancellationToken);
+                new GatewayConnectorUpsertRequest { Name = "Schema test", Transport = "container", ContainerImage = image, ContainerCommand = "server", Enabled = enabled }, TestContext.Current.CancellationToken);
 
         public (string Scope, string? OwnerUserId) ReadStoredConnectorOwnership(string connectorId)
         {

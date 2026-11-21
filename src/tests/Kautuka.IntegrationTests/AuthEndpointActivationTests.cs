@@ -600,6 +600,25 @@ public sealed partial class AuthEndpointActivationTests
     }
 
     [Fact]
+    public async Task OnlyAdminCanSetAValidChannelPublicAddress()
+    {
+        await using var fixture = await AuthApiFixture.CreateAsync();
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        fixture.CreateUser("address-user", "Testing1", isActive: true);
+        string user = await fixture.LoginAsAsync("address-user", "Testing1");
+        const string route = "/api/settings/system/channels/address";
+        using HttpResponseMessage forbidden = await fixture.SendAuthenticatedAsync(HttpMethod.Put, route, user, new { address = "https://evil.example" });
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        using HttpResponseMessage invalid = await fixture.SendAuthenticatedAsync(HttpMethod.Put, route, admin, new { address = "javascript:alert(1)" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        using HttpResponseMessage saved = await fixture.SendAuthenticatedAsync(HttpMethod.Put, route, admin, new { address = "https://kautuka.example/" });
+        Assert.Equal(HttpStatusCode.OK, saved.StatusCode);
+        using HttpResponseMessage loaded = await fixture.SendAuthenticatedAsync(HttpMethod.Get, route, admin);
+        using JsonDocument body = JsonDocument.Parse(await loaded.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal("https://kautuka.example", body.RootElement.GetProperty("address").GetString());
+    }
+
+    [Fact]
     public async Task AuthenticatedUserCanReadAgentAuthoringMetadataAndManageOwnAgent()
     {
         await using var fixture = await AuthApiFixture.CreateAsync();

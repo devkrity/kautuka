@@ -10,6 +10,18 @@ namespace Kautuka.ChannelHost.Tests;
 
 public sealed class ChannelRuntimeEventTranslatorTests
 {
+    [Fact]
+    public void NetworkApprovalNoticeDoesNotSuppressTheFinalResponse()
+    {
+        var translator = new ChannelRuntimeEventTranslator();
+        var notice = Base("network.access.required", """{"response":"Review https://kautuka.example/network-access"}""", "run-network");
+        ChannelTranslatedOutboundAction outbound = Assert.Single(translator.Translate(hitlSettings, notice));
+        ChannelSemanticMessageAction message = JsonSerializer.Deserialize(outbound.PayloadJson, ChannelContractsJsonContext.Default.ChannelSemanticMessageAction)!;
+        Assert.Contains("https://kautuka.example/network-access", ChannelSemanticRendering.RenderTelegram(message).ToJsonString(), StringComparison.Ordinal);
+        Assert.Contains("https://kautuka.example/network-access", ChannelSemanticRendering.RenderSlack(message).ToJsonString(), StringComparison.Ordinal);
+        var finished = Base("run.finished", """{"response":"Done"}""", "run-network");
+        Assert.Single(translator.Translate(hitlSettings, finished));
+    }
     private static readonly string[] sessionFactActionLabels = ["Remove #1", "Switch session", "New session"];
 
     [Theory]

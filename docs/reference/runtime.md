@@ -32,9 +32,15 @@ If a connector test times out while its MCPB image is being built, the build con
 MCPB import validation runs with the identity of the user importing the connector.
 MCPB inspection reads any tool names declared in the bundle manifest; the bundled Web Tools manifest includes its tool name.
 Built-in bundle registration uses supplied tool metadata and does not run userless connector discovery at startup.
+On a fresh installation the bundled connectors start disabled. An administrator enables each connector, which runs the existing image build and tool discovery during save; existing enabled or disabled choices survive a restart or upgrade.
+When an administrator signs in, the open application checks for enabled bundled connectors whose saved tools are missing or outdated and refreshes them in the background using the administrator's identity. It retries once; if refresh still fails, Test connection remains available on the connector.
 Local connector tool definitions are cached when the connector is saved or tested; an agent run uses those definitions rather than listing the local connector tools again.
 
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.
+
+Mail sign-in checks access to the configured sign-in service and asks the user before allowing it for that connector. After sign-in, it asks separately about the mail provider's API when needed. Declining the second request leaves the mailbox signed in but the provider connection blocked.
+
+After an approved tool call runs, its journal records an error when the returned result reports a tool failure, including MCP's `is_error` result; approval itself does not imply that execution succeeded.
 
 Administrators can load live package-proxy cache inventory on demand at `GET /api/runtime/diagnostics/pkgs-proxy/stats` (`AdminDiagnostics`). Gateway asks Manager to `podman exec kautuka-pkgs-proxy proxy stats -json`; Kautuka does not persist that payload. The host port stays unpublished.
 

@@ -342,7 +342,10 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         var channelHostHttpHandler = new NetworkAccessCheckHandler(checker, mockTransport, defaultExecutionContext: "channelhost");
         using var httpClient = new HttpClient(channelHostHttpHandler);
 
-        // 1. ChannelHost telegram-api allowed (seeded for system/channelhost)
+        // 1. ChannelHost Telegram starts blocked and works after an administrator enables it.
+        var admin = new NetworkAccessActor("admin", true);
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => httpClient.GetAsync(new Uri("https://api.telegram.org/bot123/getMe")));
+        nacController.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "api.telegram.org", "host", 443, true), nacController.PolicyStore.Revision);
         mockTransport.ResponseFactory = _ => new HttpResponseMessage(HttpStatusCode.OK);
         using var telegramResp = await httpClient.GetAsync(new Uri("https://api.telegram.org/bot123/getMe"));
         Assert.Equal(HttpStatusCode.OK, telegramResp.StatusCode);
@@ -365,7 +368,8 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
         Assert.Equal("network_access_required", wsEx.NaradReason);
         Assert.Equal("unapproved-relay.slack.com", wsEx.Destination);
 
-        // G5.NC (Negative Control): Seeded Slack wss host (wss-primary.slack.com) passes check
+        // G5.NC: Slack wss works after the administrator enables the service rule.
+        nacController.PolicyStore.SetRule(admin, new RuleWriteSpec("agent", "system", "channelhost", null, "wss-primary.slack.com", "host", 443, true), nacController.PolicyStore.Revision);
         var seededWsUri = new Uri("wss://wss-primary.slack.com/websocket");
         var target = new OutboundTarget(
             Host: seededWsUri.IdnHost,
@@ -485,7 +489,7 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
             AgentId = string.Empty,
         }, channelHostCtx);
 
-        Assert.True(outboundResp.Allowed);
+        Assert.False(outboundResp.Allowed); // RPC is authorized; the channel itself starts paused.
 
         // 3. ChannelHost client context attempting custom userId on CheckOutbound fails with PermissionDenied
         var rpcEx = await Assert.ThrowsAsync<RpcException>(() => grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest

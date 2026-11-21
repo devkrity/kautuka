@@ -917,6 +917,24 @@ for path, required in needs.values():
 PY
 }
 
+verify_envoy_selinux_policy_compatibility() {
+    local candidate="$1" current="$2" selinux_state="$3"
+    case "$selinux_state" in Enforcing|Permissive) ;; *) return 0 ;; esac
+    if [[ ! -f "$candidate/scripts/kautuka_envoy.cil" || ! -f "$current/scripts/kautuka_envoy.cil" ]] ||
+       ! cmp -s "$candidate/scripts/kautuka_envoy.cil" "$current/scripts/kautuka_envoy.cil"; then
+        echo 'error: the Envoy SELinux policy differs from this release; run the current signed Linux installer before updating.' >&2
+        return 1
+    fi
+    local modules loaded expected
+    modules="$(semodule -lfull -m)" || { echo 'error: cannot inspect the loaded Envoy SELinux policy.' >&2; return 1; }
+    loaded="$(printf '%s\n' "$modules" | awk '$2 == "kautuka_envoy" && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
+    expected="sha256:$(sha256sum "$current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+    if [[ "$loaded" != "$expected" ]]; then
+        echo 'error: the loaded Envoy SELinux policy differs from the installed release; run the current signed Linux installer before updating.' >&2
+        return 1
+    fi
+}
+
 verify_nac_hook_compatibility() {
     local candidate="$1" service_home="$2"
     local hooks_dir="$service_home/.config/containers/hooks.d" file
@@ -981,6 +999,9 @@ stage_version_roots() {
     nac_service_home="$(getent passwd "$service_user" | cut -d: -f6)"
     [[ -n "$nac_service_home" ]] || { echo 'error: Kautuka service home is unavailable; run the current signed Linux installer.' >&2; return 1; }
     verify_nac_hook_compatibility "$manager_source" "$nac_service_home" || return 1
+    local selinux_state=''
+    if command -v getenforce >/dev/null 2>&1; then selinux_state="$(getenforce 2>/dev/null || true)"; fi
+    verify_envoy_selinux_policy_compatibility "$manager_source" /opt/kautuka/manager/current "$selinux_state" || return 1
 
     [[ -f "$extract_root/services/webhost/.maintenance-page-v1" \
         && ! -L "$extract_root/services/webhost/.maintenance-page-v1" \

@@ -4,6 +4,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 source <(sed -n '/^verify_nac_hook_compatibility() {/,/^}/p' "$repo_root/scripts/kautuka-apply-release.sh")
+source <(sed -n '/^verify_envoy_selinux_policy_compatibility() {/,/^}/p' "$repo_root/scripts/kautuka-apply-release.sh")
 mkdir -p "$tmp/candidate/scripts" "$tmp/home/.config/containers/hooks.d" "$tmp/home/.config/containers/containers.conf.d"
 hooks="$tmp/home/.config/containers/hooks.d"
 for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
@@ -21,5 +22,35 @@ cp "$tmp/candidate/scripts/kautuka_workload.nft.json.tmpl" "$hooks/kautuka_workl
 rm -f "$hooks/kautuka_hook.json"
 if verify_nac_hook_compatibility "$tmp/candidate" "$tmp/home" >/dev/null 2>&1; then
   echo 'missing hook configuration was accepted' >&2; exit 1
+fi
+mkdir -p "$tmp/current/scripts"
+printf 'policy-v1\n' > "$tmp/current/scripts/kautuka_envoy.cil"
+cp "$tmp/current/scripts/kautuka_envoy.cil" "$tmp/candidate/scripts/kautuka_envoy.cil"
+loaded_checksum="sha256:$(sha256sum "$tmp/current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
+verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing
+semodule() { printf '400 kautuka_envoy cil %s\n500 kautuka_envoy cil sha256:wrong\n' "$loaded_checksum"; }
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'higher-priority changed Envoy module was accepted' >&2; exit 1
+fi
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
+loaded_checksum='sha256:0000000000000000000000000000000000000000000000000000000000000000'
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'changed loaded Envoy SELinux module was accepted' >&2; exit 1
+fi
+loaded_checksum="sha256:$(sha256sum "$tmp/current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+semodule() { :; }
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'missing loaded Envoy SELinux module was accepted' >&2; exit 1
+fi
+semodule() { printf '400 kautuka_envoy cil %s\n' "$loaded_checksum"; }
+printf 'policy-v2\n' > "$tmp/candidate/scripts/kautuka_envoy.cil"
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'changed Envoy SELinux policy was accepted' >&2; exit 1
+fi
+verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Disabled
+rm "$tmp/current/scripts/kautuka_envoy.cil"
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
+  echo 'missing current Envoy SELinux policy was accepted' >&2; exit 1
 fi
 echo 'NAC updater compatibility checks passed.'
