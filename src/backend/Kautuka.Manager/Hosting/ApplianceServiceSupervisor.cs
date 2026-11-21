@@ -25,17 +25,20 @@ internal sealed partial class ApplianceServiceSupervisor(
     private const string CredentialsRole = "credentialshost";
     private const string ChannelRole = "channelhost";
     private const string GatewayRole = "gateway";
+    private const string WebHostRole = "webhost";
     private static readonly TimeSpan reconcileDelay = TimeSpan.FromSeconds(5);
     private readonly Service credentials = new(CredentialsRole, "credentialsHost");
     private readonly Service channel = new(ChannelRole, "channelHost");
     private readonly Service gateway = new(GatewayRole, "gateway");
-    private string? gatewayImageId;
+    private readonly Service webHost = new(WebHostRole, "webhost");
 
     private sealed class Service(string role, string stateName)
     {
         internal string Role { get; } = role;
         internal string StateName { get; } = stateName;
         internal string ContainerName { get; } = $"kautuka-appliance-{role}";
+        internal string? NetworkRole => Role is GatewayRole or WebHostRole ? $"appliance-{Role}" : null;
+        internal string? RuntimeImageId { get; set; }
         internal string? ActiveContainer { get; set; }
         internal bool Ready { get; set; }
         internal int FailedProbes { get; set; }
@@ -68,6 +71,10 @@ internal sealed partial class ApplianceServiceSupervisor(
                         await TryReconcileAsync(gateway, stoppingToken).ConfigureAwait(false);
                     else
                         await StopActiveAsync(gateway, stoppingToken).ConfigureAwait(false);
+                    if (gateway.Ready && topology?.IsStartupGateOpen == true)
+                        await TryReconcileAsync(webHost, stoppingToken).ConfigureAwait(false);
+                    else
+                        await StopActiveAsync(webHost, stoppingToken).ConfigureAwait(false);
                 }
             }
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
@@ -83,6 +90,7 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     private async Task StopCohortAsync(CancellationToken token)
     {
+        await StopActiveAsync(webHost, token).ConfigureAwait(false);
         await StopActiveAsync(gateway, token).ConfigureAwait(false);
         await StopActiveAsync(channel, token).ConfigureAwait(false);
         await StopActiveAsync(credentials, token).ConfigureAwait(false);
@@ -99,7 +107,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             LogReconcileFailed(logger, service.Role, PodmanFailureFormatter.FormatFailure("Container stop", result));
             return;
         }
-        if (service.Role == GatewayRole) topology?.RevokeApplianceGateway(id);
+        if (service.NetworkRole is { } role) topology?.RevokeApplianceService(role, id);
         service.ActiveContainer = null;
         service.ResetReadiness();
     }
@@ -124,14 +132,17 @@ internal sealed partial class ApplianceServiceSupervisor(
         string transport = Path.Combine(stateRoot, service.StateName, "transport");
         string security = Path.Combine(stateRoot, "security", "channel");
         bool isChannel = service.Role == ChannelRole;
-        bool healthy = service.Role == GatewayRole
-            ? await ApplianceServiceReadiness.CheckGatewayAsync(socket, token).ConfigureAwait(false)
-            : await ApplianceServiceReadiness.CheckAsync(
+        bool healthy = service.Role switch
+        {
+            GatewayRole => await ApplianceServiceReadiness.CheckGatewayAsync(socket, token).ConfigureAwait(false),
+            WebHostRole => await ApplianceServiceReadiness.CheckWebHostAsync(token).ConfigureAwait(false),
+            _ => await ApplianceServiceReadiness.CheckAsync(
             socket,
             isChannel ? Path.Combine(security, "channel-trust", ChannelSecurityMaterialProvisioner.CaCertificate) : Path.Combine(transport, ".ca.cer"),
             isChannel ? Path.Combine(security, "gateway-private", ChannelSecurityMaterialProvisioner.GatewayClientPfx) : Path.Combine(transport, ".credentials-client.pfx"),
             token)
-            .ConfigureAwait(false);
+            .ConfigureAwait(false),
+        };
         if (healthy)
         {
             if (!service.Ready) LogServiceReady(logger, service.Role, release.ReleaseId);
@@ -151,16 +162,18 @@ internal sealed partial class ApplianceServiceSupervisor(
             CredentialsRole => credentials,
             ChannelRole => channel,
             GatewayRole => gateway,
+            WebHostRole => webHost,
             _ => throw new ArgumentOutOfRangeException(nameof(role)),
         }, token);
 
     private async Task<string> EnsureRunningAsync(Service service, CancellationToken token)
     {
         string image = release.Deployment.Images[service.Role];
-        if (service.Role == GatewayRole && topology?.IsStartupGateOpen != true)
-            throw new InvalidOperationException("Gateway cannot start before the appliance egress boundary is ready.");
-        string? gatewayImage = service.Role == GatewayRole
-            ? gatewayImageId ??= await ResolveImageIdAsync(service, image, token).ConfigureAwait(false)
+        string? role = service.NetworkRole;
+        if (role is not null && topology?.IsStartupGateOpen != true)
+            throw new InvalidOperationException("The service cannot start before the appliance egress boundary is ready.");
+        string? runtimeImage = role is not null
+            ? service.RuntimeImageId ??= await ResolveImageIdAsync(service, image, token).ConfigureAwait(false)
             : null;
         PodmanCommandResult inspection = await podman.RunAsync(["container", "inspect", service.ContainerName], 15, token)
             .ConfigureAwait(false);
@@ -170,7 +183,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             PodmanCommandResult exists = await podman.RunAsync(["container", "exists", service.ContainerName], 10, token)
                 .ConfigureAwait(false);
             if (exists.ExitCode == 1)
-                return await CreateAndStartAsync(service, image, gatewayImage, token).ConfigureAwait(false);
+                return await CreateAndStartAsync(service, image, runtimeImage, token).ConfigureAwait(false);
             throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"{service.Role} inspect", inspection));
         }
 
@@ -184,14 +197,14 @@ internal sealed partial class ApplianceServiceSupervisor(
         JsonElement host = container.GetProperty("HostConfig");
         if (!HasLabel(labels, ReleaseLabel, release.ReleaseId)
             || container.GetProperty("ImageName").GetString() != image
-            || (gatewayImage is null ? host.GetProperty("NetworkMode").GetString() != "none"
-                : !MatchesImageId(container.GetProperty("Image").GetString(), gatewayImage)
-                    || !HasGatewayProfile(container, BuildCreateArgs(service, image, gatewayImage)))
+            || (runtimeImage is null ? host.GetProperty("NetworkMode").GetString() != "none"
+                : !MatchesImageId(container.GetProperty("Image").GetString(), runtimeImage)
+                    || !HasExpectedProfile(container, BuildCreateArgs(service, image, runtimeImage)))
             || !host.GetProperty("ReadonlyRootfs").GetBoolean())
         {
             await RequireSuccessAsync(service, ["rm", "--force", "--time", "10", id], 25, token).ConfigureAwait(false);
-            if (gatewayImage is not null) topology!.RevokeApplianceGateway(id);
-            return await CreateAndStartAsync(service, image, gatewayImage, token).ConfigureAwait(false);
+            if (role is not null) topology!.RevokeApplianceService(role, id);
+            return await CreateAndStartAsync(service, image, runtimeImage, token).ConfigureAwait(false);
         }
 
         if (service.ActiveContainer != id)
@@ -200,10 +213,10 @@ internal sealed partial class ApplianceServiceSupervisor(
             service.ResetReadiness();
         }
         bool running = container.GetProperty("State").GetProperty("Running").GetBoolean();
-        if (gatewayImage is not null)
+        if (runtimeImage is not null)
         {
             if (!running) service.ResetReadiness();
-            await VerifyGatewayAsync(service, id, gatewayImage, running, token).ConfigureAwait(false);
+            await VerifyNetworkedServiceAsync(service, id, runtimeImage, running ? container : null, token).ConfigureAwait(false);
         }
         else if (!running)
         {
@@ -213,23 +226,53 @@ internal sealed partial class ApplianceServiceSupervisor(
         return id;
     }
 
-    private async Task<string> CreateAndStartAsync(Service service, string image, string? gatewayImage, CancellationToken token)
+    private async Task<string> CreateAndStartAsync(Service service, string image, string? runtimeImage, CancellationToken token)
     {
-        PodmanCommandResult created = await RequireSuccessAsync(service, BuildCreateArgs(service, image, gatewayImage), 30, token).ConfigureAwait(false);
+        PodmanCommandResult created = await RequireSuccessAsync(service, BuildCreateArgs(service, image, runtimeImage), 30, token).ConfigureAwait(false);
         string id = RequireContainerId(created.StdOut.Trim());
         service.ActiveContainer = id;
         service.ResetReadiness();
-        if (gatewayImage is null)
+        if (runtimeImage is null)
             await RequireSuccessAsync(service, ["start", id], 30, token).ConfigureAwait(false);
         else
-            await VerifyGatewayAsync(service, id, gatewayImage, running: false, token).ConfigureAwait(false);
+            await VerifyNetworkedServiceAsync(service, id, runtimeImage, inspection: null, token).ConfigureAwait(false);
         return id;
     }
 
-    private List<string> BuildCreateArgs(Service service, string image, string? gatewayImage)
+    private List<string> BuildCreateArgs(Service service, string image, string? runtimeImage)
     {
+        List<string> args =
+        [
+            "create", "--name", service.ContainerName,
+            "--label", $"{ManagedLabel}={service.Role}", "--label", $"{ReleaseLabel}={release.ReleaseId}",
+            "--pull=never", "--read-only", "--cap-drop=ALL",
+            "--security-opt=no-new-privileges", "--userns=keep-id:uid=65532,gid=65532", "--user=65532:65532",
+            "--env", "Kautuka__Mode=prod", "--env", "Kautuka__Transport=unix",
+        ];
+        if (service.NetworkRole is { } role)
+        {
+            string address = service.Role == GatewayRole ? WorkloadRulesetRenderer.ApplianceGatewayIp : WorkloadRulesetRenderer.ApplianceWebHostIp;
+            args.InsertRange(0, ["--hooks-dir", GetApplianceHookDirectory()]);
+            args.AddRange([
+                "--network", $"{EgressTopologyManager.WorkloadNetworkName}:ip={address}",
+                "--annotation", $"io.kautuka.role={role}",
+                "--annotation", $"io.kautuka.image-id={runtimeImage}",
+                "--env", "Kautuka__Appliance__Enabled=true",
+            ]);
+        }
+        else args.Add("--network=none");
+
+        if (service.Role == WebHostRole)
+        {
+            string peer = RequireMountSource(Path.Combine(socketRoot, GatewayRole), directory: true);
+            string port = WorkloadRulesetRenderer.WebHostPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            args.AddRange(["--publish", $"127.0.0.1:{port}:{port}", "--volume", $"{peer}:/run/kautuka/gateway:ro,z", image]);
+            return args;
+        }
+
+        bool isGateway = service.Role == GatewayRole;
         string statePath = Path.Combine(stateRoot, service.StateName);
-        if (gatewayImage is not null)
+        if (isGateway)
         {
             if (File.Exists(Path.Combine(stateRoot, "kautuka.db")))
                 throw new InvalidOperationException("Gateway data is still in the host-service layout. Appliance activation requires a completed data migration.");
@@ -237,33 +280,22 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
         string stateDirectory = RequireMountSource(statePath, directory: true);
         string socketDirectory = RequireMountSource(Path.Combine(socketRoot, service.Role), directory: true);
-        string dataRoot = gatewayImage is null ? "/data" : Path.GetFullPath(stateRoot);
-        string stateMount = gatewayImage is null ? $"{dataRoot}/{service.StateName}" : dataRoot;
-        List<string> args =
-        [
-            "create", "--name", service.ContainerName,
-            "--label", $"{ManagedLabel}={service.Role}", "--label", $"{ReleaseLabel}={release.ReleaseId}",
-            "--pull=never", "--read-only", "--cap-drop=ALL",
-            "--security-opt=no-new-privileges", "--userns=keep-id:uid=65532,gid=65532", "--user=65532:65532",
-            "--env", "Kautuka__Mode=prod", "--env", $"Kautuka__ContainerStateRoot={dataRoot}", "--env", "Kautuka__Transport=unix",
+        string dataRoot = isGateway ? Path.GetFullPath(stateRoot) : "/data";
+        string stateMount = isGateway ? dataRoot : $"{dataRoot}/{service.StateName}";
+        args.AddRange([
+            "--env", $"Kautuka__ContainerStateRoot={dataRoot}",
             "--volume", $"{stateDirectory}:{stateMount}:Z",
             "--volume", $"{socketDirectory}:/run/kautuka/{service.Role}:z",
             "--volume", $"{KautukaDatabaseWriterLease.LockPath}:{KautukaDatabaseWriterLease.LockPath}:ro,z",
-        ];
-        if (gatewayImage is not null)
+        ]);
+        if (isGateway)
         {
-            args.InsertRange(0, ["--hooks-dir", GetGatewayHookDirectory()]);
             args.AddRange([
-                "--network", $"{EgressTopologyManager.WorkloadNetworkName}:ip={WorkloadRulesetRenderer.ApplianceGatewayIp}",
                 "--dns", WorkloadRulesetRenderer.EgressPodIp,
-                "--annotation", "io.kautuka.role=appliance-gateway",
-                "--annotation", $"io.kautuka.image-id={gatewayImage}",
-                "--env", "Kautuka__Appliance__Enabled=true",
                 "--volume", $"{RequireMountSource(gatewayConnectDirectory!, directory: true)}:/run/kautuka-gateway-connect:ro,Z",
             ]);
             AddGatewayPeerMounts(args, dataRoot);
         }
-        else args.Add("--network=none");
         if (service.Role == ChannelRole)
         {
             string security = Path.Combine(stateRoot, "security", "channel");
@@ -286,7 +318,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         return args;
     }
 
-    private string GetGatewayHookDirectory()
+    private string GetApplianceHookDirectory()
     {
         string hookPath = RequireMountSource(Path.Combine(versionDirectory, "scripts", "kautuka-oci-hook"), directory: false);
         string managerRoot = Path.GetFullPath(Path.Combine(versionDirectory, "..", ".."));
@@ -298,7 +330,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             Span<byte> signature = stackalloc byte[4];
             hook.ReadExactly(signature);
             if (!signature.SequenceEqual("\u007fELF"u8))
-                throw new InvalidOperationException("The appliance Gateway requires the installed Native AOT OCI hook.");
+                throw new InvalidOperationException("Appliance services require the installed Native AOT OCI hook.");
         }
 
         string directory = RequireMountSource(Path.Combine(stateRoot, ".config", "containers", "hooks.d"), directory: true);
@@ -312,7 +344,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             || stages.GetArrayLength() != 1 || stages[0].GetString() != "createRuntime"
             || command.GetProperty("path").GetString() != Path.Combine(current.FullName, "scripts", "kautuka-oci-hook")
             || command.TryGetProperty("args", out _) || command.TryGetProperty("env", out _))
-            throw new InvalidOperationException("Gateway requires the appliance's Native AOT createRuntime hook registration.");
+            throw new InvalidOperationException("Appliance services require the Native AOT createRuntime hook registration.");
         return directory;
     }
 
@@ -366,7 +398,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private static bool MatchesImageId(string? actual, string expected)
         => actual == expected || string.Equals(actual, expected["sha256:".Length..], StringComparison.Ordinal);
 
-    private static bool HasGatewayProfile(JsonElement container, List<string> expected)
+    private static bool HasExpectedProfile(JsonElement container, List<string> expected)
     {
         JsonElement config = container.GetProperty("Config");
         if (!config.TryGetProperty("CreateCommand", out JsonElement command) || command.ValueKind != JsonValueKind.Array)
@@ -376,17 +408,18 @@ internal sealed partial class ApplianceServiceSupervisor(
             && actual.Skip(1).SequenceEqual(expected, StringComparer.Ordinal);
     }
 
-    private async Task VerifyGatewayAsync(Service service, string id, string imageId, bool running, CancellationToken token)
+    private async Task VerifyNetworkedServiceAsync(Service service, string id, string imageId, JsonElement? inspection, CancellationToken token)
     {
-        EgressTopologyManager egress = topology ?? throw new InvalidOperationException("Gateway requires the appliance egress boundary.");
+        EgressTopologyManager egress = topology ?? throw new InvalidOperationException("The service requires the appliance egress boundary.");
+        string role = service.NetworkRole ?? throw new InvalidOperationException("Missing appliance network profile.");
         IWorkloadLaunchLease lease = await egress.AcquireLaunchLeaseAsync(token).ConfigureAwait(false);
         await using var leaseLifetime = lease.ConfigureAwait(false);
         using var launch = CancellationTokenSource.CreateLinkedTokenSource(lease.CancellationToken, token);
         try
         {
-            egress.AuthorizeApplianceGateway(id, imageId);
-            if (!running) await RequireSuccessAsync(service, ["--hooks-dir", GetGatewayHookDirectory(), "start", id], 30, launch.Token).ConfigureAwait(false);
-            await egress.VerifyApplianceGatewayAsync(id, launch.Token).ConfigureAwait(false);
+            egress.AuthorizeApplianceService(role, id, imageId);
+            if (inspection is null) await RequireSuccessAsync(service, ["--hooks-dir", GetApplianceHookDirectory(), "start", id], 30, launch.Token).ConfigureAwait(false);
+            await egress.VerifyApplianceServiceAsync(role, id, inspection, launch.Token).ConfigureAwait(false);
             launch.Token.ThrowIfCancellationRequested();
         }
         catch

@@ -18,6 +18,9 @@ KautukaHostNetworkLayout network = KautukaHostNetworkPolicy.Resolve(builder.Conf
 string? configuredGatewayUrl = builder.Configuration["WebHost:GatewayUrl"];
 string gatewayBaseUrl = configuredGatewayUrl ?? network.GatewayPublicBaseUri.AbsoluteUri;
 bool gatewayOverSocket = string.IsNullOrWhiteSpace(configuredGatewayUrl) && network.Gateway.IsUnixSocket;
+bool appliance = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+if (appliance && (!OperatingSystem.IsLinux() || !gatewayOverSocket))
+    throw new InvalidOperationException("Appliance WebHost requires the local Gateway Unix socket on Linux.");
 
 string configuredWebRoot = builder.Configuration["WebHost:ContentRoot"]
     ?? Path.Combine(AppContext.BaseDirectory, "wwwroot");
@@ -28,7 +31,8 @@ int publicPort = network.WebHostPort;
 
 using WebHostEdgeBinding edgeBinding = WebHostEdgePolicy.Resolve(
     builder.Configuration,
-    publicPort);
+    publicPort,
+    appliance);
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Listen(edgeBinding.Address, edgeBinding.Port, listenOptions =>

@@ -56,8 +56,7 @@ try
     var allowlist = AllowlistFile.Read(Path.Combine(stateDirectory, "infra-allowlist.json"));
     var owners = OwnerRegistry.Read(ownersPath);
     var decision = HookPolicy.Decide(state, addresses, allowlist.Entries, owners.Ids,
-        inode.Value.ToString(CultureInfo.InvariantCulture), allowlist.Valid, allowlist.Reason, owners.Valid, owners.Reason,
-        allowPendingGatewayAddress: true);
+        inode.Value.ToString(CultureInfo.InvariantCulture), allowlist.Valid, allowlist.Reason, owners.Valid, owners.Reason);
     if (!decision.Allowed)
         return Finish(false, decision.Reason);
 
@@ -70,8 +69,9 @@ try
     failure = "apply_failed";
     bool packageProxy = decision.Reason == "package_proxy_rules";
     bool applianceGateway = decision.Reason == "appliance_gateway_rules";
-    string address = applianceGateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : addresses[0];
-    string rules = WorkloadRulesetRenderer.Render(address, packageProxy, applianceGateway);
+    bool applianceWebHost = decision.Reason == "appliance_webhost_rules";
+    string address = applianceGateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : applianceWebHost ? WorkloadRulesetRenderer.ApplianceWebHostIp : addresses[0];
+    string rules = WorkloadRulesetRenderer.Render(address, packageProxy, applianceGateway, applianceWebHost);
     string nftTool = FindSystemTool("nft");
     var apply = await target.RunAsync(nftTool, ["-f", "-"], rules).ConfigureAwait(false);
     if (apply.ExitCode != 0)
@@ -81,8 +81,8 @@ try
     if (verify.ExitCode != 0)
         return Finish(false, failure);
     string observedHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
-        verify.Stdout, applianceGateway ? WorkloadRulesetRenderer.RequiredApplianceGatewayComments : WorkloadRulesetRenderer.RequiredWorkloadComments, address);
-    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy, applianceGateway))
+        verify.Stdout, applianceGateway ? WorkloadRulesetRenderer.RequiredApplianceGatewayComments : applianceWebHost ? WorkloadRulesetRenderer.RequiredApplianceWebHostComments : WorkloadRulesetRenderer.RequiredWorkloadComments, address);
+    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy, applianceGateway, applianceWebHost))
         return Finish(false, failure);
     if (!ProcessIdentity.IsLive(state.Pid, inode, target.Identity.StartTicks))
         return Finish(false, "container_identity_changed");
@@ -106,7 +106,7 @@ int Finish(bool allowed, string reason)
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
     {
         Console.Error.WriteLine("The Kautuka OCI hook could not write its audit record.");
-        if (allowed && reason is "workload_rules" or "package_proxy_rules" or "appliance_gateway_rules")
+        if (allowed && reason is "workload_rules" or "package_proxy_rules" or "appliance_gateway_rules" or "appliance_webhost_rules")
             return 1;
     }
 

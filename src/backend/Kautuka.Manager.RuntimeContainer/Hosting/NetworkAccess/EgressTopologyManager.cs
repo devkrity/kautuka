@@ -142,7 +142,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<InfraAllowlistEntry> baseInfraAllowlistEntries = [];
     private InfraAllowlistEntry? packageProxyAllowlistEntry;
-    private InfraAllowlistEntry? applianceGatewayAllowlistEntry;
+    private readonly Dictionary<string, InfraAllowlistEntry> applianceAllowlistEntries = new(StringComparer.Ordinal);
     private readonly object infraAllowlistLock = new();
     private volatile bool packageProxyStartupReady;
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
@@ -658,8 +658,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 continue;
                             }
 
-                            // Gateway's supervisor re-verifies its reserved profile independently.
-                            if (knownInfraContainerIds.Contains(cid) || IsAuthorizedApplianceGateway(cid))
+                            // The appliance supervisor re-verifies these reserved profiles independently.
+                            if (knownInfraContainerIds.Contains(cid) || IsAuthorizedApplianceService(cid))
                             {
                                 continue;
                             }
@@ -1248,7 +1248,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
                 new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
             ];
-            baseInfraAllowlistEntries = entries.Where(entry => entry.Role is not ("pkgs-proxy" or "appliance-gateway")).ToArray();
+            baseInfraAllowlistEntries = entries.Where(entry => entry.Role is not ("pkgs-proxy" or "appliance-gateway" or "appliance-webhost")).ToArray();
             PersistInfraAllowlist();
         }
     }
@@ -1257,50 +1257,71 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         List<InfraAllowlistEntry> entries = [.. baseInfraAllowlistEntries];
         if (packageProxyAllowlistEntry is not null) entries.Add(packageProxyAllowlistEntry);
-        if (applianceGatewayAllowlistEntry is not null) entries.Add(applianceGatewayAllowlistEntry);
+        entries.AddRange(applianceAllowlistEntries.Values);
         WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, entries));
     }
 
-    private bool IsAuthorizedApplianceGateway(string containerId)
+    private bool IsAuthorizedApplianceService(string containerId)
     {
-        lock (infraAllowlistLock) return applianceGatewayAllowlistEntry?.Id == containerId;
+        lock (infraAllowlistLock) return applianceAllowlistEntries.Values.Any(entry => entry.Id == containerId);
     }
 
-    public void AuthorizeApplianceGateway(string containerId, string imageId)
+    private static string GetApplianceAddress(string role) => role switch
+    {
+        "appliance-gateway" => WorkloadRulesetRenderer.ApplianceGatewayIp,
+        "appliance-webhost" => WorkloadRulesetRenderer.ApplianceWebHostIp,
+        _ => throw new ArgumentOutOfRangeException(nameof(role)),
+    };
+
+    public void AuthorizeApplianceService(string role, string containerId, string imageId)
     {
         if (gatewayConnectEnvoyDirectory is null || !WorkloadPostStartVerifier.IsCanonicalContainerId(containerId)
             || string.IsNullOrEmpty(imageId) || NormalizeContainerImageId(imageId) != imageId)
-            throw new InvalidOperationException("Invalid appliance Gateway identity for the CONNECT topology.");
+            throw new InvalidOperationException("Invalid appliance service identity for the workload network.");
 
+        string address = GetApplianceAddress(role);
         lock (infraAllowlistLock)
         {
-            if (applianceGatewayAllowlistEntry is not null && applianceGatewayAllowlistEntry.Id != containerId)
-                throw new InvalidOperationException("A different appliance Gateway holds the reserved address.");
-            if (applianceGatewayAllowlistEntry?.ImageDigest == imageId) return;
-            SetApplianceGatewayAllowlistEntry(new(containerId, "appliance-gateway", [WorkloadRulesetRenderer.ApplianceGatewayIp], imageId));
+            applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous);
+            if (previous is not null && previous.Id != containerId)
+                throw new InvalidOperationException("A different appliance container holds the reserved address.");
+            if (previous?.ImageDigest == imageId) return;
+            SetApplianceAllowlistEntry(role, new(containerId, role, [address], imageId), previous);
         }
     }
 
-    public void RevokeApplianceGateway(string containerId)
+    public void RevokeApplianceService(string role, string containerId)
     {
         lock (infraAllowlistLock)
         {
-            if (applianceGatewayAllowlistEntry?.Id != containerId) return;
-            SetApplianceGatewayAllowlistEntry(null);
+            if (!applianceAllowlistEntries.TryGetValue(role, out InfraAllowlistEntry? previous) || previous.Id != containerId) return;
+            SetApplianceAllowlistEntry(role, null, previous);
         }
     }
 
-    private void SetApplianceGatewayAllowlistEntry(InfraAllowlistEntry? value)
+    private void SetApplianceAllowlistEntry(string role, InfraAllowlistEntry? value, InfraAllowlistEntry? previous)
     {
-        InfraAllowlistEntry? previous = applianceGatewayAllowlistEntry;
-        applianceGatewayAllowlistEntry = value;
+        if (value is null) applianceAllowlistEntries.Remove(role);
+        else applianceAllowlistEntries[role] = value;
         try { PersistInfraAllowlist(); }
-        catch { applianceGatewayAllowlistEntry = previous; throw; }
+        catch
+        {
+            if (previous is null) applianceAllowlistEntries.Remove(role);
+            else applianceAllowlistEntries[role] = previous;
+            throw;
+        }
     }
 
-    public Task<string> VerifyApplianceGatewayAsync(string containerId, CancellationToken cancellationToken)
-        => postStartVerifier.VerifyWorkloadRulesetAsync(containerId, WorkloadRulesetRenderer.ApplianceGatewayIp,
-            isApplianceGateway: true, cancellationToken: cancellationToken);
+    public Task<string> VerifyApplianceServiceAsync(string role, string containerId, JsonElement? inspection, CancellationToken cancellationToken)
+    {
+        string address = GetApplianceAddress(role);
+        bool gateway = role == "appliance-gateway";
+        return inspection is { } container
+            ? postStartVerifier.VerifyInspectedWorkloadRulesetAsync(container, containerId, address,
+                isPackageProxy: false, isApplianceGateway: gateway, isApplianceWebHost: !gateway, cancellationToken: cancellationToken)
+            : postStartVerifier.VerifyWorkloadRulesetAsync(containerId, address,
+                isApplianceGateway: gateway, isApplianceWebHost: !gateway, cancellationToken: cancellationToken);
+    }
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
     {

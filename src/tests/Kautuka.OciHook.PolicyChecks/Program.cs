@@ -195,11 +195,35 @@ Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with
     new Dictionary<string, HookPolicy.Infrastructure> { ["gateway-id"] = new("appliance-gateway", ["10.247.0.4"], ImageDigest: "not-immutable") }, owners, "100"));
 Check("reserved_range", HookPolicy.Decide(new("unknown", 123), ["10.247.0.4"], empty, owners, "100"));
 Check("missing_netns_inode", HookPolicy.Decide(gatewayState, ["10.247.0.4"], gatewayAllowlist, owners, null));
-Check("appliance_gateway_rules", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
-Check("no_ip", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, owners, "100"));
-Check("no_ip", HookPolicy.Decide(workload, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
-Check("missing_allowlist", HookPolicy.Decide(gatewayState, [], empty, owners, "100", allowlistValid: false, allowPendingGatewayAddress: true));
-Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState, [], empty, owners, "100", allowPendingGatewayAddress: true));
-Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "sha256:" + new string('b', 64) }, [], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
-Check("shared_netns", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, new Dictionary<string, string?> { ["100"] = "other" }, "100", allowPendingGatewayAddress: true));
-Check("workload_off_network", HookPolicy.Decide(gatewayState, ["192.0.2.10"], gatewayAllowlist, owners, "100", allowPendingGatewayAddress: true));
+Check("appliance_gateway_rules", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, owners, "100"));
+Check("no_ip", HookPolicy.Decide(workload, [], gatewayAllowlist, owners, "100"));
+Check("missing_allowlist", HookPolicy.Decide(gatewayState, [], empty, owners, "100", allowlistValid: false));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState, [], empty, owners, "100"));
+Check("appliance_gateway_identity_mismatch", HookPolicy.Decide(gatewayState with { ImageId = "sha256:" + new string('b', 64) }, [], gatewayAllowlist, owners, "100"));
+Check("shared_netns", HookPolicy.Decide(gatewayState, [], gatewayAllowlist, new Dictionary<string, string?> { ["100"] = "other" }, "100"));
+Check("workload_off_network", HookPolicy.Decide(gatewayState, ["192.0.2.10"], gatewayAllowlist, owners, "100"));
+string webImage = "sha256:" + new string('c', 64);
+var webState = new HookPolicy.State("web-id", 123, "appliance-webhost", webImage);
+var webAllowlist = new Dictionary<string, HookPolicy.Infrastructure>
+{
+    ["web-id"] = new("appliance-webhost", ["10.247.0.5"], ImageDigest: webImage),
+};
+Check("appliance_webhost_rules", HookPolicy.Decide(webState, ["10.247.0.5"], webAllowlist, owners, "100"));
+Check("appliance_webhost_rules", HookPolicy.Decide(webState, [], webAllowlist, owners, "100"));
+Check("no_ip", HookPolicy.Decide(workload, [], webAllowlist, owners, "100"));
+Check("workload_off_network", HookPolicy.Decide(webState, ["192.0.2.5"], webAllowlist, owners, "100"));
+Check("appliance_webhost_identity_mismatch", HookPolicy.Decide(webState, [], empty, owners, "100"));
+Check("appliance_webhost_identity_mismatch", HookPolicy.Decide(webState with { ImageId = "sha256:" + new string('d', 64) }, [], webAllowlist, owners, "100"));
+Check("appliance_webhost_identity_mismatch", HookPolicy.Decide(webState with { Role = null }, ["10.247.0.5"], webAllowlist, owners, "100"));
+Check("appliance_webhost_identity_mismatch", HookPolicy.Decide(new("generic-web", 123), ["10.247.0.5"],
+    new Dictionary<string, HookPolicy.Infrastructure> { ["generic-web"] = new("other", ["10.247.0.5"]) }, owners, "100"));
+Check("shared_netns", HookPolicy.Decide(webState, [], webAllowlist, new Dictionary<string, string?> { ["100"] = "other" }, "100"));
+Check("owners_unreadable", HookPolicy.Decide(webState, [], webAllowlist, owners, "100", ownersValid: false));
+string webRules = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.Render("10.247.0.5", isApplianceWebHost: true);
+if (!webRules.Contains("tcp dport 20229 accept", StringComparison.Ordinal) ||
+    !webRules.Contains("ct state established accept", StringComparison.Ordinal) ||
+    webRules.Contains("tcp dport 15004 accept", StringComparison.Ordinal) ||
+    webRules.Contains("meta l4proto tcp accept", StringComparison.Ordinal))
+    throw new InvalidOperationException("WebHost rules are not restricted.");
+string webHash = Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash("10.247.0.5", isApplianceWebHost: true);
+if (webHash.Length != 64) throw new InvalidOperationException("Invalid WebHost ruleset hash.");

@@ -68,3 +68,5 @@ Manager's appliance supervisor starts Gateway once CredentialsHost, ChannelHost,
 If Podman assigns the Gateway address after the `createRuntime` hook, the hook can install the restricted rules in the pinned namespace for the pre-authorized Gateway before the interface appears. Manager still verifies the actual address and rules before accepting readiness.
 
 Appliance socket directories are distinct from the state root so a peer socket mount cannot include the peer's private key directory.
+
+Manager publishes WebHost only at `127.0.0.1:20229` in appliance mode. WebHost starts after Gateway and mounts Gateway's local socket read-only. Its namespace allows incoming IPv4 HTTP and replies to established connections. It drops new outbound connections and IPv6.

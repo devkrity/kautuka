@@ -17,7 +17,7 @@ internal static class HookPolicy
         IReadOnlyDictionary<string, Infrastructure> allowlist,
         IReadOnlyDictionary<string, string?> owners, string? inode,
         bool allowlistValid = true, string? allowlistReason = null,
-        bool ownersValid = true, string? ownersReason = null, bool allowPendingGatewayAddress = false)
+        bool ownersValid = true, string? ownersReason = null)
     {
         static Decision Refuse(string reason) => new(false, reason);
         static Decision Allow(string reason) => new(true, reason);
@@ -26,14 +26,17 @@ internal static class HookPolicy
         if (ips.Count == 0)
         {
             // Some keep-id runtimes attach the veth after createRuntime. Only the
-            // exact allowlisted Gateway can proceed to the normal identity and
+            // exact allowlisted appliance service can proceed to the normal identity and
             // owner checks below; the caller must preserve the observed empty set.
-            if (!allowPendingGatewayAddress || state.Role != "appliance-gateway") return Refuse("no_ip");
-            ips = [WorkloadRulesetRenderer.ApplianceGatewayIp];
+            if (state.Role == "appliance-gateway")
+                ips = [WorkloadRulesetRenderer.ApplianceGatewayIp];
+            else if (state.Role == "appliance-webhost")
+                ips = [WorkloadRulesetRenderer.ApplianceWebHostIp];
+            else return Refuse("no_ip");
         }
         if (!ips.Any(static ip => ip.StartsWith("10.247.", StringComparison.Ordinal) || ip == "10.247"))
         {
-            if (state.Role is "workload" or "appliance-gateway")
+            if (state.Role is "workload" or "appliance-gateway" or "appliance-webhost")
                 return Refuse(ownersValid ? "workload_off_network" : ownersReason ?? "owners_unreadable");
             return Allow("outside_boundary");
         }
@@ -55,16 +58,21 @@ internal static class HookPolicy
                 }
             }
             if (!matches) return Refuse("infra_ip_mismatch");
-            if (entry.Role == "appliance-gateway")
+            if (entry.Role is "appliance-gateway" or "appliance-webhost")
             {
-                if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != WorkloadRulesetRenderer.ApplianceGatewayIp ||
-                    state.Role != "appliance-gateway" || !IsImmutableImageId(entry.ImageDigest) || state.ImageId != entry.ImageDigest)
-                    return Refuse("appliance_gateway_identity_mismatch");
+                bool gateway = entry.Role == "appliance-gateway";
+                string expectedIp = gateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : WorkloadRulesetRenderer.ApplianceWebHostIp;
+                string mismatch = gateway ? "appliance_gateway_identity_mismatch" : "appliance_webhost_identity_mismatch";
+                if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != expectedIp ||
+                    state.Role != entry.Role || !IsImmutableImageId(entry.ImageDigest) || state.ImageId != entry.ImageDigest)
+                    return Refuse(mismatch);
                 if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
                 if (inode is null) return Refuse("missing_netns_inode");
-                if (owners.TryGetValue(inode, out string? gatewayOwner) && gatewayOwner != state.Id) return Refuse("shared_netns");
-                return Allow("appliance_gateway_rules");
+                if (owners.TryGetValue(inode, out string? applianceOwner) && applianceOwner != state.Id) return Refuse("shared_netns");
+                return Allow(gateway ? "appliance_gateway_rules" : "appliance_webhost_rules");
             }
+            if (state.Role == "appliance-webhost" || ips.Contains(WorkloadRulesetRenderer.ApplianceWebHostIp, StringComparer.Ordinal))
+                return Refuse("appliance_webhost_identity_mismatch");
             if (state.Role == "appliance-gateway" || ips.Contains(WorkloadRulesetRenderer.ApplianceGatewayIp, StringComparer.Ordinal))
                 return Refuse("appliance_gateway_identity_mismatch");
             if (entry.Role != "pkgs-proxy") return Allow("infra_allowlisted");
@@ -74,6 +82,7 @@ internal static class HookPolicy
             return Allow("package_proxy_rules");
         }
         if (state.Role == "appliance-gateway") return Refuse("appliance_gateway_identity_mismatch");
+        if (state.Role == "appliance-webhost") return Refuse("appliance_webhost_identity_mismatch");
         if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
         if (ips.Any(static ip => ip.StartsWith("10.247.0.", StringComparison.Ordinal) && ip.Split('.').Length == 4))
             return Refuse("reserved_range");

@@ -11,6 +11,14 @@ namespace Kautuka.Manager.Hosting;
 /// <summary>Checks application service readiness over its authenticated local transport.</summary>
 internal static class ApplianceServiceReadiness
 {
+    internal static async Task<bool> CheckWebHostAsync(CancellationToken cancellationToken)
+    {
+        using var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(3) };
+        using var client = new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(3) };
+        return await CheckHttpAsync(client, new Uri($"http://127.0.0.1:{KautukaHostNetworkPolicy.WebHostPort}/health", UriKind.Absolute), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     internal static async Task<bool> CheckGatewayAsync(string socketPath, CancellationToken cancellationToken)
     {
         var endpoint = new KautukaEndpoint
@@ -29,9 +37,14 @@ internal static class ApplianceServiceReadiness
             ConnectTimeout = TimeSpan.FromSeconds(3),
         };
         using var client = new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(3) };
+        return await CheckHttpAsync(client, new Uri(endpoint.BaseUri, "/health"), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> CheckHttpAsync(HttpClient client, Uri address, CancellationToken cancellationToken)
+    {
         try
         {
-            using HttpResponseMessage response = await client.GetAsync(new Uri(endpoint.BaseUri, "/health"),
+            using HttpResponseMessage response = await client.GetAsync(address,
                 HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             return response.StatusCode == HttpStatusCode.OK;
         }

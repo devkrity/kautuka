@@ -14,6 +14,8 @@ public static class WorkloadRulesetRenderer
     public const string EgressPodIp = "10.247.0.2";
     public const string PackageProxyIp = "10.247.0.3";
     public const string ApplianceGatewayIp = "10.247.0.4";
+    public const string ApplianceWebHostIp = "10.247.0.5";
+    public const int WebHostPort = 20229;
     public const int GatewayConnectPort = 15004;
     public const int PackageProxyPort = 20101;
     public const int EnvoyPort = 15001;
@@ -33,11 +35,14 @@ public static class WorkloadRulesetRenderer
     public static readonly IReadOnlyList<string> RequiredApplianceGatewayComments =
     ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
 
+    public static readonly IReadOnlyList<string> RequiredApplianceWebHostComments =
+    ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
+
     /// <summary>
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false)
+    public static string Render(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false, bool isApplianceWebHost = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
@@ -46,6 +51,12 @@ public static class WorkloadRulesetRenderer
             throw new ArgumentException($"Invalid workload IPv4 address: '{allocatedIp}'.", nameof(allocatedIp));
         }
 
+        if (isApplianceWebHost)
+        {
+            if (isPackageProxy || isApplianceGateway || normalizedIp != ApplianceWebHostIp)
+                throw new ArgumentException("Invalid appliance WebHost ruleset identity.", nameof(allocatedIp));
+            return RenderApplianceWebHost();
+        }
         if (isApplianceGateway)
         {
             if (isPackageProxy || normalizedIp != ApplianceGatewayIp)
@@ -109,14 +120,41 @@ public static class WorkloadRulesetRenderer
 
         """;
 
+    private static string RenderApplianceWebHost() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            tcp dport {{WebHostPort}} accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ApplianceWebHostIp}} counter drop comment "spoof_drop"
+            ct state established accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
     private static string ComputeGatewayExpectedHash()
     {
         string golden = BoundaryRulesetRenderer.ResolveTemplate("kautuka_appliance_gateway.nft.json.tmpl");
         return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceGatewayComments, ApplianceGatewayIp);
     }
-    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false)
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false, bool isApplianceWebHost = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
+        if (isApplianceWebHost)
+        {
+            if (isPackageProxy || isApplianceGateway || allocatedIp != ApplianceWebHostIp)
+                throw new ArgumentException("Invalid appliance WebHost ruleset identity.", nameof(allocatedIp));
+            string golden = BoundaryRulesetRenderer.ResolveTemplate("kautuka_appliance_webhost.nft.json.tmpl");
+            return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceWebHostComments, ApplianceWebHostIp);
+        }
         if (isApplianceGateway)
         {
             if (isPackageProxy || allocatedIp != ApplianceGatewayIp)
