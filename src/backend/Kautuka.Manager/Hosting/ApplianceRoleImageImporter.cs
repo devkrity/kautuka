@@ -60,13 +60,22 @@ internal sealed class ApplianceRoleImageImporter
                 PodmanCommandResult exists = await runner.RunAsync(["image", "exists", reference], 30, cancellationToken).ConfigureAwait(false);
                 if (exists.ExitCode == 1)
                 {
-                    images ??= TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseDirectory);
-                    using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, Roles[index]);
-                    using var stream = new FileStream(archive, FileAccess.Read);
-                    ValidateArchiveIndex(stream, reference);
-                    stream.Position = 0;
-                    PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
-                    if (loaded.ExitCode != 0) throw new InvalidOperationException("Offline appliance image import failed.");
+                    string role = Roles[index];
+                    try
+                    {
+                        images ??= TrustedApplianceReleaseFiles.OpenApplianceImagesDirectory(releaseDirectory);
+                        using var archive = TrustedApplianceReleaseFiles.OpenApplianceImageArchive(images, role);
+                        using var stream = new FileStream(archive, FileAccess.Read);
+                        ValidateArchiveIndex(stream, reference);
+                        stream.Position = 0;
+                        PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (loaded.ExitCode != 0) throw new InvalidOperationException($"Offline appliance image import failed for {role}.");
+                    }
+                    catch (IOException error)
+                    {
+                        throw new InvalidDataException($"The signed {role} image is missing from Podman and its staged archive is unavailable or unreadable.", error);
+                    }
                 }
                 else if (exists.ExitCode != 0) throw new InvalidOperationException("Podman image lookup failed.");
             }

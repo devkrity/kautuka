@@ -118,3 +118,5 @@ Candidate readiness also requires a healthy package proxy with verified egress r
 During a fenced boot, Manager sends empty OTLP requests for logs, metrics, and traces from WebHost's network namespace through the existing Envoy ingestion listener. Candidate readiness requires all three requests to succeed.
 
 On the Linux appliance, `kautuka-manager --check-appliance-ready` checks the selected signed release over Manager's authenticated Unix socket. Pass `--candidate-version VERSION` to expect a specific installed release. With `KAUTUKA_APPLIANCE_VERIFY=1`, the check also requires the protected recovery marker to name that verification target.
+
+Image preparation reuses installed digests for a staged release and requires a local archive for any missing digest. A candidate that changes an image without supplying its archive fails preparation and identifies the missing service.
