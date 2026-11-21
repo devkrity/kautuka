@@ -209,10 +209,15 @@ EOF
 }
 
 install_verified_release_metadata() {
-    local version_root="$1" manifest="$2" signature="$3"
+    local version_root="$1" manifest="$2" signature="$3" appliance="$4"
 
     install -T -o root -g root -m 0644 -- "$manifest" "$version_root/kautuka-platform-release.json"
     install -T -o root -g root -m 0644 -- "$signature" "$version_root/kautuka-platform-release.sig"
+    if [[ "$appliance" == 'true' ]]; then
+        local release_id="$version_root/release-id.txt"
+        [[ -f "$release_id" && ! -L "$release_id" ]] || fail 'signed appliance payload requires a regular release-id.txt'
+        chmod 0644 "$release_id"
+    fi
 }
 
 validate_appliance_image_payload() {
@@ -3021,7 +3026,7 @@ PY
     mkdir -p "$version_root"
     copy_runtime_payload "$content_root" "$version_root"
     if [[ -n "$manifest_url" ]]; then
-        install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path"
+        install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path" "$appliance_image_payload"
     fi
     if [[ "$appliance_image_payload" == 'true' ]]; then
         install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"

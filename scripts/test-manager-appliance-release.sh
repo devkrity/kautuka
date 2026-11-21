@@ -21,6 +21,7 @@ trust=/etc/kautuka
 install -d -m 0755 "$version" "$trust"
 install -m 0755 -- "$1" "$temp/manager"
 printf '%s\n' 'v1.2.3-preview.1' > "$version/release-id.txt"
+chmod 0600 "$version/release-id.txt"
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$temp/test-signing.pem"
 chmod 0600 "$temp/test-signing.pem"
 openssl pkey -in "$temp/test-signing.pem" -pubout -out "$trust/manifest-public-key.pem"
@@ -48,12 +49,12 @@ PY
 openssl dgst -sha256 -sign "$temp/test-signing.pem" "$temp/manifest.json" | base64 > "$temp/manifest.sig"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 source <(sed -n '/^install_verified_release_metadata() {/,/^}/p' "$script_dir/kautuka-install-linux.sh.in")
-install_verified_release_metadata "$version" "$temp/manifest.json" "$temp/manifest.sig"
+install_verified_release_metadata "$version" "$temp/manifest.json" "$temp/manifest.sig" true
 manifest="$version/kautuka-platform-release.json"
 signature="$version/kautuka-platform-release.sig"
 cmp "$temp/manifest.json" "$manifest"
 cmp "$temp/manifest.sig" "$signature"
-[[ "$(stat -c '%u:%g:%a' "$manifest" "$signature")" == $'0:0:644\n0:0:644' ]]
+[[ "$(stat -c '%u:%g:%a' "$manifest" "$signature" "$version/release-id.txt")" == $'0:0:644\n0:0:644\n0:0:644' ]]
 if [[ $# -eq 2 ]]; then
     fail() { echo "$*" >&2; exit 1; }
     source <(sed -n '/^validate_appliance_image_payload() {/,/^}/p; /^install_appliance_image_payload() {/,/^}/p' "$script_dir/kautuka-install-linux.sh.in")
@@ -71,7 +72,6 @@ if [[ $# -eq 2 ]]; then
         exit 1
     fi
 fi
-chmod 0644 "$version/release-id.txt"
 ln -s 'versions/1.2.3-preview.1' "$manager/current"
 
 verify() {
