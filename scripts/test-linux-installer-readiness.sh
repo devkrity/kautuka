@@ -66,6 +66,13 @@ if ! KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
   wait_for_web_ui kautuka http://127.0.0.1:20229 20
   polls="$(cat "$polls_file")"
   [[ "$polls" -eq 3 ]] || { echo "expected to poll readiness until every service was active, got $polls polls" >&2; exit 1; }
+
+  appliance_manager() {
+    [[ "$1" == "--check-appliance-ready" && "$(cat "$polls_file")" -ge 5 ]]
+  }
+  wait_for_web_ui kautuka http://127.0.0.1:20229 20 true appliance_manager
+  polls="$(cat "$polls_file")"
+  [[ "$polls" -eq 5 ]] || { echo "healthy HTTP bypassed appliance Manager readiness" >&2; exit 1; }
 ' _ "$repo_root" > "$output" 2>&1; then
   cat "$output" >&2
   exit 1

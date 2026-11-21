@@ -2400,6 +2400,7 @@ wait_for_web_ui() {
     local url="${2:-}"
     local timeout_seconds="${3:-${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}}"
     local appliance_image_payload="${4:-false}"
+    local appliance_manager="${5:-}"
     local elapsed=0
     local service_uid=''
     local xdg_runtime_dir=''
@@ -2448,7 +2449,6 @@ wait_for_web_ui() {
         local runtime_units_ready=false
         if [[ "$appliance_image_payload" == 'true' ]]; then
             gateway_state=container credentials_state=container channelhost_state=container webhost_state=container updateservice_state=container
-            runtime_units_ready=true
         else
             gateway_state="$(systemctl show -p ActiveState --value kautuka-gateway.service 2>/dev/null || true)"
             credentials_state="$(systemctl show -p ActiveState --value kautuka-credentialshost.service 2>/dev/null || true)"
@@ -2500,9 +2500,18 @@ except (OSError, ValueError, AttributeError, TypeError):
 PY
                 )"
             fi
+            local ui_ready=false
             if [[ "$readiness" == 'ready' && "$setup_http_status" == '200' \
                 && ( "$setup_needs_setup" == 'true' || "$setup_needs_setup" == 'false' ) \
-                && "$manager_state" == 'active' && "$runtime_units_ready" == 'true' ]]; then
+                && "$manager_state" == 'active' ]]; then
+                ui_ready=true
+            fi
+            if [[ "$ui_ready" == 'true' && "$appliance_image_payload" == 'true' ]] &&
+                run_as_service_user "$service_user" "$(get_service_user_home "$service_user")" "$xdg_runtime_dir" \
+                    "$appliance_manager" --check-appliance-ready >/dev/null 2>&1; then
+                runtime_units_ready=true
+            fi
+            if [[ "$ui_ready" == 'true' && "$runtime_units_ready" == 'true' ]]; then
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
                 if [[ "$setup_needs_setup" == 'true' ]]; then
@@ -2517,6 +2526,8 @@ PY
             last_status="lifecycle=${lifecycle_status}; manager=${manager_health}"
             if [[ "$setup_http_status" != '200' ]]; then
                 last_status+="; first-run endpoint HTTP ${setup_http_status:-unknown}"
+            elif [[ "$appliance_image_payload" == 'true' && "$runtime_units_ready" != 'true' ]]; then
+                last_status+='; this appliance has not confirmed readiness'
             fi
         else
             if [[ "$http_status" =~ ^[0-9]{3}$ && "$http_status" != '000' ]]; then
@@ -3226,7 +3237,7 @@ PY
     if [[ "$appliance_image_payload" != 'true' ]]; then
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
     fi
-    wait_for_web_ui "$service_user" '' '' "$appliance_image_payload"
+    wait_for_web_ui "$service_user" '' '' "$appliance_image_payload" "$version_root/kautuka-manager"
 
     echo "Installed Manager version '$version'."
     echo "Current symlink: $current_link -> $(readlink -f "$current_link")"
