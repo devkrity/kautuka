@@ -22,7 +22,8 @@ public sealed class PodmanCommandRunner
         IReadOnlyList<string> args,
         int timeoutSeconds,
         CancellationToken cancellationToken,
-        IReadOnlyDictionary<string, string>? environment = null)
+        IReadOnlyDictionary<string, string>? environment = null,
+        Stream? standardInput = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         if (commandHandler is not null)
@@ -35,6 +36,7 @@ public sealed class PodmanCommandRunner
             FileName = BinaryName,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = standardInput is not null,
             UseShellExecute = false,
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
@@ -62,6 +64,7 @@ public sealed class PodmanCommandRunner
 
         using CancellationTokenSource timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
+        Task inputTask = standardInput is null ? Task.CompletedTask : PumpInputAsync(standardInput, process.StandardInput, timeoutCts.Token);
 
         try
         {
@@ -77,6 +80,8 @@ public sealed class PodmanCommandRunner
             {
             }
 
+            try { await inputTask.ConfigureAwait(false); }
+            catch (Exception ex) when (ex is IOException or OperationCanceledException or ObjectDisposedException) { }
             bool callerCancelled = cancellationToken.IsCancellationRequested;
             return new PodmanCommandResult(
                 callerCancelled ? 130 : 124,
@@ -85,11 +90,18 @@ public sealed class PodmanCommandRunner
                 callerCancelled ? ProcessTerminationReason.CallerCancelled : ProcessTerminationReason.TimedOut);
         }
 
+        try { await inputTask.ConfigureAwait(false); }
+        catch (IOException) when (process.ExitCode != 0) { }
         return new PodmanCommandResult(
             process.ExitCode,
             await stdOutTask.ConfigureAwait(false),
             await stdErrTask.ConfigureAwait(false),
             process.ExitCode == 0 ? ProcessTerminationReason.Completed : ProcessTerminationReason.NonZeroExit);
+    }
+    private static async Task PumpInputAsync(Stream input, StreamWriter target, CancellationToken token)
+    {
+        try { await input.CopyToAsync(target.BaseStream, token).ConfigureAwait(false); }
+        finally { target.Close(); }
     }
 }
 

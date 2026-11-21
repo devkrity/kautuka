@@ -17,7 +17,7 @@ for role in credentialshost channelhost gateway webhost updateservice; do
         "$images/appliance-deployment.json" "$role")"
     digest="sha256:$(skopeo inspect --raw "oci-archive:$archive" | sha256sum | cut -d ' ' -f 1)"
     [[ "$reference" == *@$digest ]]
-    "${podman_fixture[@]}" load --input "$archive"
+    "${podman_fixture[@]}" load < "$archive"
     [[ "$("${podman_fixture[@]}" image inspect --format '{{.Digest}}' "$reference")" == "$digest" ]]
     "${podman_fixture[@]}" run --rm --pull=never --network none --read-only --cap-drop=ALL \
         --entrypoint /bin/sh "$reference" -ec '

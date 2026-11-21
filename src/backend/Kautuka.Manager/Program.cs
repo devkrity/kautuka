@@ -12,18 +12,28 @@ using Kautuka.Telemetry.Telemetry;
 
 using Microsoft.Extensions.Options;
 
-if (Array.IndexOf(args, "--verify-appliance-release") >= 0)
+bool prepareApplianceImages = args.Contains("--prepare-appliance-images", StringComparer.Ordinal);
+if (prepareApplianceImages || args.Contains("--verify-appliance-release", StringComparer.Ordinal))
 {
     if (!OperatingSystem.IsLinux() || args.Length != 1)
     {
-        await Console.Error.WriteLineAsync("Appliance release verification requires Linux and accepts no other arguments.").ConfigureAwait(false);
+        await Console.Error.WriteLineAsync("Appliance release commands require Linux and accept no other arguments.").ConfigureAwait(false);
         return 1;
     }
 
     try
     {
+        const string managerRoot = "/opt/kautuka/manager";
         VerifiedApplianceRelease release = VerifiedApplianceRelease.Verify(
-            TrustedApplianceReleaseFiles.Read("/opt/kautuka/manager", "/etc/kautuka"));
+            TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
+        if (prepareApplianceImages)
+        {
+            var images = new ApplianceRoleImageImporter(new PodmanCommandRunner());
+            await images.EnsureAsync(release.Deployment, Path.Combine(managerRoot, "versions", release.Version), CancellationToken.None)
+                .ConfigureAwait(false);
+            await Console.Out.WriteLineAsync($"Prepared appliance images for {release.ReleaseId}.").ConfigureAwait(false);
+            return 0;
+        }
         await Console.Out.WriteLineAsync($"Verified appliance release {release.ReleaseId}.").ConfigureAwait(false);
         return 0;
     }

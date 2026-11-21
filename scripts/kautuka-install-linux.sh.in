@@ -215,6 +215,26 @@ install_verified_release_metadata() {
     install -T -o root -g root -m 0644 -- "$signature" "$version_root/kautuka-platform-release.sig"
 }
 
+validate_appliance_image_payload() {
+    local source="$1"
+    [[ -d "$source" && ! -L "$source" ]] || fail 'signed appliance release is missing its service image directory'
+    local role archive
+    for role in credentialshost channelhost gateway webhost updateservice; do
+        archive="$source/$role.tar"
+        [[ -f "$archive" && ! -L "$archive" && -s "$archive" ]] \
+            || fail "signed appliance release is missing a regular service image archive for $role"
+    done
+}
+
+install_appliance_image_payload() {
+    local source="$1" destination="$2/service-images" role
+    [[ ! -e "$destination" && ! -L "$destination" ]] || fail 'service image destination already exists'
+    install -d -o root -g root -m 0755 -- "$destination"
+    for role in credentialshost channelhost gateway webhost updateservice; do
+        install -T -o root -g root -m 0644 -- "$source/$role.tar" "$destination/$role.tar"
+    done
+}
+
 require_trusted_manifest_public_key_for_network_install() {
     local manifest_url="$1"
     local public_key_pem="${2:-}"
@@ -2709,6 +2729,7 @@ main() {
     quoted_tmp_root="$(printf '%q' "$tmp_root")"
     trap "rm -rf ${quoted_tmp_root}" EXIT
 
+    local appliance_image_payload=false
     if [[ -n "$manifest_url" ]]; then
         require_trusted_manifest_public_key_for_network_install "$manifest_url" "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
         local manifest_path="$tmp_root/kautuka-platform-release.json"
@@ -2813,6 +2834,7 @@ PY
             verification_args+=(--source-sha "$release_source_sha")
         fi
         verify_linux_release "${verification_args[@]}"
+        appliance_image_payload="$(python3 -c 'import json, sys; print("true" if "applianceDeployment" in json.load(sys.stdin) else "false")' < "$manifest_path")"
     fi
 
     # Share the updater's lock before changing any installed files. An update
@@ -2871,6 +2893,9 @@ PY
     ensure_rootless_podman_ready "$service_user" "$service_group" "$service_home" "$xdg_runtime_dir"
 
     extract_release "$artifact" "$tmp_root/extracted"
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        validate_appliance_image_payload "$tmp_root/extracted/service-images"
+    fi
     install_apply_release_helper "$tmp_root/extracted"
 
     if [[ -n "$manifest_url" ]]; then
@@ -2903,6 +2928,9 @@ PY
     copy_runtime_payload "$content_root" "$version_root"
     if [[ -n "$manifest_url" ]]; then
         install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path"
+    fi
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"
     fi
     chmod +x "$version_root/kautuka-manager"
 

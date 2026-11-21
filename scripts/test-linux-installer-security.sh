@@ -39,6 +39,13 @@ activation_line="$(grep -nF 'mv -Tf "$next_link" "$current_link"' "$tmp/generate
   echo 'error: Linux installer must pass verified release bytes to Manager before switching versions.' >&2
   exit 1
 }
+image_validation_line="$(grep -nF 'validate_appliance_image_payload "$tmp_root/extracted/service-images"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+image_handoff_line="$(grep -nF 'install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+stop_line="$(grep -nF 'stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
+[[ "$verification_line" -lt "$image_validation_line" && "$image_validation_line" -lt "$stop_line" && "$image_handoff_line" -lt "$activation_line" ]] || {
+  echo 'error: Linux installer must validate and stage signed appliance images before activation.' >&2
+  exit 1
+}
 
 mock_bin="$tmp/mock-bin"
 mkdir -p "$mock_bin"

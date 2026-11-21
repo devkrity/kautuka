@@ -3,8 +3,8 @@ set -euo pipefail
 
 # The verification command uses the real absolute appliance paths. Run this
 # fixture as root only in a disposable container or distro.
-if [[ ${EUID} -ne 0 || ${KAUTUKA_DISPOSABLE_TEST:-} != 1 || $# -ne 1 ]]; then
-    echo 'Usage: KAUTUKA_DISPOSABLE_TEST=1 bash test-manager-appliance-release.sh <native Manager executable> (disposable root only)' >&2
+if [[ ${EUID} -ne 0 || ${KAUTUKA_DISPOSABLE_TEST:-} != 1 || $# -lt 1 || $# -gt 2 ]]; then
+    echo 'Usage: KAUTUKA_DISPOSABLE_TEST=1 bash test-manager-appliance-release.sh <native Manager executable> [service-image fixtures] (disposable root only)' >&2
     exit 2
 fi
 [[ -x "$1" ]]
@@ -25,7 +25,7 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$temp/test-
 chmod 0600 "$temp/test-signing.pem"
 openssl pkey -in "$temp/test-signing.pem" -pubout -out "$trust/manifest-public-key.pem"
 chmod 0644 "$trust/manifest-public-key.pem"
-python3 - "$temp/manifest.json" <<'PY'
+python3 - "$temp/manifest.json" "${2:-}" <<'PY'
 import json, sys
 
 roles = ('credentialshost', 'channelhost', 'gateway', 'webhost', 'updateservice')
@@ -39,6 +39,9 @@ manifest = {
         'services': {role: {'image': f"ghcr.io/devkrity/kautuka-{role}@sha256:{'a' * 64}"} for role in roles},
     },
 }
+if sys.argv[2]:
+    with open(sys.argv[2] + '/appliance-deployment.json', encoding='utf-8') as descriptor:
+        manifest['applianceDeployment'] = json.load(descriptor)
 with open(sys.argv[1], 'w', encoding='utf-8') as output:
     json.dump(manifest, output)
 PY
@@ -51,6 +54,23 @@ signature="$version/kautuka-platform-release.sig"
 cmp "$temp/manifest.json" "$manifest"
 cmp "$temp/manifest.sig" "$signature"
 [[ "$(stat -c '%u:%g:%a' "$manifest" "$signature")" == $'0:0:644\n0:0:644' ]]
+if [[ $# -eq 2 ]]; then
+    fail() { echo "$*" >&2; exit 1; }
+    source <(sed -n '/^validate_appliance_image_payload() {/,/^}/p; /^install_appliance_image_payload() {/,/^}/p' "$script_dir/kautuka-install-linux.sh.in")
+    validate_appliance_image_payload "$2"
+    install_appliance_image_payload "$2" "$version"
+    [[ "$(stat -c '%u:%g:%a' "$version/service-images")" == '0:0:755' ]]
+    for role in credentialshost channelhost gateway webhost updateservice; do
+        cmp "$2/$role.tar" "$version/service-images/$role.tar"
+        [[ "$(stat -c '%u:%g:%a' "$version/service-images/$role.tar")" == '0:0:644' ]]
+    done
+    mkdir "$temp/invalid-images"
+    ln -s -- "$2/credentialshost.tar" "$temp/invalid-images/credentialshost.tar"
+    if (validate_appliance_image_payload "$temp/invalid-images"); then
+        echo 'Installer accepted a symbolic role archive.' >&2
+        exit 1
+    fi
+fi
 chmod 0644 "$version/release-id.txt"
 ln -s 'versions/1.2.3-preview.1' "$manager/current"
 

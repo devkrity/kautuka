@@ -41,6 +41,23 @@ internal static class TrustedApplianceReleaseFiles
         return new(manifest, signature, publicKey, releaseId, version);
     }
 
+    internal static SafeFileHandle OpenApplianceImagesDirectory(string releaseVersionDirectory)
+    {
+        const string prefix = "/opt/kautuka/manager/versions/";
+        if (!releaseVersionDirectory.StartsWith(prefix, StringComparison.Ordinal))
+            throw new InvalidDataException("Invalid Manager release directory.");
+        string version = releaseVersionDirectory[prefix.Length..];
+        if (version.Length == 0 || version is "." or ".." || version.Any(static ch => !(char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_')))
+            throw new InvalidDataException("Invalid Manager release version.");
+        return OpenAbsoluteDirectory(releaseVersionDirectory + "/service-images");
+    }
+
+    internal static SafeFileHandle OpenApplianceImageArchive(SafeFileHandle directory, string role)
+    {
+        if (role is not ("credentialshost" or "channelhost" or "gateway" or "webhost" or "updateservice"))
+            throw new InvalidDataException("Invalid appliance service role.");
+        return OpenChecked(directory, role + ".tar", FileFlags, FileType);
+    }
     private static SafeFileHandle OpenAbsoluteDirectory(string path)
     {
         if (string.IsNullOrEmpty(path) || path[0] != '/') throw new InvalidDataException("Trusted directory must be absolute.");
