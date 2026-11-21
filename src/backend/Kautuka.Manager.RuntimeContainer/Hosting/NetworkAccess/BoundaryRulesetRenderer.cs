@@ -12,6 +12,7 @@ namespace Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 public static class BoundaryRulesetRenderer
 {
     public const string BoundaryTableName = "kautuka_egress";
+    internal const int GatewayConnectPort = 15004;
 
     public static readonly IReadOnlyList<string> RequiredBoundaryComments =
     [
@@ -195,9 +196,11 @@ public static class BoundaryRulesetRenderer
     /// </summary>
     public static string RenderEnvoyConfig(
         string adminSocketPath = "/run/kautuka-admin/admin.sock",
-        bool isWindowsMtls = false)
+        bool isWindowsMtls = false,
+        bool includeGatewayConnect = false)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
+        string gatewayConnect = includeGatewayConnect ? RenderGatewayConnectListener() : string.Empty;
 
         string clusterSnippet = isWindowsMtls
             ? WindowsManagerAuthorizationClusterYaml
@@ -214,6 +217,7 @@ public static class BoundaryRulesetRenderer
         ];
 
         string rendered = template
+            .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
             .Replace("{{MANAGER_AUTHORIZATION_CLUSTER}}", clusterSnippet, StringComparison.Ordinal);
@@ -222,6 +226,24 @@ public static class BoundaryRulesetRenderer
         rendered = ReplaceIndentedPlaceholder(rendered, "{{RESOLVED_FILTER_LAN}}", lanCidrs);
 
         return rendered;
+    }
+
+    private static string RenderGatewayConnectListener()
+    {
+        string filter = ResolveTemplate("envoy.gateway-connect-dfp.yaml.tmpl").TrimEnd('\r', '\n') + "\n";
+        string publicFilter = filter
+            .Replace("{{CLASS}}", "public", StringComparison.Ordinal)
+            .Replace("{{CACHE}}", "dfp_cache", StringComparison.Ordinal)
+            .Replace("{{FILTER}}", "{{RESOLVED_FILTER_PUBLIC}}", StringComparison.Ordinal);
+        string lanFilter = filter
+            .Replace("{{CLASS}}", "lan", StringComparison.Ordinal)
+            .Replace("{{CACHE}}", "dfp_cache_lan", StringComparison.Ordinal)
+            .Replace("{{FILTER}}", "{{RESOLVED_FILTER_LAN}}", StringComparison.Ordinal);
+        return ResolveTemplate("envoy.gateway-connect.yaml.tmpl")
+            .Replace("{{GATEWAY_CONNECT_IP}}", EgressTopologyManager.EgressPodIp, StringComparison.Ordinal)
+            .Replace("{{GATEWAY_CONNECT_PORT}}", GatewayConnectPort.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            .Replace("{{GATEWAY_CONNECT_DFP_FILTERS}}", publicFilter + lanFilter, StringComparison.Ordinal)
+            .TrimEnd('\r', '\n') + "\n";
     }
 
     public static string RenderEnvoyAddressRangesYaml(IEnumerable<string> cidrs, string indent)

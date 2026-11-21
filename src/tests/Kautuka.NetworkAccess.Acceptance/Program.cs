@@ -387,6 +387,12 @@ public static class Program
     public static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
+        if (args is ["--gateway-connect-fixture", string fixtureDirectory])
+        {
+            await GatewayConnectFixture.RunAsync(fixtureDirectory).ConfigureAwait(false);
+            return 0;
+        }
+
         Console.WriteLine("Kautuka NAC v7 Acceptance Suite");
         Console.WriteLine("Enforcing Ground Rule G9: observed values and computed negative-control flips only.");
 
