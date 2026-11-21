@@ -21,7 +21,7 @@ message CheckRequest {
 message AttributeContext {
   Peer source = 1;
   Peer destination = 2;
-  Peer request = 4;
+  Request request = 4;
   map<string, string> context_extensions = 10;
   TLSSession tls_session = 12;
 }
@@ -32,6 +32,16 @@ message Peer {
   map<string, string> labels = 3;
   string principal = 4;
   string certificate = 5;
+}
+
+message Request {
+  HttpRequest http = 2;
+}
+
+message HttpRequest {
+  string method = 2;
+  map<string, string> headers = 3;
+  string host = 5;
 }
 
 message Address {
@@ -53,7 +63,12 @@ message TLSSession {
 
 message CheckResponse {
   Status status = 1;
+  OkHttpResponse ok_response = 3;
   google.protobuf.Struct dynamic_metadata = 4;
+}
+
+message OkHttpResponse {
+  repeated string headers_to_remove = 5;
 }
 
 message Status {

@@ -117,6 +117,92 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
     }
 
     [Fact]
+    public async Task GatewayConnect_RequiresTrustedRouteAndPrincipalAndEnforcesTheExactScope()
+    {
+        string tempDir = CreateTempDir();
+        try
+        {
+            bool gateOpen = true;
+            using var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, "policy.json"));
+            var actor = new NetworkAccessActor("admin", IsAdmin: true);
+            store.SetRule(actor, new RuleWriteSpec("user", "user-a", null, "connector-a", "mcp.example.test", "host", 443, Allowed: true), store.Revision);
+            store.SetRule(actor, new RuleWriteSpec("agent", "user-a", "agent-a", null, "model.example.test", "host", 443, Allowed: true), store.Revision);
+            var controller = new NacController(store, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => gateOpen);
+            string socketPath = Path.Combine(tempDir, "networkaccess.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socketPath,
+                LockFilePath = Path.Combine(tempDir, "networkaccess.lock"),
+            });
+            CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+            await host.StartAsync(cancellationToken);
+            using GrpcChannel channel = CreateUdsChannel(socketPath);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            var request = new CheckRequest
+            {
+                Attributes = new AttributeContext
+                {
+                    Source = new Peer { Principal = "spiffe://kautuka.internal/gateway" },
+                    Request = new Request
+                    {
+                        Http = new HttpRequest
+                        {
+                            Method = "CONNECT",
+                            Host = "mcp.example.test:443",
+                            Headers =
+                            {
+                                ["x-kautuka-user"] = "user-a",
+                                ["x-kautuka-agent"] = "agent-a",
+                                ["x-kautuka-connector"] = "connector-a",
+                            },
+                        },
+                    },
+                    ContextExtensions = { ["kautuka.authorization"] = "gateway-connect" },
+                },
+            };
+
+            CheckResponse allowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, allowed.Status.Code);
+            Assert.Contains("x-kautuka-user", allowed.OkResponse.HeadersToRemove);
+            Assert.Contains("x-kautuka-agent", allowed.OkResponse.HeadersToRemove);
+            Assert.Contains("x-kautuka-connector", allowed.OkResponse.HeadersToRemove);
+
+            await AssertDenied(attributes => attributes.Source.Principal = string.Empty, "unauthenticated_gateway");
+            await AssertDenied(attributes => attributes.ContextExtensions.Clear(), "unauthenticated_gateway");
+            await AssertDenied(attributes => attributes.Request = null, "bad_connect_authority");
+            await AssertDenied(attributes => attributes.Request.Http.Method = "GET", "bad_connect_authority");
+            await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:0443", "bad_connect_authority");
+            await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:444", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-user"] = "user-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-connector"] = "connector-b", "no_rule");
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-user"] = "user-a,user-b", "invalid_gateway_scope");
+            await AssertDenied(attributes => attributes.Request.Http.Headers.Remove("x-kautuka-user"), "invalid_gateway_scope");
+            request.Attributes.Request.Http.Host = "model.example.test:443";
+            request.Attributes.Request.Http.Headers.Remove("x-kautuka-connector");
+            CheckResponse agentAllowed = await client.CheckAsync(request, cancellationToken: cancellationToken);
+            Assert.Equal(0, agentAllowed.Status.Code);
+            await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-agent"] = "agent-b", "no_rule");
+            gateOpen = false;
+            await AssertDenied(static _ => { }, "topology_closed");
+
+            async Task AssertDenied(Action<AttributeContext> mutate, string reason)
+            {
+                CheckRequest deniedRequest = request.Clone();
+                mutate(deniedRequest.Attributes);
+                CheckResponse denied = await client.CheckAsync(deniedRequest, cancellationToken: cancellationToken);
+                Assert.Equal(7, denied.Status.Code);
+                Assert.Equal(reason, denied.Status.Message);
+                Assert.Null(denied.OkResponse);
+            }
+        }
+        finally
+        {
+            TryDeleteDir(tempDir);
+        }
+    }
+
+    [Fact]
     public async Task C2_SingleInstanceLock_PreventsUnlinkOfLiveSocket_AndReplacesStaleSocket_WithNegativeControl()
     {
         string tempDir = CreateTempDir();

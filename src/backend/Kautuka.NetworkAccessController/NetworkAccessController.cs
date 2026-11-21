@@ -556,6 +556,17 @@ public sealed class NetworkAccessController
         }
     }
 
+    internal NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input)
+    {
+        if (isContainerAuthorizationGateOpen?.Invoke() != true)
+        {
+            Interlocked.Increment(ref checks);
+            return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, input.Host, input.Port, "topology_closed");
+        }
+
+        return EvaluateOutboundCheck(input);
+    }
+
     private static bool HasPackageServiceExplicitDeny(
         NetworkAccessPolicyState state, RegistryEntry entry, string destKind, string destination, int port)
         => NetworkAccessRuleMatcher.FindApplicable(state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)

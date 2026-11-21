@@ -20,7 +20,7 @@ public delegate Task EnvoyAuthorizationFaultHook(
 /// Admission concurrency is bounded to 32 concurrent calls; overflow returns <c>Unavailable</c>
 /// (<c>capacity_exceeded</c>), never status code 7 (C14).
 /// </summary>
-public sealed class EnvoyAuthorizationService : Authorization.AuthorizationBase
+public sealed partial class EnvoyAuthorizationService : Authorization.AuthorizationBase
 {
     public const int MaxConcurrency = 32;
     public const string ExtAuthzMetadataNamespace = "envoy.filters.network.ext_authz";
@@ -79,6 +79,11 @@ public sealed class EnvoyAuthorizationService : Authorization.AuthorizationBase
             }
 
             AttributeContext? attributes = request.Attributes;
+            if (attributes is not null && (attributes.Request is not null || attributes.ContextExtensions.ContainsKey(GatewayConnectRouteKey)))
+            {
+                return CheckGatewayConnect(attributes);
+            }
+
             SocketAddress? source = attributes?.Source?.Address?.SocketAddress;
             SocketAddress? destination = attributes?.Destination?.Address?.SocketAddress;
 
