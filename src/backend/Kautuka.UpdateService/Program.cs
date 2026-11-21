@@ -35,7 +35,7 @@ builder.Services.AddSingleton<UpdateServiceRuntimePaths>();
 builder.Services.AddSingleton<UpdateServiceMtlsCerts>();
 builder.Services.AddSingleton<IManagerStatusClient, ManagerStatusClient>();
 builder.Services.AddSingleton<IUpdateServiceIntegration, UpdateServiceIntegration>();
-builder.Services.AddUpdateService();
+builder.Services.AddUpdateService(applianceMode);
 builder.Services.AddOptions<UpdateOptions>()
     .Configure<UpdateServiceRuntimePaths, IHostEnvironment>((options, paths, environment) =>
     {
@@ -50,7 +50,8 @@ builder.Services.AddOptions<UpdateOptions>()
             options.RepositoryName = "kautuka";
             options.ReleaseManifestUrl = null;
             options.ReleaseChannel = applianceReleaseVersion!.Contains("-preview.", StringComparison.Ordinal) ? "preview" : "stable";
-            options.Enabled = false;
+            options.CatalogManifestUrl = null;
+            options.CatalogManifestPublicKeyPath = null;
             options.AllowUnsignedLocalFeeds = false;
             return;
         }

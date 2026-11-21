@@ -8,7 +8,7 @@ namespace Kautuka.UpdateService.Hosting;
 
 public static class UpdateServiceCollectionExtensions
 {
-    public static IServiceCollection AddUpdateService(this IServiceCollection services)
+    public static IServiceCollection AddUpdateService(this IServiceCollection services, bool applianceMode = false)
     {
         ArgumentNullException.ThrowIfNull(services);
 
@@ -17,7 +17,9 @@ public static class UpdateServiceCollectionExtensions
             .ValidateOnStart();
         services.AddSingleton<IValidateOptions<UpdateOptions>, UpdateOptionsValidation>();
 
-        services.AddHttpClient("kautuka.updateservice.github");
+        IHttpClientBuilder httpClient = services.AddHttpClient("kautuka.updateservice.github");
+        if (applianceMode)
+            httpClient.ConfigurePrimaryHttpMessageHandler(static () => new SocketsHttpHandler { UseProxy = false });
         services.AddSingleton<IUpdateRuntimePolicyStore, UpdateRuntimePolicyStore>();
         services.AddSingleton<IUpdateStateStore, JsonUpdateStateStore>();
         services.AddSingleton<IHostedCatalogStateStore, JsonHostedCatalogStateStore>();

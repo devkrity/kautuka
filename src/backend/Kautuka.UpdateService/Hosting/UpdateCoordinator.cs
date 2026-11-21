@@ -102,8 +102,9 @@ internal sealed class UpdateCoordinator(
 
     public async ValueTask<UpdateStatusSnapshot> ApplyPreparedReleaseAsync(CancellationToken cancellationToken = default)
     {
-        if (options.ApplianceReleaseId is not null)
-            throw new InvalidOperationException("Activate a signed appliance bundle with the host recovery helper.");
+        bool appliance = options.ApplianceReleaseId is not null;
+        if (appliance && !options.Enabled)
+            throw new InvalidOperationException("Appliance updates are disabled.");
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -125,6 +126,9 @@ internal sealed class UpdateCoordinator(
                 await stateStore.SaveAsync(unavailable, cancellationToken).ConfigureAwait(false);
                 return CreateSnapshot(unavailable, hostContext);
             }
+
+            if (appliance && hostContext.ApplianceBootConfirmed != true)
+                return CreateSnapshot(state with { LastError = "Wait for Manager to report a healthy appliance release before updating." }, hostContext);
 
             if (hostContext.ActiveExecCount > 0)
             {
@@ -177,6 +181,20 @@ internal sealed class UpdateCoordinator(
                 return CreateSnapshot(failedState, hostContext);
             }
 
+            if (appliance)
+            {
+                UpdateServiceContext observed = await hostIntegration.GetHostContextAsync(cancellationToken).ConfigureAwait(false);
+                if (!CanRetryFailedActivation(hostContext, observed) || observed.ActiveExecCount != 0)
+                {
+                    UpdateStateRecord waiting = state with
+                    {
+                        LastError = "Wait for the appliance to be healthy and active executions to finish, then retry the update.",
+                    };
+                    await stateStore.SaveAsync(waiting, cancellationToken).ConfigureAwait(false);
+                    return CreateSnapshot(waiting, observed);
+                }
+            }
+
             UpdateStateRecord nextState = state with
             {
                 AvailableRelease = state.AvailableRelease is not null
@@ -199,6 +217,9 @@ internal sealed class UpdateCoordinator(
             {
                 await hostIntegration.ActivatePreparedUpdateAsync(preparedArtifacts, CancellationToken.None).ConfigureAwait(false);
                 helperCompleted = true;
+                if (appliance)
+                    return CreateSnapshot(nextState, hostContext);
+
                 UpdateServiceContext freshHost = await hostIntegration.GetHostContextAsync(CancellationToken.None).ConfigureAwait(false);
                 if (TryFinalizeAppliedRelease(nextState, freshHost, out UpdateStateRecord? finalizedState))
                 {

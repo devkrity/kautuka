@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 using Kautuka.Hosting.Hosting;
@@ -601,6 +603,95 @@ public sealed class UpdateServiceIntegrationTests
         finally
         {
             Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(0, UpdateWorkflowState.Applying)]
+    [InlineData(1, UpdateWorkflowState.Available)]
+    public async Task ApplianceApplyRechecksActiveExecutionsAfterVerifiedDownload(int activeAfterDownload, UpdateWorkflowState expected)
+    {
+        string root = CreateTempDirectory();
+        try
+        {
+            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            const string artifactName = "kautuka-linux-amd64.tar.gz";
+            const string releaseUrl = "https://github.com/devkrity/kautuka/releases/download/v1.2.4-preview.1/";
+            byte[] archive = "signed fixture"u8.ToArray();
+            UpdateReleaseReference candidate = CreateRelease("1.2.4-preview.1", "preview") with
+            {
+                ReleaseId = "v1.2.4-preview.1",
+                Tag = "v1.2.4-preview.1",
+                PlatformArtifactUrl = releaseUrl + artifactName,
+                PlatformReleaseAssetUrl = releaseUrl + "manifest.json",
+                PlatformReleaseSignatureAssetUrl = releaseUrl + "manifest.sig",
+            };
+            byte[] manifest = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                releaseId = candidate.ReleaseId,
+                version = candidate.Version,
+                channel = candidate.Channel,
+                releaseTag = candidate.Tag,
+                signature = new { url = candidate.PlatformReleaseSignatureAssetUrl },
+                artifacts = new[] { new { name = artifactName, url = candidate.PlatformArtifactUrl, size = archive.Length,
+                    sha256 = Convert.ToHexString(SHA256.HashData(archive)) } },
+                applianceDeployment = new
+                {
+                    schemaVersion = 1,
+                    hookAbi = 1,
+                    services = new[] { "credentialshost", "channelhost", "gateway", "webhost", "updateservice" }
+                        .ToDictionary(role => role, role => new { image = $"test.invalid/{role}@sha256:{new string('a', 64)}" })
+                },
+            });
+            string signature = Convert.ToBase64String(key.SignData(manifest, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
+            var integration = new RecordingUpdateServiceIntegration(root, "1.2.3-preview.1", "v1.2.3-preview.1",
+                applianceBootConfirmed: true);
+            var factory = new TestUpdateHttpClientFactory(new Dictionary<string, byte[]>
+            {
+                [candidate.PlatformReleaseAssetUrl!] = manifest,
+                [candidate.PlatformReleaseSignatureAssetUrl!] = Encoding.UTF8.GetBytes(signature),
+                [candidate.PlatformArtifactUrl!] = archive,
+            }, url =>
+            {
+                if (url == candidate.PlatformArtifactUrl)
+                    integration.ActiveExecutions = activeAfterDownload;
+            });
+            var options = Options.Create(new UpdateOptions
+            {
+                StateRootPath = root,
+                ApplianceReleaseId = "v1.2.3-preview.1",
+                ManifestPublicKeyPem = key.ExportSubjectPublicKeyInfoPem(),
+            });
+            var state = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+            {
+                State = UpdateWorkflowState.Available,
+                AvailableRelease = candidate,
+                CurrentRelease = CreateRelease("1.2.3-preview.1", "preview"),
+            });
+            var coordinator = new UpdateCoordinator(state, new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), factory, integration,
+                new UpdateOperationHistoryStore(options), options, NullLogger<UpdateCoordinator>.Instance);
+            UpdateStatusSnapshot result = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken);
+
+            Assert.Equal(expected, result.State);
+            Assert.Equal(expected == UpdateWorkflowState.Applying ? candidate.ReleaseId : null, integration.ActivatedReleaseId);
+            Assert.Equal(activeAfterDownload, result.ActiveExecCount);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private sealed class TestUpdateHttpClientFactory(Dictionary<string, byte[]> assets, Action<string> downloaded) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new Handler(assets, downloaded));
+
+        private sealed class Handler(Dictionary<string, byte[]> assets, Action<string> downloaded) : HttpMessageHandler
+        {
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            {
+                string url = request.RequestUri!.AbsoluteUri;
+                downloaded(url);
+                return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(assets[url]) });
+            }
         }
     }
 
@@ -2265,9 +2356,10 @@ public sealed class UpdateServiceIntegrationTests
         public string? ActivatedReleaseId { get; private set; }
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
+        public int ActiveExecutions { get; set; }
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, 0, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, ActiveExecutions, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {
