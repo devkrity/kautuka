@@ -11,6 +11,34 @@ namespace Kautuka.Manager.Hosting;
 /// <summary>Checks application service readiness over its authenticated local transport.</summary>
 internal static class ApplianceServiceReadiness
 {
+    internal static async Task<bool> CheckGatewayAsync(string socketPath, CancellationToken cancellationToken)
+    {
+        var endpoint = new KautukaEndpoint
+        {
+            Name = "gateway",
+            Transport = KautukaTransport.UnixSocket,
+            Port = 0,
+            SocketPath = socketPath,
+            BaseUri = new Uri("http://localhost", UriKind.Absolute),
+        };
+        using var handler = new SocketsHttpHandler
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false,
+            ConnectCallback = KautukaHostNetworkPolicy.CreateConnectCallback(endpoint),
+            ConnectTimeout = TimeSpan.FromSeconds(3),
+        };
+        using var client = new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(3) };
+        try
+        {
+            using HttpResponseMessage response = await client.GetAsync(new Uri(endpoint.BaseUri, "/health"),
+                HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            return response.StatusCode == HttpStatusCode.OK;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return false; }
+        catch (HttpRequestException) { return false; }
+    }
+
     internal static async Task<bool> CheckAsync(string socketPath, string caPath, string clientPfxPath, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

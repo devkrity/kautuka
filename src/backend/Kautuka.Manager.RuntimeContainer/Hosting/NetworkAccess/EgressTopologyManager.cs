@@ -142,6 +142,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<InfraAllowlistEntry> baseInfraAllowlistEntries = [];
     private InfraAllowlistEntry? packageProxyAllowlistEntry;
+    private InfraAllowlistEntry? applianceGatewayAllowlistEntry;
     private readonly object infraAllowlistLock = new();
     private volatile bool packageProxyStartupReady;
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
@@ -657,8 +658,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 continue;
                             }
 
-                            // Skip allowlisted infra containers
-                            if (knownInfraContainerIds.Contains(cid))
+                            // Gateway's supervisor re-verifies its reserved profile independently.
+                            if (knownInfraContainerIds.Contains(cid) || IsAuthorizedApplianceGateway(cid))
                             {
                                 continue;
                             }
@@ -1247,15 +1248,59 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
                 new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
             ];
-            baseInfraAllowlistEntries = entries.Where(entry => entry.Role != "pkgs-proxy").ToArray();
-            IReadOnlyList<InfraAllowlistEntry> persistedEntries = packageProxyAllowlistEntry is null
-                ? baseInfraAllowlistEntries
-                : [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry];
-
-            var doc = new InfraAllowlistDocument(1, persistedEntries);
-            WriteInfraAllowlistDocument(doc);
+            baseInfraAllowlistEntries = entries.Where(entry => entry.Role is not ("pkgs-proxy" or "appliance-gateway")).ToArray();
+            PersistInfraAllowlist();
         }
     }
+
+    private void PersistInfraAllowlist()
+    {
+        List<InfraAllowlistEntry> entries = [.. baseInfraAllowlistEntries];
+        if (packageProxyAllowlistEntry is not null) entries.Add(packageProxyAllowlistEntry);
+        if (applianceGatewayAllowlistEntry is not null) entries.Add(applianceGatewayAllowlistEntry);
+        WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, entries));
+    }
+
+    private bool IsAuthorizedApplianceGateway(string containerId)
+    {
+        lock (infraAllowlistLock) return applianceGatewayAllowlistEntry?.Id == containerId;
+    }
+
+    public void AuthorizeApplianceGateway(string containerId, string imageId)
+    {
+        if (gatewayConnectEnvoyDirectory is null || !WorkloadPostStartVerifier.IsCanonicalContainerId(containerId)
+            || string.IsNullOrEmpty(imageId) || NormalizeContainerImageId(imageId) != imageId)
+            throw new InvalidOperationException("Invalid appliance Gateway identity for the CONNECT topology.");
+
+        lock (infraAllowlistLock)
+        {
+            if (applianceGatewayAllowlistEntry is not null && applianceGatewayAllowlistEntry.Id != containerId)
+                throw new InvalidOperationException("A different appliance Gateway holds the reserved address.");
+            if (applianceGatewayAllowlistEntry?.ImageDigest == imageId) return;
+            SetApplianceGatewayAllowlistEntry(new(containerId, "appliance-gateway", [WorkloadRulesetRenderer.ApplianceGatewayIp], imageId));
+        }
+    }
+
+    public void RevokeApplianceGateway(string containerId)
+    {
+        lock (infraAllowlistLock)
+        {
+            if (applianceGatewayAllowlistEntry?.Id != containerId) return;
+            SetApplianceGatewayAllowlistEntry(null);
+        }
+    }
+
+    private void SetApplianceGatewayAllowlistEntry(InfraAllowlistEntry? value)
+    {
+        InfraAllowlistEntry? previous = applianceGatewayAllowlistEntry;
+        applianceGatewayAllowlistEntry = value;
+        try { PersistInfraAllowlist(); }
+        catch { applianceGatewayAllowlistEntry = previous; throw; }
+    }
+
+    public Task<string> VerifyApplianceGatewayAsync(string containerId, CancellationToken cancellationToken)
+        => postStartVerifier.VerifyWorkloadRulesetAsync(containerId, WorkloadRulesetRenderer.ApplianceGatewayIp,
+            isApplianceGateway: true, cancellationToken: cancellationToken);
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)
     {
@@ -1348,8 +1393,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         lock (infraAllowlistLock)
         {
             packageProxyAllowlistEntry = new InfraAllowlistEntry(containerId, "pkgs-proxy", [PackageProxyIp], imageId);
-            var doc = new InfraAllowlistDocument(1, [.. baseInfraAllowlistEntries, packageProxyAllowlistEntry]);
-            WriteInfraAllowlistDocument(doc);
+            PersistInfraAllowlist();
         }
 
         await SyncWindowsPodmanInfraAllowlistAsync(cancellationToken).ConfigureAwait(false);
@@ -1366,7 +1410,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 && string.Equals(packageProxyAllowlistEntry.Id, containerId, StringComparison.OrdinalIgnoreCase))
             {
                 packageProxyAllowlistEntry = null;
-                WriteInfraAllowlistDocument(new InfraAllowlistDocument(1, baseInfraAllowlistEntries));
+                PersistInfraAllowlist();
                 packageProxyStartupReady = false;
             }
         }

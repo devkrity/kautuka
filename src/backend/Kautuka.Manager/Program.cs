@@ -82,10 +82,12 @@ if (builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"))
         TrustedApplianceReleaseFiles.Read(managerRoot, "/etc/kautuka"));
     GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
     gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
+    string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
     builder.Services.AddSingleton<IHostedService>(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),
         KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), socketRoot,
-        sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>()));
+        sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
+        gatewayConnectDirectory));
 }
 WindowsPodmanDevEgressOptions? windowsPodmanDevEgress = null;
 if (OperatingSystem.IsWindows())

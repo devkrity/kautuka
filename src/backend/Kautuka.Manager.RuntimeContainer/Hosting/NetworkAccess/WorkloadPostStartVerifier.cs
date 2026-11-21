@@ -603,6 +603,15 @@ public sealed class WorkloadPostStartVerifier
         JsonElement container = document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement[0] : document.RootElement;
         string? canonicalId = container.TryGetProperty("Id", out JsonElement id) ? id.GetString() : null;
         if (!IsCanonicalContainerId(canonicalId)) throw new InvalidOperationException("Workload rules reconcile requires a canonical container ID.");
+        if (isApplianceGateway && (canonicalId != containerId
+            || !container.TryGetProperty("NetworkSettings", out JsonElement networkSettings)
+            || !networkSettings.TryGetProperty("Networks", out JsonElement networks)
+            || networks.ValueKind != JsonValueKind.Object || networks.EnumerateObject().Count() != 1
+            || !networks.TryGetProperty(EgressTopologyManager.WorkloadNetworkName, out JsonElement workloadNetwork)
+            || workloadNetwork.GetProperty("IPAddress").GetString() != allocatedIp))
+        {
+            throw new InvalidOperationException("Appliance Gateway must be attached only to its reserved workload address.");
+        }
         int pid = container.GetProperty("State").GetProperty("Pid").GetInt32();
         try
         {

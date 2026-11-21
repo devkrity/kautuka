@@ -5,6 +5,8 @@ using Kautuka.Manager.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.Telemetry.Security;
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
+using Kautuka.NetworkAccessController;
 
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -34,6 +36,146 @@ public sealed class ApplianceServiceSupervisorTests
     }
 
     [Fact]
+    public async Task GatewayCannotStartBeforeBoundaryAdmission()
+    {
+        int calls = 0;
+        var podman = new PodmanCommandRunner((_, _) => { calls++; throw new InvalidOperationException("Unexpected Podman call."); });
+        var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
+            new Dictionary<string, string> { ["gateway"] = "registry.example/gateway@sha256:" + Id }));
+        using var supervisor = CreateSupervisor(podman, release, Path.GetTempPath());
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => supervisor.EnsureRunningAsync("gateway", TestContext.Current.CancellationToken));
+        Assert.Contains("egress boundary", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task GatewayAllowlistBindsAndRevokesExactContainerAndImage()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "gateway-admission-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var podman = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Unexpected Podman call."));
+        await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+            new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), root,
+            hookStateDirectory: root, gatewayConnectEnvoyDirectory: Path.Combine(root, "envoy"));
+        try
+        {
+            topology.WriteInfraAllowlist([]);
+            Assert.Throws<InvalidOperationException>(() => topology.AuthorizeApplianceGateway(Id, "not-an-image-id"));
+            topology.AuthorizeApplianceGateway(Id, "sha256:" + Id);
+            using (JsonDocument allowlist = ReadAllowlist(root))
+            {
+                JsonElement entry = Assert.Single(allowlist.RootElement.GetProperty("entries").EnumerateArray());
+                Assert.Equal(Id, entry.GetProperty("id").GetString());
+                Assert.Equal("appliance-gateway", entry.GetProperty("role").GetString());
+                Assert.Equal("sha256:" + Id, entry.GetProperty("image_digest").GetString());
+                Assert.Equal("10.247.0.4", Assert.Single(entry.GetProperty("expected_ipv4").EnumerateArray()).GetString());
+            }
+            Assert.Throws<InvalidOperationException>(() => topology.AuthorizeApplianceGateway(new string('a', 64), "sha256:" + Id));
+            topology.RevokeApplianceGateway(Id);
+            using JsonDocument emptyAllowlist = ReadAllowlist(root);
+            Assert.Empty(emptyAllowlist.RootElement.GetProperty("entries").EnumerateArray());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GatewayVerificationFailureStopsAndRevokesBeforeAdoption(bool alreadyRunning)
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Native hook fixture requires Linux paths.");
+        string root = Path.Combine(Path.GetTempPath(), "gateway-verify-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        string version = ProvisionHook(root, root);
+        var calls = new List<string>();
+        var podman = new PodmanCommandRunner((args, _) =>
+        {
+            string operation = args[0] == "--hooks-dir" ? args[2] : args[0];
+            calls.Add(operation);
+            if (operation is "start" or "inspect")
+            {
+                using JsonDocument allowlist = ReadAllowlist(root);
+                JsonElement entry = Assert.Single(allowlist.RootElement.GetProperty("entries").EnumerateArray());
+                Assert.Equal(Id, entry.GetProperty("id").GetString());
+                Assert.Equal("sha256:" + Id, entry.GetProperty("image_digest").GetString());
+            }
+            return Task.FromResult(operation switch
+            {
+                "start" => new PodmanCommandResult(0, "", ""),
+                "inspect" => new PodmanCommandResult(1, "", "namespace verification unavailable"),
+                "stop" => new PodmanCommandResult(0, "", ""),
+                _ => throw new InvalidOperationException("Unexpected Podman call."),
+            });
+        });
+        await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")),
+            new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), root,
+            hookStateDirectory: root, gatewayConnectEnvoyDirectory: Path.Combine(root, "envoy"));
+        var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
+            new Dictionary<string, string> { ["gateway"] = "registry.example/gateway@sha256:" + Id }));
+        using var supervisor = new ApplianceServiceSupervisor(podman, release, version, root, root,
+            NullLogger<ApplianceServiceSupervisor>.Instance, topology: topology);
+        try
+        {
+            topology.WriteInfraAllowlist([]);
+            typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
+            object service = typeof(ApplianceServiceSupervisor).GetField("gateway", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(supervisor)!;
+            service.GetType().GetProperty("ActiveContainer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(service, Id);
+            var verify = typeof(ApplianceServiceSupervisor).GetMethod("VerifyGatewayAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            Task action = (Task)verify.Invoke(supervisor, [service, Id, "sha256:" + Id, alreadyRunning, TestContext.Current.CancellationToken])!;
+            await Assert.ThrowsAsync<InvalidOperationException>(() => action);
+            Assert.Equal(alreadyRunning ? ["inspect", "stop"] : ["start", "inspect", "stop"], calls);
+            using JsonDocument allowlist = ReadAllowlist(root);
+            Assert.Empty(allowlist.RootElement.GetProperty("entries").EnumerateArray());
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    [Fact]
+    public void GatewayCreateProfileMountsOnlyScopedPeerMaterial()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "Gateway appliance mounts require Linux paths.");
+        string root = Path.Combine(Path.GetTempPath(), "gateway-mounts-" + Guid.NewGuid().ToString("N"));
+        string state = Path.Combine(root, "state");
+        string sockets = Path.Combine(root, "sockets");
+        string connect = Path.Combine(root, "connect");
+        string version = ProvisionHook(root, state);
+        foreach (string path in new[] { Path.Combine(state, "gateway"), Path.Combine(state, "workspaces"), Path.Combine(state, "manager"),
+            Path.Combine(state, "credentialsHost", "transport"), Path.Combine(state, "security", "channel", "gateway-private"),
+            Path.Combine(state, "security", "channel", "gateway-trust"), Path.Combine(state, "security", "channel", "channel-private"),
+            Path.Combine(state, "security", "channel", "offline-authority"), Path.Combine(sockets, "gateway"),
+            Path.Combine(sockets, "manager"), Path.Combine(sockets, "credentialshost"), Path.Combine(sockets, "channelhost"), connect })
+            Directory.CreateDirectory(path);
+        foreach (string file in new[] { "manager/.ca.cer", "manager/" + ManagerClientIdentities.GatewayCertificateFileName,
+            "credentialsHost/transport/.ca.cer", "credentialsHost/transport/.credentials-client.pfx" })
+            File.WriteAllText(Path.Combine(state, file), "fixture");
+        var podman = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Unexpected Podman call."));
+        var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
+            new Dictionary<string, string> { ["gateway"] = "registry.example/gateway@sha256:" + Id }));
+        using var supervisor = new ApplianceServiceSupervisor(podman, release, version, state, sockets,
+            NullLogger<ApplianceServiceSupervisor>.Instance, gatewayConnectDirectory: connect);
+        try
+        {
+            object service = typeof(ApplianceServiceSupervisor).GetField("gateway", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(supervisor)!;
+            var build = typeof(ApplianceServiceSupervisor).GetMethod("BuildCreateArgs", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var args = Assert.IsType<List<string>>(build.Invoke(supervisor, [service, release.Deployment.Images["gateway"], "sha256:" + Id]));
+            Assert.Contains("io.kautuka.role=appliance-gateway", args);
+            Assert.Contains("io.kautuka.image-id=sha256:" + Id, args);
+            Assert.Contains(args, item => item.Contains("kautuka-workload:ip=10.247.0.4", StringComparison.Ordinal));
+            Assert.Contains(args, item => item.StartsWith(connect + ":/run/kautuka-gateway-connect:ro", StringComparison.Ordinal));
+            Assert.Contains(args, item => item.StartsWith(Path.Combine(state, "security", "channel", "gateway-private") + ":", StringComparison.Ordinal));
+            Assert.DoesNotContain(args, item => item.Contains(Path.Combine(state, "security", "channel", "channel-private"), StringComparison.Ordinal));
+            Assert.DoesNotContain(args, item => item.Contains(Path.Combine(state, "security", "channel", "offline-authority"), StringComparison.Ordinal));
+            Assert.DoesNotContain(args, item => item.StartsWith(Path.Combine(state, "credentialsHost") + ":", StringComparison.Ordinal));
+            Assert.DoesNotContain(args, item => item.StartsWith(Path.Combine(state, "manager") + ":", StringComparison.Ordinal));
+            string firstFingerprint = Assert.Single(args, item => item.StartsWith("io.kautuka.appliance.peer-credentials=", StringComparison.Ordinal));
+            File.WriteAllText(Path.Combine(state, "manager", ".ca.cer"), "rotated");
+            var rotated = Assert.IsType<List<string>>(build.Invoke(supervisor, [service, release.Deployment.Images["gateway"], "sha256:" + Id]));
+            string rotatedFingerprint = Assert.Single(rotated, item => item.StartsWith("io.kautuka.appliance.peer-credentials=", StringComparison.Ordinal));
+            Assert.NotEqual(firstFingerprint, rotatedFingerprint);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    [Fact]
     public async Task LiveCredentialsAndChannelHostRestartWithScopedTrust()
     {
         string? fixture = Environment.GetEnvironmentVariable("KAUTUKA_CREDENTIALS_CONTAINER_TEST_ROOT");
@@ -52,27 +194,38 @@ public sealed class ApplianceServiceSupervisorTests
         string writerLock = Path.Combine(runtime, "writer.lock");
         await File.WriteAllTextAsync(writerLock, string.Empty, TestContext.Current.CancellationToken);
         string images = Path.Combine(root, "service-images");
+        string? gatewayHook = Environment.GetEnvironmentVariable("KAUTUKA_GATEWAY_CONTAINER_TEST_HOOK");
+        bool gatewayEnabled = !string.IsNullOrWhiteSpace(gatewayHook) && File.Exists(Path.Combine(images, "gateway.tar"));
+        string? fixtureHooks = null;
         byte[] deployment = await File.ReadAllBytesAsync(Path.Combine(images, "appliance-deployment.json"),
             TestContext.Current.CancellationToken);
         using var manifest = JsonDocument.Parse(deployment);
         string image = manifest.RootElement.GetProperty("services").GetProperty(Role).GetProperty("image").GetString()!;
         string channelImage = manifest.RootElement.GetProperty("services").GetProperty("channelhost").GetProperty("image").GetString()!;
-        var release = new VerifiedApplianceRelease("v1.2.3", "1.2.3",
-            new ApplianceDeploymentDescriptor(1, 1, new Dictionary<string, string> { [Role] = image, ["channelhost"] = channelImage }));
+        var imageMap = new Dictionary<string, string> { [Role] = image, ["channelhost"] = channelImage };
+        if (gatewayEnabled) imageMap["gateway"] = manifest.RootElement.GetProperty("services").GetProperty("gateway").GetProperty("image").GetString()!;
+        var release = new VerifiedApplianceRelease("v1.2.3", "1.2.3", new ApplianceDeploymentDescriptor(1, 1, imageMap));
         var engine = new PodmanCommandRunner();
-        string[] isolatedStore = ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"),
-            "--runroot", Path.Combine(runtime, "run")];
+        string[] isolatedStore = gatewayEnabled
+            ? ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run"), "--network-config-dir", Path.Combine(runtime, "network-config")]
+            : ["--storage-driver", "vfs", "--root", Path.Combine(runtime, "store"), "--runroot", Path.Combine(runtime, "run")];
         var creates = new Dictionary<string, string[]>(StringComparer.Ordinal);
-        var podman = new PodmanCommandRunner((args, token) =>
+        var calls = new List<string[]>();
+        var podman = new PodmanCommandRunner(async (args, token) =>
         {
+            calls.Add([.. args]);
             if (args.Count > 2 && args[0] == "create")
             {
                 string name = args[2];
                 creates[name] = [.. args];
             }
-            return engine.RunAsync(
-                [.. isolatedStore, .. args.Select(arg => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z"
-                    ? $"{writerLock}:/run/kautuka-db-writer.lock:ro,z" : arg)], 30, token);
+            PodmanCommandResult result = await engine.RunAsync(
+                [.. isolatedStore, .. args.Select((arg, index) => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z"
+                    ? $"{writerLock}:/run/kautuka-db-writer.lock:ro,z"
+                    : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks : arg)], 30, token);
+            if (result.ExitCode == 0 && fixtureHooks is not null && args.SequenceEqual(["container", "inspect", "kautuka-appliance-gateway"]))
+                return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, runtime) };
+            return result;
         });
         CancellationToken cancellation = TestContext.Current.CancellationToken;
         PodmanCommandResult load = await podman.RunAsync(["load", "--input", Path.Combine(images, Role + ".tar")], 30, cancellation);
@@ -113,34 +266,151 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.Equal(channel, await supervisor.EnsureRunningAsync("channelhost", cancellation));
             await WaitForReadinessAsync(channelSocket, channelCa, gatewayClient, cancellation);
             Assert.True(await ApplianceServiceReadiness.CheckAsync(socket, Path.Combine(transport, ".ca.cer"), Path.Combine(transport, ".credentials-client.pfx"), cancellation));
+            if (gatewayEnabled)
+            {
+                Assert.True(OperatingSystem.IsLinux());
+                await RunGatewayFixtureAsync(root, runtime, images, gatewayHook!, podman, release, hooks => fixtureHooks = hooks, cancellation);
+                Assert.Contains(calls, call => call.SequenceEqual(["image", "inspect", "--format", "{{.Id}}", release.Deployment.Images["gateway"]]));
+            }
         }
         catch (Exception ex)
         {
             PodmanCommandResult logs = await podman.RunAsync(["logs", "kautuka-appliance-credentialshost"], 10, CancellationToken.None);
             PodmanCommandResult channelLogs = await podman.RunAsync(["logs", "kautuka-appliance-channelhost"], 10, CancellationToken.None);
-            throw new InvalidOperationException($"{ex.Message}\nCredentialsHost logs:\n{logs.StdOut}\n{logs.StdErr}\nChannelHost logs:\n{channelLogs.StdOut}\n{channelLogs.StdErr}", ex);
+            PodmanCommandResult gatewayLogs = await podman.RunAsync(["logs", "kautuka-appliance-gateway"], 10, CancellationToken.None);
+            throw new InvalidOperationException($"{ex.Message}\nCredentialsHost logs:\n{logs.StdOut}\n{logs.StdErr}\nChannelHost logs:\n{channelLogs.StdOut}\n{channelLogs.StdErr}\nGateway logs:\n{gatewayLogs.StdOut}\n{gatewayLogs.StdErr}", ex);
         }
         finally
         {
+            await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-channelhost"], 20, CancellationToken.None);
             await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-credentialshost"],
                 20, CancellationToken.None);
         }
     }
 
+    private static async Task RunGatewayFixtureAsync(string root, string runtime, string images, string nativeHook,
+        PodmanCommandRunner podman, VerifiedApplianceRelease release, Action<string> setFixtureHooks, CancellationToken token)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException();
+        string version = ProvisionHook(root, runtime);
+        string installedHook = Path.Combine(version, "scripts", "kautuka-oci-hook");
+        File.Copy(nativeHook, installedHook, overwrite: true);
+        File.SetUnixFileMode(installedHook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string hookStateHome = Path.Combine(runtime, "isolated-hook-state");
+        string hookState = Path.Combine(hookStateHome, "kautuka", "nac");
+        Directory.CreateDirectory(hookState);
+        string fixtureHooks = Path.Combine(runtime, "isolated-hooks");
+        Directory.CreateDirectory(fixtureHooks);
+        string currentHook = Path.Combine(root, "manager-install", "current", "scripts", "kautuka-oci-hook");
+        await File.WriteAllTextAsync(Path.Combine(fixtureHooks, "fixture.json"), JsonSerializer.Serialize(new
+        {
+            version = "1.0.0",
+            hook = new { path = currentHook, timeout = 45, env = new[] { "XDG_STATE_HOME=" + hookStateHome } },
+            when = new { always = true },
+            stages = new[] { "createRuntime" },
+        }), token);
+        setFixtureHooks(fixtureHooks);
+        foreach (string name in new[] { "gateway", "workspaces" }) Directory.CreateDirectory(Path.Combine(runtime, name));
+        GatewayConnectCertificateMaterial certificates = GatewayConnectCertificateMaterial.Ensure(Path.Combine(runtime, "connect-certificates"));
+        PodmanCommandResult load = await podman.RunAsync(["load", "--input", Path.Combine(images, "gateway.tar")], 120, token);
+        Assert.True(load.ExitCode == 0, load.StdErr);
+        PodmanCommandResult network = await podman.RunAsync(["network", "create", "--internal", "--disable-dns", "--subnet", "10.247.0.0/16", EgressTopologyManager.WorkloadNetworkName], 30, token);
+        Assert.True(network.ExitCode == 0, network.StdErr);
+        await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(runtime, "ip.json")),
+            new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), runtime, hookStateDirectory: hookState,
+            gatewayConnectEnvoyDirectory: certificates.EnvoyDirectory);
+        topology.WriteInfraAllowlist([]);
+        typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
+        using var gateway = new ApplianceServiceSupervisor(podman, release, version, runtime, runtime,
+            NullLogger<ApplianceServiceSupervisor>.Instance, topology, certificates.GatewayDirectory);
+        try
+        {
+            string id = await gateway.EnsureRunningAsync("gateway", token);
+            Assert.Equal(id, await gateway.EnsureRunningAsync("gateway", token));
+            PodmanCommandResult inspected = await podman.RunAsync(["container", "inspect", id], 15, token);
+            Assert.Equal(0, inspected.ExitCode);
+            AssertGatewayMounts(inspected.StdOut, runtime);
+            string socket = Path.Combine(runtime, "gateway", "gateway.sock");
+            bool ready = false;
+            for (int attempt = 0; attempt < 40 && !ready; attempt++)
+            {
+                ready = await ApplianceServiceReadiness.CheckGatewayAsync(socket, token);
+                if (!ready) await Task.Delay(TimeSpan.FromMilliseconds(250), token);
+            }
+            Assert.True(ready, "Gateway did not answer its health probe.");
+        }
+        finally
+        {
+            await podman.RunAsync(["rm", "--force", "--ignore", "--time", "0", "kautuka-appliance-gateway"], 20, CancellationToken.None);
+            await podman.RunAsync(["network", "rm", EgressTopologyManager.WorkloadNetworkName], 20, CancellationToken.None);
+        }
+    }
+    private static JsonDocument ReadAllowlist(string root)
+        => JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "infra-allowlist.json")));
+    private static string ProvisionHook(string root, string state)
+    {
+        string manager = Path.Combine(root, "manager-install");
+        string version = Path.Combine(manager, "versions", "v1");
+        Directory.CreateDirectory(Path.Combine(version, "scripts"));
+        File.WriteAllBytes(Path.Combine(version, "scripts", "kautuka-oci-hook"), [0x7f, 0x45, 0x4c, 0x46]);
+        string current = Path.Combine(manager, "current");
+        Directory.CreateSymbolicLink(current, version);
+        string hooks = Path.Combine(state, ".config", "containers", "hooks.d");
+        Directory.CreateDirectory(hooks);
+        File.WriteAllText(Path.Combine(hooks, "kautuka_hook.json"), JsonSerializer.Serialize(new
+        {
+            version = "1.0.0",
+            hook = new { path = Path.Combine(current, "scripts", "kautuka-oci-hook"), timeout = 45 },
+            when = new { always = true },
+            stages = new[] { "createRuntime" },
+        }));
+        return version;
+    }
     private static ChannelSecurityMaterialDirectories ProvisionTrust(string runtime, string manager)
     {
         var (server, ca) = LocalCaMtlsBootstrap.EnsureAndLoad(manager, "Manager",
-            [new LocalMtlsClientCertificate(ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.ChannelHostCertificateFileName)]);
+            [new LocalMtlsClientCertificate(ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.ChannelHostCertificateFileName),
+             new LocalMtlsClientCertificate(ManagerClientIdentities.GatewayCommonName, ManagerClientIdentities.GatewayCertificateFileName)]);
         server.Dispose();
         ca.Dispose();
-        string security = Path.Combine(runtime, "security");
+        string security = Path.Combine(runtime, "security", "channel");
         var roots = new ChannelSecurityMaterialDirectories(
             Path.Combine(security, "gateway-private"), Path.Combine(security, "gateway-trust"),
             Path.Combine(security, "channel-private"), Path.Combine(security, "channel-trust"),
             Path.Combine(security, "offline-authority"));
         ChannelSecurityMaterialProvisioner.Provision(roots);
         return roots;
+    }
+    private static string NormalizeFixtureCreateCommand(string json, string[] prefix, string fixtureHooks, string writerLock, string runtime)
+    {
+        System.Text.Json.Nodes.JsonNode root = System.Text.Json.Nodes.JsonNode.Parse(json)!;
+        System.Text.Json.Nodes.JsonArray command = root[0]!["Config"]!["CreateCommand"]!.AsArray();
+        for (int i = 0; i < prefix.Length; i++)
+        {
+            Assert.Equal(prefix[i], command[1]!.GetValue<string>());
+            command.RemoveAt(1);
+        }
+        for (int i = 0; i < command.Count; i++)
+        {
+            string value = command[i]!.GetValue<string>();
+            if (value == fixtureHooks) command[i] = Path.Combine(runtime, ".config", "containers", "hooks.d");
+            else if (value == $"{writerLock}:/run/kautuka-db-writer.lock:ro,z")
+                command[i] = "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro,z";
+        }
+        return root.ToJsonString();
+    }
+    private static void AssertGatewayMounts(string json, string runtime)
+    {
+        using JsonDocument inspected = JsonDocument.Parse(json);
+        string[] sources = inspected.RootElement[0].GetProperty("Mounts").EnumerateArray()
+            .Select(mount => mount.GetProperty("Source").GetString()!).ToArray();
+        Assert.Contains(Path.Combine(runtime, "manager", ".ca.cer"), sources);
+        Assert.Contains(Path.Combine(runtime, "credentialsHost", "transport", ".ca.cer"), sources);
+        Assert.DoesNotContain(Path.Combine(runtime, "manager"), sources);
+        Assert.DoesNotContain(Path.Combine(runtime, "credentialsHost"), sources);
+        Assert.DoesNotContain(Path.Combine(runtime, "security", "channel", "channel-private"), sources);
+        Assert.DoesNotContain(Path.Combine(runtime, "security", "channel", "offline-authority"), sources);
     }
     private static void AssertChannelMounts(string json, ChannelSecurityMaterialDirectories roots)
     {
