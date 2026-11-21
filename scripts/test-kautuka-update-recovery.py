@@ -63,6 +63,51 @@ class RecoverySnapshotTests(unittest.TestCase):
         values.update(kwargs)
         return type("Args", (), values)()
 
+    def test_appliance_restores_gateway_data_under_its_container_state_directory(self):
+        args = self._args(layout="appliance")
+        gateway_root = self.root / "gateway"
+        self._make_database(gateway_root / "kautuka.db", "registry", "gateway-source")
+        self._make_database(gateway_root / "agents/a1/agent.db", "agent", "agent-source")
+        (gateway_root / "gateway-auth.key").write_bytes(b"source-key")
+        recovery.capture(args)
+        recovery.verify(args)
+        with self.assertRaisesRegex(RuntimeError, "layout does not match"):
+            recovery.verify(self._args())
+
+        self._make_database(self.root / "kautuka.db", "registry", "host-layout")
+        self._make_database(gateway_root / "kautuka.db", "registry", "gateway-target")
+        self._make_database(gateway_root / "agents/a1/agent.db", "agent", "agent-target")
+        introduced = gateway_root / "agents/a2/agent.db"
+        self._make_database(introduced, "agent", "target-only")
+        user_file = introduced.parent / "notes.txt"
+        user_file.write_text("untouched", encoding="utf-8")
+        (gateway_root / "gateway-auth.key").write_bytes(b"target-key")
+        recovery.restore(args)
+
+        for path, table, expected in (
+            (gateway_root / "kautuka.db", "registry", "gateway-source"),
+            (gateway_root / "agents/a1/agent.db", "agent", "agent-source"),
+            (self.root / "kautuka.db", "registry", "host-layout"),
+        ):
+            db = sqlite3.connect(path)
+            try:
+                self.assertEqual([(expected,)], db.execute(f"SELECT value FROM {table}").fetchall())
+            finally:
+                db.close()
+        self.assertEqual(b"source-key", (gateway_root / "gateway-auth.key").read_bytes())
+        self.assertFalse(introduced.exists())
+        self.assertEqual("untouched", user_file.read_text(encoding="utf-8"))
+
+    def test_existing_host_service_snapshot_without_layout_is_still_valid(self):
+        args = self._args()
+        recovery.capture(args)
+        path = self.backups / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        del manifest["layout"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        recovery.verify(args)
+        recovery.restore(args)
+
     def test_uninitialized_empty_vault_can_be_backed_up(self):
         db = sqlite3.connect(self.root / "credentialsHost/vault/kautuka.credentials.db")
         db.execute("DELETE FROM user_credentials")
