@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+from jsonschema import Draft202012Validator
+
+from kautuka_web_tools.pipeline import FetchResult, build_payload, normalize_options
 from kautuka_web_tools.server import (
     PROMPT_NAME,
     SERVER_INSTRUCTIONS,
@@ -10,6 +14,35 @@ from kautuka_web_tools.server import (
     handle_list_prompts,
     handle_list_tools,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_mode", ["compact", "full"])
+@pytest.mark.parametrize("content_type", ["text/html", "text/plain"])
+async def test_fetch_payload_matches_published_schema(response_mode: str, content_type: str) -> None:
+    body = (
+        (Path(__file__).parent / "fixtures" / "sample_article.html").read_bytes()
+        if content_type == "text/html"
+        else b"Example article. This is a plain text document."
+    )
+    url = "https://example.com/article"
+    fetch_result = FetchResult(
+        url=url,
+        final_url=url,
+        status_code=200,
+        content_type=content_type,
+        fetched_at_utc="2026-05-22T00:00:00Z",
+        fetch_strategy="http",
+        redirect_count=0,
+        response_bytes=len(body),
+        body=body,
+        html_metadata={"title": "Example", "description": None, "byline": None},
+    )
+    options = normalize_options({"responseMode": response_mode})
+    tool, = await handle_list_tools()
+
+    assert tool.outputSchema is not None
+    Draft202012Validator(tool.outputSchema).validate(build_payload(url, fetch_result, options))
 
 
 @pytest.mark.asyncio
