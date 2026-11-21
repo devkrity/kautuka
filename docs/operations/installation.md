@@ -120,3 +120,5 @@ During a fenced boot, Manager sends empty OTLP requests for logs, metrics, and t
 On the Linux appliance, `kautuka-manager --check-appliance-ready` checks the selected signed release over Manager's authenticated Unix socket. Pass `--candidate-version VERSION` to expect a specific installed release. With `KAUTUKA_APPLIANCE_VERIFY=1`, the check also requires the protected recovery marker to name that verification target.
 
 Image preparation reuses installed digests for a staged release and requires a local archive for any missing digest. A candidate that changes an image without supplying its archive fails preparation and identifies the missing service.
+
+The existing host recovery helper accepts `--stage-appliance --artifact PATH --version VERSION` for an installed Manager-supervised appliance. It verifies the supplied signed bundle, stages the protected version directory, and preflights the candidate's images in the service account's Podman store. Staging runs with the active services online.

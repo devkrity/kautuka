@@ -9,6 +9,7 @@ usage() {
     cat <<'EOF'
 Usage:
   kautuka-apply-release --artifact <tar.gz> --version <version>
+  kautuka-apply-release --stage-appliance --artifact <tar.gz> --version <version>
   kautuka-apply-release --recover
   kautuka-apply-release --boot-recover
   kautuka-apply-release --commit --version <version>
@@ -30,6 +31,7 @@ boot_recover='false'
 commit='false'
 complete_recovery='false'
 capabilities='false'
+stage_appliance='false'
 
 if [[ ${EUID} -ne 0 ]]; then
     echo 'error: kautuka-apply-release must run as root.' >&2
@@ -92,6 +94,10 @@ while [[ $# -gt 0 ]]; do
             version="$2"
             shift 2
             ;;
+        --stage-appliance)
+            stage_appliance='true'
+            shift
+            ;;
         --recover)
             recover='true'
             shift
@@ -123,6 +129,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "$stage_appliance" == 'true' && ( "$recover" == 'true' || "$boot_recover" == 'true' ||
+    "$commit" == 'true' || "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]]; then
+    usage >&2
+    exit 2
+fi
 
 require_version_token() {
     local value="$1"
@@ -244,13 +256,16 @@ PY
         echo 'error: release manifest signature verification failed in privileged helper' >&2
         return 1
     }
-    python3 - "$verified_root/manifest.json" "$verified_root/artifact.tar.gz" "$target_version" <<'PY'
+    python3 - "$verified_root/manifest.json" "$verified_root/artifact.tar.gz" "$target_version" "$stage_appliance" <<'PY'
 import hashlib, json, os, sys
 
-manifest_path, artifact_path, requested = sys.argv[1:]
+manifest_path, artifact_path, requested, appliance = sys.argv[1:]
 with open(manifest_path, encoding='utf-8') as f:
     manifest = json.load(f)
-if any(key.casefold() == 'appliancedeployment' for key in manifest):
+has_appliance = any(key.casefold() == 'appliancedeployment' for key in manifest)
+if appliance == 'true' and 'applianceDeployment' not in manifest:
+    raise SystemExit('error: staging requires a signed appliance deployment')
+if appliance != 'true' and has_appliance:
     raise SystemExit('error: appliance deployment requires a Manager appliance activation transaction')
 expected_tag = requested if requested.startswith('v') else 'v' + requested
 if manifest.get('releaseTag') != expected_tag or manifest.get('version') != expected_tag[1:]:
@@ -870,8 +885,10 @@ ensure_selinux_runtime_exec_policy() {
 
 stage_extract_root=''
 stage_version_in_progress=''
+appliance_stage_root=''
 
 cleanup_staging() {
+    [[ -z "$appliance_stage_root" ]] || rm -rf -- "$appliance_stage_root"
     [[ -z "$stage_extract_root" ]] || rm -rf -- "$stage_extract_root"
     if [[ -n "$stage_version_in_progress" ]]; then
         local service current
@@ -886,12 +903,103 @@ cleanup_staging() {
     fi
 }
 
+same_file_contents() {
+    python3 -c '
+from pathlib import Path
+import sys
+try:
+    left = sys.stdin.buffer.read() if sys.argv[1] == "-" else Path(sys.argv[1]).read_bytes()
+    sys.exit(left != Path(sys.argv[2]).read_bytes())
+except OSError:
+    sys.exit(1)
+' "$1" "$2"
+}
+
+stage_appliance_version() {
+    local target="$1" manager_root=/opt/kautuka/manager
+    local versions="$manager_root/versions" directory role archive selinux_state
+    local destination="$versions/$target"
+    selinux_state=''
+    if command -v getenforce >/dev/null 2>&1; then selinux_state="$(getenforce 2>/dev/null || true)"; fi
+    for directory in /opt /opt/kautuka "$manager_root" "$versions"; do
+        [[ -d "$directory" && ! -L "$directory" && "$(stat -c '%u' -- "$directory")" == 0 &&
+            -z "$(find "$directory" -maxdepth 0 -perm /022 -print -quit)" ]] || {
+            echo "error: unsafe appliance installation directory: $directory" >&2
+            return 1
+        }
+    done
+    if [[ -e "$destination" || -L "$destination" ]]; then
+        [[ -d "$destination" && ! -L "$destination" ]] &&
+            same_file_contents "$verified_root/manifest.json" "$destination/kautuka-platform-release.json" &&
+            same_file_contents "$verified_root/signature.b64" "$destination/kautuka-platform-release.sig" || {
+            echo 'error: the appliance version is already staged with different release metadata' >&2
+            return 1
+        }
+    else
+        install -d -o root -g root -m 0755 "$backups_root"
+        [[ ! -L "$backups_root" && "$(stat -c '%u' "$backups_root")" == 0 &&
+            -z "$(find "$backups_root" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+        check_staging_space "$verified_root/artifact.tar.gz" appliance || return 1
+        stage_extract_root="$(mktemp -d /var/tmp/kautuka-appliance-stage.XXXXXXXX)"
+        (umask 022
+         tar --no-same-owner --no-same-permissions --no-overwrite-dir \
+            -xzf "$verified_root/artifact.tar.gz" -C "$stage_extract_root")
+        local payload="$stage_extract_root/bin"
+        [[ -d "$payload" && ! -L "$payload" && -f "$payload/kautuka-manager" && ! -L "$payload/kautuka-manager" &&
+            -x "$payload/kautuka-manager" && "$(head -c 4 -- "$payload/kautuka-manager")" == $'\x7fELF' &&
+            -d "$payload/scripts" && ! -L "$payload/scripts" &&
+            -f "$payload/scripts/kautuka-oci-hook" && ! -L "$payload/scripts/kautuka-oci-hook" &&
+            -x "$payload/scripts/kautuka-oci-hook" && "$(head -c 4 -- "$payload/scripts/kautuka-oci-hook")" == $'\x7fELF' ]] || {
+            echo 'error: appliance bundle must contain executables for Manager and the native OCI hook' >&2
+            return 1
+        }
+        verify_nac_hook_compatibility "$payload" "$service_home" || return 1
+        verify_envoy_selinux_policy_compatibility "$payload" "$manager_root/current" "$selinux_state" || return 1
+        appliance_stage_root="$(mktemp -d "$versions/.stage-appliance.XXXXXXXX")"
+        cp -a --no-preserve=context "$payload/." "$appliance_stage_root/"
+        [[ ! -e "$appliance_stage_root/service-images" && ! -L "$appliance_stage_root/service-images" ]] || return 1
+        for role in kautuka-platform-release.json kautuka-platform-release.sig release-id.txt; do
+            [[ ! -L "$appliance_stage_root/$role" ]] || return 1
+        done
+        if [[ -e "$stage_extract_root/service-images" || -L "$stage_extract_root/service-images" ]]; then
+            [[ -d "$stage_extract_root/service-images" && ! -L "$stage_extract_root/service-images" ]] || return 1
+            install -d -m 0755 "$appliance_stage_root/service-images"
+            for role in credentialshost channelhost gateway webhost updateservice; do
+                archive="$stage_extract_root/service-images/$role.tar"
+                [[ -e "$archive" || -L "$archive" ]] || continue
+                [[ -f "$archive" && ! -L "$archive" && -s "$archive" ]] || return 1
+                install -m 0644 -- "$archive" "$appliance_stage_root/service-images/$role.tar"
+            done
+        fi
+        install -T -m 0644 "$verified_root/manifest.json" "$appliance_stage_root/kautuka-platform-release.json"
+        install -T -m 0644 "$verified_root/signature.b64" "$appliance_stage_root/kautuka-platform-release.sig"
+        printf 'v%s\n' "$target" > "$appliance_stage_root/release-id.txt"
+        chmod 0644 "$appliance_stage_root/release-id.txt"
+        chown -R root:root "$appliance_stage_root"
+        chmod -R go-w "$appliance_stage_root"
+        chmod 0755 "$appliance_stage_root"
+        sync -f "$appliance_stage_root"
+        mv -T --no-clobber "$appliance_stage_root" "$destination"
+        [[ ! -d "$appliance_stage_root" ]] || return 1
+        appliance_stage_root=''
+        stage_version_in_progress="$target"
+        sync -f "$versions"
+    fi
+    if [[ -n "$selinux_state" && "$selinux_state" != 'Disabled' ]]; then
+        restorecon -RF "$destination" || return 1
+    fi
+    runuser -u "$service_user" -- env HOME="$service_home" XDG_RUNTIME_DIR="$xdg_runtime_dir" KAUTUKA_APPLIANCE_VERIFY=1 \
+        "$destination/kautuka-manager" --prepare-appliance-images --candidate-version "$target" || return 1
+    stage_version_in_progress=''
+}
+
 check_staging_space() {
     local test_free_bytes=''
     if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
-    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" <<'PY'
-import glob, importlib.util, os, sys, tarfile
-archive, data_root, backup_root, recovery_path, test_free_bytes = sys.argv[1:]
+    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "${2:-host-service}" <<'PY'
+import importlib.util, os, sys, tarfile
+from pathlib import Path
+archive, data_root, backup_root, recovery_path, test_free_bytes, layout = sys.argv[1:]
 with tarfile.open(archive, 'r:gz') as bundle:
     payload = sum(item.size for item in bundle if item.isfile())
 if payload <= 0:
@@ -899,8 +1007,7 @@ if payload <= 0:
 spec = importlib.util.spec_from_file_location('kautuka_recovery', recovery_path)
 recovery = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recovery)
-database_paths = [os.path.join(data_root, name) for name in recovery.DATABASES]
-database_paths.extend(glob.glob(os.path.join(data_root, 'agents', '*', 'agent.db')))
+database_paths = [os.path.join(data_root, name) for name, kind in recovery.inventory(Path(data_root), layout) if kind == "database"]
 databases = []
 for path in database_paths:
     for suffix in ('', '-wal', '-shm'):
@@ -923,7 +1030,7 @@ verify_envoy_selinux_policy_compatibility() {
     local candidate="$1" current="$2" selinux_state="$3"
     case "$selinux_state" in Enforcing|Permissive) ;; *) return 0 ;; esac
     if [[ ! -f "$candidate/scripts/kautuka_envoy.cil" || ! -f "$current/scripts/kautuka_envoy.cil" ]] ||
-       ! cmp -s "$candidate/scripts/kautuka_envoy.cil" "$current/scripts/kautuka_envoy.cil"; then
+       ! same_file_contents "$candidate/scripts/kautuka_envoy.cil" "$current/scripts/kautuka_envoy.cil"; then
         echo 'error: the Envoy SELinux policy differs from this release; run the current signed Linux installer before updating.' >&2
         return 1
     fi
@@ -1018,19 +1125,19 @@ PY
         then
             echo 'error: native NAC hook is not a supported ELF executable.' >&2; return 1
         fi
-        if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | cmp -s - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+        if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | same_file_contents - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
             echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
             return 1
         fi
         return 0
     fi
     for file in kautuka_hook.py kautuka_workload.nft.json.tmpl kautuka_package_proxy.nft.json.tmpl; do
-        if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! cmp -s "$candidate/scripts/$file" "$hooks_dir/$file"; then
+        if [[ ! -f "$candidate/scripts/$file" || ! -f "$hooks_dir/$file" ]] || ! same_file_contents "$candidate/scripts/$file" "$hooks_dir/$file"; then
             echo 'error: the installed NAC hook differs from this release; run the current signed Linux installer before updating.' >&2
             return 1
         fi
     done
-    if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | cmp -s - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
+    if ! printf '[engine]\nhooks_dir = ["%s", { append = true }]\n' "$hooks_dir" | same_file_contents - "$service_home/.config/containers/containers.conf.d/99-kautuka-hooks.conf"; then
         echo 'error: NAC hook configuration is missing or incompatible; run the current signed Linux installer before updating.' >&2
         return 1
     fi
@@ -1826,6 +1933,37 @@ PY
     exit 2
 }
 require_version_token "$version"
+if [[ "$stage_appliance" == 'true' ]]; then
+    scope=/etc/kautuka/service-scope.json
+    [[ -f "$scope" && ! -L "$scope" && "$(stat -c '%u' "$scope")" == 0 &&
+        -z "$(find "$scope" -maxdepth 0 -perm /022 -print -quit)" ]] || {
+        echo 'error: trusted appliance service scope is missing or unsafe' >&2
+        exit 1
+    }
+    python3 - "$scope" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as f:
+    scope = json.load(f)
+if (scope.get('schemaVersion') != 2 or scope.get('username') != 'kautuka'
+    or scope.get('userUnits') != ['kautuka-manager.service'] or scope.get('systemUnits') != []):
+    raise SystemExit('error: staging requires an installed Manager-supervised appliance')
+PY
+    host_services=(manager)
+    system_units=()
+    service_home="$(getent passwd "$service_user" | cut -d: -f6)"
+    [[ "$service_home" == '/var/lib/kautuka' ]] || exit 1
+    xdg_runtime_dir="/run/user/$(id -u "$service_user")"
+    assert_no_unresolved_update_operation
+    record_source_pointers
+    assert_forward_version "${source_pointers[manager]}" "$version"
+    artifact="$(assert_safe_artifact "$artifact")"
+    verified_root=''
+    trap 'cleanup_staging; [[ -z "$verified_root" ]] || rm -rf "$verified_root"' EXIT
+    verify_staged_artifact "$artifact" "$version"
+    stage_appliance_version "$version"
+    echo "Staged signed appliance release $version."
+    exit 0
+fi
 assert_no_unresolved_update_operation || exit 1
 artifact="$(assert_safe_artifact "$artifact")"
 assert_supported_data_configuration
