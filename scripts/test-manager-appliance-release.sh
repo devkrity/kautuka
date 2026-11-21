@@ -20,15 +20,12 @@ version="$manager/versions/1.2.3-preview.1"
 trust=/etc/kautuka
 install -d -m 0755 "$version" "$trust"
 install -m 0755 -- "$1" "$temp/manager"
-ln -s 'versions/1.2.3-preview.1' "$manager/current"
 printf '%s\n' 'v1.2.3-preview.1' > "$version/release-id.txt"
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$temp/test-signing.pem"
 chmod 0600 "$temp/test-signing.pem"
 openssl pkey -in "$temp/test-signing.pem" -pubout -out "$trust/manifest-public-key.pem"
 chmod 0644 "$trust/manifest-public-key.pem"
-manifest="$version/kautuka-platform-release.json"
-signature="$version/kautuka-platform-release.sig"
-python3 - "$manifest" <<'PY'
+python3 - "$temp/manifest.json" <<'PY'
 import json, sys
 
 roles = ('credentialshost', 'channelhost', 'gateway', 'webhost', 'updateservice')
@@ -45,8 +42,17 @@ manifest = {
 with open(sys.argv[1], 'w', encoding='utf-8') as output:
     json.dump(manifest, output)
 PY
-openssl dgst -sha256 -sign "$temp/test-signing.pem" "$manifest" | base64 > "$signature"
-chmod 0644 "$manifest" "$signature" "$version/release-id.txt"
+openssl dgst -sha256 -sign "$temp/test-signing.pem" "$temp/manifest.json" | base64 > "$temp/manifest.sig"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+source <(sed -n '/^install_verified_release_metadata() {/,/^}/p' "$script_dir/kautuka-install-linux.sh.in")
+install_verified_release_metadata "$version" "$temp/manifest.json" "$temp/manifest.sig"
+manifest="$version/kautuka-platform-release.json"
+signature="$version/kautuka-platform-release.sig"
+cmp "$temp/manifest.json" "$manifest"
+cmp "$temp/manifest.sig" "$signature"
+[[ "$(stat -c '%u:%g:%a' "$manifest" "$signature")" == $'0:0:644\n0:0:644' ]]
+chmod 0644 "$version/release-id.txt"
+ln -s 'versions/1.2.3-preview.1' "$manager/current"
 
 verify() {
     timeout 10 setpriv --no-new-privs --reuid 65534 --regid 65534 --clear-groups \

@@ -33,6 +33,13 @@ mutation_line="$(grep -n 'ensure_service_account "$service_user"' "$tmp/generate
   exit 1
 }
 
+handoff_line="$(grep -nF 'install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path"' "$tmp/generated-kautuka-install-linux.sh" | cut -d: -f1)"
+activation_line="$(grep -nF 'mv -Tf "$next_link" "$current_link"' "$tmp/generated-kautuka-install-linux.sh" | tail -n 1 | cut -d: -f1)"
+[[ "$handoff_line" =~ ^[0-9]+$ && "$activation_line" =~ ^[0-9]+$ && "$verification_line" -lt "$handoff_line" && "$handoff_line" -lt "$activation_line" ]] || {
+  echo 'error: Linux installer must pass verified release bytes to Manager before switching versions.' >&2
+  exit 1
+}
+
 mock_bin="$tmp/mock-bin"
 mkdir -p "$mock_bin"
 cat > "$mock_bin/gh" <<'MOCK_GH'

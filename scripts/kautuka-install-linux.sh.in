@@ -208,6 +208,13 @@ EOF
     mv -Tf "$temporary_key" "$destination"
 }
 
+install_verified_release_metadata() {
+    local version_root="$1" manifest="$2" signature="$3"
+
+    install -T -o root -g root -m 0644 -- "$manifest" "$version_root/kautuka-platform-release.json"
+    install -T -o root -g root -m 0644 -- "$signature" "$version_root/kautuka-platform-release.sig"
+}
+
 require_trusted_manifest_public_key_for_network_install() {
     local manifest_url="$1"
     local public_key_pem="${2:-}"
@@ -2894,6 +2901,9 @@ PY
     rm -rf "$version_root"
     mkdir -p "$version_root"
     copy_runtime_payload "$content_root" "$version_root"
+    if [[ -n "$manifest_url" ]]; then
+        install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path"
+    fi
     chmod +x "$version_root/kautuka-manager"
 
     local hooks_dir="$service_home/.config/containers/hooks.d"

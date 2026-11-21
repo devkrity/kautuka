@@ -49,4 +49,6 @@ Network installs require a signed platform-release manifest and artifact SHA-256
 
 The appliance deployment section of a signed platform manifest declares the hook ABI and digest-pinned images for CredentialsHost, ChannelHost, Gateway, WebHost, and UpdateService. This section accepts only the fixed service roles and their image references. The release signing tool accepts it with `--appliance-deployment`. UpdateService requires a verified signature for manifests that include this section and refuses to prepare them through the existing host-service activation path.
 
+For a signed Linux install, the installer preserves the exact verified manifest and detached signature in Manager's version directory before switching the `current` link. Both files are owned by root and readable by the Manager service account.
+
 On Linux, Manager's `--verify-appliance-release` command verifies the selected release against the installed public key. It reads the manifest and signature from the root-owned version directory selected by `/opt/kautuka/manager/current`. A successful check verifies the signed image references and required hook ABI. The command exits before starting Manager or any application service.
