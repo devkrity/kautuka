@@ -102,6 +102,12 @@ void AddApplianceVerificationService(Func<IServiceProvider, IHostedService> fact
 
 if (applianceEnabled)
 {
+    int publishedWebPort = WorkloadRulesetRenderer.WebHostPort;
+    if (builder.Configuration["Kautuka:Appliance:PublishedWebPort"] is { } port &&
+        (!int.TryParse(port, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out publishedWebPort)
+            || publishedWebPort is < 1024 or > 65535))
+        throw new InvalidOperationException("The appliance browser port must be an integer between 1024 and 65535.");
+
     if (!OperatingSystem.IsLinux() || builder.Environment.IsDevelopment()
         || !string.Equals(builder.Configuration["Kautuka:Mode"], "prod", StringComparison.OrdinalIgnoreCase))
     {
@@ -128,7 +134,8 @@ if (applianceEnabled)
         sp.GetRequiredService<ILogger<ApplianceServiceSupervisor>>(), sp.GetRequiredService<EgressTopologyManager>(),
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
         verificationMode: verifyAppliance,
-        verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null));
+        verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null,
+        publishedWebPort: publishedWebPort));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {

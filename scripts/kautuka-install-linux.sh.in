@@ -30,6 +30,7 @@ Options:
     --feed-base-url <url>    Release feed base URL. Derives artifact download and manifest URLs.
     --version <version>       Installed version used under versions/<version>
   --install-root <path>     Install root for Manager versions (default: /opt/kautuka/manager)
+    --web-port <port>        Published localhost port for a fresh signed appliance (default: 20229)
     --internal-state-root <path>
                                                         Internal runtime state root (default: /var/lib/kautuka)
     --visible-root <path>     Visible logs/workspaces root (default: /var/lib/kautuka)
@@ -868,8 +869,12 @@ write_manager_user_unit() {
     local visible_root="$3"
     local selinux_env=''
     local appliance_env=''
+    local web_port_env=''
     if [[ "${4:-false}" == 'true' ]]; then selinux_env='Environment=KAUTUKA_ENVOY_SELINUX=1'; fi
-    if [[ "${5:-false}" == 'true' ]]; then appliance_env='Environment=Kautuka__Appliance__Enabled=true'; fi
+    if [[ "${5:-false}" == 'true' ]]; then
+        appliance_env='Environment=Kautuka__Appliance__Enabled=true'
+        if [[ -n "${6:-}" ]]; then web_port_env="Environment=Kautuka__Appliance__PublishedWebPort=$6"; fi
+    fi
 
     cat > "$unit_path" <<EOF
 [Unit]
@@ -886,6 +891,7 @@ Environment=Kautuka__ContainerStateRoot=/var/lib/kautuka
 Environment=Logging__FileLogDirectory=${visible_root}/logs/manager
 ${selinux_env}
 ${appliance_env}
+${web_port_env}
 Restart=always
 RestartSec=5
 Delegate=yes
@@ -2670,6 +2676,7 @@ main() {
     local expected_signature_url=''
     local github_release_candidate='false'
     local install_root="/opt/kautuka/manager"
+    local web_port=''
     local internal_state_root="/var/lib/kautuka"
     local visible_root="/var/lib/kautuka"
     local unit_name="kautuka-manager.service"
@@ -2700,6 +2707,12 @@ main() {
                 ;;
             --install-root)
                 install_root="${2:-}"
+                shift 2
+                ;;
+            --web-port)
+                [[ "${2:-}" =~ ^[1-9][0-9]{3,4}$ ]] && (( $2 >= 1024 && $2 <= 65535 )) \
+                    || fail '--web-port must be an integer between 1024 and 65535'
+                web_port="$2"
                 shift 2
                 ;;
             --internal-state-root)
@@ -2961,6 +2974,11 @@ PY
         fi
     fi
 
+    if [[ -n "$web_port" && "$appliance_image_payload" != 'true' ]]; then
+        fail '--web-port requires a signed appliance release'
+    fi
+    web_port="${web_port:-$(resolve_web_ui_port)}"
+
     # Share the updater's lock before changing any installed files. An update
     # already being applied must finish before an installer can replace them.
     require_command flock
@@ -3142,7 +3160,7 @@ PY
         install_oci_hook_registration "$hooks_dir" "$hooks_dir/kautuka_hook.py" "$service_user" "$service_group"
     fi
 
-    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled" "$appliance_image_payload"
+    write_manager_user_unit "$unit_path" "$install_root" "$visible_root" "$envoy_selinux_enabled" "$appliance_image_payload" "$web_port"
     chmod 0644 "$unit_path"
 
     local installed_units=()
@@ -3237,13 +3255,13 @@ PY
     if [[ "$appliance_image_payload" != 'true' ]]; then
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
     fi
-    wait_for_web_ui "$service_user" '' '' "$appliance_image_payload" "$version_root/kautuka-manager"
+    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager"
 
     echo "Installed Manager version '$version'."
     echo "Current symlink: $current_link -> $(readlink -f "$current_link")"
     echo "Systemd unit: $unit_path"
     echo "Rootless Podman runtime: $xdg_runtime_dir"
-    echo "Access the web UI at: http://localhost:$(resolve_web_ui_port)"
+    echo "Access the web UI at: http://localhost:$web_port"
 }
 
 if [[ "${KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY:-0}" != '1' ]]; then

@@ -25,7 +25,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     bool superviseUpdateService = false,
     Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null,
     bool verificationMode = false,
-    WorkspaceSidecarSupervisor? verificationSidecars = null) : BackgroundService
+    WorkspaceSidecarSupervisor? verificationSidecars = null,
+    int publishedWebPort = WorkloadRulesetRenderer.WebHostPort) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -274,7 +275,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         bool healthy = service.Role switch
         {
             GatewayRole => await ApplianceServiceReadiness.CheckGatewayAsync(socket, token).ConfigureAwait(false),
-            WebHostRole => await (checkWebHostReadiness?.Invoke(token) ?? ApplianceServiceReadiness.CheckWebHostAsync(token)).ConfigureAwait(false),
+            WebHostRole => await (checkWebHostReadiness?.Invoke(token) ?? ApplianceServiceReadiness.CheckWebHostAsync(token, publishedWebPort)).ConfigureAwait(false),
             UpdateRole => await ApplianceServiceReadiness.CheckAsync(socket,
                 Path.Combine(stateRoot, service.StateName, ".ca.cer"),
                 Path.Combine(stateRoot, service.StateName, ".updateservice-client.pfx"), token).ConfigureAwait(false),
@@ -454,8 +455,8 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (service.Role == WebHostRole)
         {
             string peer = RequireMountSource(Path.Combine(socketRoot, GatewayRole), directory: true);
-            string port = WorkloadRulesetRenderer.WebHostPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            args.AddRange(["--publish", $"127.0.0.1:{port}:{port}", "--volume", $"{peer}:/run/kautuka/gateway:ro,z", image]);
+            string publication = FormattableString.Invariant($"127.0.0.1:{publishedWebPort}:{WorkloadRulesetRenderer.WebHostPort}");
+            args.AddRange(["--publish", publication, "--volume", $"{peer}:/run/kautuka/gateway:ro,z", image]);
             return args;
         }
 

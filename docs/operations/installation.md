@@ -75,6 +75,8 @@ On a fresh signed Linux appliance installation, the installer provisions private
 
 The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
 
+On a fresh signed Linux appliance, pass `--web-port 23084` to publish WebHost on a different localhost port. Manager saves the port in its systemd user unit. The default is `20229`. The container listener and its egress rules stay the same.
+
 Linux application processes can run with `KAUTUKA_APPLIANCE_VERIFY=1` during candidate verification. This holds the existing admission and worker fences for the lifetime of the process while leaving health checks available. Gateway's readiness check can still call CredentialsHost's authenticated health RPC. The activation path still needs to set this environment value when launching the candidate.
 
 The recovery helper accepts `--layout appliance` for capture, verification, and restore. It records the layout in the snapshot manifest and checks it before restoring. The appliance layout locates Gateway's databases, keys, and per-agent databases under `gateway/` within the state root. Existing snapshots without a layout field are read as host-service snapshots. During maintenance, Manager lists and stops its managed service containers by ID, including containers left running after a Manager restart. Manager and the containerized database writers share the root-owned `/run/kautuka-db-writer.lock`. On SELinux hosts, the installer registers its shared file context for boot and Manager mounts it read-only. The appliance activation path still needs to invoke recovery under the exclusive database writer lease.

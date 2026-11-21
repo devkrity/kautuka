@@ -580,28 +580,36 @@ fi
 
 (
   source "$tmp/generated-kautuka-install-linux.sh"
-  write_manager_user_unit "$tmp/kautuka-manager.service" /opt/kautuka/manager /var/lib/kautuka false true
+  write_manager_user_unit "$tmp/kautuka-manager.service" /opt/kautuka/manager /var/lib/kautuka false true 23084
   grep -Fxq 'Environment=Kautuka__Appliance__Enabled=true' "$tmp/kautuka-manager.service"
+  grep -Fxq 'Environment=Kautuka__Appliance__PublishedWebPort=23084' "$tmp/kautuka-manager.service"
   get_service_user_home() { echo /var/lib/kautuka; }
-  run_as_service_user() { [[ "${!#}" == 'kautuka-manager.service' ]]; echo active; }
+  run_as_service_user() {
+    shift 3
+    if [[ "$1" == systemctl && "${!#}" == 'kautuka-manager.service' ]]; then
+      echo active
+    else
+      [[ "$1" == /opt/kautuka/manager/current/kautuka-manager && "$2" == --check-appliance-ready ]]
+    fi
+  }
   systemctl() { echo "unexpected legacy host unit query: $*" >&2; exit 99; }
   curl() {
     local url="${!#}"
     while [[ "$1" != --output ]]; do shift; done
     case "$url" in
-      */api/runtime/system-health)
+      http://localhost:23084/api/runtime/system-health)
         echo '{"lifecycle":{"coreReady":true},"workspace":{"status":"healthy"}}' > "$2" ;;
-      */api/auth/setup/status)
+      http://localhost:23084/api/auth/setup/status)
         echo '{"needsSetup":true}' > "$2" ;;
       *) return 1 ;;
     esac
     printf '200'
   }
   confirm_first_admin_setup() {
-    [[ "$2" == '/var/lib/kautuka/gateway/setup-token' ]]
+    [[ "$1" == 'http://localhost:23084' && "$2" == '/var/lib/kautuka/gateway/setup-token' ]] || return 1
     touch "$tmp/appliance-setup-ready"
   }
-  wait_for_web_ui "$(id -un)" http://localhost:20229 2 true
+  wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager
   [[ -f "$tmp/appliance-setup-ready" ]]
 )
 
