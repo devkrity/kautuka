@@ -250,6 +250,8 @@ Connector catalogue availability does not change the network workload fingerprin
 
 Linux installation includes both the workload and package-proxy nft ruleset templates alongside the OCI hook.
 
+The Manager live rules verifier and the Native AOT hook development checks share the nftables canonicalizer. The development executable refuses container creation and is separate from the installed hook until the enforcement and launch checks pass.
+
 Registry rebuilding happens during topology initialization, not during ordinary workspace supervisor reconciliation. Routine reconciliation preserves verified workload identities.
 Active short-lived connectors remain tracked until cleanup, and the orphan sweep checks current connector activity immediately before removing a candidate.
 During workload rules reconciliation, failed inspection or ruleset reads deny the affected workload and are retried; only a successfully read ruleset with a mismatched hash triggers persistent quarantine and removal. A canceled post-start verification denies the identity without recording a permanent quarantine.
