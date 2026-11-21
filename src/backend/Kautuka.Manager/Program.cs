@@ -246,7 +246,16 @@ builder.Services.AddSingleton<IManagerRuntimeHealthProbe, ManagerRuntimeHealthPr
 builder.Services.AddSingleton<IHostedService, ManagerRuntimeHealthWarmWorker>();
 builder.Services.AddSingleton<ManagerRuntimeContainerDiagnosticsService>();
 builder.Services.AddSingleton<PkgsProxyCacheDiagnosticsService>();
-builder.Services.AddSingleton<WorkspaceSidecarSupervisor>();
+builder.Services.AddSingleton(sp => new WorkspaceSidecarSupervisor(
+    sp.GetRequiredService<WorkspaceSidecarCatalog>(),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    podmanCommandRunner,
+    sp.GetRequiredService<IOptions<ManagerContainerStartupOptions>>(),
+    sp.GetRequiredService<ILogger<WorkspaceSidecarSupervisor>>(),
+    sp.GetRequiredService<RuntimeImageAllowlist>(),
+    sp.GetRequiredService<PodmanImageArchiveStore>(),
+    sp.GetRequiredService<EgressTopologyManager>(),
+    applianceMode: applianceEnabled));
 builder.Services.AddSingleton<WorkspaceDesiredStateStore>();
 builder.Services.AddSingleton<McpbImageMaterializer>();
 builder.Services.AddSingleton<WorkspaceContainerConnectorExecutionService>();

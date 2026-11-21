@@ -431,8 +431,10 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         Assert.False(ready);
     }
 
-    [Fact]
-    public async Task ExistingSidecarImageIsRebuiltWhenItsPinnedBuildContextChanges()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExistingSidecarImageIsRebuiltWhenItsPinnedBuildContextChanges(bool applianceMode)
     {
         CancellationToken cancellationToken = TestContext.Current.CancellationToken;
         string root = Path.Combine(Path.GetTempPath(), "kautuka-sidecar-source-" + Guid.NewGuid().ToString("N"));
@@ -473,7 +475,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             HealthCheck: null,
             RequiredForReady: true,
             Policy: "always");
-        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(sidecar, podman);
+        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(sidecar, podman, applianceMode: applianceMode);
 
         try
         {
@@ -487,6 +489,9 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             int labelIndex = buildArguments.IndexOf("--label");
             Assert.True(labelIndex >= 0);
             Assert.Equal($"io.kautuka.sidecar.source-hash={expectedHash}", buildArguments[labelIndex + 1]);
+            Assert.Equal(applianceMode, buildArguments.Contains("--pull=never", StringComparer.Ordinal));
+            Assert.Equal(applianceMode, buildArguments.Contains("--network=none", StringComparer.Ordinal));
+            Assert.Equal(applianceMode, buildArguments.Contains("--format=docker", StringComparer.Ordinal));
         }
         finally
         {
@@ -503,7 +508,8 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
     private static WorkspaceSidecarSupervisor CreateSupervisor(
         WorkspaceSidecarDefinition sidecar,
         PodmanCommandRunner podman,
-        EgressTopologyManager? egressTopologyManager = null)
+        EgressTopologyManager? egressTopologyManager = null,
+        bool applianceMode = false)
     {
         ServiceCollection services = new();
         services.AddHttpClient("manager.sidecars");
@@ -516,7 +522,8 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             podman,
             Options.Create(new ManagerContainerStartupOptions()),
             NullLogger<WorkspaceSidecarSupervisor>.Instance,
-            egressTopologyManager: egressTopologyManager);
+            egressTopologyManager: egressTopologyManager,
+            applianceMode: applianceMode);
     }
 
     private static ManagerRuntimeSettings CreateRuntimeSettings()

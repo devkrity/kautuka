@@ -21,7 +21,8 @@ public sealed class WorkspaceSidecarSupervisor(
     ILogger<WorkspaceSidecarSupervisor> logger,
     RuntimeImageAllowlist? allowlist = null,
     PodmanImageArchiveStore? imageArchives = null,
-    NetworkAccess.EgressTopologyManager? egressTopologyManager = null)
+    NetworkAccess.EgressTopologyManager? egressTopologyManager = null,
+    bool applianceMode = false)
 {
     private const string alwaysPolicyName = "ALWAYS";
     private readonly WorkspaceSidecarCatalog catalog = catalog;
@@ -560,6 +561,12 @@ public sealed class WorkspaceSidecarSupervisor(
             return true;
         }
 
+        if (applianceMode && IsPackageProxy(sidecar))
+        {
+            logger.LogWarning("Package proxy image {Image} is missing from the appliance's local image store.", sidecar.Image);
+            return false;
+        }
+
         if (IsFullyQualifiedImage(sidecar.Image))
         {
             return await PullImageAsync(sidecar, cancellationToken).ConfigureAwait(false);
@@ -591,6 +598,12 @@ public sealed class WorkspaceSidecarSupervisor(
             "-f", dockerfile,
             sidecar.BuildContext
         ];
+        if (applianceMode && IsPackageProxy(sidecar))
+        {
+            // The release supplies the pinned base as an OCI archive. Build offline
+            // and retain the Docker health check used by Podman's scheduled probe.
+            args.InsertRange(1, ["--pull=never", "--network=none", "--format=docker"]);
+        }
 
         if (logger.IsEnabled(LogLevel.Information))
         {
@@ -746,7 +759,7 @@ public sealed class WorkspaceSidecarSupervisor(
             throw new InvalidOperationException("Package proxy create arguments do not contain the image reference.");
         }
 
-        createArguments.InsertRange(imageIndex, ["--annotation", $"io.kautuka.image-id={imageId}"]);
+        createArguments.InsertRange(imageIndex, ["--pull=never", "--annotation", $"io.kautuka.image-id={imageId}"]);
         PodmanCommandResult createResult = await podmanCommandRunner.RunAsync(createArguments, 30, cancellationToken).ConfigureAwait(false);
         if (createResult.ExitCode != 0)
         {

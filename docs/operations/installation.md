@@ -105,6 +105,8 @@ In appliance mode, Manager starts the pinned OpenObserve image after the egress 
 
 For an already running package proxy, Manager reads Podman's scheduled health result and reuses the resolved image ID for identity verification. It still checks the live namespace's egress rules before marking the proxy ready.
 
+In appliance mode, the package proxy wrapper builds from the locally imported, digest-pinned base image with networking and automatic pulls disabled. The build retains the scheduled Podman health check. Once running, the proxy fetches upstream packages through Envoy.
+
 Once the appliance services are ready, Manager inspects their containers in one Podman call per reconciliation. It keeps checking individual service health and live egress rules. If the batch fails, Manager inspects services individually to recover stopped or missing containers.
 
 Manager can start a selected signed release for pre-commit verification when the protected recovery marker names that release as the verification target. The signed application images must declare support for the update fence. Candidate containers keep ordinary requests and background work paused for their process lifetime while the supervisor brings up their health endpoints and the egress boundary. The update transaction must restart the cohort to resume ordinary operation.
