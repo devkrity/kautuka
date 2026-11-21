@@ -1,10 +1,28 @@
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
+import httpx
 import pytest
 
-from kautuka_web_tools.pipeline import FetchOptions, build_payload, build_selected_chunks, chunk_sections, normalize_markdown, normalize_options, parse_sections, rank_chunks
+from kautuka_web_tools.pipeline import FetchError, FetchOptions, build_payload, build_selected_chunks, chunk_sections, fetch_url, normalize_markdown, normalize_options, parse_sections, rank_chunks
+
+
+@pytest.mark.asyncio
+async def test_fetch_reports_redirect_target_when_connection_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "www.example.com":
+            return httpx.Response(302, headers={"Location": "https://edition.example.com/"})
+        raise httpx.ReadError("")
+
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(respond)))
+
+    with pytest.raises(FetchError) as error:
+        await fetch_url("https://www.example.com/", FetchOptions())
+
+    assert "Request to edition.example.com failed after redirecting from www.example.com" in str(error.value)
+    assert "Check Network Access for a pending request for edition.example.com." in str(error.value)
 
 
 def test_parse_sections_detects_heading_hierarchy() -> None:

@@ -508,8 +508,14 @@ async def fetch_url(url: str, options: FetchOptions) -> FetchResult:
             raise FetchError(
                 f"HTTP fetch failed with status {exc.response.status_code} for {url}."
             ) from exc
-        except httpx.HTTPError as exc:
-            raise FetchError(f"Failed to fetch {url}: {exc}") from exc
+        except httpx.RequestError as exc:
+            target = exc.request.url.host
+            original = httpx.URL(url).host
+            redirect = f" after redirecting from {original}" if target != original else ""
+            raise FetchError(
+                f"Request to {target} failed{redirect} ({type(exc).__name__}). "
+                f"Check Network Access for a pending request for {target}."
+            ) from exc
 
     content_type = response.headers.get("content-type", "application/octet-stream").split(";", 1)[0].strip().lower()
     if not is_allowed_content_type(content_type, options.allowed_content_types):
