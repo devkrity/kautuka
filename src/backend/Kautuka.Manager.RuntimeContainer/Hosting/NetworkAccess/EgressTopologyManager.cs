@@ -1248,7 +1248,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 new("kautuka-egress-envoy", "egress-envoy", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], EnvoyPinnedImage),
                 new("kautuka-egress-dns", "egress-dns", [EgressPodIp, OutsidePodIp, OutsideLanSourceIp], CoreDnsPinnedImage),
             ];
-            baseInfraAllowlistEntries = entries.Where(entry => entry.Role is not ("pkgs-proxy" or "appliance-gateway" or "appliance-webhost")).ToArray();
+            baseInfraAllowlistEntries = entries.Where(entry => entry.Role != "pkgs-proxy"
+                && WorkloadRulesetRenderer.FindApplianceAddress(entry.Role) is null).ToArray();
             PersistInfraAllowlist();
         }
     }
@@ -1266,12 +1267,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         lock (infraAllowlistLock) return applianceAllowlistEntries.Values.Any(entry => entry.Id == containerId);
     }
 
-    private static string GetApplianceAddress(string role) => role switch
-    {
-        "appliance-gateway" => WorkloadRulesetRenderer.ApplianceGatewayIp,
-        "appliance-webhost" => WorkloadRulesetRenderer.ApplianceWebHostIp,
-        _ => throw new ArgumentOutOfRangeException(nameof(role)),
-    };
+    private static string GetApplianceAddress(string role) => WorkloadRulesetRenderer.FindApplianceAddress(role)
+        ?? throw new ArgumentOutOfRangeException(nameof(role));
 
     public void AuthorizeApplianceService(string role, string containerId, string imageId)
     {
@@ -1315,12 +1312,11 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public Task<string> VerifyApplianceServiceAsync(string role, string containerId, JsonElement? inspection, CancellationToken cancellationToken)
     {
         string address = GetApplianceAddress(role);
-        bool gateway = role == "appliance-gateway";
         return inspection is { } container
             ? postStartVerifier.VerifyInspectedWorkloadRulesetAsync(container, containerId, address,
-                isPackageProxy: false, isApplianceGateway: gateway, isApplianceWebHost: !gateway, cancellationToken: cancellationToken)
+                isPackageProxy: false, role, cancellationToken)
             : postStartVerifier.VerifyWorkloadRulesetAsync(containerId, address,
-                isApplianceGateway: gateway, isApplianceWebHost: !gateway, cancellationToken: cancellationToken);
+                applianceRole: role, cancellationToken: cancellationToken);
     }
 
     private bool IsPreviouslyAuthorizedPackageProxy(JsonElement inspected, JsonElement labels, string containerId)

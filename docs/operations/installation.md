@@ -75,4 +75,6 @@ The Linux appliance service integration test starts the production Envoy and Cor
 
 The appliance telemetry listener is designed to accept HTTP OTLP POST requests for logs, metrics, and traces at Envoy's internal address, `10.247.0.2:15005`. The boundary rules reserve access for application service addresses and permit Envoy to reach OpenObserve at `10.247.0.6:5080`. The listener returns 404 for other methods and paths, including OpenObserve's query and administration APIs. The listener and boundary rules are available to the integration fixture. Appliance startup does not yet enable this listener or use it in the service container configuration.
 
+The native hook has an appliance OpenObserve profile for `10.247.0.6`. It requires a Manager-authorized container ID and image ID, accepts requests on port 5080 from Envoy, and permits replies on established connections. It drops new outbound connections and IPv6. Manager uses the same profile to verify the live ruleset after startup.
+
 For an already running package proxy, Manager reads Podman's scheduled health result and reuses the resolved image ID for identity verification. It still checks the live namespace's egress rules before marking the proxy ready.

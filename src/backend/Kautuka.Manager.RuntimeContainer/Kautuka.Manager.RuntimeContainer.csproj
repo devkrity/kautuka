@@ -28,6 +28,7 @@
     <EmbeddedResource Include="Hosting\NetworkAccess\*.tmpl" Exclude="Hosting\NetworkAccess\kautuka_workload.nft.json.tmpl" />
     <EmbeddedResource Include="..\..\tools\Kautuka.OciHook\kautuka_appliance_gateway.nft.json.tmpl" LogicalName="Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_appliance_gateway.nft.json.tmpl" />
     <EmbeddedResource Include="..\..\tools\Kautuka.OciHook\kautuka_appliance_webhost.nft.json.tmpl" LogicalName="Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_appliance_webhost.nft.json.tmpl" />
+    <EmbeddedResource Include="..\..\tools\Kautuka.OciHook\kautuka_appliance_observability.nft.json.tmpl" LogicalName="Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_appliance_observability.nft.json.tmpl" />
     <EmbeddedResource Include="..\..\..\scripts\nac\kautuka_workload.nft.json.tmpl">
       <LogicalName>Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.kautuka_workload.nft.json.tmpl</LogicalName>
     </EmbeddedResource>

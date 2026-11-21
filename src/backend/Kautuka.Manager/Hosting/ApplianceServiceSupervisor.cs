@@ -251,7 +251,8 @@ internal sealed partial class ApplianceServiceSupervisor(
         ];
         if (service.NetworkRole is { } role)
         {
-            string address = service.Role == GatewayRole ? WorkloadRulesetRenderer.ApplianceGatewayIp : WorkloadRulesetRenderer.ApplianceWebHostIp;
+            string address = WorkloadRulesetRenderer.FindApplianceAddress(role)
+                ?? throw new InvalidOperationException("Unknown appliance network role.");
             args.InsertRange(0, ["--hooks-dir", GetApplianceHookDirectory()]);
             args.AddRange([
                 "--network", $"{EgressTopologyManager.WorkloadNetworkName}:ip={address}",

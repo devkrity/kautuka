@@ -11,7 +11,7 @@ internal static class HookPolicy
     internal sealed record State(string Id, int Pid, string? Role = null, string? ImageId = null);
     internal sealed record Infrastructure(string? Role, IReadOnlyList<string> ExpectedIpv4,
         IReadOnlyList<IReadOnlyList<string>>? Alternates = null, string? ImageDigest = null);
-    internal sealed record Decision(bool Allowed, string Reason);
+    internal sealed record Decision(bool Allowed, string Reason, string? ApplianceRole = null);
 
     public static Decision Decide(State? state, IReadOnlyList<string>? ips,
         IReadOnlyDictionary<string, Infrastructure> allowlist,
@@ -23,20 +23,18 @@ internal static class HookPolicy
         static Decision Allow(string reason) => new(true, reason);
         if (state is null || state.Pid <= 0) return Refuse("missing_pid");
         if (ips is null) return Refuse("no_ip");
+        string? applianceAddress = WorkloadRulesetRenderer.FindApplianceAddress(state.Role);
         if (ips.Count == 0)
         {
             // Some keep-id runtimes attach the veth after createRuntime. Only the
             // exact allowlisted appliance service can proceed to the normal identity and
             // owner checks below; the caller must preserve the observed empty set.
-            if (state.Role == "appliance-gateway")
-                ips = [WorkloadRulesetRenderer.ApplianceGatewayIp];
-            else if (state.Role == "appliance-webhost")
-                ips = [WorkloadRulesetRenderer.ApplianceWebHostIp];
-            else return Refuse("no_ip");
+            if (applianceAddress is null) return Refuse("no_ip");
+            ips = [applianceAddress];
         }
         if (!ips.Any(static ip => ip.StartsWith("10.247.", StringComparison.Ordinal) || ip == "10.247"))
         {
-            if (state.Role is "workload" or "appliance-gateway" or "appliance-webhost")
+            if (state.Role == "workload" || applianceAddress is not null)
                 return Refuse(ownersValid ? "workload_off_network" : ownersReason ?? "owners_unreadable");
             return Allow("outside_boundary");
         }
@@ -58,31 +56,30 @@ internal static class HookPolicy
                 }
             }
             if (!matches) return Refuse("infra_ip_mismatch");
-            if (entry.Role is "appliance-gateway" or "appliance-webhost")
+            if (WorkloadRulesetRenderer.FindApplianceAddress(entry.Role) is { } expectedIp)
             {
-                bool gateway = entry.Role == "appliance-gateway";
-                string expectedIp = gateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : WorkloadRulesetRenderer.ApplianceWebHostIp;
-                string mismatch = gateway ? "appliance_gateway_identity_mismatch" : "appliance_webhost_identity_mismatch";
+                string prefix = entry.Role!.Replace('-', '_');
                 if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != expectedIp ||
                     state.Role != entry.Role || !IsImmutableImageId(entry.ImageDigest) || state.ImageId != entry.ImageDigest)
-                    return Refuse(mismatch);
+                    return Refuse(prefix + "_identity_mismatch");
                 if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
                 if (inode is null) return Refuse("missing_netns_inode");
                 if (owners.TryGetValue(inode, out string? applianceOwner) && applianceOwner != state.Id) return Refuse("shared_netns");
-                return Allow(gateway ? "appliance_gateway_rules" : "appliance_webhost_rules");
+                return new Decision(true, prefix + "_rules", entry.Role);
             }
             if (state.Role == "appliance-webhost" || ips.Contains(WorkloadRulesetRenderer.ApplianceWebHostIp, StringComparer.Ordinal))
                 return Refuse("appliance_webhost_identity_mismatch");
             if (state.Role == "appliance-gateway" || ips.Contains(WorkloadRulesetRenderer.ApplianceGatewayIp, StringComparer.Ordinal))
                 return Refuse("appliance_gateway_identity_mismatch");
+            if (state.Role == "appliance-observability" || ips.Contains(WorkloadRulesetRenderer.ObservabilityIp, StringComparer.Ordinal))
+                return Refuse("appliance_observability_identity_mismatch");
             if (entry.Role != "pkgs-proxy") return Allow("infra_allowlisted");
             if (entry.ExpectedIpv4.Count != 1 || entry.ExpectedIpv4[0] != "10.247.0.3" ||
                 state.Role != "package-proxy" || entry.ImageDigest is null || state.ImageId != entry.ImageDigest)
                 return Refuse("package_proxy_identity_mismatch");
             return Allow("package_proxy_rules");
         }
-        if (state.Role == "appliance-gateway") return Refuse("appliance_gateway_identity_mismatch");
-        if (state.Role == "appliance-webhost") return Refuse("appliance_webhost_identity_mismatch");
+        if (applianceAddress is not null) return Refuse(state.Role!.Replace('-', '_') + "_identity_mismatch");
         if (!ownersValid) return Refuse(ownersReason ?? "owners_unreadable");
         if (ips.Any(static ip => ip.StartsWith("10.247.0.", StringComparison.Ordinal) && ip.Split('.').Length == 4))
             return Refuse("reserved_range");

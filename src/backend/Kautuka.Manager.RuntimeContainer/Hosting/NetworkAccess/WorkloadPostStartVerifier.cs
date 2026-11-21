@@ -60,7 +60,7 @@ public sealed class WorkloadPostStartVerifier
         ImageCompatProfile? compatProfile = null,
         IWorkloadRegistry? registry = null,
         bool isPackageProxy = false,
-        bool isApplianceGateway = false,
+        string? applianceRole = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(containerId);
@@ -293,7 +293,7 @@ public sealed class WorkloadPostStartVerifier
                 await VerifyNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, isApplianceGateway: isApplianceGateway).ConfigureAwait(false);
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, applianceRole: applianceRole).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -310,7 +310,7 @@ public sealed class WorkloadPostStartVerifier
                 await VerifyPodmanMachineNetnsIpv6DisableAsync(pid, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, isApplianceGateway: isApplianceGateway).ConfigureAwait(false);
+                    await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy, applianceRole: applianceRole).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -595,23 +595,23 @@ public sealed class WorkloadPostStartVerifier
         }
     }
 
-    public async Task<string> VerifyWorkloadRulesetAsync(string containerId, string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false,
-        bool isApplianceWebHost = false, CancellationToken cancellationToken = default)
+    public async Task<string> VerifyWorkloadRulesetAsync(string containerId, string allocatedIp, bool isPackageProxy = false,
+        string? applianceRole = null, CancellationToken cancellationToken = default)
     {
         PodmanCommandResult result = await podmanRunner.RunAsync(["inspect", containerId], 15, cancellationToken).ConfigureAwait(false);
         if (result.ExitCode != 0) throw new InvalidOperationException("podman inspect failed during workload rules reconcile.");
         using JsonDocument document = JsonDocument.Parse(result.StdOut);
         JsonElement container = document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement[0] : document.RootElement;
-        return await VerifyInspectedWorkloadRulesetAsync(container, containerId, allocatedIp, isPackageProxy, isApplianceGateway, isApplianceWebHost, cancellationToken)
+        return await VerifyInspectedWorkloadRulesetAsync(container, containerId, allocatedIp, isPackageProxy, applianceRole, cancellationToken)
             .ConfigureAwait(false);
     }
 
     internal async Task<string> VerifyInspectedWorkloadRulesetAsync(JsonElement container, string containerId, string allocatedIp,
-        bool isPackageProxy, bool isApplianceGateway, bool isApplianceWebHost, CancellationToken cancellationToken)
+        bool isPackageProxy, string? applianceRole, CancellationToken cancellationToken)
     {
         string? canonicalId = container.TryGetProperty("Id", out JsonElement id) ? id.GetString() : null;
         if (!IsCanonicalContainerId(canonicalId)) throw new InvalidOperationException("Workload rules reconcile requires a canonical container ID.");
-        if ((isApplianceGateway || isApplianceWebHost) && (canonicalId != containerId
+        if (applianceRole is not null && (canonicalId != containerId
             || !container.TryGetProperty("NetworkSettings", out JsonElement networkSettings)
             || !networkSettings.TryGetProperty("Networks", out JsonElement networks)
             || networks.ValueKind != JsonValueKind.Object || networks.EnumerateObject().Count() != 1
@@ -624,7 +624,7 @@ public sealed class WorkloadPostStartVerifier
         try
         {
             await VerifyNetnsRulesetAsync(pid, allocatedIp, cancellationToken, isPackageProxy: isPackageProxy,
-                isApplianceGateway: isApplianceGateway, isApplianceWebHost: isApplianceWebHost).ConfigureAwait(false);
+                applianceRole: applianceRole).ConfigureAwait(false);
         }
         catch (WorkloadRulesetMismatchException ex)
         {
@@ -638,8 +638,7 @@ public sealed class WorkloadPostStartVerifier
         CancellationToken cancellationToken,
         bool? usePodmanMachineOverride = null,
         bool isPackageProxy = false,
-        bool isApplianceGateway = false,
-        bool isApplianceWebHost = false)
+        string? applianceRole = null)
     {
         string pidText = pid.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string stdOut;
@@ -703,11 +702,10 @@ public sealed class WorkloadPostStartVerifier
 
         string liveHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
             stdOut,
-            isApplianceWebHost ? WorkloadRulesetRenderer.RequiredApplianceWebHostComments
-                : isApplianceGateway ? WorkloadRulesetRenderer.RequiredApplianceGatewayComments : WorkloadRulesetRenderer.RequiredWorkloadComments,
+            applianceRole is null ? WorkloadRulesetRenderer.RequiredWorkloadComments : WorkloadRulesetRenderer.RequiredApplianceComments,
             allocatedIp);
 
-        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy, isApplianceGateway, isApplianceWebHost);
+        string expectedHash = WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(allocatedIp, isPackageProxy, applianceRole);
         if (!string.Equals(liveHash, expectedHash, StringComparison.Ordinal))
         {
             throw new WorkloadRulesetMismatchException($"In-netns ruleset verification failed: live hash '{liveHash}' does not match expected canonical golden hash '{expectedHash}'.");

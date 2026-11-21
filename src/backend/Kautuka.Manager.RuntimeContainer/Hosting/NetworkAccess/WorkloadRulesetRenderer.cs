@@ -37,17 +37,22 @@ public static class WorkloadRulesetRenderer
         "final_drop",
     ];
 
-    public static readonly IReadOnlyList<string> RequiredApplianceGatewayComments =
+    public static readonly IReadOnlyList<string> RequiredApplianceComments =
     ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
 
-    public static readonly IReadOnlyList<string> RequiredApplianceWebHostComments =
-    ["input_ipv6_drop", "input_drop", "ipv6_drop", "spoof_drop", "final_drop"];
+    public static string? FindApplianceAddress(string? role) => role switch
+    {
+        "appliance-gateway" => ApplianceGatewayIp,
+        "appliance-webhost" => ApplianceWebHostIp,
+        "appliance-observability" => ObservabilityIp,
+        _ => null,
+    };
 
     /// <summary>
     /// Renders the idempotent, atomic workload ruleset for a specific allocated IPv4 address.
     /// Matches <c>kautuka_hook.py:render_ruleset</c> byte-for-byte.
     /// </summary>
-    public static string Render(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false, bool isApplianceWebHost = false)
+    public static string Render(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
         string normalizedIp = allocatedIp.Trim();
@@ -56,17 +61,16 @@ public static class WorkloadRulesetRenderer
             throw new ArgumentException($"Invalid workload IPv4 address: '{allocatedIp}'.", nameof(allocatedIp));
         }
 
-        if (isApplianceWebHost)
+        if (applianceRole is not null)
         {
-            if (isPackageProxy || isApplianceGateway || normalizedIp != ApplianceWebHostIp)
-                throw new ArgumentException("Invalid appliance WebHost ruleset identity.", nameof(allocatedIp));
-            return RenderApplianceWebHost();
-        }
-        if (isApplianceGateway)
-        {
-            if (isPackageProxy || normalizedIp != ApplianceGatewayIp)
-                throw new ArgumentException("Invalid appliance Gateway ruleset identity.", nameof(allocatedIp));
-            return RenderApplianceGateway();
+            ValidateApplianceIdentity(applianceRole, normalizedIp, isPackageProxy);
+            return applianceRole switch
+            {
+                "appliance-gateway" => RenderApplianceGateway(),
+                "appliance-webhost" => RenderApplianceWebHost(),
+                "appliance-observability" => RenderObservability(),
+                _ => throw new ArgumentException("Unknown appliance network role.", nameof(applianceRole)),
+            };
         }
 
         var sb = new StringBuilder();
@@ -145,30 +149,45 @@ public static class WorkloadRulesetRenderer
         }
 
         """;
-    private static string ComputeGatewayExpectedHash()
-    {
-        string golden = BoundaryRulesetRenderer.ResolveTemplate("kautuka_appliance_gateway.nft.json.tmpl");
-        return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceGatewayComments, ApplianceGatewayIp);
-    }
-    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, bool isApplianceGateway = false, bool isApplianceWebHost = false)
+    private static string RenderObservability() => $$"""
+        table inet kautuka_workload
+        delete table inet kautuka_workload
+        table inet kautuka_workload {
+          chain input { type filter hook input priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "input_ipv6_drop"
+            iifname "lo" accept
+            ip saddr {{EgressPodIp}} ip daddr {{ObservabilityIp}} tcp dport {{ObservabilityPort}} accept
+            counter drop comment "input_drop"
+          }
+          chain output { type filter hook output priority 0; policy drop;
+            meta nfproto ipv6 counter drop comment "ipv6_drop"
+            oifname "lo" accept
+            oifname != "lo" ip saddr != {{ObservabilityIp}} counter drop comment "spoof_drop"
+            ct state established accept
+            counter drop comment "final_drop"
+          }
+        }
+
+        """;
+
+    public static string ComputeExpectedCanonicalRulesetHash(string allocatedIp, bool isPackageProxy = false, string? applianceRole = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(allocatedIp);
-        if (isApplianceWebHost)
+        if (applianceRole is not null)
         {
-            if (isPackageProxy || isApplianceGateway || allocatedIp != ApplianceWebHostIp)
-                throw new ArgumentException("Invalid appliance WebHost ruleset identity.", nameof(allocatedIp));
-            string golden = BoundaryRulesetRenderer.ResolveTemplate("kautuka_appliance_webhost.nft.json.tmpl");
-            return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceWebHostComments, ApplianceWebHostIp);
-        }
-        if (isApplianceGateway)
-        {
-            if (isPackageProxy || allocatedIp != ApplianceGatewayIp)
-                throw new ArgumentException("Invalid appliance Gateway ruleset identity.", nameof(allocatedIp));
-            return ComputeGatewayExpectedHash();
+            ValidateApplianceIdentity(applianceRole, allocatedIp, isPackageProxy);
+            string golden = BoundaryRulesetRenderer.ResolveTemplate($"kautuka_{applianceRole.Replace('-', '_')}.nft.json.tmpl");
+            return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(golden, RequiredApplianceComments, allocatedIp);
         }
         string templateName = isPackageProxy ? "kautuka_package_proxy.nft.json.tmpl" : "kautuka_workload.nft.json.tmpl";
         string tmpl = BoundaryRulesetRenderer.ResolveTemplate(templateName);
         string goldenJson = tmpl.Replace("{{IP}}", allocatedIp.Trim(), StringComparison.Ordinal);
         return BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(goldenJson, RequiredWorkloadComments, allocatedIp.Trim());
+    }
+
+    private static void ValidateApplianceIdentity(string role, string address, bool isPackageProxy)
+    {
+        if (isPackageProxy || FindApplianceAddress(role) != address)
+            throw new ArgumentException("Invalid appliance ruleset identity.", nameof(role));
     }
 }

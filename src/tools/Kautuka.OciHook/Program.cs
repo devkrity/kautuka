@@ -68,10 +68,8 @@ try
 
     failure = "apply_failed";
     bool packageProxy = decision.Reason == "package_proxy_rules";
-    bool applianceGateway = decision.Reason == "appliance_gateway_rules";
-    bool applianceWebHost = decision.Reason == "appliance_webhost_rules";
-    string address = applianceGateway ? WorkloadRulesetRenderer.ApplianceGatewayIp : applianceWebHost ? WorkloadRulesetRenderer.ApplianceWebHostIp : addresses[0];
-    string rules = WorkloadRulesetRenderer.Render(address, packageProxy, applianceGateway, applianceWebHost);
+    string address = WorkloadRulesetRenderer.FindApplianceAddress(decision.ApplianceRole) ?? addresses[0];
+    string rules = WorkloadRulesetRenderer.Render(address, packageProxy, decision.ApplianceRole);
     string nftTool = FindSystemTool("nft");
     var apply = await target.RunAsync(nftTool, ["-f", "-"], rules).ConfigureAwait(false);
     if (apply.ExitCode != 0)
@@ -81,8 +79,8 @@ try
     if (verify.ExitCode != 0)
         return Finish(false, failure);
     string observedHash = BoundaryRulesetRenderer.ComputeCanonicalNftJsonHash(
-        verify.Stdout, applianceGateway ? WorkloadRulesetRenderer.RequiredApplianceGatewayComments : applianceWebHost ? WorkloadRulesetRenderer.RequiredApplianceWebHostComments : WorkloadRulesetRenderer.RequiredWorkloadComments, address);
-    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy, applianceGateway, applianceWebHost))
+        verify.Stdout, decision.ApplianceRole is null ? WorkloadRulesetRenderer.RequiredWorkloadComments : WorkloadRulesetRenderer.RequiredApplianceComments, address);
+    if (observedHash != WorkloadRulesetRenderer.ComputeExpectedCanonicalRulesetHash(address, packageProxy, decision.ApplianceRole))
         return Finish(false, failure);
     if (!ProcessIdentity.IsLive(state.Pid, inode, target.Identity.StartTicks))
         return Finish(false, "container_identity_changed");
@@ -106,7 +104,7 @@ int Finish(bool allowed, string reason)
     catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
     {
         Console.Error.WriteLine("The Kautuka OCI hook could not write its audit record.");
-        if (allowed && reason is "workload_rules" or "package_proxy_rules" or "appliance_gateway_rules" or "appliance_webhost_rules")
+        if (allowed && reason.EndsWith("_rules", StringComparison.Ordinal))
             return 1;
     }
 

@@ -23,5 +23,6 @@
     <EmbeddedResource Include="../../../scripts/nac/kautuka_package_proxy.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_package_proxy.nft.json.tmpl" />
     <EmbeddedResource Include="../../tools/Kautuka.OciHook/kautuka_appliance_gateway.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_appliance_gateway.nft.json.tmpl" />
     <EmbeddedResource Include="../../tools/Kautuka.OciHook/kautuka_appliance_webhost.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_appliance_webhost.nft.json.tmpl" />
+    <EmbeddedResource Include="../../tools/Kautuka.OciHook/kautuka_appliance_observability.nft.json.tmpl" LogicalName="Kautuka.OciHook.kautuka_appliance_observability.nft.json.tmpl" />
   </ItemGroup>
 </Project>
