@@ -70,7 +70,8 @@ internal sealed class ApplianceRoleImageImporter
                         stream.Position = 0;
                         PodmanCommandResult loaded = await runner.RunAsync(["load"], 300, cancellationToken, standardInput: stream).ConfigureAwait(false);
                         cancellationToken.ThrowIfCancellationRequested();
-                        if (loaded.ExitCode != 0) throw new InvalidOperationException($"Offline appliance image import failed for {role}.");
+                        if (loaded.ExitCode != 0)
+                            throw new InvalidOperationException(PodmanFailureFormatter.FormatFailure($"Offline appliance image import for {role}", loaded));
                     }
                     catch (IOException error)
                     {

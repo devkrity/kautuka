@@ -57,7 +57,7 @@ For a signed Linux install, the installer preserves the exact verified manifest 
 
 The release builder can produce an appliance candidate with `--appliance-image-prefix` and `--appliance-runtime-base`. It packages the same staged Native AOT service payloads, including Gateway's connector bundles and WebHost's built UI. The Linux platform archive includes the five OCI archives under `service-images/`, and the platform manifest signs each archived image's manifest digest. Normal service startup and updates need Manager's appliance activation path before they can use these images.
 
-Release discovery and preparation for an appliance require a signed manifest with an appliance deployment descriptor. A host-service release is ineligible even if it uses the same Linux artifact name. Preparation preserves the verified manifest and signature for independent verification by the host recovery helper.
+If an offline service image import fails, the appliance update service logs the role and Podman failure detail. Release discovery and preparation for an appliance require a signed manifest with an appliance deployment descriptor. A host-service release is ineligible even if it uses the same Linux artifact name. Preparation preserves the verified manifest and signature for independent verification by the host recovery helper.
 
 UpdateService compares the newest published GitHub tag in the selected channel with the installed appliance version. It fetches the signed manifest only for a newer release.
 
