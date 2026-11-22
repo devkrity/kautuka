@@ -329,7 +329,7 @@ public sealed class PodmanContainerTool(
             PromoteSandboxAfterVerification(context, allocatedIp, createdId);
         }
 
-        return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId);
+        return new OciSandboxSession(containerName, true, context.ScopeType, context.ScopeId, context.UserId) { Created = true };
     }
 
     private async Task EnsureExistingSandboxVerifiedAsync(
@@ -1035,7 +1035,8 @@ public sealed class PodmanContainerTool(
     {
         public bool Matches(ContainerContext context)
             => string.IsNullOrEmpty(Drift)
-                && DesiredStateVersion == context.DesiredStateVersion
+                && (DesiredStateVersion == context.DesiredStateVersion
+                    || (DesiredStateVersion > 0 && DesiredStateVersion < context.DesiredStateVersion))
                 && !string.IsNullOrWhiteSpace(context.SpecFingerprint)
                 && string.Equals(SpecFingerprint, context.SpecFingerprint, StringComparison.Ordinal);
     }

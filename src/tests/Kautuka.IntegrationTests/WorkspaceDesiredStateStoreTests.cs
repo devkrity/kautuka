@@ -218,6 +218,25 @@ public sealed class WorkspaceDesiredStateStoreTests
     }
 
     [Fact]
+    public void ReplayRetriesWhenAnAuditFailedAfterSuccessfulReconciliation()
+    {
+        var store = new WorkspaceDesiredStateStore();
+        ManagerRuntimeSettings settings = CreateRuntimeSettings();
+        WorkspaceDesiredStateApplyResult Apply() => store.ApplyDesiredState(
+            5, Kautuka.Manager.Protos.WorkspaceDesiredStateSyncReason.Change, settings,
+            [CreateWorkspace("scope-a")], [CreateConnector("connector-a")], []);
+        Assert.True(Apply().Accepted);
+        Assert.True(store.Updates.TryRead(out _));
+        Assert.True(store.TryMarkReconciled(5, WorkspaceReconcileTriggerKind.DesiredStateAccepted, DateTimeOffset.UtcNow));
+        Assert.False(Apply().RequiresReconciliation);
+        Assert.True(store.TryMarkReconcileFailed(5, "connector_reconcile_deferred"));
+
+        WorkspaceDesiredStateApplyResult replay = Apply();
+        Assert.True(replay.RequiresReconciliation);
+        Assert.True(replay.TriggerEnqueued);
+    }
+
+    [Fact]
     public void SignalReconcileCoalescesPendingWakeups()
     {
         var store = new WorkspaceDesiredStateStore();

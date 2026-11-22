@@ -657,7 +657,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 compatibilityStore,
                 new WorkloadLaunchGate(new OpenStartupState(), policyStore));
 
-            _ = await service.ReconcileDesiredConnectorsAsync([desiredConnector], TestContext.Current.CancellationToken);
+            _ = await service.ReconcileDesiredConnectorsAsync([desiredConnector], null, TestContext.Current.CancellationToken);
 
             RegistryEntry recovered = Assert.Single(registry.GetAll());
             Assert.Equal(containerId, recovered.ContainerId);

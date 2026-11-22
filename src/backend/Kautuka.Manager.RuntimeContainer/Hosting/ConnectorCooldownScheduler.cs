@@ -8,6 +8,7 @@ internal sealed class ConnectorCooldownScheduler : IAsyncDisposable
     private int disposed;
 
     internal int Count => registrations.Count;
+    internal bool IsScheduled(string key) => registrations.ContainsKey(key);
 
     public async Task ScheduleAsync(string key, TimeSpan delay, Func<Task> callback)
     {
@@ -15,16 +16,21 @@ internal sealed class ConnectorCooldownScheduler : IAsyncDisposable
         await ScheduleAsync(key, delay, _ => callback()).ConfigureAwait(false);
     }
 
-    public async Task ScheduleAsync(string key, TimeSpan delay, Func<CancellationToken, Task> callback)
+    public async Task ScheduleAsync(string key, TimeSpan delay, Func<CancellationToken, Task> callback, bool preserveExisting = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(delay, TimeSpan.Zero);
         ArgumentNullException.ThrowIfNull(callback);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 
-        await CancelAsync(key).ConfigureAwait(false);
+        if (!preserveExisting)
+            await CancelAsync(key).ConfigureAwait(false);
         var registration = new Registration();
-        registrations[key] = registration;
+        if (!registrations.TryAdd(key, registration))
+        {
+            registration.Cancellation.Dispose();
+            return;
+        }
         registration.Task = RunAsync(key, delay, callback, registration);
     }
 
@@ -51,11 +57,7 @@ internal sealed class ConnectorCooldownScheduler : IAsyncDisposable
         }
         finally
         {
-            if (registrations.TryGetValue(key, out Registration? current) && ReferenceEquals(current, registration))
-            {
-                _ = registrations.TryRemove(key, out _);
-            }
-
+            _ = registrations.TryRemove(new KeyValuePair<string, Registration>(key, registration));
             registration.Cancellation.Dispose();
         }
     }

@@ -212,6 +212,15 @@ internal static partial class GatewaySettingsEndpointMappings
                 return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not confirm the network rule."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
+            bool allowLan = IsLocalProviderTarget(providerTarget);
+            string destKind = IPAddress.TryParse(providerTarget.IdnHost, out _) ? "ip" : "host";
+            var matchingRules = rules.Rules.Where(rule => rule.ScopeKind == "system"
+                && rule.Destination.Equals(providerTarget.IdnHost, StringComparison.OrdinalIgnoreCase)
+                && rule.Port == providerTarget.Port && rule.DestKind == destKind).ToArray();
+            if (matchingRules.Any(rule => !rule.Allowed || rule.Paused || (allowLan && !rule.AllowLan)))
+                return Results.Conflict(new GatewayErrorResponse(
+                    "Network Access limits this provider destination. Review the existing rule in Network Access before saving."));
+
             GatewayProvider saved;
             try
             {
@@ -232,11 +241,7 @@ internal static partial class GatewaySettingsEndpointMappings
 
             try
             {
-                bool allowLan = IsLocalProviderTarget(providerTarget);
-                string destKind = IPAddress.TryParse(providerTarget.IdnHost, out _) ? "ip" : "host";
-                bool alreadyAllowed = rules.Rules.Any(rule => rule.ScopeKind == "system" && rule.Destination.Equals(providerTarget.IdnHost, StringComparison.OrdinalIgnoreCase)
-                    && rule.Port == providerTarget.Port && rule.DestKind == destKind && rule.Allowed && !rule.Paused && (!allowLan || rule.AllowLan));
-                if (!alreadyAllowed) await manager.Client.SetRuleAsync(new NetworkAccessSetRuleRequest
+                if (matchingRules.Length == 0) await manager.Client.SetRuleAsync(new NetworkAccessSetRuleRequest
                 {
                     Actor = actor,
                     ScopeKind = "system",

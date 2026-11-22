@@ -90,9 +90,11 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
     {
         using var triggerCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
-        TimeSpan normalDelay = readinessGate.IsReady ? driftAuditInterval : recoveryRetryInterval;
+        bool recovering = !readinessGate.IsReady
+            || desiredStateStore.Snapshot.LastFailureClass == "connector_reconcile_deferred";
+        TimeSpan normalDelay = recovering ? recoveryRetryInterval : driftAuditInterval;
         TimeSpan nextDelay = GetNextReconcileDelay(normalDelay);
-        if (!readinessGate.IsReady)
+        if (recovering)
         {
             LogRecoveryRetryScheduled(logger, (int)nextDelay.TotalSeconds);
         }
@@ -102,7 +104,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         Task<WorkspaceReconcileTriggerKind> desiredStateTask = desiredStateTrigger.ReadAsync(triggerCts.Token).AsTask();
 
         Task completed = await Task.WhenAny(delayTask, idleTask, desiredStateTask).ConfigureAwait(false);
-        WorkspaceReconcileTriggerKind trigger = ResolveReconcileTrigger(completed, idleTask, desiredStateTask, readinessGate.IsReady);
+        WorkspaceReconcileTriggerKind trigger = ResolveReconcileTrigger(completed, idleTask, desiredStateTask, !recovering);
 
         await triggerCts.CancelAsync().ConfigureAwait(false);
         await ObserveCanceledWaitAsync(delayTask).ConfigureAwait(false);
@@ -355,14 +357,22 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
         // Reconcile containerized MCP connectors (Phase 2c: JIT startup with cooldown)
         await ReconcileContainerConnectorsAsync(snapshot.DesiredContainerConnectors, cancellationToken).ConfigureAwait(false);
-        IReadOnlyList<string> connectorNotes = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
+        var connectorResult = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
             snapshot.DesiredContainerConnectors,
+            snapshot,
             cancellationToken).ConfigureAwait(false);
         desiredStateStore.ReplaceDriftActions([
             .. sidecarSupervisor.TakeDriftNotes(),
             .. connectorExecutionService.TakeSandboxDriftNotes(),
-            .. connectorNotes,
+            .. connectorResult.Notes,
         ]);
+
+        if (!connectorResult.Complete)
+        {
+            MarkFailed(snapshot, "connector_reconcile_deferred");
+            SignalRuntimeReady();
+            return;
+        }
 
         if (!desiredStateStore.TryMarkReconciled(snapshot.AcceptedVersion, triggerKind, DateTimeOffset.UtcNow))
         {

@@ -1724,7 +1724,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
             Assert.DoesNotContain(commands, static command => command[0] == "rm");
             Assert.Equal(1, registry.Count);
 
-            await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+            await service.ReconcileDesiredConnectorsAsync([connector], null, CancellationToken.None);
             Assert.Equal(runCount, commands.Count(static command => command[0] == "run"));
             Assert.DoesNotContain(commands, static command => command[0] == "rm");
 
@@ -1862,7 +1862,7 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
         int inspectCountBeforeReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
 
-        _ = await service.ReconcileDesiredConnectorsAsync([connector], CancellationToken.None);
+        _ = await service.ReconcileDesiredConnectorsAsync([connector], null, CancellationToken.None);
 
         int inspectCountAfterReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
         Assert.True(inspectCountAfterReconcile > inspectCountBeforeReconcile, "Reconciliation must inspect this user and agent's actual container name.");

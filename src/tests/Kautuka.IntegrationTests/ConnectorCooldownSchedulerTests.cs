@@ -84,6 +84,21 @@ public sealed class ConnectorCooldownSchedulerTests
     }
 
     [Fact]
+    public async Task ReconciliationPreservesTheExistingIdleCallback()
+    {
+        await using var scheduler = new ConnectorCooldownScheduler();
+        var expired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await scheduler.ScheduleAsync("connector", TimeSpan.FromMilliseconds(100), () =>
+        {
+            expired.TrySetResult();
+            return Task.CompletedTask;
+        });
+        await scheduler.ScheduleAsync("connector", TimeSpan.FromMinutes(5), static _ => Task.CompletedTask, preserveExisting: true);
+
+        await expired.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task DisposalCancelsAndAwaitsAllRegistrations()
     {
         var scheduler = new ConnectorCooldownScheduler();

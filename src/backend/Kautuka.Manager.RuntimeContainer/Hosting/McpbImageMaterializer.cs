@@ -168,9 +168,10 @@ public sealed class McpbImageMaterializer(
         }
     }
 
-    public async Task<string> EnsureSandboxArtifactImageAsync(
+    internal async Task<string> EnsureSandboxArtifactImageAsync(
         WorkspaceMcpContainerConnectorDefinition connector,
         string installRoot,
+        string sourceDigest,
         bool isBraked,
         CancellationToken cancellationToken)
     {
@@ -181,7 +182,6 @@ public sealed class McpbImageMaterializer(
         connector = UseReleasedSandboxBase(connector, connector.ServerType);
         await AdmitInfrastructureBaseAsync(connector, cancellationToken).ConfigureAwait(false);
 
-        string sourceDigest = ComputeSha256Hex(connector.BundlePath!);
         string localImage = BuildSandboxArtifactImageReference(connector.ServerType!, sourceDigest + "\n" + connector.Image);
 
         PodmanCommandResult existsResult = await podmanCommandRunner

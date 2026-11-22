@@ -157,7 +157,8 @@ public sealed class WorkspaceDesiredStateStore
                     throw new InvalidOperationException("A desired-state version cannot be replayed with different content.");
                 }
 
-                bool requiresReconciliation = reconciledDesiredStateVersion != acceptedDesiredStateVersion;
+                bool requiresReconciliation = reconciledDesiredStateVersion != acceptedDesiredStateVersion
+                    || lifecyclePhase == WorkspaceDesiredStateLifecyclePhase.Failed;
                 WorkspaceDesiredStateApplyResult replay = WorkspaceDesiredStateApplyResult.IgnoredReplay(
                     acceptedDesiredStateVersion,
                     pendingPreviousConnectors,

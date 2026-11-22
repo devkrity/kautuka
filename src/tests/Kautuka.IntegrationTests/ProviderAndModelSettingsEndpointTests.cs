@@ -94,17 +94,19 @@ public sealed class ProviderSettingsEndpointTests
     }
 
     [Fact]
-    public async Task SavingProviderReplacesMatchingSystemBlockWithAllowRule()
+    public async Task SavingProviderPreservesMatchingSystemBlock()
     {
         await using var fixture = await ProviderModelFixture.CreateAsync();
         string token = await fixture.LoginAsBootstrapAdminAsync();
         var admin = new NetworkAccessActor("admin", true);
         var (revision, _) = fixture.ProviderRules.ListRules(admin);
         fixture.ProviderRules.SetRule(admin, new RuleWriteSpec("system", null, null, null, "provider.example", "host", 443, false), revision);
-        using JsonDocument _ = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/providers/save",
+        using HttpResponseMessage response = await fixture.SendAsync(HttpMethod.Post, "/api/settings/providers/save",
             new { id = "openai-test", type = "openai", settings = new { base_url = "https://provider.example/v1", api_key = "test" } }, token);
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Null(fixture.GetConfiguredProviderType("openai-test"));
         NetworkAccessRule rule = Assert.Single(fixture.ProviderRules.ListRules(admin).Rules, view => view.Rule.Destination == "provider.example").Rule;
-        Assert.True(rule.Allowed);
+        Assert.False(rule.Allowed);
         Assert.False(rule.AllowLan);
         Assert.Equal("system", rule.ScopeKind);
     }

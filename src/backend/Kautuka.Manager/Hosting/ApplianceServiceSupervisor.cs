@@ -118,7 +118,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (superviseUpdateService && topology?.IsStartupGateOpen == true)
             await TryReconcileAsync(updater, FindContainer(updater), token).ConfigureAwait(false);
         if (topology?.IsStartupGateOpen == true && credentials.Ready && channel.Ready
-            && (!superviseUpdateService || updater.Ready))
+            && (!verificationMode || !superviseUpdateService || updater.Ready))
             await TryReconcileAsync(gateway, FindContainer(gateway), token).ConfigureAwait(false);
         else
             await StopActiveAsync(gateway, token).ConfigureAwait(false);
