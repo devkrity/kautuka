@@ -238,7 +238,8 @@ AddApplianceVerificationService(sp => sp.GetRequiredService<EgressTopologyManage
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<WorkloadLaunchGate>();
-builder.Services.AddManagerNetworkAccessController();
+builder.Services.AddManagerNetworkAccessController(applianceEnabled
+    ? TimeSpan.FromSeconds(Kautuka.NetworkAccessController.NetworkAccessController.ApplianceApprovalHoldSeconds) : TimeSpan.Zero);
 
 if (OperatingSystem.IsLinux())
 {

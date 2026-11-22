@@ -36,6 +36,59 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
     [Fact]
+    public async Task ConnectAuthorizationResumesTheSameGrpcCallAfterApproval()
+    {
+        Assert.SkipUnless(OperatingSystem.IsLinux(), "The appliance authorization socket uses Linux Unix domain sockets.");
+        string directory = Directory.CreateTempSubdirectory("nac-hold-").FullName;
+        try
+        {
+            using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"), []);
+            var controller = new NacController(policy, new WorkloadRegistry(), isContainerAuthorizationGateOpen: () => true,
+                approvalHold: TimeSpan.FromSeconds(8));
+            string socket = Path.Combine(directory, "auth.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socket,
+                LockFilePath = Path.Combine(directory, "auth.lock"),
+            });
+            CancellationToken token = TestContext.Current.CancellationToken;
+            await host.StartAsync(token);
+            using GrpcChannel channel = CreateUdsChannel(socket);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            using AsyncUnaryCall<CheckResponse> call = client.CheckAsync(new CheckRequest
+            {
+                Attributes = new AttributeContext
+                {
+                    ContextExtensions = { ["kautuka.authorization"] = "gateway-connect" },
+                    Source = new Peer { Principal = "spiffe://kautuka.internal/gateway" },
+                    Request = new Request
+                    {
+                        Http = new HttpRequest
+                        {
+                            Method = "CONNECT",
+                            Host = "approval.example.test:443",
+                            Headers = { ["x-kautuka-user"] = "user-a", ["x-kautuka-agent"] = "agent-a" },
+                        }
+                    },
+                },
+            }, deadline: DateTime.UtcNow.AddSeconds(10), cancellationToken: token);
+
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+            while (policy.ListRequests(admin).Requests.Count == 0 && DateTimeOffset.UtcNow < deadline)
+                await Task.Delay(10, token);
+            NetworkAccessRequest request = Assert.Single(policy.ListRequests(admin).Requests).Request;
+            Assert.False(call.ResponseAsync.IsCompleted);
+            policy.DecideRequest(admin, request.Id, true, "agent", policy.Revision);
+            CheckResponse response = await call.ResponseAsync;
+            Assert.Equal(0, response.Status.Code);
+            Assert.Equal("public", response.DynamicMetadata.Fields["egress_class"].StringValue);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
     public async Task EnvoyAuthorizationHost_ActualLoggerFactoryUsesInformationMinimum()
     {
         string tempDir = CreateTempDir();

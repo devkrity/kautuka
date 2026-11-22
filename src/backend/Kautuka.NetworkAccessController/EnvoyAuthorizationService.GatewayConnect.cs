@@ -20,7 +20,7 @@ public sealed partial class EnvoyAuthorizationService
     private const string EgressClassKey = "egress_class";
     private static readonly string[] scopeHeaders = [UserHeader, AgentHeader, ConnectorHeader, PurposeHeader, CorrelationHeader, PublicOnlyHeader];
 
-    private CheckResponse CheckGatewayConnect(AttributeContext attributes)
+    private async Task<CheckResponse> CheckGatewayConnectAsync(AttributeContext attributes, CancellationToken cancellationToken)
     {
         if (!attributes.ContextExtensions.TryGetValue(GatewayConnectRouteKey, out string? route)
             || route != GatewayConnectRoute
@@ -49,8 +49,11 @@ public sealed partial class EnvoyAuthorizationService
         }
 
         bool publicOnly = publicOnlyValue is not null;
-        NetworkAccessDecisionResult decision = controller.EvaluateGatewayConnect(
-            new OutboundCheckInput(user, agent ?? string.Empty, connector, host, port, purpose, correlation), publicOnly);
+        var input = new OutboundCheckInput(user, agent ?? string.Empty, connector, host, port, purpose, correlation);
+        NetworkAccessDecisionResult decision = controller.EvaluateGatewayConnect(input, publicOnly);
+        if (decision.Reason == "no_rule" && purpose is not ("provider-test" or "probe" or "save-discovery"))
+            decision = await controller.RecheckAfterApprovalAsync(decision,
+                () => controller.EvaluateGatewayConnect(input, publicOnly, recordPendingRequest: false), cancellationToken).ConfigureAwait(false);
         if (!decision.Allowed)
         {
             return CreateDenyResponse(decision.Reason);

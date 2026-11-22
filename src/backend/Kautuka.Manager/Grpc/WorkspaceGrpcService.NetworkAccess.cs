@@ -39,7 +39,7 @@ public sealed partial class WorkspaceGrpcService
             return new WorkspaceBoolResponse { Ok = true };
         });
 
-    public override Task<NetworkAccessCheckOutboundResponse> CheckOutbound(
+    public override async Task<NetworkAccessCheckOutboundResponse> CheckOutbound(
         NetworkAccessCheckOutboundRequest request,
         ServerCallContext context)
     {
@@ -48,7 +48,7 @@ public sealed partial class WorkspaceGrpcService
         using IDisposable scope = BeginGrpcScope(context, "CheckOutbound", ("Host", request.Host), ("Port", request.Port));
         TagCurrentActivity(("rpc.method", "CheckOutbound"));
 
-        return ExecuteNacRpc(() =>
+        OutboundCheckInput input = await ExecuteNacRpc(() =>
         {
             string origin = ResolveClientOrigin(context);
             string effectiveUserId;
@@ -75,7 +75,7 @@ public sealed partial class WorkspaceGrpcService
                 effectiveAgentId = request.AgentId.Trim();
             }
 
-            NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
+            return new OutboundCheckInput(
                 effectiveUserId,
                 effectiveAgentId,
                 string.IsNullOrWhiteSpace(request.ConnectorId) ? null : request.ConnectorId.Trim(),
@@ -83,16 +83,26 @@ public sealed partial class WorkspaceGrpcService
                 request.Port,
                 string.IsNullOrWhiteSpace(request.Purpose) ? null : request.Purpose,
                 string.IsNullOrWhiteSpace(request.CorrelationId) ? null : request.CorrelationId,
-                origin));
-
-            return new NetworkAccessCheckOutboundResponse
-            {
-                Allowed = decision.Allowed,
-                Reason = decision.Reason,
-                RequestId = decision.RequestId ?? string.Empty,
-                OpenInternetBadge = decision.OpenInternetBadge,
-            };
-        });
+                origin);
+        }).ConfigureAwait(false);
+        bool applianceGateway = input.Origin == "gateway" && Nac.ApprovalHold > TimeSpan.Zero;
+        NetworkAccessDecisionResult decision = await ExecuteNacRpc(() => applianceGateway
+            ? Nac.EvaluateGatewayConnect(input, publicOnly: false) : Nac.EvaluateOutboundCheck(input)).ConfigureAwait(false);
+        if (decision.Reason == "no_rule" && applianceGateway
+            && context.Deadline - DateTime.UtcNow > Nac.ApprovalHold
+            && input.Purpose is not ("provider-test" or "probe" or "save-discovery"))
+        {
+            await context.WriteResponseHeadersAsync(new Metadata { { "kautuka-approval-pending", "1" } }).ConfigureAwait(false);
+            decision = await Nac.RecheckAfterApprovalAsync(decision,
+                () => Nac.EvaluateGatewayConnect(input, publicOnly: false, recordPendingRequest: false), context.CancellationToken).ConfigureAwait(false);
+        }
+        return new NetworkAccessCheckOutboundResponse
+        {
+            Allowed = decision.Allowed,
+            Reason = decision.Reason,
+            RequestId = decision.RequestId ?? string.Empty,
+            OpenInternetBadge = decision.OpenInternetBadge,
+        };
     }
 
     public override Task<NetworkAccessListRequestsResponse> ListRequests(

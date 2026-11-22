@@ -313,6 +313,26 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
+    internal async Task<string?> WaitForPendingResolutionAsync(string requestId, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Task changed;
+            lock (gate)
+            {
+                NetworkAccessPolicyState current = Load();
+                NetworkAccessRequest? request = current.Requests.FirstOrDefault(r => r.Id == requestId);
+                if (request is null) return null;
+                if (current.Brake.System) return "brake_system";
+                if (current.Brake.IsUserBraked(request.UserId)) return "brake_user";
+                if (request.Status != "pending") return request.Status;
+                changed = (policyChanged ??= new(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            }
+            await changed.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public DecideRequestResult DecideRequest(
         NetworkAccessActor actor,
         string requestId,

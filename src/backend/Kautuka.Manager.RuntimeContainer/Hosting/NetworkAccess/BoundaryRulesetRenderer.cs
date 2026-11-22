@@ -236,6 +236,8 @@ public static class BoundaryRulesetRenderer
 
         string rendered = template
             .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
+            .Replace("{{AUTHORIZATION_DEADLINE}}", includeGatewayConnect
+                ? FormattableString.Invariant($"{Kautuka.NetworkAccessController.NetworkAccessController.ApplianceApprovalHoldSeconds + 2}s") : "2s", StringComparison.Ordinal)
             .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener(telemetryAuthorization) : string.Empty, StringComparison.Ordinal)
             .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)

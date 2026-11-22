@@ -91,7 +91,7 @@ internal sealed class GatewayConnectTransport : IDisposable
                     UseProxy = false,
                     AllowAutoRedirect = false,
                     UseCookies = false,
-                    ConnectTimeout = TimeSpan.FromSeconds(15),
+                    ConnectTimeout = TimeSpan.FromSeconds(25),
                     PooledConnectionLifetime = TimeSpan.FromMinutes(2),
                     PooledConnectionIdleTimeout = TimeSpan.FromMinutes(1),
                     SslOptions = new SslClientAuthenticationOptions

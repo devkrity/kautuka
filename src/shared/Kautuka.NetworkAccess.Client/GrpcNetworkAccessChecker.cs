@@ -11,13 +11,15 @@ namespace Kautuka.NetworkAccess.Client;
 
 /// <summary>
 /// Evaluates outbound network access by calling Kautuka.Manager's CheckOutbound gRPC RPC.
-/// Enforces fail-closed semantics with a strict 2-second deadline.
+/// Enforces a short fail-closed deadline, with a longer deadline for appliance approval holds.
 /// </summary>
 public sealed partial class GrpcNetworkAccessChecker(
     Func<ManagerService.ManagerServiceClient> clientAccessor,
-    ILogger<GrpcNetworkAccessChecker>? logger = null) : INetworkAccessChecker
+    ILogger<GrpcNetworkAccessChecker>? logger = null,
+    bool waitForApproval = false) : INetworkAccessChecker
 {
     private static readonly TimeSpan deadlineTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan applianceApprovalDeadline = TimeSpan.FromSeconds(22);
     private readonly ILogger logger = logger ?? NullLogger<GrpcNetworkAccessChecker>.Instance;
 
     public GrpcNetworkAccessChecker(ManagerService.ManagerServiceClient client, ILogger<GrpcNetworkAccessChecker>? logger = null)
@@ -68,12 +70,22 @@ public sealed partial class GrpcNetworkAccessChecker(
         try
         {
             ManagerService.ManagerServiceClient client = clientAccessor();
-            DateTime deadline = DateTime.UtcNow.Add(deadlineTimeout);
+            bool hold = waitForApproval && target.Purpose is not ("provider-test" or "probe" or "save-discovery");
+            DateTime deadline = DateTime.UtcNow.Add(hold ? applianceApprovalDeadline : deadlineTimeout);
 
-            NetworkAccessCheckOutboundResponse response = await client.CheckOutboundAsync(
-                request,
-                deadline: deadline,
-                cancellationToken: cancellationToken).ResponseAsync.ConfigureAwait(false);
+            long started = Stopwatch.GetTimestamp();
+            using AsyncUnaryCall<NetworkAccessCheckOutboundResponse> call = client.CheckOutboundAsync(
+                request, deadline: deadline, cancellationToken: cancellationToken);
+            NetworkAccessCheckOutboundResponse response;
+            if (hold)
+            {
+                Metadata headers = await call.ResponseHeadersAsync.WaitAsync(deadlineTimeout, cancellationToken).ConfigureAwait(false);
+                TimeSpan remaining = deadlineTimeout - Stopwatch.GetElapsedTime(started);
+                response = headers.GetValue("kautuka-approval-pending") == "1"
+                    ? await call.ResponseAsync.ConfigureAwait(false)
+                    : await call.ResponseAsync.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+            }
+            else response = await call.ResponseAsync.ConfigureAwait(false);
 
             if (response.Allowed)
             {
@@ -105,6 +117,11 @@ public sealed partial class GrpcNetworkAccessChecker(
         catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.DeadlineExceeded or StatusCode.Cancelled)
         {
             LogGrpcUnavailable(logger, ex.Status.ToString(), ex);
+            return NetworkAccessCheckResult.CreateUnavailable("controller_unavailable");
+        }
+        catch (TimeoutException ex)
+        {
+            LogGrpcUnavailable(logger, "Manager did not acknowledge the outbound check.", ex);
             return NetworkAccessCheckResult.CreateUnavailable("controller_unavailable");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)

@@ -148,6 +148,7 @@ public sealed record NetworkAccessDecisionResult(
     bool OpenInternetBadge = false)
 {
     public bool AllowLan { get; init; }
+    internal RegistryEntry? PendingSource { get; init; }
 }
 
 public sealed record ContainerConnectionInput(

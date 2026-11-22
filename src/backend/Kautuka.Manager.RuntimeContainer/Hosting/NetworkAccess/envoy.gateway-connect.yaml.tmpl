@@ -101,7 +101,7 @@
                         envoy_grpc:
                           cluster_name: manager-authorization
                           authority: kautuka-decision.internal
-                        timeout: 2s
+                        timeout: {{AUTHORIZATION_DEADLINE}}
                       failure_mode_allow: false
                       validate_mutations: true
                       enable_dynamic_metadata_ingestion: true

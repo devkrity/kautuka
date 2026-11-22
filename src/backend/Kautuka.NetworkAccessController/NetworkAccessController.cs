@@ -43,6 +43,7 @@ public sealed class NetworkAccessController
     public const string ClusterOrigDstPublic = "orig_dst_public";
     public const string ClusterOrigDstLan = "orig_dst_lan";
     public const string ClusterPackageProxy = "pkgs_proxy";
+    public const int ApplianceApprovalHoldSeconds = 20;
 
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
@@ -50,6 +51,9 @@ public sealed class NetworkAccessController
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
     private readonly Func<bool>? isPackageProxyReady;
     private readonly TimeProvider timeProvider;
+    private readonly TimeSpan approvalHold;
+    private readonly object approvalHoldLock = new();
+    private readonly HashSet<string> outstandingApprovalHolds = new(StringComparer.Ordinal);
 
     private long checks;
     private long allowed;
@@ -64,7 +68,8 @@ public sealed class NetworkAccessController
         NetworkAccessAuditRing? auditRing = null,
         Func<bool>? isContainerAuthorizationGateOpen = null,
         Func<bool>? isPackageProxyReady = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        TimeSpan approvalHold = default)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
@@ -74,6 +79,7 @@ public sealed class NetworkAccessController
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
         this.isPackageProxyReady = isPackageProxyReady;
         this.timeProvider = timeProvider ?? TimeProvider.System;
+        this.approvalHold = approvalHold;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -84,6 +90,43 @@ public sealed class NetworkAccessController
     public void ClearProbeContainer(string containerId) => policyStore.ClearProbeContainer(containerId);
 
     public NetworkAccessPolicyStore PolicyStore => policyStore;
+    public TimeSpan ApprovalHold => approvalHold;
+
+    public async Task<NetworkAccessDecisionResult> RecheckAfterApprovalAsync(
+        NetworkAccessDecisionResult initial, Func<NetworkAccessDecisionResult> recheck, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(initial);
+        ArgumentNullException.ThrowIfNull(recheck);
+        if (approvalHold <= TimeSpan.Zero || initial.Reason != "no_rule" || initial.RequestId is not { } requestId)
+            return initial;
+        lock (approvalHoldLock)
+        {
+            // Reserve authorization capacity for immediate decisions and hold at most one call per request.
+            if (outstandingApprovalHolds.Count >= 4 || !outstandingApprovalHolds.Add(requestId)) return initial;
+        }
+
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(approvalHold);
+            try
+            {
+                string? resolution = await policyStore.WaitForPendingResolutionAsync(requestId, timeout.Token).ConfigureAwait(false);
+                timeout.Token.ThrowIfCancellationRequested();
+                return resolution switch
+                {
+                    "allowed" => recheck(),
+                    "blocked" or "brake_system" or "brake_user" => initial with { Reason = resolution },
+                    _ => initial,
+                };
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return initial; }
+        }
+        finally
+        {
+            lock (approvalHoldLock) outstandingApprovalHolds.Remove(requestId);
+        }
+    }
 
     public IWorkloadRegistry Registry => registry;
 
@@ -139,7 +182,9 @@ public sealed class NetworkAccessController
         string? destinationIp,
         int destinationPort,
         bool isTls,
-        string? sni)
+        string? sni,
+        RegistryEntry? expectedSource = null,
+        bool recordPendingRequest = true)
     {
         Interlocked.Increment(ref checks);
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -174,6 +219,8 @@ public sealed class NetworkAccessController
         // 0. Emergency Brake check FIRST (Section 4.1.4 / C21)
         NetworkAccessPolicyState state = policyStore.GetRawStateSnapshot();
         bool foundSource = registry.TryGetByIp(sourceIp, out RegistryEntry? entry);
+        if (expectedSource is not null && expectedSource != entry)
+            return RecordDeny(now, sourceIp, expectedSource, sni ?? destinationIp ?? string.Empty, destinationPort, "stale_workload");
 
         if (state.Brake.System)
         {
@@ -367,6 +414,8 @@ public sealed class NetworkAccessController
                     return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", probeRequestId);
                 }
 
+                if (!recordPendingRequest)
+                    return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule");
                 (string? requestId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     entry.UserId,
                     entry.AgentId,
@@ -387,14 +436,15 @@ public sealed class NetworkAccessController
                     return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "request_overflow");
                 }
 
-                return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", requestId);
+                NetworkAccessDecisionResult pending = RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "no_rule", requestId);
+                return approvalHold > TimeSpan.Zero && entry.Purpose != "save-discovery" ? pending with { PendingSource = entry } : pending;
         }
     }
 
     /// <summary>
     /// Evaluates an app-level outbound check (<c>CheckOutbound</c> RPC) from Gateway or ChannelHost.
     /// </summary>
-    public NetworkAccessDecisionResult EvaluateOutboundCheck(OutboundCheckInput input)
+    public NetworkAccessDecisionResult EvaluateOutboundCheck(OutboundCheckInput input, bool recordPendingRequest = true)
     {
         ArgumentNullException.ThrowIfNull(input);
         Interlocked.Increment(ref checks);
@@ -488,6 +538,8 @@ public sealed class NetworkAccessController
                 return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "seed", allowLan: seedRule.AllowLan);
             }
 
+            if (!recordPendingRequest)
+                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "no_rule");
             (string? sysReqId, bool sysOverflow) = policyStore.RecordOrUpdatePendingRequest(
                 "system",
                 agentId,
@@ -555,6 +607,8 @@ public sealed class NetworkAccessController
                     return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "provider_test", allowLan: grant.AllowLan);
                 }
 
+                if (!recordPendingRequest)
+                    return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "no_rule");
                 (string? reqId, bool overflow) = policyStore.RecordOrUpdatePendingRequest(
                     userId,
                     userConnectorWithoutAgent ? null : agentId,
@@ -579,8 +633,9 @@ public sealed class NetworkAccessController
         }
     }
 
-    internal NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input, bool publicOnly)
+    public NetworkAccessDecisionResult EvaluateGatewayConnect(OutboundCheckInput input, bool publicOnly, bool recordPendingRequest = true)
     {
+        ArgumentNullException.ThrowIfNull(input);
         if (isContainerAuthorizationGateOpen?.Invoke() != true)
         {
             Interlocked.Increment(ref checks);
@@ -594,7 +649,7 @@ public sealed class NetworkAccessController
             return RecordOutboundDeny(timeProvider.GetUtcNow(), input.UserId, input.AgentId, input.ConnectorId, normalized, input.Port, "not_public");
         }
 
-        return EvaluateOutboundCheck(input);
+        return EvaluateOutboundCheck(input, recordPendingRequest);
     }
 
     private ScopeMatchOutcome ResolveChannelProviderPermission(

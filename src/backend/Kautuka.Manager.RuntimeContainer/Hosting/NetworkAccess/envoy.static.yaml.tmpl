@@ -44,7 +44,7 @@ static_resources:
                   envoy_grpc:
                     cluster_name: manager-authorization
                     authority: kautuka-decision.internal
-                  timeout: 2s
+                  timeout: {{AUTHORIZATION_DEADLINE}}
             - name: envoy.filters.network.set_filter_state
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config
@@ -72,7 +72,7 @@ static_resources:
                   envoy_grpc:
                     cluster_name: manager-authorization
                     authority: kautuka-decision.internal
-                  timeout: 2s
+                  timeout: {{AUTHORIZATION_DEADLINE}}
             - name: envoy.filters.network.set_filter_state
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.set_filter_state.v3.Config

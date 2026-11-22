@@ -3,7 +3,7 @@ namespace Kautuka.Manager.Hosting;
 /// <summary>Registers the Manager-owned NAC decision controller with its live topology gate.</summary>
 public static class NetworkAccessControllerRegistration
 {
-    public static IServiceCollection AddManagerNetworkAccessController(this IServiceCollection services)
+    public static IServiceCollection AddManagerNetworkAccessController(this IServiceCollection services, TimeSpan approvalHold = default)
     {
         ArgumentNullException.ThrowIfNull(services);
 
@@ -14,7 +14,8 @@ public static class NetworkAccessControllerRegistration
             isContainerAuthorizationGateOpen: () =>
                 sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsStartupGateOpen,
             isPackageProxyReady: () =>
-                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsPackageProxyReady));
+                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsPackageProxyReady,
+            approvalHold: approvalHold));
         return services;
     }
 }
