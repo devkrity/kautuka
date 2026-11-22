@@ -19,6 +19,64 @@ public sealed class GatewayConnectCertificateMaterialTests
         VerifyMaterial();
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(31)]
+    public void RenewalPublishesBothInventoriesAndRetainsThePreviousPair(int daysAfterRenewal)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("CONNECT material uses Linux file permissions.");
+            return;
+        }
+
+        VerifyRenewal(daysAfterRenewal);
+    }
+
+    [SupportedOSPlatform("linux")]
+    private static void VerifyRenewal(int daysAfterRenewal)
+    {
+        DirectoryInfo root = Directory.CreateTempSubdirectory("kautuka-connect-renewal-");
+        try
+        {
+            string installPath = Path.Combine(root.FullName, "installation");
+            GatewayConnectCertificateMaterial original = GatewayConnectCertificateMaterial.Ensure(installPath);
+            var beforeRenewal = new FixedClock(original.RenewAfterUtc.AddMinutes(-1));
+            Assert.Equal(original.GatewayDirectory, GatewayConnectCertificateMaterial.Ensure(installPath, beforeRenewal).GatewayDirectory);
+
+            var renewal = new FixedClock(original.RenewAfterUtc.AddDays(daysAfterRenewal));
+            GatewayConnectCertificateMaterial renewed = GatewayConnectCertificateMaterial.Ensure(installPath, renewal);
+            Assert.NotEqual(original.GatewayDirectory, renewed.GatewayDirectory);
+            Assert.NotEqual(original.EnvoyDirectory, renewed.EnvoyDirectory);
+            GatewayConnectCertificateMaterial loaded = GatewayConnectCertificateMaterial.Ensure(installPath, renewal);
+            Assert.Equal(renewed.GatewayDirectory, loaded.GatewayDirectory);
+            Assert.Equal(renewed.EnvoyDirectory, loaded.EnvoyDirectory);
+            Assert.True(loaded.RenewAfterUtc > renewal.GetUtcNow());
+
+            using X509Certificate2 originalCa = X509CertificateLoader.LoadCertificateFromFile(Path.Combine(original.GatewayDirectory, "ca.crt"));
+            using X509Certificate2 renewedCa = X509CertificateLoader.LoadCertificateFromFile(Path.Combine(renewed.GatewayDirectory, "ca.crt"));
+            using X509Certificate2 client = X509CertificateLoader.LoadPkcs12FromFile(
+                Path.Combine(renewed.GatewayDirectory, "client.pfx"), null, X509KeyStorageFlags.EphemeralKeySet);
+            var clientIdentity = new Uri("spiffe://kautuka.internal/gateway");
+            Assert.True(LocalCaMtlsBootstrap.ValidateExactClientCert(client, renewedCa, "Kautuka Gateway CONNECT Client", clientIdentity, renewal.GetUtcNow()));
+            Assert.False(LocalCaMtlsBootstrap.ValidateExactClientCert(client, originalCa, "Kautuka Gateway CONNECT Client", clientIdentity, renewal.GetUtcNow()));
+
+            string selector = Path.Combine(installPath, "current");
+            File.Delete(selector);
+            File.CreateSymbolicLink(selector, Path.Combine(root.FullName, "missing-generation"));
+            Assert.Throws<IOException>(() => GatewayConnectCertificateMaterial.Ensure(installPath, renewal));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
     [SupportedOSPlatform("linux")]
     private static void VerifyMaterial()
     {

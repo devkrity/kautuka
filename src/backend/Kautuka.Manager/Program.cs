@@ -126,6 +126,11 @@ if (applianceEnabled)
     GatewayConnectCertificateMaterial connectMaterial = GatewayConnectCertificateMaterial.Ensure(Path.Combine(managerDataRoot, "networkAccess", "gateway-connect"));
     gatewayConnectEnvoyDirectory = connectMaterial.EnvoyDirectory;
     string gatewayConnectDirectory = connectMaterial.GatewayDirectory;
+    DateTimeOffset connectRenewal = connectMaterial.RenewAfterUtc;
+    if (!verifyAppliance)
+        builder.Services.AddHostedService(sp => new GatewayConnectRenewalService(
+            connectRenewal, sp.GetRequiredService<IHostApplicationLifetime>(),
+            sp.GetRequiredService<ILogger<GatewayConnectRenewalService>>()));
     telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podmanCommandRunner, stateRoot, CancellationToken.None)
         .ConfigureAwait(false);
     builder.Services.AddSingleton(sp => new ApplianceServiceSupervisor(
