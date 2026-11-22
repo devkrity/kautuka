@@ -478,7 +478,7 @@ describe('App update banner', () => {
   });
 
   it('reports failed cleanup after the new release is running', async () => {
-    const failure = 'Kautuka is running the new release. The update could not remove superseded backup snapshots.';
+    const failure = 'Kautuka is running the new release. The update could not confirm that superseded backup snapshots were removed.';
     const release = { releaseId: 'v2', version: '2.0.0', channel: 'preview',
       releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v2' };
     fetchUpdateStatusMock.mockResolvedValue({

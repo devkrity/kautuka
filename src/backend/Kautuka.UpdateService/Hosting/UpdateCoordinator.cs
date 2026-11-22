@@ -22,7 +22,7 @@ internal sealed class UpdateCoordinator(
     IOptions<UpdateOptions> options,
     ILogger<UpdateCoordinator> logger) : IUpdateCoordinator
 {
-    private const string snapshotPruneFailure = "Kautuka is running the new release. The update could not remove superseded backup snapshots.";
+    private const string snapshotPruneFailure = "Kautuka is running the new release. The update could not confirm that superseded backup snapshots were removed.";
     private readonly IUpdateStateStore stateStore = stateStore;
     private readonly IUpdateRuntimePolicyStore runtimePolicyStore = runtimePolicyStore;
     private readonly IReleaseDiscoveryClient discoveryClient = discoveryClient;
@@ -836,7 +836,7 @@ internal sealed class UpdateCoordinator(
             return false;
         }
 
-        bool pruneFailed = pruneStatus == "failed";
+        bool pruneFailed = !string.IsNullOrEmpty(pruneStatus) && pruneStatus != "succeeded";
         finalizedState = state with
         {
             State = pruneFailed ? UpdateWorkflowState.VerificationFailed : UpdateWorkflowState.Current,

@@ -9,6 +9,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("kautuka-update-recovery.py")
 SPEC = importlib.util.spec_from_file_location("update_recovery", MODULE_PATH)
@@ -101,9 +102,22 @@ class RecoverySnapshotTests(unittest.TestCase):
             recovery.prune_appliance_snapshots(args)
         self.assertTrue(old.exists())
         payload.write_bytes(valid_payload)
-        recovery.prune_appliance_snapshots(args)
-        recovery.prune_appliance_snapshots(args)
+
+        deleting = backups / f".pruning-{old.name}"
+        with mock.patch.object(recovery.shutil, "rmtree") as remove:
+            def interrupt(directory):
+                self.assertEqual(directory, deleting)
+                (deleting / "manifest.json").unlink()
+                raise OSError("interrupted prune")
+
+            remove.side_effect = interrupt
+            with self.assertRaisesRegex(OSError, "interrupted prune"):
+                recovery.prune_appliance_snapshots(args)
+        self.assertTrue(deleting.is_dir())
         self.assertFalse(old.exists())
+        recovery.prune_appliance_snapshots(args)
+        recovery.prune_appliance_snapshots(args)
+        self.assertFalse(deleting.exists())
         for preserved in (current, pending, unrelated, legacy):
             self.assertTrue(preserved.is_dir())
         self.assertEqual(pointer.resolve(), current)

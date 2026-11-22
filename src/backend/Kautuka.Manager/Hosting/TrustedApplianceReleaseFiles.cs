@@ -60,6 +60,12 @@ internal static class TrustedApplianceReleaseFiles
         using JsonDocument journal = JsonDocument.Parse(journalBytes);
         JsonElement record = journal.RootElement;
         string phase = record.GetProperty("phase").GetString() ?? string.Empty;
+        string pruneStatus = string.Empty;
+        if (record.TryGetProperty("snapshotPruneStatus", out JsonElement prune))
+        {
+            string? reportedStatus = prune.ValueKind == JsonValueKind.String ? prune.GetString() : null;
+            pruneStatus = reportedStatus is "pending" or "succeeded" or "failed" ? reportedStatus : "unverified";
+        }
         return new()
         {
             RecoveryRequired = fenced || phase is not ("committed" or "completed" or "aborted"),
@@ -68,8 +74,7 @@ internal static class TrustedApplianceReleaseFiles
             SourceVersion = record.GetProperty("sourceRelease").GetString() ?? string.Empty,
             TargetVersion = record.GetProperty("targetRelease").GetString() ?? string.Empty,
             UpdatedUnixMilliseconds = record.TryGetProperty("updatedUnixMilliseconds", out JsonElement updated) && updated.TryGetInt64(out long value) ? value : 0,
-            SnapshotPruneStatus = record.TryGetProperty("snapshotPruneStatus", out JsonElement prune)
-                ? prune.GetString() ?? string.Empty : string.Empty,
+            SnapshotPruneStatus = pruneStatus,
         };
     }
 

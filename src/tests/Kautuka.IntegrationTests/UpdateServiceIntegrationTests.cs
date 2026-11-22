@@ -1939,6 +1939,7 @@ public sealed class UpdateServiceIntegrationTests
     [Theory]
     [InlineData("succeeded", UpdateWorkflowState.Current)]
     [InlineData("failed", UpdateWorkflowState.VerificationFailed)]
+    [InlineData("unverified", UpdateWorkflowState.VerificationFailed)]
     public async Task CommittedUpdateWaitsForSnapshotPruningAndRetainsTheRunningRelease(
         string pruneOutcome, UpdateWorkflowState terminalState)
     {

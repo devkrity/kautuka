@@ -433,7 +433,14 @@ def prune_appliance_snapshots(args: argparse.Namespace) -> None:
         fail("retained appliance backup does not match the current operation")
     verify(args, snapshot=retained)
 
-    for directory in root.iterdir():
+    for directory in list(root.iterdir()):
+        if re.fullmatch(r"\.pruning-[0-9a-f]{32}", directory.name):
+            record = directory.lstat()
+            if (directory.name == f".pruning-{operation}" or not stat.S_ISDIR(record.st_mode)
+                    or record.st_uid != owner or record.st_mode & 0o022):
+                fail(f"untrusted appliance snapshot deletion marker: {directory}")
+            shutil.rmtree(directory)
+            continue
         if directory == retained or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
             continue
         record = directory.lstat()
@@ -444,7 +451,12 @@ def prune_appliance_snapshots(args: argparse.Namespace) -> None:
         except (OSError, ValueError, RuntimeError):
             continue
         if manifest.get("layout") == APPLIANCE_LAYOUT:
-            shutil.rmtree(directory)
+            deleting = directory.with_name(f".pruning-{directory.name}")
+            if deleting.exists() or deleting.is_symlink():
+                fail(f"appliance snapshot deletion marker already exists: {deleting}")
+            directory.rename(deleting)
+            fsync_dir(root)
+            shutil.rmtree(deleting)
     fsync_dir(root)
 
 
