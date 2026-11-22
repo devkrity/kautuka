@@ -613,7 +613,11 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             long prepareStarted = Stopwatch.GetTimestamp();
             transportLaunch = await CreateTransportAsync(connector, requireEnabled: true, allowInternalSystemConnector, workspaceContext, executionContext, isProbe: false, cancellationToken: cancellationToken, authoritativeSnapshot: authoritativeSnapshot, expectedImageDigest: expectedImageDigest).ConfigureAwait(false);
             ephemeralWorkload = transportLaunch.EphemeralWorkload;
-            using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, transportLaunch.CancellationToken);
+            using CancellationTokenSource? toolTimeout = executionContext == WorkspaceMcpExecutionContext.AgentSandbox
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken) : null;
+            toolTimeout?.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds, 1, 3600)));
+            CancellationToken toolCancellation = toolTimeout?.Token ?? cancellationToken;
+            using CancellationTokenSource launchCancellation = CancellationTokenSource.CreateLinkedTokenSource(toolCancellation, transportLaunch.CancellationToken);
             long initializeStarted = Stopwatch.GetTimestamp();
             McpClient client = await McpClient.CreateAsync(transportLaunch.Transport, ClientOptionsFor(connector.McpProtocolVersion), cancellationToken: launchCancellation.Token).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
@@ -622,7 +626,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 await ReleaseLaunchLeaseAsync(transportLaunch).ConfigureAwait(false);
                 var toolInput = McpToolContractCodec.ParseInput(toolInputJson);
                 long callStarted = Stopwatch.GetTimestamp();
-                CallToolResult result = await client.CallToolAsync(toolName, toolInput, cancellationToken: cancellationToken).ConfigureAwait(false);
+                CallToolResult result = await client.CallToolAsync(toolName, toolInput, cancellationToken: toolCancellation).ConfigureAwait(false);
                 if (logger.IsEnabled(LogLevel.Debug))
                 {
                     logger.LogDebug(

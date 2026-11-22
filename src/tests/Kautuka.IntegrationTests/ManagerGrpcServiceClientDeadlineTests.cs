@@ -41,6 +41,23 @@ public sealed class ManagerGrpcServiceClientDeadlineTests
     }
 
     [Fact]
+    public void ConfiguredPreparationBudgetExtendsOnlyToolCallsInsideTheAgentSandbox()
+    {
+        DateTime start = new(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        using var cancellation = new CancellationTokenSource();
+        var request = new Manager.Protos.WorkspaceMcpContainerCallRequest { TimeoutSeconds = 60 };
+        Assert.Equal(start.AddSeconds(75), Gateway.Infrastructure.Sandbox.ManagerGrpcServiceClient
+            .BuildToolCallOptions(request, start, cancellation.Token, bundlePreparationSeconds: 240).Deadline);
+
+        request.ExecutionContext = Manager.Protos.WorkspaceMcpExecutionContext.AgentSandbox;
+        Grpc.Core.CallOptions options = Gateway.Infrastructure.Sandbox.ManagerGrpcServiceClient
+            .BuildToolCallOptions(request, start, cancellation.Token, bundlePreparationSeconds: 240);
+        Assert.Equal(start.AddSeconds(300), options.Deadline);
+        Assert.Equal(cancellation.Token, options.CancellationToken);
+        Assert.Equal(60, request.TimeoutSeconds);
+    }
+
+    [Fact]
     public void DesiredStateActivationDeadlineCoversTwoBoundedColdArtifactBuildsAndPreservesCancellation()
     {
         DateTime utcNow = new(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);

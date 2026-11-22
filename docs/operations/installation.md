@@ -139,7 +139,7 @@ Manager debug logs report how long connector and sandbox artifact builds waited 
 
 A new connector's save-time discovery can continue after one concurrent catalog publication if the connector is still unpublished and the runtime settings are unchanged. Admission still verifies the exact revision used to start its container.
 
-An MCPB probe gets a three-minute image-preparation budget in addition to the connector's discovery timeout. This accommodates a cold build waiting for another build to finish. Set `Kautuka__ConnectorImagePreparationSeconds` in the Manager service environment to change the preparation budget.
+An MCPB probe gets a three-minute image-preparation budget in addition to the connector's discovery timeout. This accommodates a cold build waiting for another build to finish. The first call to a connector in an agent sandbox receives the same preparation allowance before its tool timeout starts. Set `Kautuka__ConnectorImagePreparationSeconds` in the Manager service environment to change the preparation budget.
 
 In appliance mode, Manager gives the read-only Podman egress pod and boundary inspections a shared 30-second deadline. Cold connector builds can delay these inspections. Manager closes admission if the deadline expires and verifies the existing boundary before reopening it. Set `Kautuka__NetworkAccess__EgressInspectionTimeoutSeconds` in the Manager service environment to a value between 1 and 60 seconds to change the deadline.
 
