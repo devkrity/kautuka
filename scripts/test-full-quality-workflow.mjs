@@ -4,7 +4,13 @@ import { readFile } from 'node:fs/promises';
 const workflow = await readFile(new URL('../.github/workflows/dotnet-quality.yml', import.meta.url), 'utf8');
 const releaseWorkflow = await readFile(new URL('../.github/workflows/release-pipeline.yml', import.meta.url), 'utf8');
 const secretWorkflow = await readFile(new URL('../.github/workflows/secret-scan.yml', import.meta.url), 'utf8');
+const nacWorkflow = await readFile(new URL('../.github/workflows/nac-acceptance.yml', import.meta.url), 'utf8');
 const buildPolicy = await readFile(new URL('../src/Directory.Build.props', import.meta.url), 'utf8');
+
+assert.match(nacWorkflow, /^  push:\r?\n    branches:\r?\n      - main\r?\n  pull_request:/m,
+  'NAC should run once on a feature PR and again only after a push to main');
+assert.match(nacWorkflow, /^    name: NAC Acceptance Suite \(Linux\)\s*$/m,
+  'NAC must preserve the required aggregate check name');
 
 for (const [name, source] of [['quality', workflow], ['secret scan', secretWorkflow]]) {
   assert.match(source, /^permissions:\s*\r?\n  contents: read\s*\r?\n(?=\S)/m, `${name} must use only read-only contents permissions`);

@@ -3,7 +3,6 @@ name: Network Access Control Acceptance
 on:
   push:
     branches:
-      - 'enhancement/**'
       - main
   pull_request:
     branches:
