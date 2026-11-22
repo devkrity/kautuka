@@ -3109,7 +3109,7 @@ PY
     ensure_selinux_runtime_exec_policy "$appliance_image_payload"
 
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"
-    if [[ "$appliance_image_payload" == 'true' && -n "${WSL_DISTRO_NAME:-}" && -n "$KAUTUKA_DEFAULT_RELEASE_TAG" ]]; then
+    if [[ "$appliance_image_payload" == 'true' && -n "${WSL_DISTRO_NAME:-}" ]]; then
         avoid_wsl_service_uid_conflict "$service_user" /sys/fs/cgroup/user.slice
     fi
     # Seed the installed release's channel only on a fresh install. Preserve any
