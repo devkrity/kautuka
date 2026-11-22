@@ -3177,8 +3177,8 @@ PY
             [[ "$resuming_first_install" == 'true' && "$selected" == "$(realpath -- "$version_root")" &&
                 ! -L "$version_root" && "$(stat -c '%u' "$version_root")" == 0 &&
                 -z "$(find "$version_root" -maxdepth 0 -perm /022 -print -quit)" &&
-                -f "$version_root/kautuka-platform-release.json" && ! -L "$version_root/kautuka-platform-release.json" ]] \
-                && cmp -s -- "$manifest_path" "$version_root/kautuka-platform-release.json" ||
+                -f "$version_root/kautuka-platform-release.json" && ! -L "$version_root/kautuka-platform-release.json" &&
+                "$(sha256sum -- "$version_root/kautuka-platform-release.json" | cut -d' ' -f1)" == "$manifest_digest" ]] ||
                 fail 'active Manager release does not match the interrupted signed initial installation'
             selected_first_install=true
         fi
