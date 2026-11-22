@@ -140,7 +140,7 @@ if (applianceEnabled)
         gatewayConnectDirectory, sp.GetRequiredService<PodmanImageArchiveStore>(), superviseObservability: true, superviseUpdateService: true,
         verificationMode: verifyAppliance,
         verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null,
-        publishedWebPort: publishedWebPort));
+        publishedWebPort: publishedWebPort, recoveryPage: new ApplianceRecoveryPage(publishedWebPort)));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {

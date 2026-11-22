@@ -38,6 +38,16 @@ internal static class TrustedApplianceReleaseFiles
             throw new InvalidDataException("The selected appliance release is not the active verification target.");
     }
 
+    internal static ApplianceRecoveryStatus ReadRecoveryStatusOrRequireRecovery(string recoveryDirectory)
+    {
+        try { return ReadRecoveryStatus(recoveryDirectory); }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
+            or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            return new() { RecoveryRequired = true };
+        }
+    }
+
     internal static ApplianceRecoveryStatus ReadRecoveryStatus(string recoveryDirectory)
     {
         using SafeFileHandle recovery = OpenAbsoluteDirectory(recoveryDirectory);

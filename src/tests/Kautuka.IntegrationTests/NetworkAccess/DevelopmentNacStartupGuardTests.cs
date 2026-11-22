@@ -52,8 +52,14 @@ public sealed class DevelopmentNacStartupGuardTests
 
         Assert.False(manager.IsStartupGateOpen);
         Assert.True(manager.IsStartupRetryPending);
+        DateTimeOffset waitUntil = DateTimeOffset.UtcNow.AddSeconds(2);
+        while (manager.NextRecoveryRetryUtc is null && DateTimeOffset.UtcNow < waitUntil)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        DateTimeOffset retryAt = Assert.IsType<DateTimeOffset>(manager.NextRecoveryRetryUtc);
+        Assert.InRange(retryAt, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddSeconds(31));
         manager.CloseLaunchAdmission();
         Assert.False(manager.IsStartupRetryPending);
+        Assert.Null(manager.NextRecoveryRetryUtc);
         await manager.DisposeAsync();
         Directory.Delete(tempDirectory, recursive: true);
     }

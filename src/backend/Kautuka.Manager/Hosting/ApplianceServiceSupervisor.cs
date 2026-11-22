@@ -26,7 +26,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     Func<CancellationToken, Task<bool>>? checkWebHostReadiness = null,
     bool verificationMode = false,
     WorkspaceSidecarSupervisor? verificationSidecars = null,
-    int publishedWebPort = WorkloadRulesetRenderer.WebHostPort) : BackgroundService
+    int publishedWebPort = WorkloadRulesetRenderer.WebHostPort,
+    ApplianceRecoveryPage? recoveryPage = null) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -43,6 +44,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private readonly Service webHost = new(WebHostRole, "webhost", networked: true);
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
     private readonly Service updater = new(UpdateRole, "updateService", networked: true);
+    private long nextServiceRetryUtcTicks;
     private volatile bool cohortReady;
     private volatile bool verificationPackageReady;
     private volatile bool verificationTelemetryReady;
@@ -73,26 +75,36 @@ internal sealed partial class ApplianceServiceSupervisor(
     {
         try
         {
+            await EnsureRecoveryPageAsync(stoppingToken).ConfigureAwait(false);
             var imageIds = await new ApplianceRoleImageImporter(podman)
                 .EnsureAsync(release.Deployment, versionDirectory, stoppingToken, requireVerificationFence: verificationMode).ConfigureAwait(false);
             foreach (Service service in new[] { credentials, channel, gateway, webHost, updater })
                 service.RuntimeImageId = imageIds[service.Role];
-            using var timer = new PeriodicTimer(reconcileDelay);
-            do
+            while (!stoppingToken.IsCancellationRequested)
             {
                 if ((!verificationMode && KautukaMaintenanceMode.IsActive) || (superviseObservability && topology?.IsStartupGateOpen != true))
-                    await StopCohortAsync(stoppingToken).ConfigureAwait(false);
+                {
+                    await StopCohortAsync(stoppingToken, showRecoveryPage: true).ConfigureAwait(false);
+                }
                 else
                     await ReconcileServicesAsync(stoppingToken).ConfigureAwait(false);
+
+                Interlocked.Exchange(ref nextServiceRetryUtcTicks, (DateTimeOffset.UtcNow + reconcileDelay).UtcTicks);
+                await Task.Delay(reconcileDelay, stoppingToken).ConfigureAwait(false);
+                Interlocked.Exchange(ref nextServiceRetryUtcTicks, 0);
             }
-            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
         finally
         {
-            await StopCohortAsync(CancellationToken.None).ConfigureAwait(false);
+            Interlocked.Exchange(ref nextServiceRetryUtcTicks, 0);
+            try
+            {
+                if (recoveryPage is not null) await recoveryPage.StopAsync().ConfigureAwait(false);
+            }
+            finally { await StopCohortAsync(CancellationToken.None).ConfigureAwait(false); }
         }
     }
 
@@ -123,9 +135,14 @@ internal sealed partial class ApplianceServiceSupervisor(
         else
             await StopActiveAsync(gateway, token).ConfigureAwait(false);
         if (gateway.Ready && topology?.IsStartupGateOpen == true)
+        {
+            if (recoveryPage is not null) await recoveryPage.StopAsync().ConfigureAwait(false);
             await TryReconcileAsync(webHost, FindContainer(webHost), token).ConfigureAwait(false);
+        }
         else
             await StopActiveAsync(webHost, token).ConfigureAwait(false);
+        if (!webHost.Ready)
+            await EnsureRecoveryPageAsync(token).ConfigureAwait(false);
         cohortReady = credentials.IsHealthy && channel.IsHealthy && gateway.IsHealthy && webHost.IsHealthy
             && (!superviseUpdateService || updater.IsHealthy) && (!superviseObservability || observability.Ready);
 
@@ -148,6 +165,36 @@ internal sealed partial class ApplianceServiceSupervisor(
             if (verificationSidecars is not null)
                 verificationPackageReady = await verificationSidecars.EnsurePackageProxyReadyForVerificationAsync(token).ConfigureAwait(false);
         }
+    }
+
+    private async Task EnsureRecoveryPageAsync(CancellationToken token)
+    {
+        if (recoveryPage is null) return;
+        try { await recoveryPage.StartAsync(ReadRecoveryMessage, token).ConfigureAwait(false); }
+        catch (Exception error) when (!token.IsCancellationRequested
+            && error is IOException or InvalidOperationException or System.Net.Sockets.SocketException)
+        {
+            LogReconcileFailed(logger, "browser recovery", error.Message);
+        }
+    }
+
+    private ApplianceRecoveryMessage ReadRecoveryMessage()
+    {
+        const string administrator = "Ask your appliance administrator to review the recovery status.";
+        if (verificationMode || KautukaMaintenanceMode.IsActive)
+            return new("Kautuka is completing or recovering an update. Your helpers are paused.");
+        if (TrustedApplianceReleaseFiles.ReadRecoveryStatusOrRequireRecovery(
+            Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!).RecoveryRequired)
+            return new("Kautuka needs to check its recovery state before your helpers can resume.", NextStep: administrator);
+        if (topology?.IsStartupGateOpen != true)
+        {
+            const string reason = "Your helpers are paused because Kautuka couldn’t verify network protection.";
+            return new(reason, topology?.NextRecoveryRetryUtc, topology?.RequiresOperatorRecovery == true ? administrator : null);
+        }
+
+        long next = Interlocked.Read(ref nextServiceRetryUtcTicks);
+        return new("Kautuka’s web interface is unavailable.",
+            next > DateTimeOffset.UtcNow.UtcTicks ? new DateTimeOffset(next, TimeSpan.Zero) : null);
     }
 
     private async Task<JsonDocument?> InspectReadyCohortAsync(CancellationToken token)
@@ -175,7 +222,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
     }
 
-    internal async Task<bool> StopCohortAsync(CancellationToken token)
+    internal async Task<bool> StopCohortAsync(CancellationToken token, bool showRecoveryPage = false)
     {
         cohortReady = false;
         verificationPackageReady = false;
@@ -217,6 +264,8 @@ internal sealed partial class ApplianceServiceSupervisor(
             stopped &= await StopActiveAsync(service, token).ConfigureAwait(false);
             if (running.TryGetValue(service, out string? id) && id != trackedId)
                 stopped &= await StopContainerAsync(service, id, token).ConfigureAwait(false);
+            if (showRecoveryPage && service == webHost)
+                await EnsureRecoveryPageAsync(token).ConfigureAwait(false);
         }
         return stopped;
     }

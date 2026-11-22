@@ -138,6 +138,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private long unlabelledWorkloadCount;
     private CancellationTokenSource? reconcileCts;
     private Task? reconcileTask;
+    private long nextReconcileUtcTicks;
     private readonly object disposeLock = new();
     private Task? disposeTask;
     private readonly HashSet<string> knownInfraContainerIds = new(StringComparer.OrdinalIgnoreCase);
@@ -244,6 +245,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     public bool IsStartupRetryPending => startupCanaryRetryPending;
+    public bool RequiresOperatorRecovery => topologyIncidentLatched;
+    public DateTimeOffset? NextRecoveryRetryUtc
+    {
+        get
+        {
+            long scheduled = Interlocked.Read(ref nextReconcileUtcTicks);
+            return scheduled > DateTimeOffset.UtcNow.UtcTicks
+                && !IsStartupGateOpen && !topologyIncidentLatched
+                && (startupInitializationRetryPending || transientRecoveryPending
+                    || (startupCanaryRetryPending && !IsCanaryIdentityBraked()))
+                ? new DateTimeOffset(scheduled, TimeSpan.Zero)
+                : null;
+        }
+    }
 
     public long UnlabelledWorkloadCount => Interlocked.Read(ref unlabelledWorkloadCount);
 
@@ -2727,12 +2742,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         reconcileTask = Task.Run(async () =>
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            TimeSpan interval = TimeSpan.FromSeconds(30);
             while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    await timer.WaitForNextTickAsync(token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref nextReconcileUtcTicks, (DateTimeOffset.UtcNow + interval).UtcTicks);
+                    await Task.Delay(interval, token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref nextReconcileUtcTicks, 0);
                     await ReconcileOnceAsync(registry, token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
@@ -2743,6 +2760,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     logger.LogError(ex, "Error in 30s egress topology reconcile loop.");
                 }
+                finally { Interlocked.Exchange(ref nextReconcileUtcTicks, 0); }
             }
         }, token);
     }
