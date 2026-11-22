@@ -63,7 +63,8 @@ internal sealed record NetworkAccessRuleDto(
     string DecidedBy,
     string DecidedAtUtc,
     bool OpenInternetBadge,
-    bool ProtectedFromUser);
+    bool ProtectedFromUser,
+    string? SetupService);
 
 [SuppressMessage("Performance", "CA1819:PropertiesShouldNotReturnArrays", Justification = "DTO record matches JSON array serialization directly.")]
 internal sealed record NetworkRulesResponseDto(

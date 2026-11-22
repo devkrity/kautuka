@@ -16,12 +16,15 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
         this.connect = connect;
     }
 
-    private GatewayOutboundHttpTransport(GatewayConnectTransport connect, X509Certificate2 trustedRoot, X509Certificate2 clientCertificate)
+    private GatewayOutboundHttpTransport(GatewayConnectTransport connect, X509Certificate2 trustedRoot, X509Certificate2 clientCertificate, TimeSpan approvalHold)
         : this(connect)
     {
         this.trustedRoot = trustedRoot;
         this.clientCertificate = clientCertificate;
+        ApprovalHold = approvalHold;
     }
+
+    internal TimeSpan ApprovalHold { get; }
 
     internal static GatewayOutboundHttpTransport FromConfiguration(IConfiguration configuration)
     {
@@ -35,9 +38,10 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
         try
         {
             clientCertificate = X509CertificateLoader.LoadPkcs12FromFile($"{certificateDirectory}/client.pfx", null, X509KeyStorageFlags.EphemeralKeySet);
+            TimeSpan approvalHold = ReadApprovalHold(configuration);
             var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate,
-                connectTimeout: ReadApprovalHold(configuration) + TimeSpan.FromSeconds(5));
-            return new GatewayOutboundHttpTransport(connect, trustedRoot, clientCertificate);
+                connectTimeout: approvalHold + TimeSpan.FromSeconds(5));
+            return new GatewayOutboundHttpTransport(connect, trustedRoot, clientCertificate, approvalHold);
         }
         catch
         {

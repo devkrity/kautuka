@@ -105,6 +105,7 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         }
 
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "api.github.com.example.test").Allowed);
+        policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "api.telegram.org", "host", 443, true), policy.Revision);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "api.telegram.org").Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 8443, true, "github.com").Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, false, null).Allowed);

@@ -6,6 +6,28 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class NetworkAccessMatchingModelTests
 {
+    [Fact]
+    public void OwnersCanReviewTheSameSeededServiceAfterOverridingItsRule()
+    {
+        DirectoryInfo root = Directory.CreateTempSubdirectory("nac-service-setup-");
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root.FullName, "policy.json"));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            NetworkAccessRuleView FindSuffixRule() => Assert.Single(store.ListRules(admin).Rules,
+                static rule => rule.Rule.Destination == "publicsuffix.org");
+            Assert.Equal("updates", FindSuffixRule().SetupService);
+            Assert.False(FindSuffixRule().Rule.Allowed);
+
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "publicsuffix.org", "host", 443, true), store.Revision);
+            Assert.Equal("updates", FindSuffixRule().SetupService);
+            Assert.True(FindSuffixRule().Rule.Allowed);
+            Assert.DoesNotContain(store.ListRules(new NetworkAccessActor("member", IsAdmin: false)).Rules,
+                static rule => rule.SetupService is not null);
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
     [Theory]
     [InlineData("auth.kautuka.io")]
     [InlineData("www.googleapis.com")]

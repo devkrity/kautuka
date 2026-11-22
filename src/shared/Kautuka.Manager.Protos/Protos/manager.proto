@@ -485,6 +485,7 @@ message NetworkAccessRuleMessage {
   bool paused = 14;
   bool open_internet_badge = 15;
   bool protected_from_user = 16;
+  string setup_service = 17;
 }
 
 message NetworkAccessUserPrivilegesMessage {

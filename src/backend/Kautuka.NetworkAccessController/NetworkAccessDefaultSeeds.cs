@@ -51,7 +51,11 @@ public static class NetworkAccessDefaultSeeds
                 entry.AllowLan,
                 DecidedBy: "system",
                 DecidedAtUtc: seedEpoch,
-                Source: "seed"));
+                Source: "seed")
+            {
+                SeedIncludesSubdomains = entry.IncludeSubdomains,
+                SeedSetupService = entry.SetupService,
+            });
         }
 
         return rules;

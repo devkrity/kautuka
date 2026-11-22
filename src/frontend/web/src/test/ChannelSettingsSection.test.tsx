@@ -8,12 +8,15 @@ vi.mock('@/lib/apiClient', () => ({ apiClient: api }));
 describe('platform channel settings', () => {
   beforeEach(() => { api.get.mockReset(); api.put.mockReset(); });
   it('enables Telegram only for the channel service', async () => {
-    const rules: Record<string, unknown>[] = [];
+    const rules: Record<string, unknown>[] = [{
+      setupService: 'telegram', scopeKind: 'agent', userId: 'system', agentId: 'channelhost',
+      destination: 'api.telegram.org', destKind: 'host', port: 443, allowed: false,
+    }];
     let revision = 7;
     api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules] } }));
     api.put.mockImplementation(async (_url: string, body: Record<string, unknown>) => {
       const index = rules.findIndex(rule => rule.destination === body.destination);
-      if (index < 0) rules.push(body); else rules[index] = body;
+      if (index < 0) rules.push(body); else rules[index] = { ...rules[index], ...body };
       revision += 1;
       return { data: body };
     });
@@ -30,10 +33,13 @@ describe('platform channel settings', () => {
     expect(await screen.findByText('Channel paused. Saved account settings are kept.')).toBeTruthy();
   });
   it('enables Slack with one channel-service rule for its host and subdomains', async () => {
-    const rules: Record<string, unknown>[] = [];
+    const rules: Record<string, unknown>[] = [{
+      setupService: 'slack', scopeKind: 'agent', userId: 'system', agentId: 'channelhost',
+      destination: 'slack.com', destKind: 'host', port: 443, allowed: false,
+    }];
     api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules] } }));
     api.put.mockImplementation(async (_url: string, body: Record<string, unknown>) => {
-      rules.push(body);
+      rules[0] = { ...rules[0], ...body };
       return { data: body };
     });
     render(<ChannelSettingsSection />);
@@ -47,13 +53,14 @@ describe('platform channel settings', () => {
   it('shows the paused release hosts and writes only scoped permissions after approval', async () => {
     const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'publicsuffix.org'];
     const rules = hosts.map(destination => ({
-      scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination, port: 443, allowed: false,
+      setupService: 'updates', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
+      destination, destKind: 'host', port: 443, allowed: false,
     }));
     let revision = 4;
     api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules] } }));
     api.put.mockImplementation(async (_url: string, body: (typeof rules)[number]) => {
       const index = rules.findIndex(rule => rule.destination === body.destination);
-      rules[index] = body;
+      rules[index] = { ...rules[index], ...body };
       revision += 1;
       return { data: body };
     });
@@ -73,12 +80,13 @@ describe('platform channel settings', () => {
   });
 
   it('can pause a saved service permission while a broader rule blocks it', async () => {
-    const grant = { scopeKind: 'agent', userId: 'system', agentId: 'channelhost', destination: 'slack.com', port: 443, allowed: true };
+    const grant = { setupService: 'slack', scopeKind: 'agent', userId: 'system', agentId: 'channelhost',
+      destination: 'slack.com', destKind: 'host', port: 443, allowed: true };
     const block = { scopeKind: 'system', destination: 'slack.com', port: 443, allowed: false };
     const rules = [grant, block];
     api.get.mockImplementation(async () => ({ data: { revision: 6, rules: [...rules] } }));
     api.put.mockImplementation(async (_url: string, body: typeof grant) => {
-      rules[0] = body;
+      rules[0] = { ...rules[0], ...body };
       return { data: body };
     });
     render(<ChannelSettingsSection />);

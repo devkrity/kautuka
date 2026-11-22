@@ -2,6 +2,8 @@ namespace Kautuka.NetworkAccessController;
 
 public sealed partial class NetworkAccessPolicyStore
 {
+    private readonly Dictionary<string, string> serviceSetupGroups;
+
     public NetworkAccessApprovalLimits GetApprovalLimits(NetworkAccessActor actor)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
@@ -292,7 +294,7 @@ public sealed partial class NetworkAccessPolicyStore
                 {
                     if (!overriddenIds.Contains(seed.Id))
                     {
-                        views.Add(new NetworkAccessRuleView(seed, Paused: false, OpenInternetBadge: false));
+                        views.Add(new NetworkAccessRuleView(seed, Paused: false, OpenInternetBadge: false, seed.SeedSetupService));
                     }
                 }
             }
@@ -306,7 +308,8 @@ public sealed partial class NetworkAccessPolicyStore
 
                 bool paused = NetworkAccessRuleMatcher.IsPaused(current, rule);
                 bool openInternet = rule.Allowed && string.Equals(rule.DestKind, "any-public", StringComparison.Ordinal);
-                views.Add(new NetworkAccessRuleView(rule, paused, openInternet));
+                string? setupService = actor.IsAdmin ? serviceSetupGroups.GetValueOrDefault(rule.Id) : null;
+                views.Add(new NetworkAccessRuleView(rule, paused, openInternet, setupService));
             }
 
             return (current.Revision, views);

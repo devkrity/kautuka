@@ -23,6 +23,9 @@ public sealed record NetworkAccessRule(
     string Source = "user",
     bool DecidedByAdmin = false)
 {
+    public bool SeedIncludesSubdomains { get; init; }
+    public string? SeedSetupService { get; init; }
+
     public static string ComputeId(
         string scopeKind,
         string? userId,
@@ -38,7 +41,8 @@ public sealed record NetworkAccessRule(
 public sealed record NetworkAccessRuleView(
     NetworkAccessRule Rule,
     bool Paused,
-    bool OpenInternetBadge);
+    bool OpenInternetBadge,
+    string? SetupService = null);
 
 public sealed record NetworkAccessRequest(
     string Id,
@@ -190,7 +194,9 @@ public sealed record SeedRuleConfigEntry(
     string DestKind,
     int Port,
     bool Allowed,
-    bool AllowLan);
+    bool AllowLan,
+    bool IncludeSubdomains = false,
+    string? SetupService = null);
 
 public sealed record SeedRulesFile(
     int SchemaVersion,

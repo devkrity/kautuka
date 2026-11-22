@@ -14,6 +14,7 @@ namespace Kautuka.Gateway.Infrastructure.Agents;
 internal sealed partial class McpAgentToolProvider
 {
     private const string noInnerMessage = "(none)";
+    private static readonly TimeSpan remoteDiscoveryTimeout = TimeSpan.FromSeconds(10);
 
     private async Task<(string Id, IReadOnlyList<AgentToolSurfaceEntry>? Entries)> ConnectSafeAsync(
         McpServerDefinition serverDef,
@@ -21,10 +22,10 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct)
     {
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        if (serverDef.Transport == McpTransport.Http) timeout.CancelAfter(mcpHttpClientFactory.ApprovalHold + remoteDiscoveryTimeout);
         try
         {
-            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout.Token).WaitAsync(timeout.Token).ConfigureAwait(false);
+            IReadOnlyList<AgentToolSurfaceEntry> entries = await ListSurfaceEntriesAsync(serverDef, context, timeout).WaitAsync(timeout.Token).ConfigureAwait(false);
             foreach (AgentToolSurfaceEntry entry in entries)
                 entry.ExecutionConfigHash = AgentToolingFingerprint.ConnectorExecutionHash(serverDef);
             McpAgentToolProviderLog.ConnectorToolsLoaded(logger, serverDef.Id, entries.Count);
@@ -70,8 +71,9 @@ internal sealed partial class McpAgentToolProvider
     private async Task<IReadOnlyList<AgentToolSurfaceEntry>> ListSurfaceEntriesAsync(
         McpServerDefinition serverDef,
         AgentToolContext context,
-        CancellationToken ct)
+        CancellationTokenSource timeout)
     {
+        CancellationToken ct = timeout.Token;
         if (serverDef.Transport == McpTransport.Container)
         {
             if (serverDef.LocalToolDefinitions is null || string.IsNullOrWhiteSpace(serverDef.LocalImageDigest)
@@ -98,7 +100,8 @@ internal sealed partial class McpAgentToolProvider
                 context.UserId,
                 context,
                 ct,
-                captureEndpoint: endpoint => endpointHash = AgentToolingFingerprint.EndpointHash(endpoint)).ConfigureAwait(false);
+                captureEndpoint: endpoint => endpointHash = AgentToolingFingerprint.EndpointHash(endpoint),
+                networkReady: () => timeout.CancelAfter(remoteDiscoveryTimeout)).ConfigureAwait(false);
             await using (client.ConfigureAwait(false))
             {
                 IList<McpClientTool> listed = await client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
@@ -182,7 +185,8 @@ internal sealed partial class McpAgentToolProvider
         CancellationToken ct,
         string? expectedEndpointHash = null,
         Action<Uri>? captureEndpoint = null,
-        string? expectedExecutionHash = null)
+        string? expectedExecutionHash = null,
+        Action? networkReady = null)
     {
         string userRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: false);
         string combinedRevision = credentialRevisions.Get(serverDef.Id, userId ?? string.Empty, includeSystem: true);
@@ -239,7 +243,8 @@ internal sealed partial class McpAgentToolProvider
             (keys, token) => credentialResolver.ResolveRemoteAsync(serverDef.CredentialAssociationId, serverDef.Id, serverDef.CredentialNamespace, userId ?? string.Empty, keys, includeSystem, token), RevalidateAsync,
             () => credentialRevisions.Acquire(serverDef.Id, userId ?? string.Empty, toolContext.AgentId, includeSystem), serverDef.CredentialNamespace, serverDef.McpProtocolVersion,
             PreferIpv4: approvedEndpoint.IdnHost.Equals("mcp.exa.ai", StringComparison.OrdinalIgnoreCase),
-            RequiresCredentialReentry: serverDef.RequiresCredentialReentry);
+            RequiresCredentialReentry: serverDef.RequiresCredentialReentry,
+            NetworkReady: networkReady);
         return await mcpHttpClientFactory.CreateAsync(transportOptions, allowPrivateDestination, requestContext, ct).ConfigureAwait(false);
     }
 

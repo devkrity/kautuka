@@ -70,6 +70,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         this.beforeBackgroundDrainHook = beforeBackgroundDrainHook;
         this.logger = logger;
         this.seedRules = seedRules ?? NetworkAccessDefaultSeeds.DefaultRules;
+        serviceSetupGroups = this.seedRules.Where(static rule => !string.IsNullOrWhiteSpace(rule.SeedSetupService))
+            .ToDictionary(static rule => rule.Id, static rule => rule.SeedSetupService!, StringComparer.Ordinal);
         this.auditRing = auditRing;
         RegistrableDomain = registrableDomain ?? new NetworkRegistrableDomain(path: null);
 

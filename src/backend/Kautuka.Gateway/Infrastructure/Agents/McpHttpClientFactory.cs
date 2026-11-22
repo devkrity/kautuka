@@ -10,9 +10,19 @@ internal sealed class McpHttpClientFactory(
     INetworkAccessChecker? networkAccessChecker = null,
     GatewayOutboundHttpTransport? outbound = null) : IMcpHttpClientFactory
 {
+    public TimeSpan ApprovalHold => outbound?.ApprovalHold ?? TimeSpan.Zero;
+
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "The MCP client owns the transport on success; failure disposes it below.")]
     public async Task<McpClient> CreateAsync(HttpClientTransportOptions transportOptions, bool allowPrivateDestination, RemoteMcpRequestContext context, CancellationToken cancellationToken)
     {
+        if (ApprovalHold > TimeSpan.Zero)
+        {
+            // Wait before the MCP SDK starts its protocol discovery and connection timers.
+            await RemoteMcpRequestHandler.RequireNetworkAccessAsync(context, context.Endpoint,
+                networkAccessChecker ?? FailClosedNetworkAccessChecker.Instance, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            context.NetworkReady?.Invoke();
+        }
         HttpClientTransport transport = CreateTransport(transportOptions, allowPrivateDestination, context);
         try
         {

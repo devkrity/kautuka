@@ -882,7 +882,8 @@ internal static partial class GatewayRuntimeEndpointMappings
             DecidedBy: rule.DecidedBy,
             DecidedAtUtc: rule.DecidedAtUtc,
             OpenInternetBadge: rule.OpenInternetBadge,
-            ProtectedFromUser: rule.ProtectedFromUser);
+            ProtectedFromUser: rule.ProtectedFromUser,
+            SetupService: string.IsNullOrEmpty(rule.SetupService) ? null : rule.SetupService);
     }
 
     private static async Task<NetworkAccessRequestDto> BuildRequestDtoAsync(

@@ -632,6 +632,7 @@ public sealed partial class WorkspaceGrpcService
             Paused = view.Paused,
             OpenInternetBadge = view.OpenInternetBadge,
             ProtectedFromUser = view.Rule.DecidedByAdmin,
+            SetupService = view.SetupService ?? string.Empty,
         };
 
     private static NetworkAccessUserPrivilegesMessage ToMessage(UserPrivileges privs, bool hasStoredRecord = true)

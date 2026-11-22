@@ -1,5 +1,6 @@
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { ChannelSettingsSection } from '@/features/settings';
 import React from 'react';
 import { AgentTypeScreen, type AgentTypePreset } from '../components/AgentTypeScreen';
 import { BrainPresetOption, CompactSetupScreen } from '../components/CompactSetupScreen';
@@ -174,6 +175,8 @@ class WizardErrorBoundary extends React.Component<
 
 export const OnboardingWizard: React.FC = () => {
   const [manualBrainSelection, setManualBrainSelection] = React.useState(false);
+  const [permissionReviewReady, setPermissionReviewReady] = React.useState(false);
+  const [permissionsConfirmed, setPermissionsConfirmed] = React.useState(false);
   const {
     stage,
     goNext,
@@ -378,7 +381,26 @@ export const OnboardingWizard: React.FC = () => {
               />
             )}
 
-            {stage === WIZARD_STAGES.setup && (
+            {stage === WIZARD_STAGES.setup && canManageServiceNetworkAccess && !hasExistingSetup && !permissionsConfirmed && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-bold">Review service permissions</h2>
+                  <p className="mt-1 text-muted-foreground">Review the services Kautuka can reach and change any settings before continuing.</p>
+                </div>
+                <ChannelSettingsSection onReviewReady={setPermissionReviewReady} />
+                <div className="flex justify-between gap-3">
+                  <Button variant="secondary" onClick={() => {
+                    setPermissionReviewReady(false);
+                    goNext(WIZARD_STAGES.agentType);
+                  }}>Back</Button>
+                  <Button disabled={!permissionReviewReady} onClick={() => setPermissionsConfirmed(true)}>
+                    Confirm permissions and continue
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {stage === WIZARD_STAGES.setup && (!canManageServiceNetworkAccess || hasExistingSetup || permissionsConfirmed) && (
               <CompactSetupScreen
                 helperName={agentForm.name}
                 onHelperNameChange={(value) => setAgentForm((prev) => ({ ...prev, name: value }))}
@@ -440,7 +462,6 @@ export const OnboardingWizard: React.FC = () => {
 
             {stage === WIZARD_STAGES.recommendations && (
               <RecommendationsScreen
-                canManageServiceNetworkAccess={canManageServiceNetworkAccess}
                 canImportConnectors={canImportConnectors}
                 canImportSkills={canImportSkills}
                 onBack={() => goNext(WIZARD_STAGES.success)}

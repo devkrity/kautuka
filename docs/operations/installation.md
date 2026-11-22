@@ -103,9 +103,11 @@ Gateway's HTTP clients use caller-scoped Envoy CONNECT when started with `Kautuk
 
 The system Gateway scope starts with HTTPS access to `auth.kautuka.io`, `www.googleapis.com`, and `login.microsoftonline.com` for social sign-in and signing-key discovery. An owner can block any of these destinations. Signed-in connector OAuth and mail brokerage keep their user and connector scope.
 
+First run shows the service destinations from the appliance's seeded rules. The owner can review or change the defaults for sign-in, Slack, Telegram, and in-app updates before confirming and continuing. Advanced Settings uses the same rules.
+
 When a remote MCP connection needs approval, the connection test directs the user to Network Access. A block without a pending request points to both rules and requests. DNS, TLS, and provider failures keep their own messages.
 
-The appliance can hold one call per pending network request for up to ten minutes. It defaults to 64 held calls across the appliance and eight per user. Set `Kautuka__NetworkAccess__ApprovalHold__Duration`, `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCalls`, and `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCallsPerUser` in the Manager service environment to change these values. A call cancelled by its caller releases its slot.
+The appliance can hold one call per pending network request for up to ten minutes. It defaults to 64 held calls across the appliance and eight per user. Set `Kautuka__NetworkAccess__ApprovalHold__Duration`, `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCalls`, and `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCallsPerUser` in the Manager service environment to change these values. A call cancelled by its caller releases its slot. Remote MCP starts its discovery timeout after Manager authorizes the connection.
 
 After verifying the appliance release, Manager generates a dedicated CONNECT identity and checks its lifetime on later starts. Manager replaces the certificate pair when it reaches the renewal window and starts Gateway and Envoy with the renewed identity. Gateway and Envoy each have an owner-only host directory with their own leaf private key and a public CA certificate. Manager mounts only the listener's certificate files into Envoy and admits CONNECT from the reserved Gateway address.
 

@@ -342,7 +342,7 @@ public sealed class NetworkAccessController
         {
             if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
                 && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
-                && normalizedDestination is ("api.github.com" or "github.com" or "release-assets.githubusercontent.com" or "publicsuffix.org")
+                && FindSystemSeedRule(policyStore.SeedRules, "updateservice", destKind, normalizedDestination, destinationPort) is not null
                 && FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort)
                     is { Allowed: true } releaseRule && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule))
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
@@ -673,23 +673,27 @@ public sealed class NetworkAccessController
     private ScopeMatchOutcome ResolveChannelProviderPermission(
         NetworkAccessPolicyState state, string destKind, string destination, int port)
     {
-        bool slack = destination == "slack.com" || destination.EndsWith(".slack.com", StringComparison.Ordinal);
-        if (destKind != "host" || port != 443 || (!slack && destination != "api.telegram.org"))
+        const string channelHost = "channelhost";
+        if (destKind != "host" || port != 443)
             return new(ScopeMatchKind.NoMatch, "channel_provider_denied", false, false);
 
-        const string channelHost = "channelhost";
-        string provider = slack ? "slack.com" : destination;
+        NetworkAccessRule? seed = policyStore.SeedRules.FirstOrDefault(rule =>
+            rule.UserId == "system" && rule.AgentId == channelHost && rule.DestKind == destKind && rule.Port == port
+            && rule.SeedIncludesSubdomains && destination.EndsWith("." + rule.Destination, StringComparison.Ordinal))
+            ?? FindSystemSeedRule(policyStore.SeedRules, channelHost, destKind, destination, port);
+        if (seed is null)
+            return new(ScopeMatchKind.NoMatch, "channel_provider_denied", false, false);
+
         NetworkAccessRule? exact = FindSystemExplicitRule(state.Rules, channelHost, destKind, destination, port);
-        NetworkAccessRule? providerSwitch = provider == destination ? exact
-            : FindSystemExplicitRule(state.Rules, channelHost, destKind, provider, port);
+        NetworkAccessRule? providerSwitch = seed.Destination == destination ? exact
+            : FindSystemExplicitRule(state.Rules, channelHost, destKind, seed.Destination, port);
         IReadOnlyList<NetworkAccessRule> platform = NetworkAccessRuleMatcher.FindApplicable(policyStore.RegistrableDomain, state, null, null, null, destKind, destination, port);
         if (exact is { Allowed: false } || providerSwitch is { Allowed: false } || platform.Any(static rule => !rule.Allowed))
             return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
         if (exact is { Allowed: true } || providerSwitch is { Allowed: true })
             return new(ScopeMatchKind.Allowed, "rule_system", false, false);
 
-        NetworkAccessRule? seed = FindSystemSeedRule(policyStore.SeedRules, channelHost, destKind, provider, port);
-        if (seed is { Allowed: true })
+        if (seed.Allowed)
             return new(ScopeMatchKind.Allowed, "seed", false, false);
         return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
     }
