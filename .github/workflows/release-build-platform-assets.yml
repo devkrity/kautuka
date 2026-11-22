@@ -200,7 +200,7 @@ jobs:
             --channel "$CHANNEL" \
             --artifact-base-url "$artifact_base_url" \
             --appliance-image-prefix "ghcr.io/${GITHUB_REPOSITORY,,}/appliance" \
-            --appliance-runtime-base 'quay.io/fedora/fedora-minimal@sha256:f71389f4775ee6c0b26d917f4487851857f1096f20b5e6144ee03c223e31748a'
+            --appliance-runtime-base 'quay.io/fedora/fedora-minimal@sha256:51912d3c727c1ac964470150ba280b3a0192ced3c622c78b7b68fe8d55d73fee'
 
           # build-release-assets.sh keys its output directory on the manifest version.
           release_dir="publish/release-assets/$MANIFEST_VERSION"
