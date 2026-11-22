@@ -143,6 +143,8 @@ Once the appliance services are ready, Manager inspects their containers in one 
 
 Manager can start a selected signed release for pre-commit verification when the protected recovery marker names that release as the verification target. The signed application images must declare support for the update fence. Candidate containers keep ordinary requests and background work paused for their process lifetime while the supervisor brings up their health endpoints and the egress boundary. The update transaction must restart the cohort to resume ordinary operation.
 
+If backup pruning fails after activation commits, the update helper reports a failure and leaves the active release and retained recovery point in place. Recovery can retry pruning without restoring older data.
+
 Manager's authenticated host status reports its selected signed release ID and whether it booted in verification mode. Appliance UpdateService uses that status only when both values match its own release and mode.
 
 Candidate readiness also requires a healthy package proxy with verified egress rules. Manager reconciles the proxy during the fenced boot without starting the workspace supervisor.

@@ -1782,8 +1782,10 @@ recover_appliance_operation() {
             manifest_digest="$(read_journal_field snapshotManifestSha256)" || return 1
             source_release="$(read_journal_field sourceRelease)" || return 1
             target_release="$(read_journal_field targetRelease)" || return 1
-            python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release" ||
-                echo 'warning: superseded appliance backups could not be pruned' >&2
+            if ! python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release"; then
+                echo 'error: the selected appliance release is running, but superseded backups could not be pruned' >&2
+                return 1
+            fi
         fi
     fi
     echo "Appliance recovery selected release $expected."
