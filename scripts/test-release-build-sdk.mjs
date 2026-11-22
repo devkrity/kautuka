@@ -133,7 +133,7 @@ try {
     const end = builder.indexOf('\nassert_staged_sidecar_seal "$stage_dir"', start);
     assert.ok(start >= 0 && end > start, 'must locate the complete final assembly command block');
     execFileSync('bash', ['-e', '-u', '-o', 'pipefail', '-c', builder.slice(start, end)], {
-      env: { ...process.env, stage_dir: fixtureStage, source_root: fixtureSource },
+      env: { ...process.env, stage_dir: fixtureStage, source_root: fixtureSource, appliance_image_prefix: '' },
     });
     for (const relative of executables) {
       assert.equal((await stat(path.join(fixtureStage, relative))).mode & 0o111, 0o111, `executable mode must be set for ${relative}`);
