@@ -124,9 +124,11 @@ function getOpenAiModelBaseId(modelName: string): string {
 
 export function getGeneratedProviderId(
   providerType: string,
-  existingIds: readonly string[]
+  existingIds: readonly string[],
+  suffix?: string,
 ): string {
-  return makeUniqueName(getProviderBaseId(providerType), existingIds);
+  const baseId = getProviderBaseId(providerType);
+  return makeUniqueName(suffix ? `${baseId}-${suffix}` : baseId, existingIds);
 }
 
 export function getGeneratedModelId(

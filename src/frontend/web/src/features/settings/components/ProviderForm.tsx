@@ -194,7 +194,7 @@ export const ProviderForm: React.FC<{
                   nextBaseUrl = 'http://localhost:11434';
                 }
 
-                onChange({ ...form, type: nextType, base_url: nextBaseUrl });
+                onChange({ ...form, type: nextType, base_url: nextBaseUrl, api_key: nextType === form.type ? form.api_key : '' });
               }}
             >
               {providerTypes.map((pt) => (
@@ -217,7 +217,10 @@ export const ProviderForm: React.FC<{
           </Label>
           <Input
             value={form.base_url}
-            onChange={(e) => onChange({ ...form, base_url: e.target.value })}
+            onChange={(e) => {
+              const nextBaseUrl = e.target.value;
+              onChange({ ...form, base_url: nextBaseUrl, api_key: nextBaseUrl.trim() === form.base_url.trim() ? form.api_key : '' });
+            }}
             placeholder={form.type === 'ollama' ? 'http://localhost:11434' : 'Leave blank to use the provider default'}
             title="Optional override for the provider endpoint. Leave blank to use the current catalog default when creating a provider."
           />

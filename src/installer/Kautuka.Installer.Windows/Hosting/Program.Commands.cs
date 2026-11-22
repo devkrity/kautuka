@@ -14,11 +14,17 @@ internal static partial class Program
 
         try
         {
-            WindowsApplianceInstaller.InstallAsync(request, line =>
+            var outcome = WindowsApplianceInstaller.InstallAsync(request, line =>
             {
                 ProgramLogMessages.StreamInstallLine(log, line);
                 return Task.CompletedTask;
-            }, CancellationToken.None).GetAwaiter().GetResult();
+            }, express: true, CancellationToken.None).GetAwaiter().GetResult();
+            if (outcome == WindowsApplianceInstaller.InstallOutcome.RestartRequired)
+            {
+                ProgramLogMessages.StreamInstallLine(log, "Restart Windows to resume the appliance installation.");
+                Environment.ExitCode = 3010; // ERROR_SUCCESS_REBOOT_REQUIRED.
+                return;
+            }
         }
 #pragma warning disable CA1031 // The executable must report failure for any unsuccessful installation.
         catch (Exception ex)

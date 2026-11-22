@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import * as SettingsAdminModule from '@/features/settings/api/settingsAdmin';
 import { ProviderForm } from '@/features/settings/components/ProviderForm';
@@ -106,6 +106,18 @@ describe('ProviderForm — dynamic provider types', () => {
       />
     );
     expect(screen.getByText('Base URL')).toBeInTheDocument();
+  });
+
+  it('clears a typed credential when the provider or URL changes', async () => {
+    vi.spyOn(SettingsAdminModule.settingsAdmin, 'listProviderTypes').mockResolvedValue({ data: { providerTypes: PROVIDER_TYPES } } as never);
+    const onChange = vi.fn();
+    render(<ProviderForm editingId="" form={{ ...DEFAULT_FORM, api_key: 'fixture-key' }} saving={false} onChange={onChange} onCancel={vi.fn()} onSave={vi.fn()} />);
+    await screen.findByRole('option', { name: 'Groq' });
+
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'groq' } });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'groq', api_key: '' }));
+    fireEvent.change(screen.getByTitle(/optional override for the provider endpoint/i), { target: { value: 'https://provider.example.test' } });
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ base_url: 'https://provider.example.test', api_key: '' }));
   });
 
   it('shows API Key field for types that require it, not for ollama', async () => {

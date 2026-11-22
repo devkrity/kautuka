@@ -182,8 +182,8 @@ internal static class InstallerEndpoints
                 InstallerJsonContext.Default.WindowsApplianceInstallRequest).ConfigureAwait(false)
                 ?? new WindowsApplianceInstallRequest { ReleaseId = null };
 
-            await WindowsApplianceInstaller.InstallAsync(req, Log, ctx.RequestAborted).ConfigureAwait(false);
-            await Log("__DONE__").ConfigureAwait(false);
+            var outcome = await WindowsApplianceInstaller.InstallAsync(req, Log, express: false, ctx.RequestAborted).ConfigureAwait(false);
+            await Log(outcome == WindowsApplianceInstaller.InstallOutcome.Completed ? "__DONE__" : "__RESTART__").ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

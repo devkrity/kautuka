@@ -90,7 +90,7 @@ export function useOnboardingFlow() {
   // Stable unique IDs per wizard session — prevents overwriting existing records on repeat runs
   const [wizardIds] = useState(() => {
     const ts = Date.now();
-    return { agentId: `agent-${ts}` };
+    return { agentId: `agent-${ts}`, providerSuffix: ts.toString(36) };
   });
 
   // Data State
@@ -362,7 +362,8 @@ export function useOnboardingFlow() {
       providerForm.id.trim() ||
       getGeneratedProviderId(
         providerForm.type,
-        existingProviders.map((provider) => provider.id)
+        existingProviders.map((provider) => provider.id),
+        wizardIds.providerSuffix,
       );
     const providerType = providerForm.type.trim();
     const settings = getProviderSettings(providerType);
@@ -445,8 +446,9 @@ export function useOnboardingFlow() {
       });
 
       const modelName = providerModel;
+      const currentModel = existingModels.find((model) => model.id === modelForm.id);
       const modelId =
-        modelForm.id.trim() ||
+        (currentModel?.providerId === providerId && currentModel.modelName === modelName ? currentModel.id : '') ||
         getGeneratedModelId(
           providerType,
           modelName,
@@ -611,7 +613,8 @@ export function useOnboardingFlow() {
       providerForm.id.trim() ||
       getGeneratedProviderId(
         providerForm.type,
-        existingProviders.map((provider) => provider.id)
+        existingProviders.map((provider) => provider.id),
+        wizardIds.providerSuffix,
       ),
     modelForm,
     setModelForm,

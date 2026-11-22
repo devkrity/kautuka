@@ -132,7 +132,14 @@ internal sealed class GoogleAiClientProvider(
     }
 
     internal static bool IsOpenAiCompatibleGeminiUrl(string url)
-        => url.EndsWith(openaiCompatPathSuffix, StringComparison.OrdinalIgnoreCase);
+        => Uri.TryCreate(url, UriKind.Absolute, out Uri? target)
+            && target.Scheme == Uri.UriSchemeHttps
+            && target.IsDefaultPort
+            && target.UserInfo.Length == 0
+            && target.Query.Length == 0
+            && target.Fragment.Length == 0
+            && string.Equals(target.IdnHost, "generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(target.AbsolutePath, openaiCompatPathSuffix, StringComparison.OrdinalIgnoreCase);
 
     private Client CreateClient(JsonObject settings, string apiKey)
     {

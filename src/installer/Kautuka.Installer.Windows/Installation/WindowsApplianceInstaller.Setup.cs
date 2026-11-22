@@ -41,9 +41,10 @@ internal static partial class WindowsApplianceInstaller
         return null;
     }
 
-    private static async Task EnsureWslPrerequisitesAsync(
+    private static async Task<bool> EnableWslPrerequisitesAsync(
         WindowsApplianceInstallState state,
         Func<string, Task> log,
+        bool express,
         CancellationToken cancellationToken)
     {
         if (!CommandAvailable("wsl.exe"))
@@ -55,14 +56,14 @@ internal static partial class WindowsApplianceInstaller
         if (wslEnabled)
         {
             await log("WSL prerequisites already enabled.").ConfigureAwait(false);
-            return;
+            return true;
         }
 
         if (!IsAdministrator())
             throw new InvalidOperationException("Enabling WSL prerequisites requires an elevated installer session.");
 
         WindowsApplianceStateStore.Save(state);
-        RegisterResumeRunOnce(state.DistroName);
+        RegisterResumeRunOnce(state.DistroName, express);
 
         await log("Enabling WSL prerequisites...").ConfigureAwait(false);
         var installAttempt = await RunProcessAsync(
@@ -87,7 +88,7 @@ internal static partial class WindowsApplianceInstaller
                 throw new InvalidOperationException("Failed to enable WSL prerequisites.");
         }
 
-        throw new InvalidOperationException("WSL prerequisites were enabled. Restart Windows to resume the appliance installation.");
+        return false;
     }
 
     private static WindowsApplianceInstallState StageAssets(WindowsApplianceInstallState state)
@@ -164,14 +165,14 @@ internal static partial class WindowsApplianceInstaller
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static void RegisterResumeRunOnce(string distroName)
+    private static void RegisterResumeRunOnce(string distroName, bool express)
     {
         var installerExecutablePath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(installerExecutablePath))
             throw new InvalidOperationException("Unable to determine the installer executable path for resume registration.");
 
         string stagedInstaller = WindowsApplianceStateStore.StageResumeExecutable(installerExecutablePath);
-        var command = $"\"{stagedInstaller}\" --resume --distro-name \"{distroName}\"";
+        var command = $"\"{stagedInstaller}\"{(express ? " --express" : string.Empty)} --resume --distro-name \"{distroName}\"";
         using var hive = PlatformInstaller.OpenUserHive(writable: true);
         using var key = hive.CreateSubKey(
             @"Software\Microsoft\Windows\CurrentVersion\RunOnce");

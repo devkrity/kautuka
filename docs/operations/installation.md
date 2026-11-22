@@ -8,7 +8,9 @@ Use [Development workflow](../development/workflow.md) for a source checkout. De
 
 `Kautuka.Installer.exe` is the supported Windows entry point. It checks/enables WSL prerequisites, preserves reboot-resume state, resolves a release, imports the appliance into the selected Windows directory, starts the appliance, and waits for `http://localhost:20229` before reporting success.
 
-After installation, the Windows installer displays the one-time setup token in its local window and waits for the user to copy it and acknowledge that it is needed to create the first administrator in Kautuka's setup page. The token is deleted after successful use. If the installer window was closed, run `wsl.exe -d <distro-name> -u root -- cat /var/lib/kautuka/gateway/setup-token` in PowerShell, substituting the selected distro name.
+After installation, the Windows installer displays the one-time setup token in its local window and waits for the user to copy it and acknowledge that it is needed to create the first administrator in Kautuka's setup page. The token is deleted after successful use. To recover it, reopen the installer and select **Open Kautuka**. If the window is unavailable, run `wsl.exe -d <distro-name> -u root -- cat /var/lib/kautuka/gateway/setup-token` in PowerShell, substituting the selected distro name.
+
+When Windows needs a restart to enable WSL, the installer saves its progress in the protected installer state directory. The interactive installer offers **Resume** after sign-in. Express installs return Windows exit code `3010` when a restart is required and keep express mode for the next run.
 
 The selected Windows directory stores the WSL distribution. Runtime paths remain inside the imported appliance. Uninstall unregisters the distribution and may remove the selected data when requested.
 

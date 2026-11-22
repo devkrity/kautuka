@@ -894,6 +894,12 @@
               completed = true;
               continue;
             }
+            if (payload === "__RESTART__") {
+              setRunning(false, "Restart required", "Restart Windows to resume the appliance installation.");
+              setBanner("Restart Windows to resume the appliance installation.");
+              await refreshStatus();
+              return;
+            }
             appendLog(payload);
             if (String(payload).startsWith("ERROR: "))
               throw new Error(String(payload).slice(7));

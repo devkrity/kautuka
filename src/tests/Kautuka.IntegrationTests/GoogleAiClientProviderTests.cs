@@ -66,5 +66,7 @@ public sealed class GoogleAiClientProviderTests
         Assert.Equal(
             "https://generativelanguage.googleapis.com",
             GoogleAiClientProvider.ResolveNativeBaseUrl("https://generativelanguage.googleapis.com/"));
+        Assert.Equal("https://provider.example.test/v1beta/openai",
+            GoogleAiClientProvider.ResolveNativeBaseUrl("https://provider.example.test/v1beta/openai"));
     }
 }

@@ -215,7 +215,12 @@ internal static partial class GatewaySettingsEndpointMappings
             GatewayProvider saved;
             try
             {
-                saved = catalog.SaveProvider(StripApiKeyFromBody(bodyElement));
+                proposedSettings.Remove("api_key");
+                proposedSettings.Remove("apiKey");
+                proposedSettings["base_url"] = proposedBaseUrl;
+                var providerBody = JsonObject.Create(bodyElement) ?? new JsonObject();
+                providerBody["settings"] = proposedSettings;
+                saved = catalog.SaveProvider(JsonSerializer.SerializeToElement(providerBody, KautukaJsonContext.Default.JsonObject));
             }
             catch (ProviderConfigurationException ex)
             {
@@ -302,14 +307,4 @@ internal static partial class GatewaySettingsEndpointMappings
         return bytes[0] == 10 || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) || (bytes[0] == 192 && bytes[1] == 168);
     }
 
-    private static JsonElement StripApiKeyFromBody(JsonElement body)
-    {
-        JsonNode? node = JsonNode.Parse(body.GetRawText());
-        if (node is JsonObject obj && obj["settings"] is JsonObject settings)
-        {
-            settings.Remove("api_key");
-        }
-        using JsonDocument doc = JsonDocument.Parse((node ?? JsonNode.Parse("null"))!.ToJsonString());
-        return doc.RootElement.Clone();
-    }
 }

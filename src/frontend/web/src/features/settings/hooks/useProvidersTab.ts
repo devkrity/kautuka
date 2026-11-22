@@ -264,7 +264,13 @@ export function useProvidersTab() {
     testing,
     pendingNetworkApproval,
     statusItems,
-    setForm,
+    setForm: (next: ProviderFormState) => {
+      if (next.type !== form.type || next.base_url.trim() !== form.base_url.trim()) {
+        setPendingNetworkApproval(null);
+        setResult(null);
+      }
+      setForm(next);
+    },
     startCreate,
     startEdit,
     cancelEdit,

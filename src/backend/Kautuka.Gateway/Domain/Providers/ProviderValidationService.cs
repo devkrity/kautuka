@@ -122,6 +122,7 @@ internal sealed class ProviderValidationService : IProviderValidationService
             return false;
         }
 
+        settings["base_url"] = ProviderTypeCatalogSettings.GetEffectiveBaseUrl(settings, providerType, providerTypeCatalog);
         errorMessage = string.Empty;
         return true;
     }
