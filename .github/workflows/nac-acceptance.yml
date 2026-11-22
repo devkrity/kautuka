@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: nac-acceptance-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   nac-windows:
     name: NAC Windows Unit Tests
@@ -45,16 +49,11 @@ jobs:
       - name: Run Windows NAC verification and recovery tests
         run: dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj --filter "FullyQualifiedName~WindowsPodmanDevEgressOptionsTests|FullyQualifiedName~WorkloadRegistryTrustLifecycleTests|FullyQualifiedName~WorkloadPostStartVerifierTests|FullyQualifiedName~V7_55_ReconcileFailClosedTests|FullyQualifiedName~V7_55_ReconcileQuarantineRetryTests|FullyQualifiedName~V7_55_QuarantinePersistenceTests|FullyQualifiedName~ProductionDnsBoundaryAllowsOnlyTheCoreDnsGateway"
 
-  nac-acceptance:
-    name: NAC Acceptance Suite (Linux)
-    needs: nac-windows
-    if: ${{ always() }}
+  nac-linux:
+    name: NAC Production and Integration Tests (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Require Windows NAC tests to pass
-        run: test '${{ needs.nac-windows.result }}' = success
-
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,9 +95,10 @@ jobs:
       - name: Run launcher tests
         run: node --test scripts/test-launcher-nac-hook.mjs scripts/test-launcher-web-tools.mjs scripts/launcher-readiness.test.mjs
 
-      - name: Build Solution
+      - name: Build NAC acceptance and integration tests
         run: |
-          dotnet build src/Kautuka.slnx -c Release
+          dotnet build src/tests/Kautuka.NetworkAccess.Acceptance/Kautuka.NetworkAccess.Acceptance.csproj -c Release
+          dotnet build src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -c Release
 
       - name: Prepare rootless Podman runtime directory
         run: |
@@ -199,3 +199,19 @@ jobs:
       - name: Run Integration Tests
         run: |
           dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -c Release --no-build
+
+  nac-acceptance:
+    # Main's ruleset requires this exact check name.
+    name: NAC Acceptance Suite (Linux)
+    needs: [nac-linux, nac-windows]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require both NAC jobs to pass
+        env:
+          LINUX_RESULT: ${{ needs.nac-linux.result }}
+          WINDOWS_RESULT: ${{ needs.nac-windows.result }}
+        run: |
+          printf 'Linux: %s\nWindows: %s\n' "$LINUX_RESULT" "$WINDOWS_RESULT"
+          test "$LINUX_RESULT" = success && test "$WINDOWS_RESULT" = success
