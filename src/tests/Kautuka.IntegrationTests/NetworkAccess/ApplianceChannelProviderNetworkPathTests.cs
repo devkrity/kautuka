@@ -1,9 +1,75 @@
+using System.Net;
+using System.Net.WebSockets;
+
+using Kautuka.NetworkAccess.Client;
 using Kautuka.NetworkAccessController;
+
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 
 namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class ApplianceChannelProviderNetworkPathTests
 {
+    [Fact]
+    public async Task PausingSlackBlocksReconnectionWhileAnOpenWebSocketCanStillExchangeFrames()
+    {
+        DirectoryInfo directory = Directory.CreateTempSubdirectory("kautuka-slack-pause-");
+        try { await VerifySlackPauseAsync(directory.FullName); }
+        finally { directory.Delete(recursive: true); }
+    }
+
+    private static async Task VerifySlackPauseAsync(string directory)
+    {
+        using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"));
+        var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policy, new WorkloadRegistry());
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        var rule = new RuleWriteSpec("agent", "system", "channelhost", null, "slack.com", "host", 443, true);
+        policy.SetRule(admin, rule, policy.Revision);
+        var checker = new NetworkAccessWebSocketChecker(new LoopbackSlackPolicy(controller));
+
+        WebApplicationBuilder builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions { Args = [] });
+        builder.WebHost.UseKestrelCore().UseSockets().ConfigureKestrel(options => options.Listen(IPAddress.Loopback, 0));
+        await using WebApplication server = builder.Build();
+        server.UseWebSockets();
+        server.Run(async context =>
+        {
+            using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
+            var buffer = new byte[8];
+            ValueWebSocketReceiveResult frame = await socket.ReceiveAsync(buffer.AsMemory(), context.RequestAborted);
+            await socket.SendAsync(buffer.AsMemory(0, frame.Count), frame.MessageType, frame.EndOfMessage, context.RequestAborted);
+        });
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        CancellationToken token = timeout.Token;
+        await server.StartAsync(token);
+        var endpoint = new UriBuilder(server.Urls.Single()) { Scheme = "ws" }.Uri;
+        using var established = new ClientWebSocket();
+        await checker.ConnectAsync(established, endpoint, token);
+
+        policy.SetRule(admin, rule with { Allowed = false }, policy.Revision);
+        using var reconnect = new ClientWebSocket();
+        await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => checker.ConnectAsync(reconnect, endpoint, token));
+        await established.SendAsync(new byte[] { 42 }.AsMemory(), WebSocketMessageType.Binary, true, token);
+        var reply = new byte[8];
+        ValueWebSocketReceiveResult received = await established.ReceiveAsync(reply.AsMemory(), token);
+        Assert.Equal(WebSocketMessageType.Binary, received.MessageType);
+        Assert.Equal(1, received.Count);
+        Assert.Equal(42, reply[0]);
+    }
+
+    private sealed class LoopbackSlackPolicy(Kautuka.NetworkAccessController.NetworkAccessController controller) : INetworkAccessChecker
+    {
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+        {
+            // The WebSocket server is local. Apply production ChannelHost policy to the Slack endpoint it represents.
+            var decision = controller.EvaluateOutboundCheck(new OutboundCheckInput(
+                "system", "channelhost", null, "wss-primary.slack.com", 443, null, null));
+            return Task.FromResult(new NetworkAccessCheckResult(decision.Allowed, decision.Reason));
+        }
+    }
+
     [Fact]
     public void VerifiedUpdateServiceCanReachOnlyReleaseProviderTlsThroughTheDnsSinkhole()
     {
