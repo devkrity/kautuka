@@ -255,6 +255,19 @@ export const OnboardingWizard: React.FC = () => {
     }));
   };
 
+  const changeProvider = (type: string, baseUrl: string) => {
+    const changed = type !== providerForm.type || baseUrl.trim() !== providerForm.base_url.trim();
+    setProviderForm((prev) => ({
+      ...prev,
+      ...(changed ? { id: '', apiCredential: '' } : {}),
+      type,
+      base_url: baseUrl,
+    }));
+    if (changed) {
+      setModelForm((prev) => ({ ...prev, id: '', providerId: '' }));
+    }
+  };
+
   const applyBrainPreset = (presetId: string) => {
     const preset = BRAIN_PRESETS.find((item) => item.id === presetId);
     if (!preset) {
@@ -262,11 +275,10 @@ export const OnboardingWizard: React.FC = () => {
     }
 
     setSelectedBrainPresetId(presetId);
-    setProviderForm((prev) => ({
-      ...prev,
-      type: preset.providerType,
-      base_url: preset.providerType === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
-    }));
+    changeProvider(
+      preset.providerType,
+      preset.providerType === 'ollama' ? providerForm.base_url.trim() || 'http://localhost:11434' : '',
+    );
     setModelForm((prev) => ({
       ...prev,
       modelName: preset.modelName,
@@ -396,14 +408,15 @@ export const OnboardingWizard: React.FC = () => {
                 providerType={providerForm.type}
                 onProviderTypeChange={(value) => {
                   setSelectedBrainPresetId(null);
-                  setProviderForm((prev) => ({
-                    ...prev,
-                    type: value,
-                    base_url: value === 'ollama' ? prev.base_url.trim() || 'http://localhost:11434' : '',
-                  }));
+                  changeProvider(
+                    value,
+                    value === providerForm.type
+                      ? providerForm.base_url
+                      : value === 'ollama' ? 'http://localhost:11434' : '',
+                  );
                 }}
                 providerBaseUrl={providerForm.base_url}
-                onProviderBaseUrlChange={(value) => setProviderForm((prev) => ({ ...prev, base_url: value }))}
+                onProviderBaseUrlChange={(value) => changeProvider(providerForm.type, value)}
                 providerApiCredential={providerForm.apiCredential}
                 onProviderApiCredentialChange={(value) =>
                   setProviderForm((prev) => ({ ...prev, apiCredential: value }))

@@ -135,4 +135,16 @@ describe('OnboardingWizard welcome step', () => {
 
     expect(flowState.saveSetup).toHaveBeenCalled();
   });
+
+  it('clears the key and saved binding when switching provider presets', () => {
+    flowState.stage = 'setup';
+    flowState.providerForm = { ...flowState.providerForm, id: 'saved-gemini', apiCredential: 'fixture-key' };
+    render(<OnboardingWizard />);
+
+    fireEvent.click(screen.getByRole('button', { name: /OpenRouter \+ GPT-4.1 Mini/i }));
+
+    const update = flowState.setProviderForm.mock.lastCall?.[0] as
+      (previous: typeof flowState.providerForm) => typeof flowState.providerForm;
+    expect(update(flowState.providerForm)).toMatchObject({ type: 'openrouter', apiCredential: '', id: '' });
+  });
 });
