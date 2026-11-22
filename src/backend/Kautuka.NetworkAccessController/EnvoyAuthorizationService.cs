@@ -26,8 +26,11 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
     public const string ExtAuthzMetadataNamespace = "envoy.filters.network.ext_authz";
     public const string ClusterMetadataKey = "cluster";
 
+    // Allow for the Podman inspection and rules read within one bounded wait.
+    private static readonly TimeSpan packageVerificationTimeout = TimeSpan.FromSeconds(30);
     private readonly NetworkAccessController controller;
     private readonly SemaphoreSlim admissionCapacity;
+    private int packageVerificationWaiters;
     private volatile EnvoyAuthorizationFaultHook? faultHook;
 
     public EnvoyAuthorizationService(
@@ -70,6 +73,7 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
             throw new RpcException(new RpcStatus(StatusCode.Unavailable, "capacity_exceeded"));
         }
 
+        bool ownsAdmission = true;
         try
         {
             EnvoyAuthorizationFaultHook? hook = faultHook;
@@ -110,7 +114,66 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
                 destination.Address,
                 (int)destination.PortValue,
                 isTls,
-                sni);
+                sni,
+                expectedSource: null,
+                recordPendingRequest: true,
+                waitForPackageVerification: true);
+
+            if (decision.PendingPackageProxy is { } originalProxy)
+            {
+                RegistryEntry? packageCaller = decision.PendingSource;
+                try
+                {
+                    if (Interlocked.Increment(ref packageVerificationWaiters) <= MaxConcurrency)
+                    {
+                        using var budget = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
+                        budget.CancelAfter(packageVerificationTimeout);
+                        while (decision.PendingPackageProxy?.Verification is { } verification)
+                        {
+                            // Live rules inspection can run while other connections are authorized.
+                            admissionCapacity.Release();
+                            ownsAdmission = false;
+                            bool verified = false;
+                            try
+                            {
+                                verified = await verification.WaitAsync(budget.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested) { }
+
+                            ownsAdmission = admissionCapacity.Wait(0);
+                            if (!ownsAdmission)
+                            {
+                                try
+                                {
+                                    await admissionCapacity.WaitAsync(budget.Token).ConfigureAwait(false);
+                                    ownsAdmission = true;
+                                }
+                                catch (OperationCanceledException) when (!context.CancellationToken.IsCancellationRequested)
+                                {
+                                    throw new RpcException(new RpcStatus(StatusCode.Unavailable, "capacity_exceeded"));
+                                }
+                            }
+
+                            context.CancellationToken.ThrowIfCancellationRequested();
+                            verified = verified && !budget.IsCancellationRequested;
+                            decision = controller.EvaluateContainerConnection(source.Address, destination.Address,
+                                (int)destination.PortValue, isTls, sni, expectedSource: packageCaller,
+                                recordPendingRequest: false, waitForPackageVerification: verified,
+                                expectedPackageProxyGeneration: originalProxy.Generation, allowVerifiedPackageProxy: verified);
+                        }
+                    }
+                    else
+                    {
+                        decision = controller.EvaluateContainerConnection(source.Address, destination.Address,
+                            (int)destination.PortValue, isTls, sni, expectedSource: packageCaller,
+                            recordPendingRequest: false, waitForPackageVerification: false, allowVerifiedPackageProxy: false);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref packageVerificationWaiters);
+                }
+            }
 
             if (decision.PendingSource is { } originalSource)
                 decision = await controller.RecheckAfterApprovalAsync(decision, originalSource.UserId ?? "system",
@@ -151,7 +214,8 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
         }
         finally
         {
-            admissionCapacity.Release();
+            if (ownsAdmission)
+                admissionCapacity.Release();
         }
     }
 

@@ -124,8 +124,10 @@ public sealed class PackageProxyNetworkPathTests
         }
     }
 
-    [Fact]
-    public async Task RegistryRebuildPreservesOnlyThePreviouslyVerifiedLiveProxy()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RegistryRebuildPreservesOnlyThePreviouslyVerifiedLiveProxy(bool revokeDuringAudit)
     {
         string temp = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -161,12 +163,19 @@ public sealed class PackageProxyNetworkPathTests
         });
         string packageRules = BoundaryRulesetRenderer.ResolveTemplate("kautuka_package_proxy.nft.json.tmpl")
             .Replace("{{IP}}", WorkloadRulesetRenderer.PackageProxyIp, StringComparison.Ordinal);
-        var podman = new PodmanCommandRunner((args, _) => Task.FromResult(
-            args[0] == "ps"
-                ? new PodmanCommandResult(0, psJson, string.Empty)
-                : args.Contains("nft", StringComparer.Ordinal)
-                    ? new PodmanCommandResult(0, packageRules, string.Empty)
-                    : new PodmanCommandResult(0, inspectJson, string.Empty)));
+        var auditStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishAudit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var podman = new PodmanCommandRunner(async (args, token) =>
+        {
+            if (args[0] == "ps")
+                return new PodmanCommandResult(0, psJson, string.Empty);
+            if (!args.Contains("nft", StringComparer.Ordinal))
+                return new PodmanCommandResult(0, inspectJson, string.Empty);
+
+            auditStarted.TrySetResult();
+            await finishAudit.Task.WaitAsync(token);
+            return new PodmanCommandResult(0, packageRules, string.Empty);
+        });
         var registry = new WorkloadRegistry();
         await using var manager = new EgressTopologyManager(
             podman,
@@ -176,12 +185,30 @@ public sealed class PackageProxyNetworkPathTests
         {
             await manager.AuthorizePackageProxyContainerAsync(cid, imageId, TestContext.Current.CancellationToken);
             manager.RegisterVerifiedPackageProxyContainer(cid);
+            manager.SetPackageProxyReady(true);
 
-            await manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+            Task rebuild = manager.RebuildRegistryFromLiveContainersAsync(registry, TestContext.Current.CancellationToken);
+            Task<bool>? verification;
+            try
+            {
+                await auditStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                PackageProxyAdmission admission = manager.GetPackageProxyAdmission();
+                Assert.False(admission.Ready);
+                verification = Assert.IsAssignableFrom<Task<bool>>(admission.Verification);
+                if (revokeDuringAudit)
+                    await manager.RevokePackageProxyContainerAsync(cid, TestContext.Current.CancellationToken);
+            }
+            finally
+            {
+                finishAudit.TrySetResult();
+            }
 
-            Assert.True(registry.TryGetByIp(WorkloadRulesetRenderer.PackageProxyIp, out RegistryEntry? entry));
-            Assert.NotNull(entry);
-            Assert.Equal(cid, entry.ContainerId);
+            await rebuild;
+            Assert.Equal(!revokeDuringAudit, await verification.WaitAsync(TestContext.Current.CancellationToken));
+            Assert.Equal(!revokeDuringAudit, manager.IsPackageProxyReady);
+            Assert.Equal(!revokeDuringAudit, registry.TryGetByIp(WorkloadRulesetRenderer.PackageProxyIp, out RegistryEntry? entry));
+            if (!revokeDuringAudit)
+                Assert.Equal(cid, entry!.ContainerId);
         }
         finally
         {
@@ -214,7 +241,7 @@ public sealed class PackageProxyNetworkPathTests
             new WorkloadPostStartVerifier(podman), registry, temp);
         try
         {
-            bool verified = await manager.VerifyPackageProxyRulesetAsync(cid, TestContext.Current.CancellationToken);
+            bool verified = await manager.VerifyPackageProxyRulesetAsync(cid, cancellationToken: TestContext.Current.CancellationToken);
 
             Assert.False(verified);
             Assert.False(registry.TryGetByIp(WorkloadRulesetRenderer.PackageProxyIp, out _));

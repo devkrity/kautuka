@@ -146,7 +146,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private InfraAllowlistEntry? packageProxyAllowlistEntry;
     private readonly Dictionary<string, InfraAllowlistEntry> applianceAllowlistEntries = new(StringComparer.Ordinal);
     private readonly object infraAllowlistLock = new();
-    private volatile bool packageProxyStartupReady;
+    private string? readyPackageProxyId;
+    private long packageProxyRevocationVersion;
+    private TaskCompletionSource<bool>? packageProxyVerification;
+    private readonly SemaphoreSlim packageProxyVerificationLock = new(1, 1);
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string? gatewayConnectEnvoyDirectory;
@@ -673,7 +676,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         logger.LogInformation("Rebuilding workload registry from live container labels...");
         PodmanCommandResult psResult = await podmanRunner
-            .RunAsync(["ps", "-a", "--format", "json"], 30, cancellationToken)
+            .RunAsync(["ps", "-a", "--no-trunc", "--format", "json"], 30, cancellationToken)
             .ConfigureAwait(false);
 
         if (psResult.ExitCode != 0)
@@ -762,17 +765,16 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 {
                                     try
                                     {
-                                        await postStartVerifier.VerifyWorkloadRulesetAsync(
-                                            cid, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
-                                        rebuiltEntries.Add(previouslyVerifiedPackageProxy);
+                                        if (await VerifyLivePackageProxyRulesAsync(cid, false, cancellationToken).ConfigureAwait(false) is not null)
+                                            rebuiltEntries.Add(previouslyVerifiedPackageProxy);
                                     }
                                     catch (Exception verificationException) when (verificationException is not OperationCanceledException)
                                     {
-                                        packageProxyStartupReady = false;
+                                        SetPackageProxyReady(false);
                                         logger.LogWarning(verificationException, "Previously verified package proxy {ContainerId} no longer has the required workload rules.", cid);
                                     }
                                 }
-                                else packageProxyStartupReady = false;
+                                else SetPackageProxyReady(false);
 
                                 continue;
                             }
@@ -1516,6 +1518,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         lock (infraAllowlistLock)
         {
+            if (!string.Equals(packageProxyAllowlistEntry?.Id, containerId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(packageProxyAllowlistEntry?.ImageDigest, imageId, StringComparison.OrdinalIgnoreCase))
+                SetPackageProxyReady(false);
             packageProxyAllowlistEntry = new InfraAllowlistEntry(containerId, "pkgs-proxy", [PackageProxyIp], imageId);
             PersistInfraAllowlist();
         }
@@ -1533,9 +1538,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             if (packageProxyAllowlistEntry is not null
                 && string.Equals(packageProxyAllowlistEntry.Id, containerId, StringComparison.OrdinalIgnoreCase))
             {
+                SetPackageProxyReady(false);
                 packageProxyAllowlistEntry = null;
                 PersistInfraAllowlist();
-                packageProxyStartupReady = false;
             }
         }
 
@@ -1544,7 +1549,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             && string.Equals(registered.ContainerId, containerId, StringComparison.OrdinalIgnoreCase)
             && string.Equals(registered.AgentId, "package-proxy", StringComparison.Ordinal))
         {
-            packageProxyStartupReady = false;
+            SetPackageProxyReady(false);
             registry.Deregister(PackageProxyIp, containerId);
         }
 
@@ -1584,17 +1589,92 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             && string.Equals(entry.Attribution, "user-agent", StringComparison.Ordinal);
 
     public void SetPackageProxyReady(bool ready)
-        => packageProxyStartupReady = ready && IsPackageProxyRegistered;
+    {
+        lock (infraAllowlistLock)
+        {
+            if (!ready)
+            {
+                readyPackageProxyId = null;
+                packageProxyRevocationVersion++;
+                packageProxyVerification?.TrySetResult(false);
+            }
+            else if (packageProxyVerification is null && IsPackageProxyRegistered)
+            {
+                readyPackageProxyId = registry.FindByIp(PackageProxyIp)?.ContainerId;
+            }
+        }
+    }
 
-    public bool IsPackageProxyReady => packageProxyStartupReady && IsPackageProxyRegistered;
+    public bool IsPackageProxyReady => GetPackageProxyAdmission().Ready;
 
-    public async Task<bool> VerifyPackageProxyRulesetAsync(string containerId, CancellationToken cancellationToken = default)
+    public PackageProxyAdmission GetPackageProxyAdmission()
+    {
+        lock (infraAllowlistLock)
+        {
+            bool sameRegisteredProxy = readyPackageProxyId is { } id && IsRegisteredPackageProxyContainer(id);
+            return new(sameRegisteredProxy && packageProxyVerification is null,
+                sameRegisteredProxy ? packageProxyVerification?.Task : null, packageProxyRevocationVersion);
+        }
+    }
+
+    private async Task<string?> VerifyLivePackageProxyRulesAsync(string containerId, bool registerAfterVerification,
+        CancellationToken cancellationToken)
+    {
+        await packageProxyVerificationLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var verification = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        long version;
+        lock (infraAllowlistLock)
+        {
+            if (!string.Equals(readyPackageProxyId, containerId, StringComparison.OrdinalIgnoreCase))
+                readyPackageProxyId = null;
+            packageProxyVerification = verification;
+            version = packageProxyRevocationVersion;
+        }
+
+        bool ready = false;
+        try
+        {
+            string verifiedId = await postStartVerifier.VerifyWorkloadRulesetAsync(
+                containerId, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (infraAllowlistLock)
+            {
+                if (version != packageProxyRevocationVersion
+                    || !string.Equals(verifiedId, containerId, StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                if (registerAfterVerification)
+                {
+                    if (!string.Equals(packageProxyAllowlistEntry?.Id, verifiedId, StringComparison.OrdinalIgnoreCase))
+                        return null;
+
+                    RegisterVerifiedPackageProxyContainer(verifiedId);
+                    readyPackageProxyId = verifiedId;
+                }
+
+                ready = readyPackageProxyId is not null && IsRegisteredPackageProxyContainer(verifiedId);
+                return verifiedId;
+            }
+        }
+        finally
+        {
+            lock (infraAllowlistLock)
+            {
+                if (!ready)
+                    readyPackageProxyId = null;
+                packageProxyVerification = null;
+                verification.TrySetResult(ready && version == packageProxyRevocationVersion);
+            }
+            packageProxyVerificationLock.Release();
+        }
+    }
+
+    public async Task<bool> VerifyPackageProxyRulesetAsync(string containerId, bool registerAfterVerification = false,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            await postStartVerifier.VerifyWorkloadRulesetAsync(
-                containerId, PackageProxyIp, isPackageProxy: true, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return true;
+            return await VerifyLivePackageProxyRulesAsync(containerId, registerAfterVerification, cancellationToken).ConfigureAwait(false) is not null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -3270,8 +3350,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             bool isPackageProxy = string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal);
             if (isPackageProxy && !isActive)
             {
-                packageProxyStopped |= packageProxyStartupReady;
-                packageProxyStartupReady = false;
+                PackageProxyAdmission admission = GetPackageProxyAdmission();
+                packageProxyStopped |= admission.Ready || admission.Verification is not null;
+                SetPackageProxyReady(false);
             }
             bool isQuarantined = desiredStateStore?.IsWorkloadQuarantined(entry.ContainerId) == true
                 || (liveCid is not null && desiredStateStore?.IsWorkloadQuarantined(liveCid) == true);
@@ -3318,13 +3399,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 {
                     if (isPackageProxy && !await IsPreviouslyAuthorizedPackageProxyAsync(liveCid!, cancellationToken).ConfigureAwait(false))
                     {
-                        packageProxyStartupReady = false;
+                        SetPackageProxyReady(false);
                         continue;
                     }
 
-                    string canonicalId = await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip,
-                        isPackageProxy: isPackageProxy,
-                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    string? canonicalId = isPackageProxy
+                        ? await VerifyLivePackageProxyRulesAsync(liveCid!, false, cancellationToken).ConfigureAwait(false)
+                        : await postStartVerifier.VerifyWorkloadRulesetAsync(liveCid!, entry.Ip,
+                            cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (canonicalId is null) continue;
                     if (!string.Equals(canonicalId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)) registry.UpdateContainerId(entry.Ip, entry.ContainerId, canonicalId);
                     if (transientWorkloadDenials.TryGetValue(entry.Ip, out RegistryEntry? prior)
                         && string.Equals(prior.ContainerId, entry.ContainerId, StringComparison.OrdinalIgnoreCase)
@@ -3337,7 +3420,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 catch (WorkloadRulesetVerificationException ex)
                 {
                     transientWorkloadDenials.TryRemove(entry.Ip, out _);
-                    if (isPackageProxy) packageProxyStartupReady = false;
+                    if (isPackageProxy) SetPackageProxyReady(false);
                     string? canonicalId = ex is WorkloadRulesetVerificationException drift ? drift.CanonicalContainerId : null;
                     canonicalId ??= WorkloadPostStartVerifier.IsCanonicalContainerId(liveCid) ? liveCid : null;
                     if (canonicalId is null)
@@ -3380,7 +3463,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    if (isPackageProxy) packageProxyStartupReady = false;
+                    if (isPackageProxy) SetPackageProxyReady(false);
                     if (registry.IsVerified(entry.Ip, entry.ContainerId))
                         transientWorkloadDenials[entry.Ip] = entry;
                     registry.TryQuarantine(entry.Ip, entry.ContainerId, liveCid);
@@ -4073,6 +4156,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             cts.Dispose();
         }
+        packageProxyVerificationLock.Dispose();
         reconcileWake.Dispose();
     }
 }

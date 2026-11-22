@@ -1685,7 +1685,7 @@ public static class Program
             registry,
             auditRing,
             isContainerAuthorizationGateOpen: () => Volatile.Read(ref packetPathOnlyGateOverride) == 1 || topology.IsStartupGateOpen,
-            isPackageProxyReady: () => topology.IsPackageProxyReady);
+            packageProxyAdmission: topology.GetPackageProxyAdmission);
         string sockPath = Path.Combine(socketDir, "envoy.sock");
         string lockPath = Path.Combine(socketDir, "networkaccess.lock");
         var authHost = EnvoyAuthorizationHost.Create(

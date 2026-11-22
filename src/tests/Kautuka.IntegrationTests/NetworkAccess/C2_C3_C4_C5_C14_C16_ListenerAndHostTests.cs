@@ -35,6 +35,87 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 /// </summary>
 public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
 {
+    [Theory]
+    [InlineData(true, false, false, false, "")]
+    [InlineData(false, false, false, false, "package_proxy_unavailable")]
+    [InlineData(true, true, false, false, "blocked")]
+    [InlineData(true, false, true, false, "")]
+    [InlineData(true, false, false, true, "package_proxy_unavailable")]
+    public async Task PackageAuthorizationWaitsForVerificationAndRechecksCurrentPolicy(
+        bool verified, bool addBlock, bool repeatAudit, bool replaceProxy, string expectedDenial)
+    {
+        string directory = CreateTempDir();
+        try
+        {
+            using var policy = new NetworkAccessPolicyStore(Path.Combine(directory, "policy.json"));
+            var registry = new WorkloadRegistry();
+            const string workloadIp = "10.247.1.30";
+            const string packageIp = "198.18.250.249";
+            registry.Register(new RegistryEntry(workloadIp, "user-a", "agent-a", "ctr-a", "agent-sandbox", null,
+                "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow));
+            var admin = new NetworkAccessActor("admin", IsAdmin: true);
+            policy.SetRule(admin, new RuleWriteSpec("agent", "user-a", "agent-a", null, "example.com", "host", 443, Allowed: true), policy.Revision);
+            var readAdmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var audit = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var readNextAudit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var nextAudit = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controller = new NacController(policy, registry, packageProxyAdmission: () =>
+            {
+                readAdmission.TrySetResult();
+                if (!audit.Task.IsCompletedSuccessfully)
+                    return new PackageProxyAdmission(false, audit.Task, Generation: 1);
+                if (repeatAudit && !nextAudit.Task.IsCompletedSuccessfully)
+                {
+                    readNextAudit.TrySetResult();
+                    return new PackageProxyAdmission(false, nextAudit.Task, Generation: 1);
+                }
+                return new PackageProxyAdmission(audit.Task.Result, Generation: replaceProxy ? 2 : 1);
+            });
+            string socket = Path.Combine(directory, "auth.sock");
+            await using var host = new EnvoyAuthorizationHost(controller, new EnvoyAuthorizationHostOptions
+            {
+                TransportMode = EnvoyListenerTransportMode.UnixDomainSocket,
+                SocketPath = socket,
+                LockFilePath = Path.Combine(directory, "auth.lock"),
+            });
+            CancellationToken token = TestContext.Current.CancellationToken;
+            await host.StartAsync(token);
+            using GrpcChannel channel = CreateUdsChannel(socket);
+            var client = new EnvoyAuth.AuthorizationClient(channel);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+            using AsyncUnaryCall<CheckResponse> pending = client.CheckAsync(
+                BuildCheckRequest(workloadIp, packageIp, 20101, null), deadline: deadline, cancellationToken: token);
+            await readAdmission.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            Assert.False(pending.ResponseAsync.IsCompleted);
+
+            using AsyncUnaryCall<CheckResponse> unrelated = client.CheckAsync(
+                BuildCheckRequest(workloadIp, "198.18.250.250", 443, "example.com"), deadline: deadline, cancellationToken: token);
+            Assert.Equal(0, (await unrelated.ResponseAsync).Status.Code);
+            if (addBlock)
+                policy.SetRule(admin, new RuleWriteSpec("agent", "user-a", "agent-a", null, packageIp, "ip", 20101, Allowed: false), policy.Revision);
+
+            audit.SetResult(verified);
+            if (repeatAudit)
+            {
+                await readNextAudit.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                Assert.False(pending.ResponseAsync.IsCompleted);
+                nextAudit.SetResult(true);
+            }
+            CheckResponse result = await pending.ResponseAsync;
+            if (string.IsNullOrEmpty(expectedDenial))
+            {
+                Assert.Equal(0, result.Status.Code);
+                Assert.Equal("pkgs_proxy", result.DynamicMetadata.Fields["cluster"].StringValue);
+            }
+            else
+            {
+                Assert.Equal(7, result.Status.Code);
+                Assert.Equal(expectedDenial, result.Status.Message);
+            }
+        }
+        finally { TryDeleteDir(directory); }
+    }
+
     [Fact]
     public async Task ConnectAuthorizationResumesTheSameGrpcCallAfterApproval()
     {

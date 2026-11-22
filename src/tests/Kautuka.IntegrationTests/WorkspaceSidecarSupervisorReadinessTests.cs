@@ -152,7 +152,9 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
         });
         var calls = new List<string>();
         EgressTopologyManager? verifiedTopology = null;
-        var podman = new PodmanCommandRunner((args, _) =>
+        var ruleCheckStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishRuleCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var podman = new PodmanCommandRunner(async (args, token) =>
         {
             calls.Add(string.Join(' ', args.Take(2)));
             if (args[0] == "image" && args[1] == "inspect")
@@ -160,14 +162,20 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
                 Assert.Equal(sameIdentity, verifiedTopology!.IsPackageProxyReady);
             }
 
-            return Task.FromResult(args[0] switch
+            if (args[0] == "inspect" && args[1] == containerId)
+            {
+                ruleCheckStarted.SetResult();
+                await finishRuleCheck.Task.WaitAsync(token);
+            }
+
+            return args[0] switch
             {
                 "inspect" when args[1] == name => new PodmanCommandResult(0, inspect, ""),
                 "image" when args[1] == "inspect" => new PodmanCommandResult(0, imageId, ""),
                 "inspect" when args[1] == containerId => new PodmanCommandResult(1, "", "fixture ruleset inspection unavailable"),
                 "rm" => new PodmanCommandResult(0, "", ""),
                 _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
-            });
+            };
         });
         DirectoryInfo temp = Directory.CreateTempSubdirectory("kautuka-warm-proxy-");
         try
@@ -176,15 +184,32 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
                 new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), temp.FullName, hookStateDirectory: temp.FullName);
             typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
             verifiedTopology = topology;
-            topology.RegisterVerifiedPackageProxyContainer(sameIdentity ? containerId : new string('c', 64));
+            string registeredId = sameIdentity ? containerId : new string('c', 64);
+            await topology.AuthorizePackageProxyContainerAsync(registeredId, imageId, TestContext.Current.CancellationToken);
+            topology.RegisterVerifiedPackageProxyContainer(registeredId);
             topology.SetPackageProxyReady(true);
             WorkspaceSidecarSupervisor supervisor = CreateSupervisor(new WorkspaceSidecarDefinition(name, image, [],
                 new Dictionary<string, string>(), [], null, null, null, RequiredForReady: true, ManagerInfrastructure: true),
                 podman, topology, applianceMode: verification);
-            bool ready = verification
-                ? await supervisor.EnsurePackageProxyReadyForVerificationAsync(TestContext.Current.CancellationToken)
-                : await supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken);
-            Assert.False(ready);
+            Task<bool> ready = verification
+                ? supervisor.EnsurePackageProxyReadyForVerificationAsync(TestContext.Current.CancellationToken)
+                : supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken);
+            PackageProxyAdmission admission;
+            try
+            {
+                await ruleCheckStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                admission = topology.GetPackageProxyAdmission();
+                Assert.False(admission.Ready);
+                Assert.Equal(sameIdentity, admission.Verification is not null);
+            }
+            finally
+            {
+                finishRuleCheck.TrySetResult();
+                await ready;
+            }
+            if (admission.Verification is { } rules)
+                Assert.False(await rules.WaitAsync(TestContext.Current.CancellationToken));
+            Assert.False(await ready);
             Assert.False(topology.IsPackageProxyReady);
             Assert.Equal(new[] { $"inspect {name}", "image inspect", $"inspect {containerId}", "rm -f" }, calls);
         }

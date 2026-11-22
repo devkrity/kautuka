@@ -252,7 +252,7 @@ public sealed class U1_DecisionFunctionTests : IDisposable
         bool proxyReady = false;
         var store = new NetworkAccessPolicyStore(Path.Combine(tempDir, Guid.NewGuid().ToString("N"), "state.json"));
         var registry = new WorkloadRegistry();
-        var controller = new NacController(store, registry, isPackageProxyReady: () => proxyReady);
+        var controller = new NacController(store, registry, packageProxyAdmission: () => new(proxyReady));
         RegisterOrdinaryAgent(controller, "10.247.1.30", "user-x", "agent-x");
         var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
         store.SetRule(admin, new RuleWriteSpec("agent", "user-x", "agent-x", null, "example.com", "host", 443, Allowed: true), store.Revision);

@@ -153,7 +153,10 @@ public sealed record NetworkAccessDecisionResult(
 {
     public bool AllowLan { get; init; }
     internal RegistryEntry? PendingSource { get; init; }
+    internal PackageProxyAdmission? PendingPackageProxy { get; init; }
 }
+
+public readonly record struct PackageProxyAdmission(bool Ready, Task<bool>? Verification = null, long Generation = 0);
 
 public sealed record ContainerConnectionInput(
     string? SourceIp,

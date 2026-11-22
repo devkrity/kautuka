@@ -283,8 +283,6 @@ public sealed class WorkspaceSidecarSupervisor(
                     return false;
                 }
 
-                if (isPackageProxy) egressTopologyManager?.SetPackageProxyReady(true);
-
                 logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
                 return true;
             }
@@ -382,7 +380,6 @@ public sealed class WorkspaceSidecarSupervisor(
             }
         }
 
-        if (isPackageProxy) egressTopologyManager?.SetPackageProxyReady(ready);
         if (ready)
         {
             logger.LogInformation("Sidecar {Name} is ready.", sidecar.Name);
@@ -903,7 +900,8 @@ public sealed class WorkspaceSidecarSupervisor(
 
         string containerId = ReadInspectString(inspectJson, "Id");
         await egressTopologyManager.AuthorizePackageProxyContainerAsync(containerId, imageId, cancellationToken).ConfigureAwait(false);
-        if (!await egressTopologyManager.VerifyPackageProxyRulesetAsync(containerId, cancellationToken).ConfigureAwait(false))
+        if (!await egressTopologyManager.VerifyPackageProxyRulesetAsync(
+            containerId, registerAfterVerification: true, cancellationToken).ConfigureAwait(false))
         {
             egressTopologyManager.SetPackageProxyReady(false);
             await RevokeAndRemovePackageProxyAsync(containerId, sidecar.Name, cancellationToken).ConfigureAwait(false);
@@ -911,7 +909,6 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        egressTopologyManager.RegisterVerifiedPackageProxyContainer(containerId);
         return true;
     }
 

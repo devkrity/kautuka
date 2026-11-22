@@ -15,8 +15,8 @@ public static class NetworkAccessControllerRegistration
             sp.GetRequiredService<Kautuka.NetworkAccessController.NetworkAccessAuditRing>(),
             isContainerAuthorizationGateOpen: () =>
                 sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsStartupGateOpen,
-            isPackageProxyReady: () =>
-                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().IsPackageProxyReady,
+            packageProxyAdmission: () =>
+                sp.GetRequiredService<Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess.EgressTopologyManager>().GetPackageProxyAdmission(),
             approvalHold: approvalHold,
             maxHeldCalls: maxHeldCalls,
             maxHeldCallsPerUser: maxHeldCallsPerUser));

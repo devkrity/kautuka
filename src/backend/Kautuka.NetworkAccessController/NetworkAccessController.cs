@@ -51,7 +51,7 @@ public sealed class NetworkAccessController
     private readonly IWorkloadRegistry registry;
     private readonly NetworkAccessAuditRing auditRing;
     private readonly Func<bool>? isContainerAuthorizationGateOpen;
-    private readonly Func<bool>? isPackageProxyReady;
+    private readonly Func<PackageProxyAdmission>? packageProxyAdmission;
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan approvalHold;
     private readonly object approvalHoldLock = new();
@@ -71,7 +71,7 @@ public sealed class NetworkAccessController
         IWorkloadRegistry registry,
         NetworkAccessAuditRing? auditRing = null,
         Func<bool>? isContainerAuthorizationGateOpen = null,
-        Func<bool>? isPackageProxyReady = null,
+        Func<PackageProxyAdmission>? packageProxyAdmission = null,
         TimeProvider? timeProvider = null,
         TimeSpan approvalHold = default,
         int maxHeldCalls = DefaultHeldCallLimit,
@@ -86,7 +86,7 @@ public sealed class NetworkAccessController
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
         this.isContainerAuthorizationGateOpen = isContainerAuthorizationGateOpen;
-        this.isPackageProxyReady = isPackageProxyReady;
+        this.packageProxyAdmission = packageProxyAdmission;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.approvalHold = approvalHold;
         this.maxHeldCalls = maxHeldCalls;
@@ -200,6 +200,20 @@ public sealed class NetworkAccessController
         string? sni,
         RegistryEntry? expectedSource = null,
         bool recordPendingRequest = true)
+        => EvaluateContainerConnection(sourceIp, destinationIp, destinationPort, isTls, sni,
+            expectedSource, recordPendingRequest, waitForPackageVerification: false);
+
+    internal NetworkAccessDecisionResult EvaluateContainerConnection(
+        string? sourceIp,
+        string? destinationIp,
+        int destinationPort,
+        bool isTls,
+        string? sni,
+        RegistryEntry? expectedSource,
+        bool recordPendingRequest,
+        bool waitForPackageVerification,
+        long? expectedPackageProxyGeneration = null,
+        bool allowVerifiedPackageProxy = true)
     {
         Interlocked.Increment(ref checks);
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -308,9 +322,24 @@ public sealed class NetworkAccessController
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "blocked");
         }
 
-        if (isPackageProxyService && isPackageProxyReady?.Invoke() == false)
+        if (isPackageProxyService)
         {
-            return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "package_proxy_unavailable");
+            PackageProxyAdmission admission = packageProxyAdmission?.Invoke() ?? new(Ready: true);
+            bool invalid = !allowVerifiedPackageProxy
+                || (expectedPackageProxyGeneration is { } generation && generation != admission.Generation);
+            if (!admission.Ready || invalid)
+            {
+                if (!invalid && waitForPackageVerification && admission.Verification is not null)
+                {
+                    return new NetworkAccessDecisionResult(false, "package_proxy_unavailable")
+                    {
+                        PendingPackageProxy = admission,
+                        PendingSource = entry,
+                    };
+                }
+
+                return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "package_proxy_unavailable");
+            }
         }
         if (entry.Egress == "proxy-only" && !isPackageProxyService)
         {
