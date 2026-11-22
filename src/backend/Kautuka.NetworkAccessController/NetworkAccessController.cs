@@ -280,7 +280,9 @@ public sealed class NetworkAccessController
         {
             if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
                 && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
-                && normalizedDestination is "api.github.com" or "github.com" or "release-assets.githubusercontent.com")
+                && normalizedDestination is ("api.github.com" or "github.com" or "release-assets.githubusercontent.com")
+                && FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort)
+                    is { Allowed: true } releaseRule && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule))
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
                     "release_provider", ClusterDfpPublic, openInternetBadge: false);
 

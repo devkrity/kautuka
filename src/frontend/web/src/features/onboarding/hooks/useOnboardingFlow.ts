@@ -614,6 +614,7 @@ export function useOnboardingFlow() {
     canImportConnectors,
     canImportSkills,
     canUseCatalogRecommendations,
+    canManageServiceNetworkAccess: currentUser?.role === 'admin',
     personaDefinitions,
     selectedAgentPresetId,
     setSelectedAgentPresetId,

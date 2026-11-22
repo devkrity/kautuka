@@ -195,6 +195,7 @@ builder.Services.AddSingleton<IWorkloadRegistry>(sp =>
 builder.Services.AddSingleton(sp =>
     new NetworkAccessPolicyStore(
         Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
+        seedRules: applianceEnabled ? null : NetworkAccessDefaultSeeds.DefaultRules.Where(rule => rule.AgentId != "updateservice").ToArray(),
         logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
 builder.Services.AddSingleton(sp =>
     new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl"),

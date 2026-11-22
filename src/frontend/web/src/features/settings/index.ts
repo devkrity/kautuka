@@ -43,6 +43,7 @@ export { ProviderCard } from './components/ProviderCard';
 export { WorkspaceAndSandboxSection } from './components/WorkspaceAndSandboxSection';
 export { PackageCacheStatsSection } from './components/PackageCacheStatsSection';
 export { ObservabilitySection } from './components/ObservabilitySection';
+export { ChannelSettingsSection } from './components/ChannelSettingsSection';
 export { ModelForm } from './components/ModelForm';
 export { ModelCard } from './components/ModelCard';
 export { ModelDiscoverySelect } from './components/ModelDiscoverySelect';

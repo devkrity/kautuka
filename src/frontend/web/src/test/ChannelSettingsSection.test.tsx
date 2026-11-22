@@ -43,4 +43,50 @@ describe('platform channel settings', () => {
       userId: 'system', agentId: 'channelhost', destination: 'slack.com', allowed: true,
     }));
   });
+
+  it('shows the paused release hosts and writes only scoped permissions after approval', async () => {
+    const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com'];
+    const rules = hosts.map(destination => ({
+      scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination, port: 443, allowed: false,
+    }));
+    let revision = 4;
+    api.get.mockImplementation(async () => ({ data: { revision, rules: [...rules] } }));
+    api.put.mockImplementation(async (_url: string, body: (typeof rules)[number]) => {
+      const index = rules.findIndex(rule => rule.destination === body.destination);
+      rules[index] = body;
+      revision += 1;
+      return { data: body };
+    });
+    render(<ChannelSettingsSection />);
+    expect(await screen.findByText('In-app updates: Paused')).toBeVisible();
+    expect(screen.getByText(hosts.join(', '))).toBeVisible();
+    expect(api.put).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Enable in-app updates' }));
+    expect(await screen.findByText('In-app updates enabled.')).toBeVisible();
+    expect(api.put).toHaveBeenCalledTimes(3);
+    hosts.forEach((destination, index) => {
+      expect(api.put).toHaveBeenNthCalledWith(index + 1, '/network-access/rules', expect.objectContaining({
+        scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination,
+        port: 443, allowed: true, allowLan: false, expectedRevision: 4 + index,
+      }));
+    });
+  });
+
+  it('can pause a saved service permission while a broader rule blocks it', async () => {
+    const grant = { scopeKind: 'agent', userId: 'system', agentId: 'channelhost', destination: 'slack.com', port: 443, allowed: true };
+    const block = { scopeKind: 'system', destination: 'slack.com', port: 443, allowed: false };
+    const rules = [grant, block];
+    api.get.mockImplementation(async () => ({ data: { revision: 6, rules: [...rules] } }));
+    api.put.mockImplementation(async (_url: string, body: typeof grant) => {
+      rules[0] = body;
+      return { data: body };
+    });
+    render(<ChannelSettingsSection />);
+    expect(await screen.findByText('Slack: Blocked by another network rule')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Pause Slack' }));
+    expect(await screen.findByText('Slack: Paused')).toBeVisible();
+    expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
+      userId: 'system', agentId: 'channelhost', destination: 'slack.com', allowed: false,
+    }));
+  });
 });

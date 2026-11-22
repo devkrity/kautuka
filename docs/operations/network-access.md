@@ -30,6 +30,8 @@ Administrators can also set an address that Slack and Telegram users can reach. 
 
 Slack and Telegram start paused. Administrators can enable each channel in Settings → Advanced → Network access. The same channel permission controls ChannelHost's application checks and Envoy's admission of new connections to Telegram's API or Slack's domain and subdomains. It grants no permissions to agents or connectors. Pausing keeps saved account settings and blocks new connections. Existing connections can remain open.
 
+The first-run wizard offers these controls in optional setup. In-app update downloads start paused too. An administrator can enable UpdateService's scoped rules for `api.github.com`, `github.com`, and `release-assets.githubusercontent.com` from the same controls. UpdateService still requires verified container identity, TLS on port 443 and Envoy's public route.
+
 Approved tool calls resumed by the background dispatcher retain the approving run's user, agent, and connector identity for network access checks. This is covered by a focused continuation test.
 
 Hosted catalogue connector discovery runs as the installing user and saves the verified tool definitions and image and bundle digests alongside the connector.

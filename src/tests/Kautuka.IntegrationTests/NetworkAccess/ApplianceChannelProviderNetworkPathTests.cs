@@ -89,8 +89,15 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
         registry.Register(new RegistryEntry(source, "system", "updateservice", "fixture", "agent-sandbox", null,
             "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, Purpose: "appliance-updateservice"));
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
+        var admin = new NetworkAccessActor("admin", IsAdmin: true);
+        var releaseGrant = new RuleWriteSpec("agent", "system", "updateservice", null, "github.com", "host", 443, true);
+        Assert.Throws<UnauthorizedAccessException>(() => policy.SetRule(new NetworkAccessActor("member", IsAdmin: false), releaseGrant, policy.Revision));
+        policy.SetRule(admin, new RuleWriteSpec("system", null, null, null, "github.com", "host", 443, true), policy.Revision);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
         foreach (string host in new[] { "api.github.com", "github.com", "release-assets.githubusercontent.com" })
         {
+            policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, host, "host", 443, true), policy.Revision);
             var decision = controller.EvaluateContainerConnection(source, sinkhole, 443, true, host);
             Assert.True(decision.Allowed);
             Assert.Equal(Kautuka.NetworkAccessController.NetworkAccessController.ClusterDfpPublic, decision.Cluster);
@@ -101,7 +108,9 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 8443, true, "github.com").Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, false, null).Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, "192.0.2.2", 443, true, "github.com").Allowed);
-        policy.SetBrake(new NetworkAccessActor("admin", IsAdmin: true), "system", null, on: true);
+        policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "api.github.com", "host", 443, false), policy.Revision);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "api.github.com").Allowed);
+        policy.SetBrake(admin, "system", null, on: true);
         Assert.Equal("brake_system", controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Reason);
     }
 

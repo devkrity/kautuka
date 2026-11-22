@@ -186,6 +186,7 @@ export const OnboardingWizard: React.FC = () => {
     loadExistingSetup,
     canImportConnectors,
     canImportSkills,
+    canManageServiceNetworkAccess,
     onboardingHealth,
     personaDefinitions,
     selectedAgentPresetId,
@@ -439,6 +440,7 @@ export const OnboardingWizard: React.FC = () => {
 
             {stage === WIZARD_STAGES.recommendations && (
               <RecommendationsScreen
+                canManageServiceNetworkAccess={canManageServiceNetworkAccess}
                 canImportConnectors={canImportConnectors}
                 canImportSkills={canImportSkills}
                 onBack={() => goNext(WIZARD_STAGES.success)}

@@ -64,6 +64,36 @@
     {
       "scopeKind": "agent",
       "userId": "system",
+      "agentId": "updateservice",
+      "destination": "api.github.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": false,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "updateservice",
+      "destination": "github.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": false,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "updateservice",
+      "destination": "release-assets.githubusercontent.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": false,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
       "agentId": "channelhost",
       "destination": "api.telegram.org",
       "destKind": "host",

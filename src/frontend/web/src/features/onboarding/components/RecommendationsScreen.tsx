@@ -1,5 +1,6 @@
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import { ChannelSettingsSection } from '@/features/settings';
 import React from 'react';
 
 type RecommendationsScreenProps = {
@@ -8,6 +9,7 @@ type RecommendationsScreenProps = {
   onSetupTelegram: () => void;
   canImportConnectors: boolean;
   canImportSkills: boolean;
+  canManageServiceNetworkAccess?: boolean;
 };
 
 export const RecommendationsScreen: React.FC<RecommendationsScreenProps> = ({
@@ -16,6 +18,7 @@ export const RecommendationsScreen: React.FC<RecommendationsScreenProps> = ({
   onSetupTelegram,
   canImportConnectors,
   canImportSkills,
+  canManageServiceNetworkAccess = false,
 }) => {
   const destinations = [
     canImportConnectors ? 'Connectors' : null,
@@ -55,6 +58,8 @@ export const RecommendationsScreen: React.FC<RecommendationsScreenProps> = ({
           </p>
         </div>
       </div>
+
+      {canManageServiceNetworkAccess && <ChannelSettingsSection />}
 
       <Alert variant="info" className="shadow-sm">
         <div className="font-medium">Where to manage them later</div>
