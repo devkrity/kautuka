@@ -377,7 +377,7 @@ public sealed partial class NetworkAccessPolicyStore
             string destination = request.Destination;
             if (includeSubdomains)
             {
-                if (!allow || kind != "host" || !NetworkRegistrableDomain.TryGet(destination, out string baseDomain))
+                if (!allow || kind != "host" || !RegistrableDomain.TryGet(destination, out string baseDomain))
                     throw new ArgumentException("This request does not support base domain approval.", nameof(includeSubdomains));
                 kind = "domain";
                 destination = baseDomain;
@@ -388,7 +388,8 @@ public sealed partial class NetworkAccessPolicyStore
                 request.Port,
                 allow,
                 allow && allowLan,
-                actor.IsAdmin);
+                actor.IsAdmin,
+                registrableDomain: RegistrableDomain);
 
             string ruleId = NetworkAccessRule.ComputeId(
                 effectiveScope,
@@ -487,7 +488,7 @@ public sealed partial class NetworkAccessPolicyStore
         lock (gate)
         {
             NetworkAccessPolicyState current = Load();
-            IReadOnlyList<NetworkAccessRule> matching = NetworkAccessRuleMatcher.FindApplicable(current, null, null, null, kind, host, targetPort);
+            IReadOnlyList<NetworkAccessRule> matching = NetworkAccessRuleMatcher.FindApplicable(RegistrableDomain, current, null, null, null, kind, host, targetPort);
             if (current.Brake.System || matching.Any(rule => !rule.Allowed || (allowLan && !rule.AllowLan)))
                 return (current.Revision, "restricted");
             if (matching.Count != 0 || seedRules.Any(rule => rule.ScopeKind == "system" && rule.Allowed
@@ -536,7 +537,8 @@ public sealed partial class NetworkAccessPolicyStore
                 spec.Allowed,
                 spec.Allowed && spec.AllowLan,
                 actor.IsAdmin,
-                allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan);
+                allowLoopback: scopeKind == "system" && actor.IsAdmin && spec.Allowed && spec.AllowLan,
+                registrableDomain: RegistrableDomain);
 
             string ruleId = NetworkAccessRule.ComputeId(
                 scopeKind,
@@ -828,10 +830,10 @@ public sealed partial class NetworkAccessPolicyStore
         return EvaluatesToAllow(stateWithNewRule, req);
     }
 
-    private static bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
+    private bool EvaluatesToAllow(NetworkAccessPolicyState state, NetworkAccessRequest req)
     {
         IReadOnlyList<NetworkAccessRule> matches = NetworkAccessRuleMatcher.FindApplicable(
-            state, req.UserId, req.AgentId, req.ConnectorId, req.DestKind, req.Destination, req.Port,
+            RegistrableDomain, state, req.UserId, req.AgentId, req.ConnectorId, req.DestKind, req.Destination, req.Port,
             allowAnyPublic: req.Origin == "container" && req.ConnectorId is not null);
         return !matches.Any(static rule => !rule.Allowed)
             && matches.Any(rule => rule.Allowed && (req.DestKind != "ip"

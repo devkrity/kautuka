@@ -72,7 +72,6 @@ for (const name of [
   'LICENSE-APACHE-sqlite-vec.txt',
   'LICENSE-openobserve.txt',
   'LICENSE-proxy.txt',
-  'LICENSE-public-suffix-list.txt',
   'LICENSE-OFL-1.1-IBM-Plex-Mono.txt',
   'LICENSE-OFL-1.1-Source-Sans-3.txt',
   'LICENSE-EPL-2.0-elkjs.md',

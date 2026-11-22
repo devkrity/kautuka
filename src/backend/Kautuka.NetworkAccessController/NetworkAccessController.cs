@@ -327,7 +327,7 @@ public sealed class NetworkAccessController
         {
             if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
                 && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
-                && normalizedDestination is ("api.github.com" or "github.com" or "release-assets.githubusercontent.com")
+                && normalizedDestination is ("api.github.com" or "github.com" or "release-assets.githubusercontent.com" or "publicsuffix.org")
                 && FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort)
                     is { Allowed: true } releaseRule && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule))
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
@@ -512,7 +512,7 @@ public sealed class NetworkAccessController
             }
 
             IReadOnlyList<NetworkAccessRule> matchingRules = NetworkAccessRuleMatcher.FindApplicable(
-                state, "system", agentId, null, destKind, normalizedDestination, input.Port, includeSystemDomainFallback: true);
+                policyStore.RegistrableDomain, state, "system", agentId, null, destKind, normalizedDestination, input.Port, includeSystemDomainFallback: true);
             if (matchingRules.Any(static rule => !rule.Allowed && rule.ScopeKind is ("system" or "agent")))
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port)
@@ -667,7 +667,7 @@ public sealed class NetworkAccessController
         NetworkAccessRule? exact = FindSystemExplicitRule(state.Rules, channelHost, destKind, destination, port);
         NetworkAccessRule? providerSwitch = provider == destination ? exact
             : FindSystemExplicitRule(state.Rules, channelHost, destKind, provider, port);
-        IReadOnlyList<NetworkAccessRule> platform = NetworkAccessRuleMatcher.FindApplicable(state, null, null, null, destKind, destination, port);
+        IReadOnlyList<NetworkAccessRule> platform = NetworkAccessRuleMatcher.FindApplicable(policyStore.RegistrableDomain, state, null, null, null, destKind, destination, port);
         if (exact is { Allowed: false } || providerSwitch is { Allowed: false } || platform.Any(static rule => !rule.Allowed))
             return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
         if (exact is { Allowed: true } || providerSwitch is { Allowed: true })
@@ -679,9 +679,9 @@ public sealed class NetworkAccessController
         return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
     }
 
-    private static bool HasPackageServiceExplicitDeny(
+    private bool HasPackageServiceExplicitDeny(
         NetworkAccessPolicyState state, RegistryEntry entry, string destKind, string destination, int port)
-        => NetworkAccessRuleMatcher.FindApplicable(state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)
+        => NetworkAccessRuleMatcher.FindApplicable(policyStore.RegistrableDomain, state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port)
             .Any(static rule => !rule.Allowed);
     private ScopeMatchOutcome ResolvePackageServiceDefault(
         NetworkAccessPolicyState state,
@@ -708,7 +708,7 @@ public sealed class NetworkAccessController
         int port)
     {
         IReadOnlyList<NetworkAccessRule> applicable = NetworkAccessRuleMatcher.FindApplicable(
-            state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port,
+            policyStore.RegistrableDomain, state, entry.UserId, entry.AgentId, entry.ConnectorId, destKind, destination, port,
             allowAnyPublic: entry.ExecContext is "isolated" or "isolated-with-agent-files");
         if (applicable.Any(static rule => !rule.Allowed))
             return new ScopeMatchOutcome(ScopeMatchKind.BlockedByRule, "blocked", false, false);

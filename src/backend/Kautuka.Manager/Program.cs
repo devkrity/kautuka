@@ -196,7 +196,10 @@ builder.Services.AddSingleton(sp =>
     new NetworkAccessPolicyStore(
         Path.Combine(managerDataRoot, "networkAccess", "policy", "state.json"),
         seedRules: applianceEnabled ? null : NetworkAccessDefaultSeeds.DefaultRules.Where(rule => rule.AgentId != "updateservice").ToArray(),
-        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>()));
+        logger: sp.GetRequiredService<ILogger<NetworkAccessPolicyStore>>(),
+        registrableDomain: new NetworkRegistrableDomain(
+            Path.Combine(KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration), "updateService", NetworkRegistrableDomain.ListFileName),
+            builder.Configuration.GetValue("Update:PublicSuffixMinimumRuleCount", NetworkRegistrableDomain.DefaultMinimumRuleCount))));
 builder.Services.AddSingleton(sp =>
     new NetworkAccessAuditRing(Path.Combine(managerDataRoot, "networkAccess", "audit", "decisions.jsonl"),
         10 * 1024 * 1024, sp.GetRequiredService<ILogger<NetworkAccessAuditRing>>()));

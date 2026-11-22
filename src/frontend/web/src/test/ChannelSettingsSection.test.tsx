@@ -45,7 +45,7 @@ describe('platform channel settings', () => {
   });
 
   it('shows the paused release hosts and writes only scoped permissions after approval', async () => {
-    const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com'];
+    const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'publicsuffix.org'];
     const rules = hosts.map(destination => ({
       scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination, port: 443, allowed: false,
     }));
@@ -63,7 +63,7 @@ describe('platform channel settings', () => {
     expect(api.put).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Enable in-app updates' }));
     expect(await screen.findByText('In-app updates enabled.')).toBeVisible();
-    expect(api.put).toHaveBeenCalledTimes(3);
+    expect(api.put).toHaveBeenCalledTimes(hosts.length);
     hosts.forEach((destination, index) => {
       expect(api.put).toHaveBeenNthCalledWith(index + 1, '/network-access/rules', expect.objectContaining({
         scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination,

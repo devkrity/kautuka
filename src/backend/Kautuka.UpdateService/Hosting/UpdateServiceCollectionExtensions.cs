@@ -19,7 +19,12 @@ public static class UpdateServiceCollectionExtensions
 
         IHttpClientBuilder httpClient = services.AddHttpClient("kautuka.updateservice.github");
         if (applianceMode)
+        {
             httpClient.ConfigurePrimaryHttpMessageHandler(static () => new SocketsHttpHandler { UseProxy = false });
+            services.AddHttpClient(PublicSuffixRefreshWorker.ClientName, static client => client.MaxResponseContentBufferSize = 4 * 1024 * 1024)
+                .ConfigurePrimaryHttpMessageHandler(static () => new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
+            services.AddHostedService<PublicSuffixRefreshWorker>();
+        }
         services.AddSingleton<IUpdateRuntimePolicyStore, UpdateRuntimePolicyStore>();
         services.AddSingleton<IUpdateStateStore, JsonUpdateStateStore>();
         services.AddSingleton<IHostedCatalogStateStore, JsonHostedCatalogStateStore>();

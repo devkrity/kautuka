@@ -44,8 +44,9 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         string path,
         IReadOnlyList<NetworkAccessRule>? seedRules = null,
         NetworkAccessAuditRing? auditRing = null,
-        ILogger<NetworkAccessPolicyStore>? logger = null)
-        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing, logger: logger)
+        ILogger<NetworkAccessPolicyStore>? logger = null,
+        NetworkRegistrableDomain? registrableDomain = null)
+        : this(path, FlushDirectory, beforeRenameHook: null, seedRules, auditRing, logger: logger, registrableDomain: registrableDomain)
     {
     }
 
@@ -57,7 +58,8 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         NetworkAccessAuditRing? auditRing = null,
         Action? beforeBackgroundDiskLockHook = null,
         Action? beforeBackgroundDrainHook = null,
-        ILogger<NetworkAccessPolicyStore>? logger = null)
+        ILogger<NetworkAccessPolicyStore>? logger = null,
+        NetworkRegistrableDomain? registrableDomain = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(syncDirectory);
@@ -69,6 +71,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
         this.logger = logger;
         this.seedRules = seedRules ?? NetworkAccessDefaultSeeds.DefaultRules;
         this.auditRing = auditRing;
+        RegistrableDomain = registrableDomain ?? new NetworkRegistrableDomain(path: null);
 
         // Bounded channel of size 1 with DropOldest for waking the coalescing writer.
         var channelOptions = new BoundedChannelOptions(1)
@@ -86,6 +89,7 @@ public sealed partial class NetworkAccessPolicyStore : IAsyncDisposable, IDispos
     public long BackgroundWriteErrorCount => Interlocked.Read(ref backgroundWriteErrorCount);
 
     public IReadOnlyList<NetworkAccessRule> SeedRules => seedRules;
+    public NetworkRegistrableDomain RegistrableDomain { get; }
 
     public void EnsureLoaded()
     {

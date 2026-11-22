@@ -34,7 +34,7 @@ The first-run wizard offers these controls in optional setup. In-app update down
 
 On the appliance, an outbound call with a new network access request can wait up to 20 seconds for a decision. Approval checks the original caller and destination again before traffic proceeds. A rejection, expired wait, cancelled call or changed workload identity leaves the original operation blocked. Four calls can wait at once, with one waiting call per request. Temporary connector probes still return their request immediately.
 
-Hostname approvals start with the requested host. The request card can include the base domain and its subdomains when the packaged Public Suffix List identifies one. The selected user, helper or connector scope and port still apply. IP addresses, shared public suffixes and temporary probes use exact approval. An existing block still takes precedence.
+Hostname approvals start with the requested host. When the appliance's Public Suffix List identifies a base domain, the card can approve that domain and its subdomains. The selected user, helper or connector scope and port still apply. IP addresses, shared public suffixes and temporary probes use exact approval. If the list is missing or invalid, existing domain allows match their exact hostname and domain blocks still cover subdomains.
 
 Approved tool calls resumed by the background dispatcher retain the approving run's user, agent, and connector identity for network access checks. This is covered by a focused continuation test.
 

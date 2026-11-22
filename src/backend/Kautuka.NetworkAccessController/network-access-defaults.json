@@ -94,6 +94,16 @@
     {
       "scopeKind": "agent",
       "userId": "system",
+      "agentId": "updateservice",
+      "destination": "publicsuffix.org",
+      "destKind": "host",
+      "port": 443,
+      "allowed": false,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
       "agentId": "channelhost",
       "destination": "api.telegram.org",
       "destKind": "host",

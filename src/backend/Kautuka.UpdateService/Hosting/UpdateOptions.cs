@@ -1,3 +1,5 @@
+using Kautuka.NetworkAccessController;
+
 namespace Kautuka.UpdateService.Hosting;
 
 public sealed class UpdateOptions
@@ -49,6 +51,9 @@ public sealed class UpdateOptions
     public TimeSpan DiscoveryInterval { get; set; } = TimeSpan.FromDays(1);
 
     public TimeSpan CatalogRefreshInterval { get; set; } = TimeSpan.FromDays(1);
+    public TimeSpan PublicSuffixRefreshInterval { get; set; } = TimeSpan.FromDays(7);
+    public int PublicSuffixMaxRuleDropPercent { get; set; } = 25;
+    public int PublicSuffixMinimumRuleCount { get; set; } = NetworkRegistrableDomain.DefaultMinimumRuleCount;
 
     internal bool HasManifestPublicKey
         => !string.IsNullOrWhiteSpace(ManifestPublicKeyPem) || File.Exists(ManifestPublicKeyPath);

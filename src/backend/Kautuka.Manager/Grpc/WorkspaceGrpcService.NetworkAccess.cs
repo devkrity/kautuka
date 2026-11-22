@@ -588,7 +588,7 @@ public sealed partial class WorkspaceGrpcService
             ? throw new ArgumentException("Authenticated actor userId is required.")
             : new NetworkAccessActor(actor.UserId, actor.IsAdmin);
 
-    private static NetworkAccessRequestMessage ToMessage(NetworkAccessRequestView view)
+    private NetworkAccessRequestMessage ToMessage(NetworkAccessRequestView view)
         => new()
         {
             Id = view.Request.Id,
@@ -610,7 +610,7 @@ public sealed partial class WorkspaceGrpcService
             WaitingForAdmin = view.WaitingForAdmin,
             CompatibilityMode = view.CompatibilityMode,
             BaseDomain = view.Request.Status == "pending" && view.Request.DestKind == "host" && view.Request.Purpose != "probe"
-                && NetworkRegistrableDomain.TryGet(view.Request.Destination, out string domain) ? domain : string.Empty,
+                && Nac.PolicyStore.RegistrableDomain.TryGet(view.Request.Destination, out string domain) ? domain : string.Empty,
         };
 
     private static NetworkAccessRuleMessage ToMessage(NetworkAccessRuleView view)

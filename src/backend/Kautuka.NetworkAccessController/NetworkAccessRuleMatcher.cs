@@ -3,6 +3,7 @@ namespace Kautuka.NetworkAccessController;
 internal static class NetworkAccessRuleMatcher
 {
     public static IReadOnlyList<NetworkAccessRule> FindApplicable(
+        NetworkRegistrableDomain registrableDomain,
         NetworkAccessPolicyState state,
         string? userId,
         string? agentId,
@@ -15,6 +16,7 @@ internal static class NetworkAccessRuleMatcher
     {
         var matches = new List<NetworkAccessRule>();
         string? baseDomain = null;
+        bool listAvailable = false;
         foreach (NetworkAccessRule rule in state.Rules)
         {
             if (IsPaused(state, rule))
@@ -42,8 +44,12 @@ internal static class NetworkAccessRuleMatcher
                     && destination[destination.Length - rule.Destination.Length - 1] == '.'
                     && destination.EndsWith(rule.Destination, StringComparison.Ordinal))))
             {
-                baseDomain ??= NetworkRegistrableDomain.TryGet(destination, out string domain) ? domain : string.Empty;
-                domainMatch = baseDomain == rule.Destination;
+                if (baseDomain is null)
+                {
+                    _ = registrableDomain.TryGet(destination, out baseDomain, out listAvailable);
+                }
+                domainMatch = listAvailable ? baseDomain == rule.Destination
+                    : !rule.Allowed || destination == rule.Destination;
             }
             if (exact || anyPublic || domainMatch)
                 matches.Add(rule);

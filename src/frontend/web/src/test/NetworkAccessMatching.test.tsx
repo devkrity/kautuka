@@ -25,7 +25,7 @@ describe('network access user scopes', () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<PendingApprovalCard request={request} currentUser={{ id: 'alice', role: 'user' }}
       userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
-    const toggle = screen.getByRole('checkbox', { name: 'Include cnn.com and its subdomains' });
+    const toggle = screen.getByRole('checkbox', { name: 'Allow all of cnn.com, including its subdomains' });
     expect(toggle).not.toBeChecked();
     if (includeSubdomains) fireEvent.click(toggle);
     fireEvent.click(screen.getByRole('button', { name: 'Allow Assistant to access this site' }));

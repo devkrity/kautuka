@@ -153,7 +153,8 @@ public static class NetworkDestinationNormalizer
         bool allowed,
         bool allowLan,
         bool isAdmin,
-        bool allowLoopback = false)
+        bool allowLoopback = false,
+        NetworkRegistrableDomain? registrableDomain = null)
     {
         if (string.IsNullOrWhiteSpace(destKind))
         {
@@ -171,7 +172,7 @@ public static class NetworkDestinationNormalizer
                 if (port is < 1 or > 65535)
                     throw new ArgumentException("invalid_port: Port must be between 1 and 65535.", nameof(port));
                 if (!TryNormalizeHostname(destination, out string requestedDomain, out _)
-                    || !NetworkRegistrableDomain.TryGet(requestedDomain, out string domain) || domain != requestedDomain)
+                    || registrableDomain is null || !registrableDomain.TryGet(requestedDomain, out string domain) || domain != requestedDomain)
                     throw new ArgumentException("invalid_destination: A domain rule must use a registrable base domain.", nameof(destination));
                 return ("domain", domain, port);
 

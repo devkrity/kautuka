@@ -192,7 +192,7 @@ export function PendingApprovalCard({
               <Checkbox id={`domain-${request.id}`} checked={includeSubdomains} disabled={disabled || submitting}
                 onChange={(event) => setIncludeSubdomains(event.target.checked)} />
               <label htmlFor={`domain-${request.id}`} className="text-sm cursor-pointer">
-                Include {baseDomain} and its subdomains
+                Allow all of {baseDomain}, including its subdomains
               </label>
             </div>
           )}

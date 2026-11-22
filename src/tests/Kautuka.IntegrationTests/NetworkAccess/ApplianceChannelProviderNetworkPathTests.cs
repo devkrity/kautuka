@@ -95,7 +95,8 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         Assert.Throws<UnauthorizedAccessException>(() => policy.SetRule(new NetworkAccessActor("member", IsAdmin: false), releaseGrant, policy.Revision));
         policy.SetRule(admin, new RuleWriteSpec("system", null, null, null, "github.com", "host", 443, true), policy.Revision);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
-        foreach (string host in new[] { "api.github.com", "github.com", "release-assets.githubusercontent.com" })
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "publicsuffix.org").Allowed);
+        foreach (string host in new[] { "api.github.com", "github.com", "release-assets.githubusercontent.com", "publicsuffix.org" })
         {
             policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, host, "host", 443, true), policy.Revision);
             var decision = controller.EvaluateContainerConnection(source, sinkhole, 443, true, host);

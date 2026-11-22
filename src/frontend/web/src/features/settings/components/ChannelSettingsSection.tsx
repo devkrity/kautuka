@@ -9,7 +9,7 @@ const channels = [
 ] as const;
 const updates = {
   name: 'in-app updates', agentId: 'updateservice',
-  hosts: ['api.github.com', 'github.com', 'release-assets.githubusercontent.com'],
+  hosts: ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'publicsuffix.org'],
 } as const;
 type ServicePermission = (typeof channels)[number] | typeof updates;
 
