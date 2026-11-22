@@ -439,23 +439,7 @@ public sealed class WorkspaceSidecarSupervisor(
                 cancellationToken).ConfigureAwait(false);
             if (!ready || !IsPackageProxy(sidecar)) return ready;
 
-            PodmanCommandResult healthCheck = await podmanCommandRunner.RunAsync(
-                ["healthcheck", "run", sidecar.Name],
-                10,
-                cancellationToken).ConfigureAwait(false);
-            if (healthCheck.ExitCode != 0)
-            {
-                logger.LogWarning(
-                    "Package proxy image healthcheck failed (exit {ExitCode}; error {Error}; output {Output}).",
-                    healthCheck.ExitCode,
-                    healthCheck.StdErr.Trim(),
-                    healthCheck.StdOut.Trim());
-                return false;
-            }
-
-            ContainerState proxyState = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
-            return proxyState.IsRunning
-                && string.Equals(proxyState.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
+            return await WaitForPackageProxyHealthAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
         }
 
         if (!IsLoopbackHost(sidecar.HealthCheck.Url.Host))
@@ -508,6 +492,40 @@ public sealed class WorkspaceSidecarSupervisor(
         return false;
     }
 
+    private async Task<bool> WaitForPackageProxyHealthAsync(string name, CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(defaultRunningProbeTimeoutSeconds));
+        try
+        {
+            while (!deadline.IsCancellationRequested)
+            {
+                // Podman may not schedule image health checks in a rootless session.
+                PodmanCommandResult probe = await podmanCommandRunner.RunAsync(
+                    ["healthcheck", "run", name], 10, deadline.Token).ConfigureAwait(false);
+                deadline.Token.ThrowIfCancellationRequested();
+                if (probe.ExitCode == 0)
+                {
+                    ContainerState state = await InspectStateAsync(name, deadline.Token).ConfigureAwait(false);
+                    if (state.IsRunning && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+
+                await Task.Delay(defaultRunningProbeIntervalMilliseconds, deadline.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            // The caller may retry reconciliation. Keep the proxy unavailable meanwhile.
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        logger.LogWarning("Package proxy image healthcheck did not become healthy within {TimeoutSeconds}s.", defaultRunningProbeTimeoutSeconds);
+        return false;
+    }
+
     private async Task<bool> WaitUntilPodmanReadyAsync(
         string sidecarName,
         int timeoutSeconds,
@@ -522,7 +540,8 @@ public sealed class WorkspaceSidecarSupervisor(
             ContainerState state = await InspectStateAsync(sidecarName, timeoutCts.Token).ConfigureAwait(false);
             if (state.IsRunning)
             {
-                if (string.IsNullOrEmpty(state.HealthStatus))
+                if (string.IsNullOrEmpty(state.HealthStatus)
+                    || string.Equals(sidecarName, packageProxySidecarName, StringComparison.Ordinal))
                 {
                     return true;
                 }
@@ -534,12 +553,6 @@ public sealed class WorkspaceSidecarSupervisor(
 
                 if (string.Equals(state.HealthStatus, "unhealthy", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (string.Equals(sidecarName, packageProxySidecarName, StringComparison.Ordinal))
-                    {
-                        // Let the explicit probe confirm whether an unhealthy proxy has recovered.
-                        return true;
-                    }
-
                     logger.LogWarning("Sidecar {Name} reported Podman health status 'unhealthy'.", sidecarName);
                     return false;
                 }

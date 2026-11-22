@@ -54,14 +54,14 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
     [Fact]
     public async Task PackageProxyReadinessExecutesAndRequiresImageHealthcheckAsync()
     {
-        bool healthcheckInvoked = false;
+        int healthcheckCount = 0;
         int inspectCount = 0;
         var podman = new PodmanCommandRunner((args, _) =>
         {
             if (args.Count > 0 && args[0] == "inspect")
             {
                 inspectCount++;
-                string healthStatus = inspectCount == 1 ? "starting" : "healthy";
+                string healthStatus = healthcheckCount < 2 ? "starting" : "healthy";
                 string inspect = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     HostConfig = new { Dns = new[] { EgressTopologyManager.EgressPodIp } },
@@ -73,9 +73,10 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
 
             if (args.SequenceEqual(["healthcheck", "run", "kautuka-pkgs-proxy"]))
             {
-                Assert.Equal(2, inspectCount);
-                healthcheckInvoked = true;
-                return Task.FromResult(new PodmanCommandResult(0, "healthy", string.Empty));
+                Assert.Equal(1, inspectCount);
+                return Task.FromResult(++healthcheckCount == 1
+                    ? new PodmanCommandResult(1, "unhealthy", string.Empty)
+                    : new PodmanCommandResult(0, "healthy", string.Empty));
             }
 
             throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args));
@@ -108,8 +109,8 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             TestContext.Current.CancellationToken]));
 
         Assert.True(await pending.ConfigureAwait(true));
-        Assert.True(healthcheckInvoked);
-        Assert.Equal(3, inspectCount);
+        Assert.Equal(2, healthcheckCount);
+        Assert.Equal(2, inspectCount);
     }
 
     [Theory]

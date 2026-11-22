@@ -125,7 +125,7 @@ The native hook has an appliance OpenObserve profile for `10.247.0.6`. It requir
 
 In appliance mode, Manager starts the pinned OpenObserve image after the egress boundary is ready and disables OpenObserve's vendor telemetry. The collector stores its data under the appliance state root and receives its bootstrap password through a persistent Podman secret. Envoy attaches the authorization header on the ingestion route using its private rendered configuration. Manager requires the existing secret when the collector's data directory is populated.
 
-At startup, Manager waits for Podman's initial health check to finish before running the explicit readiness probe. During routine reconciliation, the same previously verified container can continue serving packages while Manager checks its health, image and live egress rules. Failure, a different container ID, or a detected need for replacement clears readiness. A replacement must pass verification before it can serve packages.
+At startup, Manager retries the explicit package proxy health probe within a bounded window. This works when the rootless Podman session has no scheduled health checks. During routine reconciliation, the same previously verified container can continue serving packages while Manager checks its health, image and live egress rules. Failure, a different container ID, or a detected need for replacement clears readiness. A replacement must pass verification before it can serve packages.
 
 Manager debug logs report how long connector and sandbox artifact builds waited for the image build lock and how long workspace reconciliation took for each trigger.
 
