@@ -246,6 +246,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public bool IsStartupRetryPending => startupCanaryRetryPending;
     public bool RequiresOperatorRecovery => topologyIncidentLatched;
+    public bool IsRecoveryWaitingForNetworkResume => startupCanaryRetryPending && IsCanaryIdentityBraked();
     public DateTimeOffset? NextRecoveryRetryUtc
     {
         get
@@ -254,7 +255,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return scheduled > DateTimeOffset.UtcNow.UtcTicks
                 && !IsStartupGateOpen && !topologyIncidentLatched
                 && (startupInitializationRetryPending || transientRecoveryPending
-                    || (startupCanaryRetryPending && !IsCanaryIdentityBraked()))
+                    || (startupCanaryRetryPending && !IsRecoveryWaitingForNetworkResume))
                 ? new DateTimeOffset(scheduled, TimeSpan.Zero)
                 : null;
         }

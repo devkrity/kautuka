@@ -189,7 +189,12 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (topology?.IsStartupGateOpen != true)
         {
             const string reason = "Your helpers are paused because Kautuka couldn’t verify network protection.";
-            return new(reason, topology?.NextRecoveryRetryUtc, topology?.RequiresOperatorRecovery == true ? administrator : null);
+            if (topology?.RequiresOperatorRecovery == true)
+                return new(reason, NextStep: administrator);
+            if (topology?.IsRecoveryWaitingForNetworkResume == true)
+                return new("Your helpers are paused because network access has been turned off.",
+                    NextStep: "Contact Kautuka support for help resuming network access.");
+            return new(reason, topology?.NextRecoveryRetryUtc);
         }
 
         long next = Interlocked.Read(ref nextServiceRetryUtcTicks);
