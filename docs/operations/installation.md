@@ -73,7 +73,7 @@ Both commands accept `--candidate-version <version>` to inspect a staged release
 
 In appliance mode, Manager's existing `GetHostStatus` RPC reports `core_ready` once the Podman runtime is available, the egress startup gate is open, and the supervised application services pass their local health checks. Manager also checks that the observability container is running.
 
-On first boot, Manager provisions the OpenObserve ingestion credential through the collector's private loopback interface. Envoy receives the named ingestion token for its fixed OTLP endpoint. Manager stores the token as a Podman secret for subsequent boots. The collector's root credential stays with the collector and Manager's provisioning call.
+On first boot, Manager provisions the OpenObserve ingestion credential through the collector's private loopback interface. Envoy receives the named ingestion token for its fixed OTLP endpoint. Manager keeps the token in its owner-only telemetry state for subsequent boots. The collector's root credential stays with the collector and Manager's provisioning call.
 
 When the egress inventory detects that the package proxy stopped, Manager requests a workspace sidecar reconciliation. Package requests stay blocked until the proxy is ready again.
 
@@ -131,7 +131,7 @@ The appliance telemetry listener accepts HTTP OTLP POST requests for logs, metri
 
 The native hook has an appliance OpenObserve profile for `10.247.0.6`. It requires a Manager-authorized container ID and image ID, accepts requests on port 5080 from Envoy, and permits replies on established connections. It drops new outbound connections and IPv6. Manager uses the same profile to verify the live ruleset after startup.
 
-In appliance mode, Manager starts the pinned OpenObserve image after the egress boundary is ready and disables OpenObserve's vendor telemetry. The collector stores its data under the appliance state root and receives its bootstrap password through a persistent Podman secret. Manager requires the existing secret when the collector's data directory is populated. For ingestion, Envoy reads the separate credential from a file inside Manager's private Envoy directory. The generated YAML references the file by path, and Envoy replaces any request authorization header on the OTLP listener.
+In appliance mode, Manager starts the pinned OpenObserve image after the egress boundary is ready and disables OpenObserve's vendor telemetry. The collector stores its data under the appliance state root and reads its bootstrap password from a read-only configuration file mounted only in the collector. Manager requires the existing file when the collector's data directory is populated. For ingestion, Envoy reads the separate credential from a file inside Manager's private Envoy directory. The generated YAML references the file by path, and Envoy replaces any request authorization header on the OTLP listener.
 
 At startup, Manager retries the explicit package proxy health probe within a bounded window. This works when the rootless Podman session has no scheduled health checks. During routine reconciliation, the same previously verified container can continue serving packages while Manager checks its health, image and live egress rules. Failure, a different container ID, or a detected need for replacement clears readiness. A replacement must pass verification before it can serve packages.
 

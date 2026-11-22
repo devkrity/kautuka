@@ -3,44 +3,56 @@ using System.Text;
 using System.Text.Json;
 
 using Kautuka.Manager.RuntimeContainer.Hosting;
+using Kautuka.Security;
 using Kautuka.Telemetry.Telemetry;
 
 namespace Kautuka.Manager.Hosting;
 
 internal static class ApplianceTelemetry
 {
-    internal const string SecretName = "kautuka-appliance-observability";
     internal const string StateName = "observability";
+    internal const string CollectorConfigPath = "/run/kautuka-observability.env";
     private const string IngestionSecretName = "kautuka-appliance-otlp";
     private const string IngestionEndpoint = "http://127.0.0.1:5080/api/default/ingestion-tokens";
+    private const string PasswordSetting = "ZO_ROOT_USER_PASSWORD=";
 
-    internal static async Task EnsureRootSecretAsync(PodmanCommandRunner podman, string stateRoot, CancellationToken token)
+    internal static string RootConfigurationPath(string stateRoot)
+        => Path.Combine(SecretDirectory(stateRoot), "collector.env");
+
+    private static string SecretDirectory(string stateRoot) => Path.Combine(stateRoot, "manager", "telemetry");
+    private static string IngestionSecretPath(string stateRoot) => Path.Combine(SecretDirectory(stateRoot), "ingestion");
+
+    internal static void EnsureRootConfiguration(string stateRoot)
     {
-        PodmanCommandResult exists = await podman.RunAsync(["secret", "exists", SecretName], 10, token).ConfigureAwait(false);
-        if (exists.ExitCode == 1)
+        EnsurePrivateDirectory(SecretDirectory(stateRoot));
+        string path = RootConfigurationPath(stateRoot);
+        if (new FileInfo(path).LinkTarget is not null)
+            throw new InvalidOperationException("The appliance observability configuration must be a regular file.");
+        if (File.Exists(path))
         {
-            string data = Path.Combine(stateRoot, StateName);
-            if (Directory.Exists(data) && Directory.EnumerateFileSystemEntries(data).Any())
-                throw new InvalidOperationException("The appliance observability secret is missing while its data directory is populated.");
-
-            await CreateSecretAsync(podman, SecretName, "A!9" + RandomNumberGenerator.GetHexString(48, lowercase: true), token)
-                .ConfigureAwait(false);
+            _ = ReadRootAuthorization(stateRoot);
+            return;
         }
-        else if (exists.ExitCode != 0)
-            throw new InvalidOperationException("Could not check the appliance observability secret.");
+
+        string data = Path.Combine(stateRoot, StateName);
+        if (Directory.Exists(data) && Directory.EnumerateFileSystemEntries(data).Any())
+            throw new InvalidOperationException("The appliance observability secret is missing while its data directory is populated.");
+
+        string password = "A!9" + RandomNumberGenerator.GetHexString(48, lowercase: true);
+        WriteSecret(path, $"{PasswordSetting}{password}\n", replace: false, mountedInCollector: true);
     }
 
-    internal static async Task<string?> ReadIngestionAuthorizationAsync(PodmanCommandRunner podman, CancellationToken token)
+    internal static string? ReadIngestionAuthorization(string stateRoot)
     {
-        PodmanCommandResult exists = await podman.RunAsync(["secret", "exists", IngestionSecretName], 10, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (exists.ExitCode == 1) return null;
-        if (exists.ExitCode != 0) throw new InvalidOperationException("Could not check the appliance ingestion secret.");
-        string retained = await ReadSecretAsync(podman, IngestionSecretName, token).ConfigureAwait(false);
+        string path = IngestionSecretPath(stateRoot);
+        if (new FileInfo(path).LinkTarget is not null)
+            throw new InvalidOperationException("The appliance ingestion secret must be a regular file.");
+        if (!File.Exists(path)) return null;
+        string retained = File.ReadAllText(path);
         return IsIngestionToken(retained) ? EncodeBasic("default", retained) : null;
     }
 
-    internal static async Task<string?> ProvisionIngestionAuthorizationAsync(PodmanCommandRunner podman, string collectorId, CancellationToken token)
+    internal static async Task<string?> ProvisionIngestionAuthorizationAsync(PodmanCommandRunner podman, string stateRoot, string collectorId, CancellationToken token)
     {
         if (collectorId.Length != 64 || !collectorId.All(char.IsAsciiHexDigit))
             throw new InvalidOperationException("The appliance collector identity is invalid.");
@@ -56,7 +68,7 @@ internal static class ApplianceTelemetry
 
         // Podman's unique bind mount is resolved inside the rootless helper's mount namespace.
         string pinnedNamespace = "--net=" + networkNamespace;
-        string rootAuthorization = await ReadRootAuthorizationAsync(podman, token).ConfigureAwait(false);
+        string rootAuthorization = ReadRootAuthorization(stateRoot);
         (bool Exists, string? Token)? result = ParseIngestionToken(await SendAsync(create: false).ConfigureAwait(false));
         if (result is { Exists: false })
         {
@@ -65,7 +77,8 @@ internal static class ApplianceTelemetry
         }
         if (result?.Token is not { } ingestionToken || !IsIngestionToken(ingestionToken)) return null;
 
-        await CreateSecretAsync(podman, IngestionSecretName, ingestionToken, token, replace: true).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        WriteSecret(IngestionSecretPath(stateRoot), ingestionToken, replace: true);
         return EncodeBasic("default", ingestionToken);
 
         async Task<string?> SendAsync(bool create)
@@ -87,9 +100,12 @@ internal static class ApplianceTelemetry
         }
     }
 
-    internal static async Task<string> ReadRootAuthorizationAsync(PodmanCommandRunner podman, CancellationToken token)
+    internal static string ReadRootAuthorization(string stateRoot)
     {
-        string password = await ReadSecretAsync(podman, SecretName, token).ConfigureAwait(false);
+        string configuration = File.ReadAllText(RootConfigurationPath(stateRoot));
+        if (!configuration.StartsWith(PasswordSetting, StringComparison.Ordinal) || !configuration.EndsWith('\n'))
+            throw new InvalidOperationException("The appliance observability configuration has an invalid format.");
+        string password = configuration[PasswordSetting.Length..^1];
         if (password.Length != 51 || !password.StartsWith("A!9", StringComparison.Ordinal)
             || !password.Skip(3).All(static c => c is >= '0' and <= '9' or >= 'a' and <= 'f'))
             throw new InvalidOperationException("The appliance observability secret has an invalid format.");
@@ -114,29 +130,33 @@ internal static class ApplianceTelemetry
         catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException) { return null; }
     }
 
-    private static async Task<string> ReadSecretAsync(PodmanCommandRunner podman, string name, CancellationToken token)
+    private static void WriteSecret(string path, string value, bool replace, bool mountedInCollector = false)
     {
-        PodmanCommandResult retained = await podman.RunAsync(
-            ["secret", "inspect", "--showsecret", "--format", "{{.SecretData}}", name], 10, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (retained.ExitCode != 0)
-            throw new InvalidOperationException("Could not read the appliance telemetry secret.");
-        return retained.StdOut.TrimEnd('\r', '\n');
-    }
-
-    private static async Task CreateSecretAsync(PodmanCommandRunner podman, string name, string secret, CancellationToken token, bool replace = false)
-    {
-        byte[] bytes = Encoding.ASCII.GetBytes(secret);
+        string directory = Path.GetDirectoryName(path)!;
+        string temporaryPath = Path.Combine(directory, $".telemetry-{Guid.NewGuid():N}.tmp");
         try
         {
-            using var input = new MemoryStream(bytes, writable: false);
-            string[] args = replace ? ["secret", "create", "--replace", name, "-"] : ["secret", "create", name, "-"];
-            PodmanCommandResult created = await podman.RunAsync(args, 10, token,
-                standardInput: input).ConfigureAwait(false);
-            token.ThrowIfCancellationRequested();
-            if (created.ExitCode != 0) throw new InvalidOperationException("Could not provision the appliance telemetry secret.");
+            OwnerOnlySecretFile.WriteAllText(temporaryPath, value);
+            // The rootless collector runs as a remapped non-root UID. Its single-file
+            // mount can read this file while the private parent protects it on the host.
+            if (OperatingSystem.IsLinux() && mountedInCollector)
+                File.SetUnixFileMode(temporaryPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+            File.Move(temporaryPath, path, overwrite: replace);
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        finally { File.Delete(temporaryPath); }
+    }
+
+    private static void EnsurePrivateDirectory(string directory)
+    {
+        if (new DirectoryInfo(directory).LinkTarget is not null)
+            throw new InvalidOperationException("The appliance telemetry directory must not be a symbolic link.");
+        if (OperatingSystem.IsLinux())
+        {
+            const UnixFileMode ownerOnly = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            Directory.CreateDirectory(directory, ownerOnly);
+            File.SetUnixFileMode(directory, ownerOnly);
+        }
+        else Directory.CreateDirectory(directory);
     }
 
     private static bool IsIngestionToken(string token)

@@ -138,8 +138,8 @@ internal sealed partial class ApplianceServiceSupervisor(
                 nextTelemetryProvisioningUtc = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(15);
                 try
                 {
-                    string? authorization = await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token).ConfigureAwait(false)
-                        ?? await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, collector, token).ConfigureAwait(false);
+                    string? authorization = ApplianceTelemetry.ReadIngestionAuthorization(stateRoot)
+                        ?? await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, stateRoot, collector, token).ConfigureAwait(false);
                     if (authorization is not null) topology.ScheduleTelemetryAuthorization(authorization);
                 }
                 catch (Exception error) when (!token.IsCancellationRequested
@@ -524,13 +524,14 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (service.Role == ObservabilityRole)
         {
             string dataDirectory = Directory.CreateDirectory(Path.Combine(stateRoot, ApplianceTelemetry.StateName)).FullName;
+            string bootstrap = RequireMountSource(ApplianceTelemetry.RootConfigurationPath(stateRoot), directory: false);
             args.AddRange([
-                "--secret", $"{ApplianceTelemetry.SecretName},type=env,target=ZO_ROOT_USER_PASSWORD",
                 "--env", $"ZO_ROOT_USER_EMAIL={KautukaTelemetryDefaults.DefaultOpenObserveRootUserEmail}",
                 "--env", "ZO_TELEMETRY=false",
                 "--env", "ZO_DATA_DIR=/data",
+                "--volume", $"{bootstrap}:{ApplianceTelemetry.CollectorConfigPath}:ro,Z",
                 "--volume", $"{dataDirectory}:/data:Z",
-                image,
+                image, "/openobserve", "--config", ApplianceTelemetry.CollectorConfigPath,
             ]);
             return args;
         }

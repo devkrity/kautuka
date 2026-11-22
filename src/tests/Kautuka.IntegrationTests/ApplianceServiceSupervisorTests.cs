@@ -388,8 +388,8 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.True(load.ExitCode == 0, load.StdErr);
         string networkState = Path.Combine(runtime, "network");
         string envoySockets = Path.Combine(sockets, "envoy");
-        await ApplianceTelemetry.EnsureRootSecretAsync(podman, runtime, token);
-        string? telemetryAuthorization = await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token);
+        ApplianceTelemetry.EnsureRootConfiguration(runtime);
+        string? telemetryAuthorization = ApplianceTelemetry.ReadIngestionAuthorization(runtime);
         var registry = new WorkloadRegistry();
         using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
         policy.SetRule(new NetworkAccessActor("fixture-admin", true),
@@ -450,7 +450,7 @@ public sealed class ApplianceServiceSupervisorTests
             await WaitForCollectorAsync(podman, collector, token);
             if (telemetryAuthorization is null)
             {
-                telemetryAuthorization = await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, collector, token);
+                telemetryAuthorization = await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, runtime, collector, token);
                 Assert.NotNull(telemetryAuthorization);
                 topology.ScheduleTelemetryAuthorization(telemetryAuthorization);
                 DateTimeOffset configDeadline = DateTimeOffset.UtcNow.AddSeconds(45);
@@ -459,9 +459,9 @@ public sealed class ApplianceServiceSupervisorTests
                 Assert.False(topology.TelemetryConfigurationPending);
                 Assert.True(topology.IsStartupGateOpen);
             }
-            Assert.True(telemetryAuthorization == await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token),
+            Assert.True(telemetryAuthorization == ApplianceTelemetry.ReadIngestionAuthorization(runtime),
                 "The retained ingestion secret was not reused.");
-            string rootAuthorization = await ApplianceTelemetry.ReadRootAuthorizationAsync(podman, token);
+            string rootAuthorization = ApplianceTelemetry.ReadRootAuthorization(runtime);
             string envoyConfiguration = await File.ReadAllTextAsync(Path.Combine(networkState, "nac", "envoy", "envoy.yaml"), token);
             Assert.False(envoyConfiguration.Contains(rootAuthorization, StringComparison.Ordinal), "Envoy received the collector's root credential.");
             Assert.Equal(0, (await podman.RunAsync(["stop", collector], 30, token)).ExitCode);
