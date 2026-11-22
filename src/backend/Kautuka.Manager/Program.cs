@@ -111,6 +111,7 @@ void AddApplianceVerificationService(Func<IServiceProvider, IHostedService> fact
 
 if (applianceEnabled)
 {
+    bool confineManagerPeers = Environment.GetEnvironmentVariable("KAUTUKA_ENVOY_SELINUX") == "1";
     int publishedWebPort = WorkloadRulesetRenderer.WebHostPort;
     if (builder.Configuration["Kautuka:Appliance:PublishedWebPort"] is { } port &&
         (!int.TryParse(port, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out publishedWebPort)
@@ -121,6 +122,14 @@ if (applianceEnabled)
         || !string.Equals(builder.Configuration["Kautuka:Mode"], "prod", StringComparison.OrdinalIgnoreCase))
     {
         throw new InvalidOperationException("Appliance service supervision requires Linux production mode.");
+    }
+
+    if (confineManagerPeers)
+    {
+        string managerSocketPath = managerEndpoint.SocketPath
+            ?? throw new InvalidOperationException("SELinux appliance supervision requires a Manager Unix socket.");
+        builder.WebHost.UseSockets(options =>
+            options.CreateBoundListenSocket = endpoint => ManagerSocketSelinux.CreateBoundSocket(endpoint, managerSocketPath));
     }
 
     string stateRoot = KautukaHostPathPolicy.ResolveSharedStateRoot(builder.Configuration);
@@ -150,7 +159,7 @@ if (applianceEnabled)
         verificationMode: verifyAppliance,
         verificationSidecars: verifyAppliance ? sp.GetRequiredService<WorkspaceSidecarSupervisor>() : null,
         publishedWebPort: publishedWebPort, recoveryPage: new ApplianceRecoveryPage(publishedWebPort),
-        approvalHold: approvalHold));
+        approvalHold: approvalHold, confineManagerPeers: confineManagerPeers));
     AddApplianceVerificationService(sp => sp.GetRequiredService<ApplianceServiceSupervisor>());
     builder.Services.AddSingleton<Func<(string ReleaseId, bool VerificationMode, bool Ready)>>(sp =>
     {

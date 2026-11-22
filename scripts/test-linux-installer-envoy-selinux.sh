@@ -33,6 +33,13 @@ semodule() {
 }
 install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates"
 grep -Fq "$tmp/kautuka_envoy.cil" "$tmp/semodule-call"
+if install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates" "$tmp/kautuka_manager_peer.cil" >/dev/null 2>&1; then
+  echo 'missing appliance Manager peer policy was accepted' >&2
+  exit 1
+fi
+touch "$tmp/kautuka_manager_peer.cil"
+install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates" "$tmp/kautuka_manager_peer.cil"
+grep -Fxq -- "-i $tmp/kautuka_envoy.cil $tmp/kautuka_manager_peer.cil" "$tmp/semodule-call"
 if grep -Eq 'base_container.cil|net_container.cil' "$tmp/semodule-call"; then echo 'existing shared policy templates were replaced' >&2; exit 1; fi
 MODULES_PRESENT=no install_envoy_selinux_policy "$tmp/kautuka_envoy.cil" "$tmp/templates"
 grep -Fq "$tmp/templates/base_container.cil" "$tmp/semodule-call"

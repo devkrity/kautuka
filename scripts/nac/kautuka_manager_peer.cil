@@ -1,0 +1,10 @@
+; Manager assigns this type only to the appliance RPC listening socket.
+(type kautuka_manager_rpc_socket_t)
+(allow unconfined_t kautuka_manager_rpc_socket_t
+  (unix_stream_socket (create bind listen accept getattr getopt setopt read write shutdown)))
+
+(block kautuka_manager_client
+  (blockinherit container)
+  (blockinherit net_container)
+  (allow process kautuka_manager_rpc_socket_t (unix_stream_socket (connectto)))
+)

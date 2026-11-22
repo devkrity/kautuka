@@ -996,6 +996,7 @@ stage_appliance_version() {
         }
         verify_nac_hook_compatibility "$payload" "$appliance_service_home" || return 1
         verify_envoy_selinux_policy_compatibility "$payload" "$manager_root/current" "$selinux_state" || return 1
+        verify_envoy_selinux_policy_compatibility "$payload" "$manager_root/current" "$selinux_state" kautuka_manager_peer || return 1
         appliance_stage_root="$(mktemp -d "$versions/.stage-appliance.XXXXXXXX")"
         cp -a --no-preserve=context "$payload/." "$appliance_stage_root/"
         [[ ! -e "$appliance_stage_root/service-images" && ! -L "$appliance_stage_root/service-images" ]] || return 1
@@ -1068,19 +1069,19 @@ PY
 }
 
 verify_envoy_selinux_policy_compatibility() {
-    local candidate="$1" current="$2" selinux_state="$3"
+    local candidate="$1" current="$2" selinux_state="$3" policy="${4:-kautuka_envoy}"
     case "$selinux_state" in Enforcing|Permissive) ;; *) return 0 ;; esac
-    if [[ ! -f "$candidate/scripts/kautuka_envoy.cil" || ! -f "$current/scripts/kautuka_envoy.cil" ]] ||
-       ! same_file_contents "$candidate/scripts/kautuka_envoy.cil" "$current/scripts/kautuka_envoy.cil"; then
-        echo 'error: the Envoy SELinux policy differs from this release; run the current signed Linux installer before updating.' >&2
+    if [[ ! -f "$candidate/scripts/$policy.cil" || ! -f "$current/scripts/$policy.cil" ]] ||
+       ! same_file_contents "$candidate/scripts/$policy.cil" "$current/scripts/$policy.cil"; then
+        echo "error: the $policy SELinux policy differs from this release; run the current signed Linux installer before updating." >&2
         return 1
     fi
     local modules loaded expected
-    modules="$(semodule -lfull -m)" || { echo 'error: cannot inspect the loaded Envoy SELinux policy.' >&2; return 1; }
-    loaded="$(printf '%s\n' "$modules" | awk '$2 == "kautuka_envoy" && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
-    expected="sha256:$(sha256sum "$current/scripts/kautuka_envoy.cil" | cut -d' ' -f1)"
+    modules="$(semodule -lfull -m)" || { echo "error: cannot inspect the loaded $policy SELinux policy." >&2; return 1; }
+    loaded="$(printf '%s\n' "$modules" | awk -v policy="$policy" '$2 == policy && $3 == "cil" && $1 ~ /^[0-9]+$/ { if ($1 > priority) { priority=$1; checksum=$4; disabled=($0 ~ /disabled/) } } END { if (!disabled) print checksum }')"
+    expected="sha256:$(sha256sum "$current/scripts/$policy.cil" | cut -d' ' -f1)"
     if [[ "$loaded" != "$expected" ]]; then
-        echo 'error: the loaded Envoy SELinux policy differs from the installed release; run the current signed Linux installer before updating.' >&2
+        echo "error: the loaded $policy SELinux policy differs from the installed release; run the current signed Linux installer before updating." >&2
         return 1
     fi
 }

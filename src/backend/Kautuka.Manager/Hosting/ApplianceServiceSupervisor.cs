@@ -28,7 +28,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     WorkspaceSidecarSupervisor? verificationSidecars = null,
     int publishedWebPort = WorkloadRulesetRenderer.WebHostPort,
     ApplianceRecoveryPage? recoveryPage = null,
-    TimeSpan approvalHold = default) : BackgroundService
+    TimeSpan approvalHold = default,
+    bool confineManagerPeers = false) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -433,6 +434,9 @@ internal sealed partial class ApplianceServiceSupervisor(
         JsonElement host = container.GetProperty("HostConfig");
         if (!HasLabel(labels, ReleaseLabel, release.ReleaseId)
             || container.GetProperty("ImageName").GetString() != image
+            || (RequiresManagerClientType(service)
+                && (!container.TryGetProperty("ProcessLabel", out JsonElement processLabel)
+                    || processLabel.GetString()?.Split(':', 4) is not [_, _, ManagerSocketSelinux.ClientType, _]))
             || (runtimeImage is null ? host.GetProperty("NetworkMode").GetString() != "none"
                 : !MatchesImageId(container.GetProperty("Image").GetString(), runtimeImage)
                     || !HasExpectedProfile(container, BuildCreateArgs(service, image, runtimeImage)))
@@ -485,6 +489,9 @@ internal sealed partial class ApplianceServiceSupervisor(
             "--security-opt=no-new-privileges", "--userns=keep-id:uid=65532,gid=65532", "--user=65532:65532",
             "--env", "Kautuka__Mode=prod", "--env", "Kautuka__Transport=unix",
         ];
+        if (RequiresManagerClientType(service))
+            args.AddRange(["--security-opt", $"label=type:{ManagerSocketSelinux.ClientType}"]);
+
         if (service.NetworkRole is { } role)
         {
             string address = WorkloadRulesetRenderer.FindApplianceAddress(role)
@@ -697,6 +704,9 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     private static bool MatchesImageId(string? actual, string expected)
         => actual == expected || string.Equals(actual, expected["sha256:".Length..], StringComparison.Ordinal);
+
+    private bool RequiresManagerClientType(Service service)
+        => confineManagerPeers && service.Role is GatewayRole or ChannelRole or UpdateRole;
 
     private static bool HasExpectedProfile(JsonElement container, List<string> expected)
     {

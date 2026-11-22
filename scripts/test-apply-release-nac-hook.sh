@@ -3,6 +3,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
+source <(sed -n '/^same_file_contents() {/,/^}/p' "$repo_root/scripts/kautuka-apply-release.sh")
 source <(sed -n '/^verify_nac_hook_compatibility() {/,/^}/p' "$repo_root/scripts/kautuka-apply-release.sh")
 source <(sed -n '/^verify_envoy_selinux_policy_compatibility() {/,/^}/p' "$repo_root/scripts/kautuka-apply-release.sh")
 mkdir -p "$tmp/candidate/scripts" "$tmp/home/.config/containers/hooks.d" "$tmp/home/.config/containers/containers.conf.d"
@@ -86,6 +87,14 @@ if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enf
   echo 'changed Envoy SELinux policy was accepted' >&2; exit 1
 fi
 verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Disabled
+printf 'manager-peer-policy\n' > "$tmp/current/scripts/kautuka_manager_peer.cil"
+cp "$tmp/current/scripts/kautuka_manager_peer.cil" "$tmp/candidate/scripts/kautuka_manager_peer.cil"
+loaded_checksum="sha256:$(sha256sum "$tmp/current/scripts/kautuka_manager_peer.cil" | cut -d' ' -f1)"
+if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing kautuka_manager_peer >/dev/null 2>&1; then
+    echo 'an Envoy module checksum was accepted for the Manager peer policy' >&2; exit 1
+fi
+semodule() { printf '400 kautuka_manager_peer cil %s\n' "$loaded_checksum"; }
+verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing kautuka_manager_peer
 rm "$tmp/current/scripts/kautuka_envoy.cil"
 if verify_envoy_selinux_policy_compatibility "$tmp/candidate" "$tmp/current" Enforcing >/dev/null 2>&1; then
   echo 'missing current Envoy SELinux policy was accepted' >&2; exit 1
