@@ -43,15 +43,37 @@ public sealed class NetworkAccessApprovalHoldTests
         Assert.True(client.Disposed);
     }
 
+    [Fact]
+    public async Task GatewayPreflightReturnsPendingRequestWithoutEnteringApprovalHold()
+    {
+        var client = new ApprovalCheckClient();
+        client.Response.SetResult(new NetworkAccessCheckOutboundResponse { Reason = "no_rule", RequestId = "approval-1" });
+        var checker = new GrpcNetworkAccessChecker(() => client, approvalHold: TimeSpan.FromMinutes(10));
+
+        NetworkAccessCheckResult result = await checker.CheckAsync(new OutboundTarget("approval.example.test", 443,
+            Purpose: "connector-oauth", UserId: "user-a", ConnectorId: "mail", SkipApprovalHold: true),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(result.Allowed);
+        Assert.Equal("approval-1", result.RequestId);
+        Assert.True(client.Request!.SkipApprovalHold);
+        Assert.Equal("connector-oauth", client.Request.Purpose);
+        Assert.True(client.Disposed);
+    }
+
     private sealed class ApprovalCheckClient : ManagerService.ManagerServiceClient
     {
         public TaskCompletionSource<Metadata> Headers { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<NetworkAccessCheckOutboundResponse> Response { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public NetworkAccessCheckOutboundRequest? Request { get; private set; }
         public bool Disposed { get; private set; }
 
         public override AsyncUnaryCall<NetworkAccessCheckOutboundResponse> CheckOutboundAsync(
             NetworkAccessCheckOutboundRequest request, CallOptions options)
-            => new(Response.Task, Headers.Task, () => Status.DefaultSuccess, () => new Metadata(), () => Disposed = true);
+        {
+            Request = request;
+            return new(Response.Task, Headers.Task, () => Status.DefaultSuccess, () => new Metadata(), () => Disposed = true);
+        }
     }
 
     [Theory]

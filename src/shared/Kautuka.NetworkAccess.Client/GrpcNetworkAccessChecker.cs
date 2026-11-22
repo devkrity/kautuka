@@ -64,12 +64,14 @@ public sealed partial class GrpcNetworkAccessChecker(
             Port = target.Port,
             Purpose = target.Purpose ?? string.Empty,
             CorrelationId = target.CorrelationId ?? Activity.Current?.Id ?? Guid.NewGuid().ToString("N"),
+            SkipApprovalHold = target.SkipApprovalHold,
         };
 
         try
         {
             ManagerService.ManagerServiceClient client = clientAccessor();
-            bool hold = approvalHold > TimeSpan.Zero && target.Purpose is not ("provider-test" or "probe" or "save-discovery");
+            bool hold = approvalHold > TimeSpan.Zero && !target.SkipApprovalHold
+                && target.Purpose is not ("provider-test" or "probe" or "save-discovery");
             DateTime deadline = DateTime.UtcNow.Add(hold ? approvalHold + deadlineTimeout : deadlineTimeout);
 
             long started = Stopwatch.GetTimestamp();

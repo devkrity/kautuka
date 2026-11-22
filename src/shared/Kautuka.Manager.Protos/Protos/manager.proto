@@ -426,6 +426,7 @@ message NetworkAccessCheckOutboundRequest {
   int32 port = 6;
   string purpose = 7;
   string correlation_id = 8;
+  bool skip_approval_hold = 9;
 }
 
 message NetworkAccessCheckOutboundResponse {

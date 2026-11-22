@@ -88,7 +88,7 @@ public sealed partial class WorkspaceGrpcService
         bool applianceGateway = input.Origin == "gateway" && Nac.ApprovalHold > TimeSpan.Zero;
         NetworkAccessDecisionResult decision = await ExecuteNacRpc(() => applianceGateway
             ? Nac.EvaluateGatewayConnect(input, publicOnly: false) : Nac.EvaluateOutboundCheck(input)).ConfigureAwait(false);
-        if (decision.Reason == "no_rule" && applianceGateway
+        if (decision.Reason == "no_rule" && applianceGateway && !request.SkipApprovalHold
             && context.Deadline - DateTime.UtcNow > Nac.ApprovalHold
             && input.Purpose is not ("provider-test" or "probe" or "save-discovery"))
         {
