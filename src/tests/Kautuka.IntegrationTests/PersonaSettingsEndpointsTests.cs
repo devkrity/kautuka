@@ -688,7 +688,10 @@ public sealed class PersonaSettingsEndpointsTests
             RemoveHostedService<ChannelHostIngressWorker>(builder.Services);
             RemoveHostedService<AutopilotSchedulerService>(builder.Services);
             RemoveHostedService<GatewayUserRolePrivilegesStartupSyncService>(builder.Services);
-            builder.Services.AddSingleton(new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json")));
+            var providerRules = new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json"));
+            providerRules.SetRule(new NetworkAccessActor("fixture-admin", true),
+                new RuleWriteSpec("system", null, null, null, "localhost", "host", 11434, true, true), providerRules.Revision);
+            builder.Services.AddSingleton(providerRules);
             builder.Services.AddSingleton<IManagerGrpcService, TestWorkspaceGrpcService>();
             builder.Services.RemoveAll<CredentialResolverService>();
             builder.Services.AddSingleton(
