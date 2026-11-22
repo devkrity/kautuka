@@ -9,6 +9,7 @@ using Kautuka.ChannelHost;
 using Kautuka.ChannelHost.Grpc;
 using Kautuka.ChannelHost.Hosting;
 using Kautuka.ChannelHost.Providers.Slack;
+using Kautuka.NetworkAccess.Client;
 using Kautuka.Protos;
 
 using Microsoft.Data.Sqlite;
@@ -212,6 +213,54 @@ public sealed class SlackSocketModeDispatchTests
         Assert.True(SlackSocketModeWorker.GetConnectionBackoffDelay(100) <= TimeSpan.FromSeconds(60));
     }
 
+    [Fact]
+    public async Task RevokingNetworkPermissionClosesAnEstablishedSocketAndBlocksReconnect()
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var permission = new PausableSocketPermission();
+        var checker = new NetworkAccessWebSocketChecker(permission);
+        var socket = new RecordingWebSocket(stayOpen: true);
+        var deniedReconnect = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new DispatchFixture(paired: true, supervisorPollDelay: TimeSpan.FromMilliseconds(20), webSocketChecker: checker,
+            socketConnector: async (uri, token) =>
+            {
+                try { await checker.CheckAsync(uri, token); }
+                catch (NetworkAccessDeniedException)
+                {
+                    deniedReconnect.TrySetResult();
+                    throw;
+                }
+                return socket;
+            });
+        const string openResponse = """{"ok":true,"url":"wss://wss-primary.slack.com/fixture"}""";
+        fixture.Http.ConnectionOpenResponses.Enqueue(openResponse);
+        fixture.Http.ConnectionOpenResponses.Enqueue(openResponse);
+        Task run = fixture.Worker.RunAsync(timeout.Token);
+        try
+        {
+            await socket.Receiving.Task.WaitAsync(timeout.Token);
+            Assert.False(socket.Disposed.Task.IsCompleted);
+            permission.Pause();
+            await socket.Disposed.Task.WaitAsync(timeout.Token);
+            await deniedReconnect.Task.WaitAsync(timeout.Token);
+        }
+        finally
+        {
+            await timeout.CancelAsync();
+            try { await run; }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+        }
+    }
+
+    private sealed class PausableSocketPermission : INetworkAccessChecker
+    {
+        private volatile bool paused;
+        public void Pause() => paused = true;
+        public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
+            => Task.FromResult(paused ? NetworkAccessCheckResult.CreatePaused("blocked") : NetworkAccessCheckResult.CreateAllowed("rule_system"));
+    }
+
     private sealed class DispatchFixture : IDisposable
     {
         private readonly string root = Path.Combine(Path.GetTempPath(), "kautuka-slack-dispatch-" + Guid.NewGuid().ToString("N"));
@@ -225,7 +274,8 @@ public sealed class SlackSocketModeDispatchTests
             Func<int, TimeSpan>? retryDelay = null,
             Func<string, string, string, CancellationToken, Task>? connectionLoopRunner = null,
             TimeSpan? supervisorPollDelay = null,
-            TimeProvider? connectionTimeProvider = null)
+            TimeProvider? connectionTimeProvider = null,
+            NetworkAccessWebSocketChecker? webSocketChecker = null)
         {
             this.attachmentId = attachmentId ?? "slack-dispatch-" + Guid.NewGuid().ToString("N");
             IConfiguration configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
@@ -259,7 +309,8 @@ public sealed class SlackSocketModeDispatchTests
                 connectionBackoffDelay: retryDelay,
                 connectionLoopRunner: connectionLoopRunner,
                 supervisorPollInterval: supervisorPollDelay,
-                connectionTimeProvider: connectionTimeProvider);
+                connectionTimeProvider: connectionTimeProvider,
+                webSocketChecker: webSocketChecker);
         }
 
         public string AttachmentId => attachmentId;
@@ -309,15 +360,19 @@ public sealed class SlackSocketModeDispatchTests
         private readonly Queue<string> incoming;
         private readonly List<string>? sequence;
         private readonly Action<string>? onReceive;
+        private readonly bool stayOpen;
         private WebSocketState state = WebSocketState.Open;
 
-        public RecordingWebSocket(IEnumerable<string>? incoming = null, List<string>? sequence = null, Action<string>? onReceive = null)
+        public RecordingWebSocket(IEnumerable<string>? incoming = null, List<string>? sequence = null, Action<string>? onReceive = null, bool stayOpen = false)
         {
             this.incoming = new Queue<string>(incoming ?? []);
             this.sequence = sequence;
             this.onReceive = onReceive;
+            this.stayOpen = stayOpen;
         }
 
+        public TaskCompletionSource Disposed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Receiving { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<JsonDocument> Messages { get; } = [];
         public override WebSocketCloseStatus? CloseStatus => null;
         public override string? CloseStatusDescription => null;
@@ -326,14 +381,19 @@ public sealed class SlackSocketModeDispatchTests
         public override void Abort() { }
         public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) { state = WebSocketState.Closed; return Task.CompletedTask; }
         public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) { state = WebSocketState.CloseSent; return Task.CompletedTask; }
-        public override void Dispose() { }
-        public override Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
+        public override void Dispose() => Disposed.TrySetResult();
+        public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
         {
-            if (incoming.Count == 0) return Task.FromResult(new WebSocketReceiveResult(0, WebSocketMessageType.Close, true));
+            if (stayOpen)
+            {
+                Receiving.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            if (incoming.Count == 0) return new WebSocketReceiveResult(0, WebSocketMessageType.Close, true);
             byte[] bytes = Encoding.UTF8.GetBytes(incoming.Dequeue());
             onReceive?.Invoke(Encoding.UTF8.GetString(bytes));
             bytes.AsSpan().CopyTo(buffer.AsSpan());
-            return Task.FromResult(new WebSocketReceiveResult(bytes.Length, WebSocketMessageType.Text, true));
+            return new WebSocketReceiveResult(bytes.Length, WebSocketMessageType.Text, true);
         }
         public override Task SendAsync(ArraySegment<byte> buffer, WebSocketMessageType messageType, bool endOfMessage, CancellationToken cancellationToken)
         {

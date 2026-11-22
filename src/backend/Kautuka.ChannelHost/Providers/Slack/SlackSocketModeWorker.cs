@@ -379,11 +379,31 @@ internal sealed class SlackSocketModeWorker(
                     if (!currentIds.Contains(failedAttachmentId)) identitySyncFailures.TryRemove(failedAttachmentId, out _);
                 }
 
+                var socketPermissions = new Dictionary<string, bool>(StringComparer.Ordinal);
                 foreach ((string attachmentId, ActiveSlackConnection connection) in activeConnections.ToArray())
                 {
                     if (currentIds.Contains(attachmentId) && connection.Task is { IsCompleted: false })
                     {
-                        continue;
+                        Uri? endpoint = connection.Endpoint;
+                        if (endpoint is null || webSocketChecker is null)
+                            continue;
+
+                        string authority = endpoint.GetLeftPart(UriPartial.Authority);
+                        if (!socketPermissions.TryGetValue(authority, out bool allowed))
+                        {
+                            try
+                            {
+                                await webSocketChecker.CheckAsync(endpoint, cancellationToken).ConfigureAwait(false);
+                                allowed = true;
+                            }
+                            catch (NetworkAccessDeniedException)
+                            {
+                                allowed = false;
+                            }
+                            socketPermissions.Add(authority, allowed);
+                        }
+                        if (allowed || !ReferenceEquals(connection.Endpoint, endpoint))
+                            continue;
                     }
 
                     if (activeConnections.TryGetValue(attachmentId, out ActiveSlackConnection? current)
@@ -483,12 +503,13 @@ internal sealed class SlackSocketModeWorker(
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1031:Do not catch general exception types", Justification = "Provider failures must be logged and retried without terminating Socket Mode supervision.")]
     internal async Task RunConnectionLoopSafeAsync(string attachmentId, string ownerUserId, string appToken, CancellationToken cancellationToken)
     {
+        activeConnections.TryGetValue(attachmentId, out ActiveSlackConnection? connection);
         int failures = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
             {
-                bool connectionWasStable = await RunConnectionLoopAsync(attachmentId, ownerUserId, appToken, cancellationToken).ConfigureAwait(false);
+                bool connectionWasStable = await RunConnectionLoopAsync(attachmentId, ownerUserId, appToken, connection, cancellationToken).ConfigureAwait(false);
                 if (connectionWasStable)
                 {
                     failures = 0;
@@ -505,6 +526,10 @@ internal sealed class SlackSocketModeWorker(
                 SlackSocketModeWorkerLog.ConnectionLoopError(logger, ex, attachmentId);
                 failures++;
             }
+            finally
+            {
+                if (connection is not null) connection.Endpoint = null;
+            }
             try { await Task.Delay(getConnectionBackoffDelay(failures), cancellationToken).ConfigureAwait(false); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
         }
@@ -520,7 +545,8 @@ internal sealed class SlackSocketModeWorker(
         return TimeSpan.FromSeconds(Math.Min(60, baseSeconds + jitterSeconds));
     }
 
-    private async Task<bool> RunConnectionLoopAsync(string attachmentId, string ownerUserId, string appToken, CancellationToken cancellationToken)
+    private async Task<bool> RunConnectionLoopAsync(string attachmentId, string ownerUserId, string appToken,
+        ActiveSlackConnection? connection, CancellationToken cancellationToken)
     {
         using HttpRequestMessage request = new(HttpMethod.Post, "https://slack.com/api/apps.connections.open");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", appToken);
@@ -551,6 +577,7 @@ internal sealed class SlackSocketModeWorker(
             return false;
         }
 
+        if (connection is not null) connection.Endpoint = socketUri;
         long connectedAt = connectionClock.GetTimestamp();
         SlackSocketModeWorkerLog.SocketModeConnected(logger, attachmentId);
 
@@ -1624,8 +1651,15 @@ internal sealed class SlackSocketModeWorker(
 
     private sealed class ActiveSlackConnection(CancellationTokenSource cancellation)
     {
+        private Uri? endpoint;
+
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public Task? Task { get; set; }
+        public Uri? Endpoint
+        {
+            get => Volatile.Read(ref endpoint);
+            set => Volatile.Write(ref endpoint, value);
+        }
     }
 
     private sealed record IdentitySyncFailure(string TokenFingerprint, string? Detail, bool Permanent, DateTimeOffset RetryAfter, int Attempts);
