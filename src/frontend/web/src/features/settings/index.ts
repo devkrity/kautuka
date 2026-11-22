@@ -12,6 +12,7 @@ export * from './types/settingsTypes';
 
 // Utils
 export * from './utils/settingsUtils';
+export { confirmProviderSave, isProviderIdReserved } from './utils/confirmProviderSave';
 
 // Shared Components
 export * from './components/SettingsShared';

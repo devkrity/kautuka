@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { settingsAdmin } from '@/features/settings';
+import { confirmProviderSave } from '../utils/confirmProviderSave';
 import {
   checkProviderSystemwideRule,
   resolveProviderNetworkTarget,
@@ -201,7 +202,7 @@ export function useProvidersTab() {
     setSaving(true);
     setResult(null);
     try {
-      await settingsAdmin.saveProvider({
+      const saved = await confirmProviderSave(settingsAdmin.saveProvider, {
         id: form.id.trim(),
         type: form.type,
         settings: {
@@ -210,6 +211,7 @@ export function useProvidersTab() {
           http_timeout_seconds: httpTimeoutSeconds,
         },
       });
+      if (!saved) return;
       setResult({ success: true, message: 'Provider saved.' });
       cancelEdit();
       await load();

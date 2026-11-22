@@ -225,6 +225,21 @@ public sealed partial class WorkspaceGrpcService
         });
     }
 
+    public override Task<NetworkAccessProviderPermissionResponse> EnsureProviderPermission(
+        NetworkAccessProviderPermissionRequest request, ServerCallContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        using IDisposable scope = BeginGrpcScope(context, "EnsureProviderPermission");
+        return ExecuteNacRpc(() =>
+        {
+            (long revision, string status) = Nac.PolicyStore.EnsureProviderPermission(
+                ToActor(request.Actor), request.Destination, request.DestKind, request.Port, request.AllowLan,
+                request.HasConfirmedRevision ? request.ConfirmedRevision : null);
+            return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
+        });
+    }
+
     private (string? ExecContext, string? Attribution) ResolveAuthoritativeRuleContextAndAttribution(
         string? connectorId,
         string? userId,

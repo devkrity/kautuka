@@ -6,7 +6,9 @@ using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Auth;
 using Kautuka.Gateway.Domain.Skills;
+using Kautuka.Gateway.Infrastructure.Credentials;
 using Kautuka.NetworkAccessController;
+using Kautuka.Protos;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
@@ -537,9 +539,14 @@ public sealed class SkillEndpointTests
             builder.WebHost.UseTestServer();
             GatewayAppBootstrap.ConfigureServices(builder);
             var providerRules = new NetworkAccessPolicyStore(Path.Combine(root, "provider-network.json"));
+            providerRules.SetRule(new NetworkAccessActor("fixture-admin", true),
+                new RuleWriteSpec("system", null, null, null, "127.0.0.1", "ip", 11434, true, true), providerRules.Revision);
             builder.Services.AddSingleton(providerRules);
             builder.Services.RemoveAll<IManagerGrpcService>();
             builder.Services.AddSingleton(ProviderModelFixture.CreateTestManager(providerRules));
+            builder.Services.RemoveAll<CredentialResolverService>();
+            builder.Services.AddSingleton(new CredentialResolverService(
+                new Lazy<CredentialsService.CredentialsServiceClient>(static () => new FakeCredentialsServiceClient())));
             builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
             WebApplication app = builder.Build();

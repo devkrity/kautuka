@@ -66,6 +66,7 @@ internal static class ManagerRpcAuthorizationPolicy
         servicePrefix + "DecideRequest",
         servicePrefix + "ListRules",
         servicePrefix + "SetRule",
+        servicePrefix + "EnsureProviderPermission",
         servicePrefix + "DeleteRule",
         servicePrefix + "ListActivity",
         servicePrefix + "GetUserPrivileges",

@@ -394,7 +394,8 @@ When container startup fails with exit code 126 or 1, check the `reason` field i
 ## 6. AI Provider Endpoints (v7-37)
 - There is no built-in localhost or Ollama exception. Gateway calls to a provider endpoint are denied until an admin grants a rule.
 - If the address is not already allowed, **Test connection** asks the administrator for temporary access to the provider's host and port. The allowance is limited to that test and ends when it finishes or after 30 seconds, whichever comes first; testing creates no persistent rule.
-- Saving a provider with no matching rule adds a `system`-scope allow for its host and port. Loopback and private IPv4 addresses require a LAN grant. If an existing rule blocks or pauses access, or leaves LAN access out, review that rule in Network Access before saving. If Manager cannot be reached, the save is rejected.
+- Saving a provider with no matching permission asks the administrator to confirm a systemwide allow for the exact host and port. Loopback and private IPv4 addresses require a LAN grant. Manager checks for an existing rule or system pause and applies a new allow under the same policy lock. If the policy changes before confirmation, try the save again to see the current decision. A permission explicitly approved during save is visible in Network Access even if a later credential write fails.
+- A provider is published after its credential write is acknowledged. If an interrupted save leaves a credential under an unpublished ID, retry with a fresh provider ID. First-run setup prepares a fresh ID for the retry.
 - The temporary test uses the Manager outbound policy check with the test's identity; its completion operation removes the allowance. These changes have focused tests and have not yet been proven by a CI run.
 
 ## SELinux infrastructure config mounts

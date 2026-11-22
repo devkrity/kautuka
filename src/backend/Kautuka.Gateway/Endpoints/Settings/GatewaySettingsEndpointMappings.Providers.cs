@@ -10,6 +10,9 @@ using Grpc.Core;
 
 namespace Kautuka.Gateway.Endpoints.Settings;
 
+internal sealed record ProviderPermissionConfirmation(string Detail, string Destination, int Port, bool AllowLan, string Revision);
+internal sealed record ProviderSaveConflict(string Detail, string Code);
+
 internal static partial class GatewaySettingsEndpointMappings
 {
     private static readonly SemaphoreSlim providerWrites = new(1);
@@ -154,14 +157,6 @@ internal static partial class GatewaySettingsEndpointMappings
             }
 
             string providerId = bodyElement.GetStringProperty("id", string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(apiKey)
-                && !string.IsNullOrWhiteSpace(providerId)
-                && catalog.TryGetProvider(providerId, out GatewayProvider? existingWithKey)
-                && existingWithKey is not null)
-            {
-                apiKey = AiProviderSettings.GetString(existingWithKey.Settings, "api_key");
-            }
-
             string providerType = ProviderTypeCatalogSettings.NormalizeType(
                 bodyElement.GetStringProperty("type", string.Empty));
             bool requiresApiKey = providerTypeCatalog.TryGet(
@@ -184,43 +179,107 @@ internal static partial class GatewaySettingsEndpointMappings
                 return Results.Json(new GatewayErrorResponse("Provider endpoint is invalid."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            if (previousProvider is not null && (requiresApiKey || hasApiKey
+            bool sameCredentialDestination = previousProvider is null
+                || ProviderTypeCatalogSettings.HasSameCredentialDestination(previousProvider, providerType, proposedSettings, providerTypeCatalog);
+            bool hasStoredKey = false;
+            if (!providerExists || (!hasApiKey && (requiresApiKey || !sameCredentialDestination)))
+            {
+                try
+                {
+                    IReadOnlyList<string> existingKeys = await credentialResolver.ListSystemKeysAsync(ct).ConfigureAwait(false);
+                    hasStoredKey = existingKeys.Contains($"provider.{providerId}.api_key", StringComparer.Ordinal);
+                }
+                catch (RpcException)
+                {
+                    return Results.Json(new GatewayErrorResponse("Provider settings were not saved because the credential store is unavailable."),
+                        KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+            }
+
+            if (!providerExists && hasStoredKey)
+                return Results.Json(new ProviderSaveConflict("This provider ID still has a saved credential. Choose a different provider ID.", "provider_id_reserved"),
+                    KautukaJsonContext.Default.ProviderSaveConflict, statusCode: StatusCodes.Status409Conflict);
+
+            if (previousProvider is not null && !sameCredentialDestination && (requiresApiKey || hasApiKey || hasStoredKey
                     || (providerTypeCatalog.TryGet(previousProvider.Type, out AiProviderCatalog.ProviderMetadata? previousMetadata)
-                        && previousMetadata?.RequiresApiKey is true))
-                && !ProviderTypeCatalogSettings.HasSameCredentialDestination(previousProvider, providerType, proposedSettings, providerTypeCatalog))
+                        && previousMetadata?.RequiresApiKey is true)))
             {
                 return Results.BadRequest(new GatewayErrorResponse("Create a new provider to use a different credential destination."));
             }
 
-            if (requiresApiKey && (!providerExists || !hasApiKey))
-            {
-                IReadOnlyList<string> existingKeys = await credentialResolver.ListSystemKeysAsync(ct).ConfigureAwait(false);
-                bool hasStoredKey = existingKeys.Contains($"provider.{providerId}.api_key", StringComparer.Ordinal);
-                if (!providerExists && hasStoredKey)
-                    return Results.BadRequest(new GatewayErrorResponse("This provider ID still has a saved credential. Choose a new provider ID."));
-                hasApiKey |= providerExists && hasStoredKey;
-                if (!hasApiKey)
-                    return Results.BadRequest(new GatewayErrorResponse($"Provider type '{providerType}' requires an API key."));
-            }
-
-            var manager = context.RequestServices.GetRequiredService<IManagerGrpcService>();
-            var actor = new NetworkAccessActorMessage { UserId = adminUser.Id, IsAdmin = true };
-            NetworkAccessListRulesResponse rules;
-            try { rules = await manager.Client.ListRulesAsync(new NetworkAccessListRulesRequest { Actor = actor }, cancellationToken: ct); }
-            catch (RpcException)
-            {
-                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not confirm the network rule."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
+            hasApiKey |= providerExists && hasStoredKey;
+            if (requiresApiKey && !hasApiKey)
+                return Results.BadRequest(new GatewayErrorResponse($"Provider type '{providerType}' requires an API key."));
 
             bool allowLan = IsLocalProviderTarget(providerTarget);
             string destKind = IPAddress.TryParse(providerTarget.IdnHost, out _) ? "ip" : "host";
-            var matchingRules = rules.Rules.Where(rule => rule.ScopeKind == "system"
-                && rule.Destination.Equals(providerTarget.IdnHost, StringComparison.OrdinalIgnoreCase)
-                && rule.Port == providerTarget.Port && rule.DestKind == destKind).ToArray();
-            if (matchingRules.Any(rule => !rule.Allowed || rule.Paused || (allowLan && !rule.AllowLan)))
+            var permissionRequest = new NetworkAccessProviderPermissionRequest
+            {
+                Actor = new NetworkAccessActorMessage { UserId = adminUser.Id, IsAdmin = true },
+                Destination = providerTarget.IdnHost,
+                DestKind = destKind,
+                Port = providerTarget.Port,
+                AllowLan = allowLan,
+            };
+            if (bodyElement.TryGetProperty("networkPermission", out JsonElement confirmation) && confirmation.ValueKind == JsonValueKind.Object
+                && confirmation.GetStringProperty("destination", string.Empty) == permissionRequest.Destination
+                && confirmation.TryGetProperty("port", out JsonElement confirmedPort) && confirmedPort.ValueKind == JsonValueKind.Number
+                && confirmedPort.TryGetInt32(out int port) && port == permissionRequest.Port
+                && confirmation.TryGetProperty("allowLan", out JsonElement confirmedLan)
+                && confirmedLan.ValueKind == (allowLan ? JsonValueKind.True : JsonValueKind.False)
+                && long.TryParse(confirmation.GetStringProperty("revision", string.Empty), System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out long revision))
+            {
+                permissionRequest.ConfirmedRevision = revision;
+            }
+
+            NetworkAccessProviderPermissionResponse permission;
+            try
+            {
+                permission = await context.RequestServices.GetRequiredService<IManagerGrpcService>().Client
+                    .EnsureProviderPermissionAsync(permissionRequest, cancellationToken: ct).ConfigureAwait(false);
+            }
+            catch (RpcException error) when (error.StatusCode == StatusCode.InvalidArgument)
+            {
+                return Results.BadRequest(new GatewayErrorResponse("Network Access cannot allow this provider destination. Check its hostname or IP address and port."));
+            }
+            catch (RpcException)
+            {
+                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not apply its network permission."),
+                    KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+            if (permission.Status == "confirmation_required")
+                return Results.Json(new ProviderPermissionConfirmation(
+                    permissionRequest.HasConfirmedRevision
+                        ? "Network Access changed while you were confirming. Try saving again."
+                        : "Confirm systemwide network access before saving this provider.",
+                    permissionRequest.Destination, permissionRequest.Port,
+                    allowLan, permission.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                    KautukaJsonContext.Default.ProviderPermissionConfirmation, statusCode: StatusCodes.Status409Conflict);
+            if (permission.Status == "restricted")
                 return Results.Conflict(new GatewayErrorResponse(
                     "Network Access limits this provider destination. Review the existing rule in Network Access before saving."));
+            if (permission.Status != "allowed")
+                return Results.Json(new GatewayErrorResponse("Manager returned an unknown provider network decision."),
+                    KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
 
+            if (providerId.Length == 0)
+                providerId = $"provider-{Guid.NewGuid():N}";
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                try
+                {
+                    int written = await credentialResolver.SetSystemAsync(
+                        new Dictionary<string, string> { [$"provider.{providerId}.api_key"] = apiKey }, ct).ConfigureAwait(false);
+                    if (written != 1)
+                        throw new RpcException(new Status(StatusCode.Unavailable, "The credential store did not acknowledge the provider key."));
+                }
+                catch (RpcException)
+                {
+                    return Results.Json(new GatewayErrorResponse("Provider settings were not saved because the credential store could not confirm the key. Check Network Access for any permission you approved."),
+                        KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
+                }
+            }
             GatewayProvider saved;
             try
             {
@@ -228,6 +287,8 @@ internal static partial class GatewaySettingsEndpointMappings
                 proposedSettings.Remove("apiKey");
                 proposedSettings["base_url"] = proposedBaseUrl;
                 var providerBody = JsonObject.Create(bodyElement) ?? new JsonObject();
+                providerBody["id"] = providerId;
+                providerBody.Remove("networkPermission");
                 providerBody["settings"] = proposedSettings;
                 saved = catalog.SaveProvider(JsonSerializer.SerializeToElement(providerBody, KautukaJsonContext.Default.JsonObject));
             }
@@ -237,38 +298,6 @@ internal static partial class GatewaySettingsEndpointMappings
                     new GatewayErrorResponse(ex.Message),
                     KautukaJsonContext.Default.GatewayErrorResponse,
                     statusCode: StatusCodes.Status400BadRequest);
-            }
-
-            try
-            {
-                if (matchingRules.Length == 0) await manager.Client.SetRuleAsync(new NetworkAccessSetRuleRequest
-                {
-                    Actor = actor,
-                    ScopeKind = "system",
-                    Destination = providerTarget.IdnHost,
-                    DestKind = destKind,
-                    Port = providerTarget.Port,
-                    Allowed = true,
-                    AllowLan = allowLan,
-                    ExpectedRevision = rules.Revision,
-                }, cancellationToken: ct);
-            }
-            catch (RpcException)
-            {
-                if (previousProvider is null) catalog.DeleteProvider(saved.Id);
-                else
-                {
-                    var restore = new JsonObject { ["id"] = previousProvider.Id, ["type"] = previousProvider.Type, ["settings"] = previousProvider.Settings.DeepClone() };
-                    using JsonDocument restoreDocument = JsonDocument.Parse(restore.ToJsonString());
-                    catalog.SaveProvider(restoreDocument.RootElement);
-                }
-                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not update the network rule."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
-            }
-
-            if (!string.IsNullOrWhiteSpace(apiKey))
-            {
-                await credentialResolver.SetSystemAsync(
-                    new Dictionary<string, string> { [$"provider.{saved.Id}.api_key"] = apiKey }, ct).ConfigureAwait(false);
             }
 
             return Results.Json(

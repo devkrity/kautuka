@@ -443,6 +443,34 @@ public sealed partial class NetworkAccessPolicyStore
         }
     }
 
+    public (long Revision, string Status) EnsureProviderPermission(
+        NetworkAccessActor actor, string destination, string destKind, int port, bool allowLan, long? confirmedRevision)
+    {
+        NetworkAccessPolicyAuthorizer.ValidateActor(actor);
+        if (!actor.IsAdmin) throw new UnauthorizedAccessException("Only an administrator can set provider permissions.");
+        if (destKind is not ("host" or "ip")) throw new ArgumentException("Provider permissions require an exact destination.", nameof(destKind));
+
+        (string kind, string host, int targetPort) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
+            destKind, destination, port, allowed: true, allowLan, actor.IsAdmin, allowLoopback: allowLan);
+
+        lock (gate)
+        {
+            NetworkAccessPolicyState current = Load();
+            IReadOnlyList<NetworkAccessRule> matching = NetworkAccessRuleMatcher.FindApplicable(current, null, null, null, kind, host, targetPort);
+            if (current.Brake.System || matching.Any(rule => !rule.Allowed || (allowLan && !rule.AllowLan)))
+                return (current.Revision, "restricted");
+            if (matching.Count != 0 || seedRules.Any(rule => rule.ScopeKind == "system" && rule.Allowed
+                && rule.DestKind == kind && rule.Destination == host && rule.Port == targetPort && (!allowLan || rule.AllowLan)))
+                return (current.Revision, "allowed");
+            if (confirmedRevision != current.Revision)
+                return (current.Revision, "confirmation_required");
+
+            // Keep the permission check and the existing rule writer under the same policy lock.
+            (long revision, _) = SetRule(actor, new RuleWriteSpec("system", null, null, null, host, kind, targetPort, true, allowLan), current.Revision);
+            return (revision, "allowed");
+        }
+    }
+
     public (long Revision, NetworkAccessRuleView Rule) SetRule(
         NetworkAccessActor actor,
         RuleWriteSpec spec,

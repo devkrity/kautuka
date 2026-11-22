@@ -201,6 +201,8 @@ namespace Kautuka.Gateway.Serialization;
 [JsonSerializable(typeof(ExternalLoginCompleteRequest))]
 [JsonSerializable(typeof(GatewayUserPayload))]
 [JsonSerializable(typeof(GatewayErrorResponse))]
+[JsonSerializable(typeof(ProviderPermissionConfirmation))]
+[JsonSerializable(typeof(ProviderSaveConflict))]
 [JsonSerializable(typeof(GatewayBooleanSuccessResponse))]
 [JsonSerializable(typeof(GatewayChatResponse))]
 [JsonSerializable(typeof(GatewaySessionsResponse))]

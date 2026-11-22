@@ -4,7 +4,7 @@ import { waitFor } from '@testing-library/dom';
 import type { PropsWithChildren } from 'react';
 import React from 'react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   listProvidersMock,
@@ -73,11 +73,13 @@ vi.mock('@/features/onboarding/hooks/useSettingsStatus', () => ({
 
 vi.mock('@/features/onboarding/utils/wizardNaming', () => ({
   getGeneratedModelId: () => 'generated-model',
-  getGeneratedProviderId: () => 'generated-provider',
+  getGeneratedProviderId: (_type: string, usedIds: readonly string[]) =>
+    usedIds.includes('generated-provider') ? 'replacement-provider' : 'generated-provider',
   getRecommendedProviderModel: () => 'llama-3.3-70b-versatile',
 }));
 
-vi.mock('@/features/settings', () => ({
+vi.mock('@/features/settings', async () => ({
+  ...(await import('@/features/settings/utils/confirmProviderSave')),
   apiError: (error: unknown) => (error instanceof Error ? error.message : 'unknown error'),
   normalizePersonaDefinitions: (value: unknown) => value,
   normalizePersonaProfile: (value: unknown) => value,
@@ -98,6 +100,8 @@ import { useOnboardingFlow } from '@/features/onboarding/hooks/useOnboardingFlow
 
 describe('useOnboardingFlow existing setup detection', () => {
   let currentRoute = '';
+
+  afterEach(() => vi.restoreAllMocks());
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -352,9 +356,11 @@ describe('useOnboardingFlow existing setup detection', () => {
     await waitFor(() => expect(result.current.stage).toBe('recommendations'));
   });
 
-  it('saves the provider without a test or separate network prompt', async () => {
+  it('asks for the exact provider permission before creating the helper', async () => {
     listAgentsMock.mockResolvedValue({ data: { agents: [] } });
-    checkRuleMock.mockResolvedValue({ alreadyAllowed: false, expectedRevision: 7 });
+    const permission = { destination: 'api.groq.com', port: 443, allowLan: false, revision: '7' };
+    saveProviderMock.mockRejectedValueOnce({ response: { status: 409, data: permission } });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
     await waitFor(() => expect(result.current.checkingExisting).toBe(false));
@@ -368,7 +374,10 @@ describe('useOnboardingFlow existing setup detection', () => {
 
     expect(checkRuleMock).not.toHaveBeenCalled();
     expect(testProviderMock).not.toHaveBeenCalled();
-    expect(saveProviderMock).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('api.groq.com:443'));
+    expect(saveProviderMock).toHaveBeenCalledTimes(2);
+    expect(saveProviderMock).toHaveBeenLastCalledWith(expect.objectContaining({ networkPermission: permission }));
+    expect(saveAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not prompt when the provider address is already allowed', async () => {
@@ -387,6 +396,29 @@ describe('useOnboardingFlow existing setup detection', () => {
     expect(checkRuleMock).not.toHaveBeenCalled();
     expect(saveProviderMock).toHaveBeenCalledTimes(1);
     expect(testProviderMock).not.toHaveBeenCalled();
+  });
+
+  it('prepares a fresh provider ID after a credential reserves the original ID', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    saveProviderMock.mockRejectedValueOnce({
+      response: { status: 409, data: { code: 'provider_id_reserved' } },
+    });
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    await act(async () => {
+      result.current.setProviderForm((prev) => ({ ...prev, apiCredential: 'key-123' }));
+    });
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+
+    expect(result.current.providerForm.id).toBe('replacement-provider');
+    expect(saveAgentMock).not.toHaveBeenCalled();
+    await act(async () => {
+      await result.current.saveSetup();
+    });
+    expect(saveProviderMock).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'replacement-provider' }));
+    expect(saveAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it('requires a second confirmation when the starter model probe returns a warning', async () => {

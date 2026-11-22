@@ -169,7 +169,8 @@ public sealed partial class V7_4_And_V7_12_GatewayPrivilegeSyncTests
     [Theory]
     [InlineData("GetApprovalLimits")]
     [InlineData("SetApprovalLimits")]
-    public async Task ApprovalLimitsInterceptorRejectsNonGatewayCertificates(string method)
+    [InlineData("EnsureProviderPermission")]
+    public async Task PrivilegedNetworkAccessRpcRejectsNonGatewayCertificates(string method)
     {
         var interceptor = new ManagerClientAuthorizationInterceptor();
         foreach (string name in new[] { ManagerClientIdentities.ChannelHostCommonName, ManagerClientIdentities.UpdateServiceCommonName, "unknown-client" })

@@ -28,6 +28,7 @@ service ManagerService {
   rpc DecideRequest       (NetworkAccessDecideRequest)        returns (NetworkAccessDecideResponse);
   rpc ListRules           (NetworkAccessListRulesRequest)     returns (NetworkAccessListRulesResponse);
   rpc SetRule             (NetworkAccessSetRuleRequest)       returns (NetworkAccessSetRuleResponse);
+  rpc EnsureProviderPermission (NetworkAccessProviderPermissionRequest) returns (NetworkAccessProviderPermissionResponse);
   rpc DeleteRule          (NetworkAccessDeleteRuleRequest)    returns (NetworkAccessDeleteRuleResponse);
   rpc ListActivity        (NetworkAccessListActivityRequest)  returns (NetworkAccessListActivityResponse);
   rpc GetUserPrivileges   (NetworkAccessGetUserPrivilegesRequest) returns (NetworkAccessUserPrivilegesMessage);
@@ -567,6 +568,20 @@ message NetworkAccessSetRuleRequest {
 message NetworkAccessSetRuleResponse {
   int64 revision = 1;
   NetworkAccessRuleMessage rule = 2;
+}
+
+message NetworkAccessProviderPermissionRequest {
+  NetworkAccessActorMessage actor = 1;
+  string destination = 2;
+  string dest_kind = 3;
+  int32 port = 4;
+  bool allow_lan = 5;
+  optional int64 confirmed_revision = 6;
+}
+
+message NetworkAccessProviderPermissionResponse {
+  int64 revision = 1;
+  string status = 2;
 }
 
 message NetworkAccessDeleteRuleRequest {

@@ -1,6 +1,8 @@
 import { useCurrentUser } from '@/features/auth';
 import {
     apiError,
+    confirmProviderSave,
+    isProviderIdReserved,
     normalizePersonaDefinitions,
     normalizePersonaProfile,
     settingsAdmin,
@@ -417,7 +419,17 @@ export function useOnboardingFlow() {
         setSaving(false);
       }
     } catch (err) {
-      setError(apiError(err));
+      if (isProviderIdReserved(err)) {
+        const retryId = getGeneratedProviderId(
+          providerType,
+          [...existingProviders.map((provider) => provider.id), providerId],
+          Date.now().toString(36),
+        );
+        setProviderForm((prev) => ({ ...prev, id: retryId }));
+        setError('The previous provider ID still has a credential. Continue again to save with a fresh ID.');
+      } else {
+        setError(apiError(err));
+      }
       setProviderValidation(null);
     }
   };
@@ -428,11 +440,12 @@ export function useOnboardingFlow() {
     settings: { base_url: string | null; api_key: string | null; http_timeout_seconds: number | null },
     providerModel: string
   ) => {
-      await settingsAdmin.saveProvider({
+      const saved = await confirmProviderSave(settingsAdmin.saveProvider, {
         id: providerId,
         type: providerType,
         settings,
       });
+      if (!saved) return;
       setProviderForm((prev) => ({ ...prev, id: providerId }));
       setExistingProviders((prev) => {
         const nextProvider = {
