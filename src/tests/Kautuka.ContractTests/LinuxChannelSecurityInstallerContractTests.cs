@@ -65,7 +65,12 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("ChannelHost can read Gateway private material", source, StringComparison.Ordinal);
         Assert.Contains("'root:kautuka:771'", source, StringComparison.Ordinal);
 
-        Assert.Contains("chown_tree_excluding \"$internal_state_root\" \"$service_user:$service_group\" \"$channel_security_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("prepare_install_state_permissions \"$internal_state_root\" \"$visible_root\" \"$service_user\" \"$service_group\" \"$appliance_image_payload\"", source, StringComparison.Ordinal);
+        Assert.Contains("""
+                if [[ "$appliance" != 'true' ]]; then
+                    local channel_security_root="$state_root/security"
+                    chown_tree_excluding "$state_root" "$service_user:$service_group" "$channel_security_root"
+            """, source, StringComparison.Ordinal);
         Assert.Contains("-o -exec chown -h \"$owner\" {} +", source, StringComparison.Ordinal);
         Assert.Contains("local containers_root=\"$root/.local/share/containers\"", source, StringComparison.Ordinal);
         Assert.Contains("local credentials_state_root=\"$root/credentialsHost\"", source, StringComparison.Ordinal);
@@ -87,7 +92,11 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("prepare_gateway_database_owner() {", source, StringComparison.Ordinal);
         Assert.Contains("chown \"kautuka-gateway:kautuka\" \"$database_sidecar\"", source, StringComparison.Ordinal);
         Assert.Contains("chmod 0600 \"$database_sidecar\"", source, StringComparison.Ordinal);
-        Assert.Contains("normalize_sidecar_data_permissions \"$internal_state_root\"\n    if [[ \"$appliance_image_payload\" == 'true' ]]; then", source, StringComparison.Ordinal);
+        Assert.Contains("""
+                if [[ "$appliance" != 'true' ]]; then
+                    normalize_sidecar_data_permissions "$state_root"
+                fi
+            """, source, StringComparison.Ordinal);
         Assert.Contains("provision_appliance_channel_security_material \"$internal_state_root\" \"$channel_executable\" \"$service_user:$service_group\"\n    else\n        prepare_gateway_database_owner \"$internal_state_root\"", source, StringComparison.Ordinal);
         Assert.Contains("chown -R \"kautuka-gateway:$service_group\" \"$bundle_root\"", source, StringComparison.Ordinal);
         Assert.Contains("no pinned update source written; UpdateService discovers signed GitHub releases by channel", source, StringComparison.Ordinal);
