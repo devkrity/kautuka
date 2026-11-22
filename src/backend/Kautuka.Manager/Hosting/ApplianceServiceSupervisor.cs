@@ -565,6 +565,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             args.AddRange([
                 "--dns", WorkloadRulesetRenderer.EgressPodIp,
                 "--env", $"Kautuka__NetworkAccess__ApprovalHold__Duration={approvalHold.ToString("c", System.Globalization.CultureInfo.InvariantCulture)}",
+                "--env", "Kautuka__ConnectorImagePreparationSeconds",
                 "--volume", $"{RequireMountSource(gatewayConnectDirectory!, directory: true)}:/run/kautuka-gateway-connect:ro,Z",
             ]);
             AddGatewayPeerMounts(args, dataRoot);

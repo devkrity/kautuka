@@ -729,6 +729,22 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                             string egress = GetStringProperty(labels, "io.kautuka.egress");
                             string compat = GetStringProperty(labels, "io.kautuka.compat");
                             string purpose = GetStringProperty(labels, "io.kautuka.purpose");
+                            string inspectedContainerId = GetStringProperty(inspected, "Id");
+
+                            if (kind == "builder"
+                                && GetStringProperty(labels, "kautuka.managed") == "manager"
+                                && GetStringProperty(labels, "kautuka.role") == "builder")
+                            {
+                                string name = GetStringProperty(inspected, "Name").TrimStart('/');
+                                bool owned = registry.GetAll().Any(entry => entry.Kind == "builder"
+                                    && (string.Equals(entry.ContainerId, inspectedContainerId, StringComparison.OrdinalIgnoreCase)
+                                        || string.Equals(entry.ContainerId, name, StringComparison.Ordinal)));
+                                if (!owned)
+                                {
+                                    await RemoveRestoredBuilderAsync(inspectedContainerId, cancellationToken).ConfigureAwait(false);
+                                    continue;
+                                }
+                            }
 
                             // The package proxy is a reserved service identity. Never rebuild it
                             // from self-asserted labels; the sidecar supervisor registers it only
@@ -818,7 +834,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                                 string.IsNullOrWhiteSpace(compat) ? null : compat,
                                 DateTimeOffset.UtcNow,
                                 string.IsNullOrWhiteSpace(purpose) ? null : purpose);
-                            string inspectedContainerId = GetStringProperty(inspected, "Id");
                             bool alreadyQuarantined = desiredStateStore?.IsWorkloadQuarantined(cid) == true
                                 || (!string.IsNullOrWhiteSpace(inspectedContainerId) && desiredStateStore?.IsWorkloadQuarantined(inspectedContainerId) == true);
                             if (alreadyQuarantined)
@@ -906,6 +921,33 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public Task RebuildRegistryFromLiveContainersAsync(CancellationToken cancellationToken = default)
         => RebuildRegistryFromLiveContainersAsync(registry, cancellationToken);
+
+    private async Task RemoveRestoredBuilderAsync(string containerId, CancellationToken cancellationToken)
+    {
+        if (!WorkloadPostStartVerifier.IsCanonicalContainerId(containerId))
+            throw new StartupWorkloadContainmentException("Could not verify the identity of a restored package builder.");
+
+        try
+        {
+            PodmanCommandResult removed = await podmanRunner.RunAsync(
+                ["rm", "-f", "--ignore", "--time", "1", containerId], 5, cancellationToken).ConfigureAwait(false);
+            if (removed.ExitCode == 0) return;
+            throw new InvalidOperationException($"Podman could not remove package builder '{containerId}' (exit {removed.ExitCode}).");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (desiredStateStore is null)
+                throw new StartupWorkloadContainmentException("Could not remove a restored package builder.", ex);
+
+            try { desiredStateStore.QuarantineWorkload(containerId); }
+            catch (Exception persistenceException) when (persistenceException is not OperationCanceledException)
+            {
+                throw new StartupWorkloadContainmentException("Could not remove or persist quarantine for a restored package builder.",
+                    new AggregateException(ex, persistenceException));
+            }
+            logger.LogWarning(ex, "Restored package builder {ContainerId} was quarantined for cleanup retry.", containerId);
+        }
+    }
 
     /// <summary>
     /// Executes the startup canary test (Section 4.3.4 item 5).

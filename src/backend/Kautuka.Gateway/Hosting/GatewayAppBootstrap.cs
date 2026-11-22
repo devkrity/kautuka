@@ -193,7 +193,8 @@ internal static partial class GatewayAppBootstrap
 
             return new ManagerGrpcServiceClient(
                 new DeadlineCallInvoker(new LazyCallInvoker(lazyChannel)),
-                baseAddress);
+                baseAddress,
+                builder.Configuration.GetValue("Kautuka:ConnectorImagePreparationSeconds", ManagerGrpcServiceClient.DefaultBundlePreparationSeconds));
         });
         builder.Services.AddSingleton<INetworkAccessChecker>(sp =>
         {

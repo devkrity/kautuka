@@ -4,8 +4,8 @@ public sealed class ManagerGrpcServiceClientDeadlineTests
 {
     [Theory]
     [InlineData("", 30, 45)]
-    [InlineData("/packages/connector.mcpb", 30, 120)]
-    [InlineData("/packages/connector.mcpb", 10, 100)]
+    [InlineData("/packages/connector.mcpb", 30, 210)]
+    [InlineData("/packages/connector.mcpb", 10, 190)]
     public void ProbeDeadlineAllowsPackagePreparationAndPreservesCancellation(
         string bundlePath,
         int connectorTimeoutSeconds,
@@ -25,6 +25,19 @@ public sealed class ManagerGrpcServiceClientDeadlineTests
         Assert.Equal(utcNow.AddSeconds(expectedDeadlineSeconds), options.Deadline);
         Assert.Equal(cancellation.Token, options.CancellationToken);
         Assert.Equal(connectorTimeoutSeconds, request.TimeoutSeconds);
+    }
+
+    [Fact]
+    public void ConfiguredPreparationBudgetOnlyExtendsBundleProbes()
+    {
+        DateTime start = new(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        var request = new Manager.Protos.WorkspaceMcpContainerProbeRequest { TimeoutSeconds = 30 };
+
+        Assert.Equal(start.AddSeconds(45), Gateway.Infrastructure.Sandbox.ManagerGrpcServiceClient
+            .BuildProbeCallOptions(request, start, CancellationToken.None, bundlePreparationSeconds: 240).Deadline);
+        request.BundlePath = "/packages/connector.mcpb";
+        Assert.Equal(start.AddSeconds(270), Gateway.Infrastructure.Sandbox.ManagerGrpcServiceClient
+            .BuildProbeCallOptions(request, start, CancellationToken.None, bundlePreparationSeconds: 240).Deadline);
     }
 
     [Fact]

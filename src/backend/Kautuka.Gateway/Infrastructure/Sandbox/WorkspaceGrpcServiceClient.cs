@@ -12,10 +12,14 @@ namespace Kautuka.Gateway.Infrastructure.Sandbox;
 /// AOT-compatible gRPC client for the Kautuka.Manager service.
 /// Wraps the proto-first generated <see cref="ManagerService.ManagerServiceClient"/>.
 /// </summary>
-internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string managerGrpcAddress) : IManagerGrpcService
+internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string managerGrpcAddress,
+    int bundlePreparationSeconds = ManagerGrpcServiceClient.DefaultBundlePreparationSeconds) : IManagerGrpcService
 {
+    internal const int DefaultBundlePreparationSeconds = 180;
     internal static readonly TimeSpan DesiredStateMaterializationDeadline = TimeSpan.FromMinutes(31);
     private readonly ManagerService.ManagerServiceClient client = new(callInvoker);
+    private readonly int bundlePreparationBudget = bundlePreparationSeconds > 0
+        ? bundlePreparationSeconds : throw new ArgumentOutOfRangeException(nameof(bundlePreparationSeconds));
 
     public ManagerService.ManagerServiceClient Client => client;
 
@@ -64,15 +68,16 @@ internal sealed class ManagerGrpcServiceClient(CallInvoker callInvoker, string m
     public Task<WorkspaceMcpProbeResponse> ProbeMcpContainerAsync(WorkspaceMcpContainerProbeRequest request, CancellationToken cancellationToken = default)
         => Call("ProbeMcpContainer", () => client.ProbeMcpContainerAsync(
             request,
-            BuildProbeCallOptions(request, DateTime.UtcNow, cancellationToken)).ResponseAsync);
+            BuildProbeCallOptions(request, DateTime.UtcNow, cancellationToken, bundlePreparationBudget)).ResponseAsync);
 
-    internal static CallOptions BuildProbeCallOptions(WorkspaceMcpContainerProbeRequest request, DateTime utcNow, CancellationToken cancellationToken)
+    internal static CallOptions BuildProbeCallOptions(WorkspaceMcpContainerProbeRequest request, DateTime utcNow, CancellationToken cancellationToken,
+        int bundlePreparationSeconds = DefaultBundlePreparationSeconds)
     {
         int connectorTimeoutSeconds = BoundedTimeout(request.TimeoutSeconds, 30, 600);
-        int preparationSeconds = string.IsNullOrWhiteSpace(request.BundlePath) ? 15 : 90;
+        int preparationSeconds = string.IsNullOrWhiteSpace(request.BundlePath) ? 15 : bundlePreparationSeconds;
         return new CallOptions(
             KautukaGrpcCorrelationMetadata.CreateClientHeaders(),
-            deadline: utcNow.AddSeconds(connectorTimeoutSeconds + preparationSeconds),
+            deadline: utcNow.AddSeconds(connectorTimeoutSeconds).AddSeconds(preparationSeconds),
             cancellationToken: cancellationToken);
     }
 

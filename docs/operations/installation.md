@@ -137,7 +137,11 @@ Manager debug logs report how long connector and sandbox artifact builds waited 
 
 A new connector's save-time discovery can continue after one concurrent catalog publication if the connector is still unpublished and the runtime settings are unchanged. Admission still verifies the exact revision used to start its container.
 
+An MCPB probe gets a three-minute image-preparation budget in addition to the connector's discovery timeout. This accommodates a cold build waiting for another build to finish. Set `Kautuka__ConnectorImagePreparationSeconds` in the Manager service environment to change the preparation budget.
+
 Workload reconciliation compares the Podman listing with the registry entries captured before that listing began. A package build keeps its pre-start registration until its own cleanup runs. The registry removes that build's registration even if reconciliation has updated its container ID. If an egress inspection times out during reconciliation, Manager closes launch admission and verifies the full boundary on the next pass. If that retry finds the pod unhealthy or still cannot verify its health, Manager recreates it before reopening admission.
+
+On restart, Manager removes package builders that have no active registration. If removal fails, Manager quarantines the builder and retries during reconciliation.
 
 In appliance mode, the package proxy wrapper builds from the locally imported, digest-pinned base image with networking and automatic pulls disabled. The build retains the scheduled Podman health check. Once running, the proxy fetches upstream packages through Envoy.
 
