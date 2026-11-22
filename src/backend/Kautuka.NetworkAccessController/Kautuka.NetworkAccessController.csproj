@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="network-access-defaults.json" />
+    <EmbeddedResource Include="public_suffix_list.dat" />
     <None Include="network-access-defaults.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

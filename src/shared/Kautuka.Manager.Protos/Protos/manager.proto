@@ -465,6 +465,7 @@ message NetworkAccessRequestMessage {
   string compat_profile = 17;
   bool waiting_for_admin = 18;
   bool compatibility_mode = 19;
+  string base_domain = 20;
 }
 
 message NetworkAccessRuleMessage {
@@ -530,6 +531,7 @@ message NetworkAccessDecideRequest {
   string scope = 4;
   bool allow_lan = 5;
   int64 expected_revision = 6;
+  bool include_subdomains = 7;
 }
 
 message NetworkAccessDecideResponse {

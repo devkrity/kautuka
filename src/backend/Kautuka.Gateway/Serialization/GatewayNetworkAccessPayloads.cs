@@ -24,7 +24,8 @@ internal sealed record NetworkAccessRequestDto(
     string? Purpose = null,
     bool? CompatibilityMode = null,
     bool? WaitingForAdmin = null,
-    bool? OwnerCanApproveOwn = null);
+    bool? OwnerCanApproveOwn = null,
+    string? BaseDomain = null);
 
 internal sealed record UserPrivilegesSummaryDto(bool CanApproveOwn);
 
@@ -73,7 +74,8 @@ internal sealed record RequestDecisionDto(
     bool Allow,
     string? Scope,
     bool? AllowLan,
-    long ExpectedRevision);
+    long ExpectedRevision,
+    bool IncludeSubdomains = false);
 
 internal sealed record RequestDecisionResponseDto(
     long Revision,

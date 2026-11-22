@@ -23,6 +23,7 @@
 *.slnx text eol=lf
 *.ps1 text eol=lf
 compliance/licenses/*.txt text eol=lf
+src/backend/Kautuka.NetworkAccessController/public_suffix_list.dat text eol=lf
 .editorconfig text eol=lf
 .gitattributes text eol=lf
 

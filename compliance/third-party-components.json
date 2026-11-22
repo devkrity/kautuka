@@ -3,6 +3,17 @@
   "policy": "Every externally sourced component copied into a Kautuka release must be recorded here or discovered in the generated release SBOM. Changes to runtime image digests or bundled native assets require an evidence update.",
   "components": [
     {
+      "id": "public-suffix-list",
+      "version": "2026-11-21_04-33-45_UTC",
+      "licenseExpression": "MPL-2.0",
+      "source": "https://publicsuffix.org/list/",
+      "sourceCommit": "87a2c1b8de5886a133ff4da21b2aa6fec88d8739",
+      "licenseFiles": ["LICENSE-public-suffix-list.txt"],
+      "artifacts": {
+        "src/backend/Kautuka.NetworkAccessController/public_suffix_list.dat": "017501d3fa7911c60ac7e0f68df4122b07216c585c15dc30e0f0c74b8d13a2b9"
+      }
+    },
+    {
       "id": "sqlite-vec",
       "version": "0.1.9",
       "licenseExpression": "MIT OR Apache-2.0",

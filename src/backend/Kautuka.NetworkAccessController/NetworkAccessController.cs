@@ -511,23 +511,26 @@ public sealed class NetworkAccessController
                     : RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, channel.Reason);
             }
 
-            IReadOnlyList<NetworkAccessRule> platformRules = NetworkAccessRuleMatcher.FindApplicable(
-                state, null, null, null, destKind, normalizedDestination, input.Port);
-            if (platformRules.Any(static rule => !rule.Allowed))
+            IReadOnlyList<NetworkAccessRule> matchingRules = NetworkAccessRuleMatcher.FindApplicable(
+                state, "system", agentId, null, destKind, normalizedDestination, input.Port, includeSystemDomainFallback: true);
+            if (matchingRules.Any(static rule => !rule.Allowed && rule.ScopeKind is ("system" or "agent")))
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-            NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port);
+            NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port)
+                ?? matchingRules.FirstOrDefault(static rule => rule.ScopeKind == "agent" && rule.DestKind == "domain");
             if (explicitSystemRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, normalizedDestination, input.Port);
             if (explicitSystemRule is null && seedRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+            bool systemWideAllow = matchingRules.Any(static rule => rule.ScopeKind == "system" && rule.Allowed);
+            bool systemWideAllowLan = systemWideAllow && matchingRules.Any(static rule => rule.ScopeKind == "system" && rule.Allowed && rule.AllowLan);
             if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
-                && (platformRules.Any(static rule => rule.Allowed) || explicitSystemRule is { Allowed: true })
-                && !platformRules.Any(static rule => rule.Allowed && rule.AllowLan) && explicitSystemRule is not { Allowed: true, AllowLan: true })
+                && (systemWideAllow || explicitSystemRule is { Allowed: true })
+                && !systemWideAllowLan && explicitSystemRule is not { Allowed: true, AllowLan: true })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "not_public");
-            if (platformRules.Any(static rule => rule.Allowed))
+            if (systemWideAllow)
                 return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system",
-                    allowLan: platformRules.Any(static rule => rule.Allowed && rule.AllowLan) || explicitSystemRule is { Allowed: true, AllowLan: true });
+                    allowLan: systemWideAllowLan || explicitSystemRule is { Allowed: true, AllowLan: true });
             if (explicitSystemRule is { Allowed: true })
             {
                 return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system", allowLan: explicitSystemRule.AllowLan);

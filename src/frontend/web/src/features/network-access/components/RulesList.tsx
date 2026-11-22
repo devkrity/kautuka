@@ -88,7 +88,9 @@ export function RulesList({
     const destDisplay =
       rule.destKind === 'any-public'
         ? 'Any public website'
-        : formatDestinationDisplay(rule.destination, rule.port);
+        : rule.destKind === 'domain'
+          ? `${formatDestinationDisplay(rule.destination, rule.port)} and its subdomains`
+          : formatDestinationDisplay(rule.destination, rule.port);
 
     return (
       <article

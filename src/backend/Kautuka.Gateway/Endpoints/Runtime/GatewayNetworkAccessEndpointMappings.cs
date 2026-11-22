@@ -142,6 +142,7 @@ internal static partial class GatewayRuntimeEndpointMappings
                 Allow = decision.Allow,
                 Scope = decision.Scope ?? string.Empty,
                 AllowLan = decision.AllowLan ?? false,
+                IncludeSubdomains = decision.IncludeSubdomains,
                 ExpectedRevision = decision.ExpectedRevision,
             };
 
@@ -968,7 +969,8 @@ internal static partial class GatewayRuntimeEndpointMappings
             Purpose: string.IsNullOrWhiteSpace(req.Purpose) ? null : req.Purpose,
             CompatibilityMode: req.CompatibilityMode,
             WaitingForAdmin: waitingForAdmin,
-            OwnerCanApproveOwn: canApproveOwn);
+            OwnerCanApproveOwn: canApproveOwn,
+            BaseDomain: string.IsNullOrEmpty(req.BaseDomain) ? null : req.BaseDomain);
     }
 
     private static IResult ManagerUnavailable(string message)

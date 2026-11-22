@@ -21,6 +21,7 @@ export interface NetworkAccessRequestDto {
   compatibilityMode?: boolean;
   waitingForAdmin?: boolean;
   ownerCanApproveOwn?: boolean;
+  baseDomain?: string | null;
 }
 
 export interface UserPrivilegesSummaryDto {
@@ -52,7 +53,7 @@ export interface NetworkAccessRuleDto {
   connectorId?: string;
   connectorDisplayName?: string;
   destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
+  destKind: 'host' | 'ip' | 'domain' | 'any-public';
   port: number;
   allowed: boolean;
   allowLan: boolean;
@@ -75,6 +76,7 @@ export interface RequestDecisionDto {
   scope?: 'agent' | 'user' | 'connector' | 'system';
   allowLan?: boolean;
   expectedRevision: number;
+  includeSubdomains?: boolean;
 }
 
 export interface RequestDecisionResponseDto {
@@ -89,7 +91,7 @@ export interface CreateOrUpdateRuleDto {
   agentId?: string;
   connectorId?: string;
   destination: string;
-  destKind: 'host' | 'ip' | 'any-public';
+  destKind: 'host' | 'ip' | 'domain' | 'any-public';
   port: number;
   allowed: boolean;
   allowLan?: boolean;

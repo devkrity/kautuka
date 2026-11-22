@@ -147,7 +147,8 @@ public sealed partial class WorkspaceGrpcService
                 request.Allow,
                 string.IsNullOrWhiteSpace(request.Scope) ? null : request.Scope,
                 request.ExpectedRevision,
-                request.AllowLan);
+                request.AllowLan,
+                request.IncludeSubdomains);
 
             return new NetworkAccessDecideResponse
             {
@@ -608,6 +609,8 @@ public sealed partial class WorkspaceGrpcService
             CompatProfile = view.Request.CompatProfile ?? string.Empty,
             WaitingForAdmin = view.WaitingForAdmin,
             CompatibilityMode = view.CompatibilityMode,
+            BaseDomain = view.Request.Status == "pending" && view.Request.DestKind == "host" && view.Request.Purpose != "probe"
+                && NetworkRegistrableDomain.TryGet(view.Request.Destination, out string domain) ? domain : string.Empty,
         };
 
     private static NetworkAccessRuleMessage ToMessage(NetworkAccessRuleView view)

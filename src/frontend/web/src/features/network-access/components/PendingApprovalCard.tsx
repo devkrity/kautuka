@@ -60,10 +60,13 @@ export function PendingApprovalCard({
   const canAllowAllAgents = canApproveOwn;
   const defaultScope = request.userId === 'system' ? 'system' : request.agentId ? 'agent' : request.connectorId ? 'connector' : 'user';
   const [allowLan, setAllowLan] = React.useState(false);
+  const [includeSubdomains, setIncludeSubdomains] = React.useState(false);
   const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
 
   const isProbe = request.purpose === 'probe';
+  const baseDomain = request.destKind === 'host' && !isProbe ? request.baseDomain : null;
+  const coverage = includeSubdomains && baseDomain ? { includeSubdomains: true } : {};
   const isPrivate = destinationScope(request.destination) === 'private';
   const destFormatted = formatDestinationDisplay(request.destination, request.port);
 
@@ -86,6 +89,7 @@ export function PendingApprovalCard({
       await onDecide({
         allow: true,
         scope: defaultScope,
+        ...coverage,
         allowLan: isAdmin && allowLan ? true : undefined,
         expectedRevision,
       });
@@ -118,6 +122,7 @@ export function PendingApprovalCard({
       await onDecide({
         allow: true,
         scope: 'user',
+        ...coverage,
         allowLan: isAdmin && allowLan ? true : undefined,
         expectedRevision,
       });
@@ -131,7 +136,7 @@ export function PendingApprovalCard({
   const handleAllowConnector = async () => {
     setSubmitting(true);
     try {
-      await onDecide({ allow: true, scope: 'connector', allowLan: isAdmin && allowLan ? true : undefined, expectedRevision });
+      await onDecide({ allow: true, scope: 'connector', ...coverage, allowLan: isAdmin && allowLan ? true : undefined, expectedRevision });
     } catch {
       // Handled by parent error state
     } finally {
@@ -182,6 +187,15 @@ export function PendingApprovalCard({
         </p>
       ) : canApproveOwn ? (
         <div className="space-y-3 pt-1">
+          {baseDomain && (
+            <div className="flex items-center space-x-2">
+              <Checkbox id={`domain-${request.id}`} checked={includeSubdomains} disabled={disabled || submitting}
+                onChange={(event) => setIncludeSubdomains(event.target.checked)} />
+              <label htmlFor={`domain-${request.id}`} className="text-sm cursor-pointer">
+                Include {baseDomain} and its subdomains
+              </label>
+            </div>
+          )}
           {isAdmin && isPrivate && (
             <div className="flex items-center space-x-2">
               <Checkbox
@@ -245,7 +259,7 @@ export function PendingApprovalCard({
               {confirmedAllScope && (
                 <p className="text-xs text-muted-foreground mt-1">
                   {isOwner ? 'All your activity' : `All of ${userLabel}'s activity`} can now reach{' '}
-                  {destFormatted}.
+                  {includeSubdomains && baseDomain ? `${baseDomain} and its subdomains` : destFormatted}.
                 </p>
               )}
             </div>

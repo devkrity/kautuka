@@ -339,7 +339,8 @@ public sealed partial class NetworkAccessPolicyStore
         bool allow,
         string? scope,
         long expectedRevision,
-        bool allowLan = false)
+        bool allowLan = false,
+        bool includeSubdomains = false)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
@@ -349,6 +350,7 @@ public sealed partial class NetworkAccessPolicyStore
             NetworkAccessPolicyState current = Load();
             if (probeRequestsById.TryGetValue(requestId, out TemporaryProbePendingEntry? probeEntry))
             {
+                if (includeSubdomains) throw new ArgumentException("Temporary probes require exact hostname approval.", nameof(includeSubdomains));
                 return DecideProbeRequestUnsafe(actor, current, probeEntry, allow, expectedRevision, allowLan);
             }
 
@@ -371,9 +373,18 @@ public sealed partial class NetworkAccessPolicyStore
                 throw new InvalidOperationException("revision_conflict: Policy revision has changed.");
             }
 
+            string kind = request.DestKind;
+            string destination = request.Destination;
+            if (includeSubdomains)
+            {
+                if (!allow || kind != "host" || !NetworkRegistrableDomain.TryGet(destination, out string baseDomain))
+                    throw new ArgumentException("This request does not support base domain approval.", nameof(includeSubdomains));
+                kind = "domain";
+                destination = baseDomain;
+            }
             (string destKind, string normalizedDest, int port) = NetworkDestinationNormalizer.ValidateAndNormalizeRuleDestination(
-                request.DestKind,
-                request.Destination,
+                kind,
+                destination,
                 request.Port,
                 allow,
                 allow && allowLan,

@@ -15,6 +15,24 @@ vi.mock('@/features/settings/api/queries', () => ({ useAgents: () => ({ data: []
 vi.mock('@/features/connectors/api/queries', () => ({ useConnectors: () => ({ data: [{ id: 'web', name: 'Web Tools', scope: 'user', ownerUserId: 'alice' }] }) }));
 
 describe('network access user scopes', () => {
+  it.each([false, true])('keeps approval at the exact host until broader coverage is selected (%s)', async (includeSubdomains) => {
+    const request: NetworkAccessRequestDto = {
+      id: 'coverage', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'Assistant',
+      attribution: 'user-agent', destination: 'edition.cnn.com', destKind: 'host', baseDomain: 'cnn.com',
+      port: 443, actorKind: 'agent', firstSeenUtc: '2026-01-01T00:00:00Z',
+      lastSeenUtc: '2026-01-01T00:00:00Z', attempts: 1, status: 'pending', origin: 'container',
+    };
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<PendingApprovalCard request={request} currentUser={{ id: 'alice', role: 'user' }}
+      userPrivileges={{ canApproveOwn: true }} expectedRevision={4} onDecide={onDecide} />);
+    const toggle = screen.getByRole('checkbox', { name: 'Include cnn.com and its subdomains' });
+    expect(toggle).not.toBeChecked();
+    if (includeSubdomains) fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: 'Allow Assistant to access this site' }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith({ allow: true, scope: 'agent', allowLan: undefined,
+      expectedRevision: 4, ...(includeSubdomains ? { includeSubdomains: true } : {}) }));
+  });
+
   it.each([
     ['gateway', 'remote-mcp', 'Kautuka was connecting to a remote connector to discover or use its tools.'],
     ['gateway', undefined, "This agent or connector tried to connect to a website it hasn't been allowed to use."],
