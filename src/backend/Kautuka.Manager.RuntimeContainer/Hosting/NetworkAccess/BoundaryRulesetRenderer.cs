@@ -215,7 +215,6 @@ public static class BoundaryRulesetRenderer
         bool isWindowsMtls = false,
         bool includeGatewayConnect = false,
         bool includeApplianceTelemetry = false,
-        string? telemetryAuthorization = null,
         TimeSpan approvalHold = default)
     {
         string template = ResolveTemplate("envoy.static.yaml.tmpl");
@@ -242,7 +241,8 @@ public static class BoundaryRulesetRenderer
             .Replace("{{GATEWAY_CONNECT_LISTENER}}", gatewayConnect, StringComparison.Ordinal)
             .Replace("{{AUTHORIZATION_DEADLINE}}", FormattableString.Invariant($"{authorizationDeadline.TotalSeconds:0.###}s"), StringComparison.Ordinal)
             .Replace("{{GATEWAY_STREAM_IDLE_DEADLINE}}", FormattableString.Invariant($"{connectIdleDeadline.TotalSeconds:0.###}s"), StringComparison.Ordinal)
-            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener(telemetryAuthorization) : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_LISTENER}}", includeApplianceTelemetry ? RenderTelemetryListener() : string.Empty, StringComparison.Ordinal)
+            .Replace("{{TELEMETRY_SECRET}}", includeApplianceTelemetry ? TelemetrySecretYaml : string.Empty, StringComparison.Ordinal)
             .Replace("{{TELEMETRY_CLUSTER}}", includeApplianceTelemetry ? RenderTelemetryCluster() : string.Empty, StringComparison.Ordinal)
             .Replace("{{ADMIN_SOCKET_PATH}}", adminSocketPath, StringComparison.Ordinal)
             .Replace("{{LAN_SOURCE_IP}}", EgressTopologyManager.OutsideLanSourceIp, StringComparison.Ordinal)
@@ -254,20 +254,18 @@ public static class BoundaryRulesetRenderer
         return rendered;
     }
 
-    private static string RenderTelemetryListener(string? authorization)
+    internal const string TelemetrySecretFileName = "otlp-ingestion";
+    private const string TelemetrySecretYaml = """
+      secrets:
+        - name: appliance_otlp_ingestion
+          generic_secret:
+            secret:
+              filename: /etc/kautuka-envoy/otlp-ingestion
+
+    """;
+
+    private static string RenderTelemetryListener()
     {
-        if (authorization is not null && (authorization.Length is 0 or > 256
-            || !authorization.All(static ch => char.IsAsciiLetterOrDigit(ch) || ch is '+' or '/' or '=')))
-            throw new ArgumentException("Invalid appliance telemetry authorization format.", nameof(authorization));
-
-        string header = authorization is null ? string.Empty : FormattableString.Invariant($"""
-                                  request_headers_to_add:
-                                    - header:
-                                        key: authorization
-                                        value: "Basic {authorization}"
-                                      append_action: OVERWRITE_IF_EXISTS_OR_ADD
-
-        """);
         return FormattableString.Invariant($"""
         - name: appliance_telemetry
           address:
@@ -297,11 +295,22 @@ public static class BoundaryRulesetRenderer
                                       exact: "POST"
                               route:
                                 cluster: appliance_observability
-    {header}                        - match:
+                            - match:
                                 prefix: "/"
                               direct_response:
                                 status: 404
                     http_filters:
+                      - name: envoy.filters.http.credential_injector
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector
+                          overwrite: true
+                          credential:
+                            name: envoy.http.injected_credentials.generic
+                            typed_config:
+                              "@type": type.googleapis.com/envoy.extensions.http.injected_credentials.generic.v3.Generic
+                              credential:
+                                name: appliance_otlp_ingestion
+                              header_value_prefix: "Basic "
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

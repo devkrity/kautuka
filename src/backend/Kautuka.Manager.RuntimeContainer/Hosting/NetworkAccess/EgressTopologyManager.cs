@@ -1645,15 +1645,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     {
         // Render boundary and configs
         bool includeGatewayConnect = gatewayConnectEnvoyDirectory is not null;
-        bool includeTelemetry = telemetryAuthorization is not null;
+        string? ingestionSecret = telemetryAuthorization;
+        bool includeTelemetry = ingestionSecret is not null;
         string boundaryNft = BoundaryRulesetRenderer.RenderBoundaryNft(includeLanGrants, decisionEndpointIp, [OutsideGatewayIp], includeGatewayConnect, includeTelemetry);
         string envoyConfig = BoundaryRulesetRenderer.RenderEnvoyConfig(
             adminSocketPath: isWindowsHostNativeDev ? "/tmp/kautuka-admin.sock" : "/run/kautuka-admin/admin.sock",
             isWindowsMtls: isWindowsHostNativeDev,
             includeGatewayConnect: includeGatewayConnect,
             includeApplianceTelemetry: includeTelemetry,
-            approvalHold: approvalHold,
-            telemetryAuthorization: telemetryAuthorization);
+            approvalHold: approvalHold);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 
         string nacDir = Path.Combine(stateDirectory, "nac");
@@ -1666,14 +1666,22 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string boundaryConfigDir = Path.Combine(nacDir, "boundary");
         string boundaryPath = Path.Combine(boundaryConfigDir, "boundary.nft");
         string envoyConfigDir = Path.Combine(nacDir, "envoy");
+        string ingestionSecretPath = Path.Combine(envoyConfigDir, BoundaryRulesetRenderer.TelemetrySecretFileName);
         string dnsConfigDir = Path.Combine(nacDir, "dns");
         string envoyPath = Path.Combine(envoyConfigDir, "envoy.yaml");
         string corefilePath = Path.Combine(dnsConfigDir, "Corefile");
 
-        expectedBoundaryNftSourceHash = ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+        expectedBoundaryNftSourceHash = ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret);
         await EnsureExistingEgressPodUsesRenderedConfigAsync(
-            boundaryNft, envoyConfig, corefile, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
+            boundaryNft, envoyConfig, corefile, ingestionSecret, isWindowsHostNativeDev, cancellationToken).ConfigureAwait(false);
 
+        if (ingestionSecret is not null)
+        {
+            // The rootless Envoy image runs as a remapped UID. The owner-only
+            // nac directory protects this file on the host, and only Envoy mounts it.
+            await WriteConfigAtomicallyAsync(ingestionSecretPath, ingestionSecret, cancellationToken,
+                unixMode: UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead).ConfigureAwait(false);
+        }
         await WriteConfigAtomicallyAsync(boundaryPath, boundaryNft, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(envoyPath, envoyConfig, cancellationToken).ConfigureAwait(false);
         await WriteConfigAtomicallyAsync(corefilePath, corefile, cancellationToken).ConfigureAwait(false);
@@ -1955,12 +1963,15 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(renderedBoundaryNft)));
     }
 
-    internal static string ComputeReconcileConfigurationHash(string boundaryNft, string envoyConfig, string corefile)
+    internal static string ComputeReconcileConfigurationHash(string boundaryNft, string envoyConfig, string corefile, string? ingestionSecret = null)
     {
         ArgumentNullException.ThrowIfNull(boundaryNft);
         ArgumentNullException.ThrowIfNull(envoyConfig);
         ArgumentNullException.ThrowIfNull(corefile);
-        return ComputeBoundaryNftSourceHash($"boundary.nft\0{boundaryNft}\0envoy.yaml\0{envoyConfig}\0Corefile\0{corefile}");
+        string contents = $"boundary.nft\0{boundaryNft}\0envoy.yaml\0{envoyConfig}\0Corefile\0{corefile}";
+        if (ingestionSecret is not null)
+            contents += $"\0otlp-ingestion\0{ingestionSecret}";
+        return ComputeBoundaryNftSourceHash(contents);
     }
 
     internal static void RequireMatchingBoundaryRulesetHash(string renderedNativeHash, string liveHash)
@@ -2750,7 +2761,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string path,
         string content,
         CancellationToken cancellationToken,
-        Func<Stream, string, CancellationToken, Task>? writer = null)
+        Func<Stream, string, CancellationToken, Task>? writer = null,
+        UnixFileMode? unixMode = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(content);
@@ -2778,6 +2790,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            if (OperatingSystem.IsLinux() && unixMode is { } mode)
+            {
+                File.SetUnixFileMode(tempPath, mode);
+            }
             File.Move(tempPath, fullPath, overwrite: true);
         }
         finally
@@ -3915,20 +3931,25 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string boundaryNft = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
         string envoyConfig = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
         string corefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
-        return ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile);
+        string? ingestionSecret = telemetryAuthorization is null ? null : await File.ReadAllTextAsync(
+            Path.Combine(Path.GetDirectoryName(envoyPath)!, BoundaryRulesetRenderer.TelemetrySecretFileName), cancellationToken).ConfigureAwait(false);
+        return ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret);
     }
 
     private async Task<bool> ExistingReconcileConfigurationMatchesAsync(
         string boundaryNft,
         string envoyConfig,
         string corefile,
+        string? ingestionSecret,
         CancellationToken cancellationToken)
     {
         string nacDirectory = Path.Combine(stateDirectory, "nac");
         string boundaryPath = Path.Combine(nacDirectory, "boundary", "boundary.nft");
         string envoyPath = Path.Combine(nacDirectory, "envoy", "envoy.yaml");
         string corefilePath = Path.Combine(nacDirectory, "dns", "Corefile");
-        if (!File.Exists(boundaryPath) || !File.Exists(envoyPath) || !File.Exists(corefilePath))
+        string secretPath = Path.Combine(nacDirectory, "envoy", BoundaryRulesetRenderer.TelemetrySecretFileName);
+        if (!File.Exists(boundaryPath) || !File.Exists(envoyPath) || !File.Exists(corefilePath)
+            || (ingestionSecret is not null && !File.Exists(secretPath)))
         {
             return false;
         }
@@ -3936,9 +3957,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string existingBoundary = await File.ReadAllTextAsync(boundaryPath, cancellationToken).ConfigureAwait(false);
         string existingEnvoy = await File.ReadAllTextAsync(envoyPath, cancellationToken).ConfigureAwait(false);
         string existingCorefile = await File.ReadAllTextAsync(corefilePath, cancellationToken).ConfigureAwait(false);
+        string? existingSecret = ingestionSecret is null ? null : await File.ReadAllTextAsync(secretPath, cancellationToken).ConfigureAwait(false);
         return string.Equals(
-            ComputeReconcileConfigurationHash(existingBoundary, existingEnvoy, existingCorefile),
-            ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile),
+            ComputeReconcileConfigurationHash(existingBoundary, existingEnvoy, existingCorefile, existingSecret),
+            ComputeReconcileConfigurationHash(boundaryNft, envoyConfig, corefile, ingestionSecret),
             StringComparison.Ordinal);
     }
 
@@ -3946,11 +3968,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         string boundaryNft,
         string envoyConfig,
         string corefile,
+        string? ingestionSecret,
         bool isWindowsHostNativeDev,
         CancellationToken cancellationToken)
     {
         if (isWindowsHostNativeDev
-            || await ExistingReconcileConfigurationMatchesAsync(boundaryNft, envoyConfig, corefile, cancellationToken).ConfigureAwait(false))
+            || await ExistingReconcileConfigurationMatchesAsync(boundaryNft, envoyConfig, corefile, ingestionSecret, cancellationToken).ConfigureAwait(false))
         {
             return;
         }

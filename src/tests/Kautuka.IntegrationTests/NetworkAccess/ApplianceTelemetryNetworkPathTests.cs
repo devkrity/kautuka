@@ -24,16 +24,27 @@ public sealed class ApplianceTelemetryNetworkPathTests
     }
 
     [Fact]
-    public void EnvoySetsTheCollectorAuthorizationOnlyOnTheIngestionRoute()
+    public void EnvoyLoadsCollectorAuthorizationFromThePrivateFile()
     {
-        const string authorization = "Zml4dHVyZQ==";
-        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig(includeApplianceTelemetry: true, telemetryAuthorization: authorization);
+        string envoy = BoundaryRulesetRenderer.RenderEnvoyConfig(includeApplianceTelemetry: true);
 
-        string route = envoy[envoy.IndexOf("cluster: appliance_observability", StringComparison.Ordinal)..envoy.IndexOf("status: 404", StringComparison.Ordinal)];
-        Assert.Contains("key: authorization", route, StringComparison.Ordinal);
-        Assert.Contains($"value: \"Basic {authorization}\"", route, StringComparison.Ordinal);
-        Assert.Contains("append_action: OVERWRITE_IF_EXISTS_OR_ADD", route, StringComparison.Ordinal);
-        Assert.Throws<ArgumentException>(() => BoundaryRulesetRenderer.RenderEnvoyConfig(
-            includeApplianceTelemetry: true, telemetryAuthorization: "bad\nvalue"));
+        int listenerStart = envoy.IndexOf("name: appliance_telemetry", StringComparison.Ordinal);
+        string listener = envoy[listenerStart..envoy.IndexOf("  secrets:", listenerStart, StringComparison.Ordinal)];
+        Assert.Contains("envoy.filters.http.credential_injector", listener, StringComparison.Ordinal);
+        Assert.Contains("overwrite: true", listener, StringComparison.Ordinal);
+        Assert.Contains("name: appliance_otlp_ingestion", listener, StringComparison.Ordinal);
+        Assert.Contains("header_value_prefix: \"Basic \"", listener, StringComparison.Ordinal);
+        Assert.Contains("filename: /etc/kautuka-envoy/otlp-ingestion", envoy, StringComparison.Ordinal);
+        string secret = envoy[envoy.IndexOf("  secrets:", listenerStart, StringComparison.Ordinal)..envoy.IndexOf("  clusters:", listenerStart, StringComparison.Ordinal)];
+        Assert.DoesNotContain("inline_string:", secret, StringComparison.Ordinal);
+        Assert.DoesNotContain("appliance_otlp_ingestion", BoundaryRulesetRenderer.RenderEnvoyConfig(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ChangedIngestionCredentialInvalidatesTheLoadedConfigurationHash()
+    {
+        Assert.NotEqual(
+            EgressTopologyManager.ComputeReconcileConfigurationHash("rules", "envoy", "dns", "original"),
+            EgressTopologyManager.ComputeReconcileConfigurationHash("rules", "envoy", "dns", "replacement"));
     }
 }
