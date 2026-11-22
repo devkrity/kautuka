@@ -133,6 +133,7 @@ function AppShell() {
     }
   }, [applyObservedUpdateStatus]);
 
+  const isUpdateApplying = updateStatus?.state.toLowerCase() === 'applying';
   React.useEffect(() => {
     let cancelled = false;
 
@@ -162,7 +163,7 @@ function AppShell() {
     };
 
     void poll();
-    const pollInterval = updateStatus?.state.toLowerCase() === 'applying' ? 3000 : 30000;
+    const pollInterval = isUpdateApplying ? 3000 : 30000;
     const intervalId = window.setInterval(() => {
       void poll();
     }, pollInterval);
@@ -171,7 +172,7 @@ function AppShell() {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [applyObservedUpdateStatus, authenticated, updateStatus?.state]);
+  }, [applyObservedUpdateStatus, authenticated, isUpdateApplying]);
 
   const runUpdateAction = React.useCallback(
     async (action: 'refresh' | 'apply') => {

@@ -406,6 +406,7 @@ describe('App update banner', () => {
       expect(screen.getByText('You’re up to date')).toBeInTheDocument();
     });
 
+    expect(fetchUpdateStatusMock).toHaveBeenCalledOnce();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
