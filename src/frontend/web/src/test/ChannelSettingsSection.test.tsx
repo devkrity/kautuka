@@ -51,7 +51,7 @@ describe('platform channel settings', () => {
   });
 
   it('shows the paused release hosts and writes only scoped permissions after approval', async () => {
-    const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'publicsuffix.org'];
+    const hosts = ['api.github.com', 'github.com', 'release-assets.githubusercontent.com'];
     const rules = hosts.map(destination => ({
       setupService: 'updates', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
       destination, destKind: 'host', port: 443, allowed: false,
@@ -77,6 +77,28 @@ describe('platform channel settings', () => {
         port: 443, allowed: true, allowLan: false, expectedRevision: 4 + index,
       }));
     });
+  });
+
+  it('shows suffix list maintenance allowed by default and pauses it separately from updates', async () => {
+    const suffix = { setupService: 'suffix-list', scopeKind: 'agent', userId: 'system',
+      agentId: 'updateservice', destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: true };
+    const release = { ...suffix, setupService: 'updates', destination: 'api.github.com', allowed: false };
+    const rules = [suffix, release];
+    api.get.mockImplementation(async () => ({ data: { revision: 1, rules: [...rules] } }));
+    api.put.mockImplementation(async (_url: string, body: typeof suffix) => {
+      rules[0] = { ...rules[0], ...body };
+      return { data: body };
+    });
+    render(<ChannelSettingsSection />);
+    expect(await screen.findByText('Public Suffix List refresh: Allowed by this setting')).toBeVisible();
+    expect(screen.getByText('publicsuffix.org')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Pause suffix list refresh' }));
+    expect(await screen.findByText('Public Suffix List refresh: Paused')).toBeVisible();
+    expect(screen.getByText('In-app updates: Paused')).toBeVisible();
+    expect(api.put).toHaveBeenCalledTimes(1);
+    expect(api.put).toHaveBeenCalledWith('/network-access/rules', expect.objectContaining({
+      scopeKind: 'agent', userId: 'system', agentId: 'updateservice', destination: 'publicsuffix.org', allowed: false,
+    }));
   });
 
   it('can pause a saved service permission while a broader rule blocks it', async () => {

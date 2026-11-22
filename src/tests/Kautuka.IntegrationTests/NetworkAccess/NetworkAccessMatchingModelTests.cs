@@ -16,12 +16,12 @@ public sealed class NetworkAccessMatchingModelTests
             var admin = new NetworkAccessActor("admin", IsAdmin: true);
             NetworkAccessRuleView FindSuffixRule() => Assert.Single(store.ListRules(admin).Rules,
                 static rule => rule.Rule.Destination == "publicsuffix.org");
-            Assert.Equal("updates", FindSuffixRule().SetupService);
-            Assert.False(FindSuffixRule().Rule.Allowed);
-
-            store.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "publicsuffix.org", "host", 443, true), store.Revision);
-            Assert.Equal("updates", FindSuffixRule().SetupService);
+            Assert.Equal("suffix-list", FindSuffixRule().SetupService);
             Assert.True(FindSuffixRule().Rule.Allowed);
+
+            store.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "publicsuffix.org", "host", 443, false), store.Revision);
+            Assert.Equal("suffix-list", FindSuffixRule().SetupService);
+            Assert.False(FindSuffixRule().Rule.Allowed);
             Assert.DoesNotContain(store.ListRules(new NetworkAccessActor("member", IsAdmin: false)).Rules,
                 static rule => rule.SetupService is not null);
         }

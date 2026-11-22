@@ -8,6 +8,7 @@ const groups = [
   { id: 'telegram', name: 'Telegram', label: 'Telegram' },
   { id: 'slack', name: 'Slack', label: 'Slack' },
   { id: 'updates', name: 'in-app updates', label: 'In-app updates' },
+  { id: 'suffix-list', name: 'suffix list refresh', label: 'Public Suffix List refresh' },
 ] as const;
 type ServicePermission = (typeof groups)[number];
 
@@ -50,7 +51,7 @@ export function ChannelSettingsSection({ onReviewReady }: { onReviewReady?: (rea
       const updated = await load();
       const result = serviceState(updated.rules, serviceTargets(updated.rules, service));
       const applied = allow ? result.allowed === targets.length : result.granted === 0;
-      if (service.id === 'updates' || service.id === 'sign-in') {
+      if (service.id !== 'telegram' && service.id !== 'slack') {
         setMessage(applied
           ? `${service.label} ${allow ? 'enabled' : 'paused'}.`
           : `Check the network rules for ${service.name}.`);

@@ -137,8 +137,8 @@ describe('OnboardingWizard welcome step', () => {
     flowState.stage = 'setup';
     flowState.canManageServiceNetworkAccess = true;
     api.get.mockResolvedValue({ data: { revision: 1, rules: [{
-      setupService: 'updates', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
-      destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: false,
+      setupService: 'suffix-list', scopeKind: 'agent', userId: 'system', agentId: 'updateservice',
+      destination: 'publicsuffix.org', destKind: 'host', port: 443, allowed: true,
     }] } });
     render(<OnboardingWizard />);
 

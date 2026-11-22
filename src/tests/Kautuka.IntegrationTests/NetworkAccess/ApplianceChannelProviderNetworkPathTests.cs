@@ -87,6 +87,7 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policy, registry);
 
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "publicsuffix.org").Allowed);
         registry.Register(new RegistryEntry(source, "system", "updateservice", "fixture", "agent-sandbox", null,
             "agent-sandbox", "normal", "user-agent", null, DateTimeOffset.UtcNow, Purpose: "appliance-updateservice"));
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
@@ -95,6 +96,12 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         Assert.Throws<UnauthorizedAccessException>(() => policy.SetRule(new NetworkAccessActor("member", IsAdmin: false), releaseGrant, policy.Revision));
         policy.SetRule(admin, new RuleWriteSpec("system", null, null, null, "github.com", "host", 443, true), policy.Revision);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "github.com").Allowed);
+        var suffix = controller.EvaluateContainerConnection(source, sinkhole, 443, true, "publicsuffix.org");
+        Assert.True(suffix.Allowed);
+        Assert.Equal(Kautuka.NetworkAccessController.NetworkAccessController.ClusterDfpPublic, suffix.Cluster);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 8443, true, "publicsuffix.org").Allowed);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "www.publicsuffix.org").Allowed);
+        policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "publicsuffix.org", "host", 443, false), policy.Revision);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "publicsuffix.org").Allowed);
         foreach (string host in new[] { "api.github.com", "github.com", "release-assets.githubusercontent.com", "publicsuffix.org" })
         {
@@ -110,6 +117,8 @@ public sealed class ApplianceChannelProviderNetworkPathTests
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 8443, true, "github.com").Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, false, null).Allowed);
         Assert.False(controller.EvaluateContainerConnection(source, "192.0.2.2", 443, true, "github.com").Allowed);
+        policy.SetRule(admin, new RuleWriteSpec("system", null, null, null, "publicsuffix.org", "host", 443, false), policy.Revision);
+        Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "publicsuffix.org").Allowed);
         policy.SetRule(admin, new RuleWriteSpec("agent", "system", "updateservice", null, "api.github.com", "host", 443, false), policy.Revision);
         Assert.False(controller.EvaluateContainerConnection(source, sinkhole, 443, true, "api.github.com").Allowed);
         policy.SetBrake(admin, "system", null, on: true);

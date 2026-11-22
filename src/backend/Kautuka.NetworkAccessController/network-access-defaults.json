@@ -132,10 +132,10 @@
       "userId": "system",
       "agentId": "updateservice",
       "destination": "publicsuffix.org",
-      "setupService": "updates",
+      "setupService": "suffix-list",
       "destKind": "host",
       "port": 443,
-      "allowed": false,
+      "allowed": true,
       "allowLan": false
     },
     {

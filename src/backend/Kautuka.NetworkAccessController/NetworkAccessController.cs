@@ -342,9 +342,10 @@ public sealed class NetworkAccessController
         {
             if (entry.Purpose == "appliance-updateservice" && entry.UserId == "system" && entry.AgentId == "updateservice"
                 && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
-                && FindSystemSeedRule(policyStore.SeedRules, "updateservice", destKind, normalizedDestination, destinationPort) is not null
-                && FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort)
-                    is { Allowed: true } releaseRule && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule))
+                && FindSystemSeedRule(policyStore.SeedRules, "updateservice", destKind, normalizedDestination, destinationPort) is { } releaseSeed
+                && (FindExactRule(state.Rules, "agent", "system", "updateservice", null, destKind, normalizedDestination, destinationPort) is { } releaseRule
+                    ? releaseRule.Allowed && !NetworkAccessRuleMatcher.IsPaused(state, releaseRule)
+                    : releaseSeed.Allowed))
                 return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
                     "release_provider", ClusterDfpPublic, openInternetBadge: false);
 
