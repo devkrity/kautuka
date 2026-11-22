@@ -18,6 +18,32 @@ interface PendingApprovalCardProps {
   disabled?: boolean;
 }
 
+function describeInitiatingTask(request: NetworkAccessRequestDto): string | undefined {
+  if (request.origin !== 'gateway') return undefined;
+
+  switch (request.purpose) {
+    case 'agent-run':
+      return 'The helper was working on a task that needed its AI model.';
+    case 'remote-mcp':
+      return 'Kautuka was connecting to a remote connector to discover or use its tools.';
+    case 'provider-test':
+    case 'ai-probe':
+      return 'Kautuka was testing an AI provider connection.';
+    case 'ai-discovery':
+      return 'Kautuka was looking up the models available from an AI provider.';
+    case 'connector-oauth':
+    case 'connector-oauth-refresh':
+      return 'Kautuka was connecting an account or renewing access for a connector.';
+    case 'oidc-login':
+    case 'oidc-link':
+      return 'Kautuka was communicating with a sign-in provider.';
+    case 'catalog-install':
+      return 'Kautuka was downloading an item from the catalog.';
+    default:
+      return undefined;
+  }
+}
+
 export function PendingApprovalCard({
   request,
   currentUser,
@@ -147,7 +173,7 @@ export function PendingApprovalCard({
       <p className="text-sm text-muted-foreground">
         {isProbe
           ? 'This temporary connector probe tried to connect while discovering tools. Any approval applies only until the probe exits.'
-          : "This agent or connector tried to connect to a website it hasn't been allowed to use."}
+          : describeInitiatingTask(request) ?? "This agent or connector tried to connect to a website it hasn't been allowed to use."}
       </p>
 
       {showWaitingNotice ? (

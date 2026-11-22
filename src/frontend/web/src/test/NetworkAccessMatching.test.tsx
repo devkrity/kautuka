@@ -15,6 +15,23 @@ vi.mock('@/features/settings/api/queries', () => ({ useAgents: () => ({ data: []
 vi.mock('@/features/connectors/api/queries', () => ({ useConnectors: () => ({ data: [{ id: 'web', name: 'Web Tools', scope: 'user', ownerUserId: 'alice' }] }) }));
 
 describe('network access user scopes', () => {
+  it.each([
+    ['gateway', 'remote-mcp', 'Kautuka was connecting to a remote connector to discover or use its tools.'],
+    ['gateway', undefined, "This agent or connector tried to connect to a website it hasn't been allowed to use."],
+    ['gateway', 'unrecognized-purpose', "This agent or connector tried to connect to a website it hasn't been allowed to use."],
+    ['container', 'remote-mcp', "This agent or connector tried to connect to a website it hasn't been allowed to use."],
+  ] as const)('explains the initiating task for %s / %s', (origin, purpose, explanation) => {
+    const request: NetworkAccessRequestDto = {
+      id: 'task', userId: 'alice', agentId: 'assistant', attribution: 'user-agent',
+      destination: 'api.example.com', destKind: 'host', port: 443, actorKind: 'connector',
+      firstSeenUtc: '2026-01-01T00:00:00Z', lastSeenUtc: '2026-01-01T00:00:00Z',
+      attempts: 1, status: 'pending', origin, purpose,
+    };
+    render(<PendingApprovalCard request={request} expectedRevision={4} onDecide={vi.fn()} />);
+    expect(screen.getByText(explanation)).toBeVisible();
+    expect(screen.queryByText('unrecognized-purpose')).not.toBeInTheDocument();
+  });
+
   it('uses the revision returned by each decision when allowing a group', async () => {
     const request: NetworkAccessRequestDto = {
       id: 'one', userId: 'alice', agentId: 'agent-1', agentDisplayName: 'My Assistant',
