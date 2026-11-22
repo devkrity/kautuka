@@ -399,6 +399,7 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
 
     private async Task TryReconcileAsync(WorkspaceReconcileTriggerKind triggerKind, CancellationToken cancellationToken)
     {
+        long startedAt = Stopwatch.GetTimestamp();
         try
         {
             await ReconcileAsync(triggerKind, cancellationToken).ConfigureAwait(false);
@@ -412,6 +413,10 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
             WorkspaceDesiredStateSnapshot snapshot = desiredStateStore.Snapshot;
             MarkFailed(snapshot, ClassifyFailure(ex));
             LogReconcileLoopFailed(logger, ex);
+        }
+        finally
+        {
+            logger.LogDebug("Workspace reconcile triggered by {Trigger} took {ElapsedMs:F1} ms.", triggerKind, Stopwatch.GetElapsedTime(startedAt).TotalMilliseconds);
         }
     }
 

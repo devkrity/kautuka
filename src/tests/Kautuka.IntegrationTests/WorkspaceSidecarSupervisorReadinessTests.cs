@@ -61,7 +61,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             if (args.Count > 0 && args[0] == "inspect")
             {
                 inspectCount++;
-                string healthStatus = inspectCount == 1 ? string.Empty : "healthy";
+                string healthStatus = inspectCount == 1 ? "starting" : "healthy";
                 string inspect = System.Text.Json.JsonSerializer.Serialize(new
                 {
                     HostConfig = new { Dns = new[] { EgressTopologyManager.EgressPodIp } },
@@ -73,6 +73,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
 
             if (args.SequenceEqual(["healthcheck", "run", "kautuka-pkgs-proxy"]))
             {
+                Assert.Equal(2, inspectCount);
                 healthcheckInvoked = true;
                 return Task.FromResult(new PodmanCommandResult(0, "healthy", string.Empty));
             }
@@ -93,7 +94,7 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             .GetMethod("IsHealthyAsync", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("IsHealthyAsync method was not found.");
 
-        Task<bool> pending = Assert.IsType<Task<bool>>(isHealthy.Invoke(supervisor, [
+        Task<bool> pending = Assert.IsAssignableFrom<Task<bool>>(isHealthy.Invoke(supervisor, [
             new WorkspaceSidecarDefinition(
                 Name: "kautuka-pkgs-proxy",
                 Image: "localhost/kautuka-pkgs-proxy:local",
@@ -108,13 +109,14 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
 
         Assert.True(await pending.ConfigureAwait(true));
         Assert.True(healthcheckInvoked);
-        Assert.Equal(2, inspectCount);
+        Assert.Equal(3, inspectCount);
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task WarmPackageProxyUsesScheduledHealthAndOneImageLookupButStillVerifiesRulesAsync(bool verification)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public async Task WarmPackageProxyUsesScheduledHealthAndOneImageLookupButStillVerifiesRulesAsync(bool verification, bool sameIdentity)
     {
         const string name = "kautuka-pkgs-proxy";
         const string image = "localhost/kautuka-pkgs-proxy:local";
@@ -148,9 +150,15 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             },
         });
         var calls = new List<string>();
+        EgressTopologyManager? verifiedTopology = null;
         var podman = new PodmanCommandRunner((args, _) =>
         {
             calls.Add(string.Join(' ', args.Take(2)));
+            if (args[0] == "image" && args[1] == "inspect")
+            {
+                Assert.Equal(sameIdentity, verifiedTopology!.IsPackageProxyReady);
+            }
+
             return Task.FromResult(args[0] switch
             {
                 "inspect" when args[1] == name => new PodmanCommandResult(0, inspect, ""),
@@ -166,6 +174,9 @@ public sealed class WorkspaceSidecarSupervisorReadinessTests
             await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")),
                 new WorkloadPostStartVerifier(podman), new WorkloadRegistry(), temp.FullName, hookStateDirectory: temp.FullName);
             typeof(EgressTopologyManager).GetProperty(nameof(EgressTopologyManager.IsStartupGateOpen))!.SetValue(topology, true);
+            verifiedTopology = topology;
+            topology.RegisterVerifiedPackageProxyContainer(sameIdentity ? containerId : new string('c', 64));
+            topology.SetPackageProxyReady(true);
             WorkspaceSidecarSupervisor supervisor = CreateSupervisor(new WorkspaceSidecarDefinition(name, image, [],
                 new Dictionary<string, string>(), [], null, null, null, RequiredForReady: true, ManagerInfrastructure: true),
                 podman, topology, applianceMode: verification);

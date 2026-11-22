@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -85,9 +86,11 @@ public sealed class McpbImageMaterializer(
         }
 
         string buildContextPath = CreateBuildContextPath(connector.ConnectorId, sourceDigest);
+        long queuedAt = Stopwatch.GetTimestamp();
         await imageBuildGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            logger.LogDebug("Connector image build lock acquired after {WaitMs:F1} ms.", Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds);
             // Another request may have built the same content while this one waited.
             existsResult = await podmanCommandRunner
                 .RunAsync(["image", "exists", localImage], 15, cancellationToken)
@@ -194,9 +197,11 @@ public sealed class McpbImageMaterializer(
         }
 
         string buildContextPath = CreateBuildContextPath(connector.ConnectorId, sourceDigest + "-sandbox");
+        long queuedAt = Stopwatch.GetTimestamp();
         await imageBuildGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            logger.LogDebug("Sandbox artifact image build lock acquired after {WaitMs:F1} ms.", Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds);
             // Recheck under the build gate so concurrent requests share one image.
             existsResult = await podmanCommandRunner
                 .RunAsync(["image", "exists", localImage], 15, cancellationToken)

@@ -1521,8 +1521,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     }
 
     public bool IsPackageProxyRegistered
+        => IsRegisteredPackageProxyContainer(containerId: null);
+
+    internal bool IsRegisteredPackageProxyContainer(string? containerId)
         => registry.TryGetByIp(PackageProxyIp, out RegistryEntry? entry)
             && entry is not null
+            && (containerId is null || string.Equals(entry.ContainerId, containerId, StringComparison.OrdinalIgnoreCase))
             && string.Equals(entry.Kind, "agent-sandbox", StringComparison.Ordinal)
             && string.Equals(entry.UserId, "system", StringComparison.Ordinal)
             && string.Equals(entry.AgentId, "package-proxy", StringComparison.Ordinal)

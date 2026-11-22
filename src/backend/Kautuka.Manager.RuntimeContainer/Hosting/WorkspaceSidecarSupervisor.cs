@@ -218,9 +218,11 @@ public sealed class WorkspaceSidecarSupervisor(
 
     private async Task<bool> EnsureSidecarAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
     {
+        bool ready = false;
         try
         {
-            return await EnsureSidecarCoreAsync(sidecar, cancellationToken).ConfigureAwait(false);
+            ready = await EnsureSidecarCoreAsync(sidecar, cancellationToken).ConfigureAwait(false);
+            return ready;
         }
         catch (ContainerInspectionUnavailableException ex)
         {
@@ -228,16 +230,18 @@ public sealed class WorkspaceSidecarSupervisor(
             driftNotes.Enqueue(sidecar.Name + " inspection is unavailable. Reconciliation is deferred.");
             return false;
         }
+        finally
+        {
+            if (!ready && IsPackageProxy(sidecar))
+            {
+                egressTopologyManager?.SetPackageProxyReady(false);
+            }
+        }
     }
 
     private async Task<bool> EnsureSidecarCoreAsync(WorkspaceSidecarDefinition sidecar, CancellationToken cancellationToken)
     {
         bool isPackageProxy = IsPackageProxy(sidecar);
-        if (isPackageProxy)
-        {
-            egressTopologyManager?.SetPackageProxyReady(false);
-        }
-
         if (string.IsNullOrWhiteSpace(sidecar.Name) || string.IsNullOrWhiteSpace(sidecar.Image))
         {
             logger.LogWarning("Sidecar configuration is incomplete for image '{Image}'.", sidecar.Image);
@@ -261,6 +265,13 @@ public sealed class WorkspaceSidecarSupervisor(
         ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
         bool hasScheduledPackageHealth = isPackageProxy && sidecar.HealthCheck is null
             && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
+        if (isPackageProxy && egressTopologyManager is not null
+            && !(state.IsRunning && hasScheduledPackageHealth && state.InspectJson is not null
+                && egressTopologyManager.IsRegisteredPackageProxyContainer(ReadInspectString(state.InspectJson, "Id"))))
+        {
+            egressTopologyManager.SetPackageProxyReady(false);
+        }
+
         if (state.IsRunning && (hasScheduledPackageHealth || await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false)))
         {
             (string? drift, string imageId) = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
@@ -280,6 +291,11 @@ public sealed class WorkspaceSidecarSupervisor(
 
             logger.LogInformation("Sidecar {Name} is healthy but {Drift}. Replacing it.", sidecar.Name, drift);
             driftNotes.Enqueue(sidecar.Name + " was replaced because " + drift + ".");
+        }
+
+        if (isPackageProxy)
+        {
+            egressTopologyManager?.SetPackageProxyReady(false);
         }
 
         if (!await EnsureImageAvailableAsync(sidecar, cancellationToken).ConfigureAwait(false))
@@ -506,8 +522,7 @@ public sealed class WorkspaceSidecarSupervisor(
             ContainerState state = await InspectStateAsync(sidecarName, timeoutCts.Token).ConfigureAwait(false);
             if (state.IsRunning)
             {
-                if (string.IsNullOrEmpty(state.HealthStatus)
-                    || string.Equals(sidecarName, packageProxySidecarName, StringComparison.Ordinal))
+                if (string.IsNullOrEmpty(state.HealthStatus))
                 {
                     return true;
                 }
@@ -519,6 +534,12 @@ public sealed class WorkspaceSidecarSupervisor(
 
                 if (string.Equals(state.HealthStatus, "unhealthy", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (string.Equals(sidecarName, packageProxySidecarName, StringComparison.Ordinal))
+                    {
+                        // Let the explicit probe confirm whether an unhealthy proxy has recovered.
+                        return true;
+                    }
+
                     logger.LogWarning("Sidecar {Name} reported Podman health status 'unhealthy'.", sidecarName);
                     return false;
                 }
@@ -871,6 +892,7 @@ public sealed class WorkspaceSidecarSupervisor(
         await egressTopologyManager.AuthorizePackageProxyContainerAsync(containerId, imageId, cancellationToken).ConfigureAwait(false);
         if (!await egressTopologyManager.VerifyPackageProxyRulesetAsync(containerId, cancellationToken).ConfigureAwait(false))
         {
+            egressTopologyManager.SetPackageProxyReady(false);
             await RevokeAndRemovePackageProxyAsync(containerId, sidecar.Name, cancellationToken).ConfigureAwait(false);
             logger.LogError("Package proxy did not have the required Envoy-only workload rules; it was removed.");
             return false;
