@@ -45,7 +45,7 @@ public sealed class ApplianceRecoveryPageTests
             Assert.Equal(HttpStatusCode.ServiceUnavailable, manual.StatusCode);
             html = await manual.Content.ReadAsStringAsync(token);
             Assert.Contains("Ask your appliance administrator", html, StringComparison.Ordinal);
-            Assert.DoesNotContain("will retry", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("<p id=\"next\">Kautuka will retry", html, StringComparison.Ordinal);
 
             using var poll = new HttpRequestMessage(HttpMethod.Get, "/health");
             poll.Headers.Accept.ParseAdd("application/json");

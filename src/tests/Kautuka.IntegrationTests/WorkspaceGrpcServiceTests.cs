@@ -46,9 +46,10 @@ public sealed class WorkspaceGrpcServiceTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch(bool saveDiscovery)
+    [InlineData(false, "kautuka-web-tools", "kautuka-web-tools")]
+    [InlineData(true, "kautuka-web-tools", "test-user-identity::kautuka-web-tools")]
+    [InlineData(true, "test-user-identity::kautuka-web-tools", "test-user-identity::kautuka-web-tools")]
+    public async Task ProbeMcpContainerForwardsUserIdentityToConnectorLaunch(bool saveDiscovery, string connectorId, string expectedConnectorId)
     {
         string stateDirectory = Path.Combine(Path.GetTempPath(), "workspace-grpc-probe-identity-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stateDirectory);
@@ -97,7 +98,7 @@ public sealed class WorkspaceGrpcServiceTests
             WorkspaceMcpProbeResponse response = await service.ProbeMcpContainer(
                 new WorkspaceMcpContainerProbeRequest
                 {
-                    ConnectorId = "kautuka-web-tools",
+                    ConnectorId = connectorId,
                     Image = "localhost/kautuka-test-probe:latest",
                     TimeoutSeconds = 15,
                     UserId = "test-user-identity",
@@ -108,6 +109,7 @@ public sealed class WorkspaceGrpcServiceTests
             Assert.False(response.Ok);
             string launchArguments = await File.ReadAllTextAsync(capturedArgumentsPath, TestContext.Current.CancellationToken);
             Assert.Contains("io.kautuka.user=test-user-identity", launchArguments, StringComparison.Ordinal);
+            Assert.Contains($"io.kautuka.connector={expectedConnectorId} ", launchArguments, StringComparison.Ordinal);
             if (saveDiscovery)
                 Assert.DoesNotContain("io.kautuka.purpose=probe", launchArguments, StringComparison.Ordinal);
             else

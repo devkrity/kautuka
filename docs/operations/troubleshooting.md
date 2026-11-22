@@ -14,6 +14,7 @@
 - Missing internal-service certificates may keep a dependency unready even though Gateway starts because clients are lazy.
 - Manager reloads accepted desired state; inspect its accepted/reconciled version and safe failure rather than only container presence.
 - Cold MCP materialization can be long-running. Preserve cancellation/deadline diagnostics and inspect bounded stderr head/tail.
+- Retained discovery containers use the same user-scoped connector identity as Manager's desired state. Deleting the connector removes its tracked containers.
 
 ## Egress topology shutdown
 
