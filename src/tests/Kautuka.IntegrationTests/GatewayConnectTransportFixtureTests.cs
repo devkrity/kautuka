@@ -102,11 +102,21 @@ public sealed class GatewayConnectTransportFixtureTests
         Assert.Contains("x-kautuka-purpose: ai-discovery\r\n", discoveryConnect, StringComparison.Ordinal);
         Assert.DoesNotContain("x-kautuka-correlation:", discoveryConnect, StringComparison.Ordinal);
 
-        Task<string> loginTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true);
+        var loginChecker = new FixtureNetworkAccessChecker();
+        Task<string> loginTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true, originRequests: 2);
         using (NetworkAccessContext.BeginScope("system", "gateway", purpose: "oidc-login", service: "external-auth"))
-        using (var authClient = new HttpClient(new NetworkAccessCheckHandler(new FixtureNetworkAccessChecker(), outbound.CreateApplicationTransport()!)))
+        using (var authClient = new HttpClient(new NetworkAccessCheckHandler(loginChecker, outbound.CreateApplicationTransport()!)))
         {
-            Assert.Equal("ok", await authClient.GetStringAsync(new Uri("http://auth.example.test/token"), timeout.Token));
+            var authEndpoint = new Uri("http://auth.example.test/token");
+            Assert.Equal("ok", await authClient.GetStringAsync(authEndpoint, timeout.Token));
+
+            // Keep the tunnel alive and change the policy before the next send.
+            loginChecker.Allowed = false;
+            await Assert.ThrowsAsync<NetworkAccessDeniedException>(() => authClient.GetStringAsync(authEndpoint, timeout.Token));
+            Assert.False(loginTask.IsCompleted);
+
+            loginChecker.Allowed = true;
+            Assert.Equal("ok", await authClient.GetStringAsync(authEndpoint, timeout.Token));
         }
         string loginConnect = await loginTask;
         Assert.Contains("x-kautuka-user: system\r\n", loginConnect, StringComparison.Ordinal);
@@ -196,7 +206,11 @@ public sealed class GatewayConnectTransportFixtureTests
 
     private sealed class FixtureNetworkAccessChecker : INetworkAccessChecker
     {
+        public bool Allowed { get; set; } = true;
+
         public Task<NetworkAccessCheckResult> CheckAsync(OutboundTarget target, CancellationToken cancellationToken = default)
-            => Task.FromResult(NetworkAccessCheckResult.CreateAllowed("fixture"));
+            => Task.FromResult(Allowed
+                ? NetworkAccessCheckResult.CreateAllowed("fixture")
+                : NetworkAccessCheckResult.CreateDenied("fixture"));
     }
 }
