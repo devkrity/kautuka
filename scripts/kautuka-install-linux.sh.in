@@ -885,6 +885,40 @@ grant_shared_group_write_excluding() {
         -o -type f -exec chmod g+rw {} +
 }
 
+prepare_appliance_state_directories() {
+    local state_root="$1" service_user="$2" service_group="$3"
+    local service_uid directory
+    [[ -d "$state_root" && ! -L "$state_root" && ! -L "$state_root/logs" ]] || fail "unsafe appliance state root: $state_root"
+    service_uid="$(id -u "$service_user")"
+    for directory in "$state_root/manager" "$state_root/updateService" "$state_root/logs/manager" "$state_root/workspaces"; do
+        [[ ! -L "$directory" ]] || fail "unsafe appliance state directory: $directory"
+        if [[ ! -e "$directory" ]] ||
+            { [[ -d "$directory" && "$(stat -c '%u' -- "$directory")" == 0 ]] &&
+              [[ -z "$(find "$directory" -mindepth 1 -maxdepth 1 -print -quit)" ]]; }; then
+            # An interrupted installer can leave a root-owned directory before service startup.
+            install -d -o "$service_user" -g "$service_group" -m 0700 -- "$directory"
+        elif [[ ! -d "$directory" || "$(stat -c '%u' -- "$directory")" != "$service_uid" ]]; then
+            fail "unsafe appliance state ownership: $directory"
+        fi
+    done
+}
+
+prepare_install_state_permissions() {
+    local state_root="$1" visible_root="$2" service_user="$3" service_group="$4" appliance="$5"
+    if [[ "$appliance" != 'true' ]]; then
+        local channel_security_root="$state_root/security"
+        chown_tree_excluding "$state_root" "$service_user:$service_group" "$channel_security_root"
+        if [[ "$visible_root" != "$state_root" ]]; then
+            chown_tree_excluding "$visible_root" "$service_user:$service_group" "$channel_security_root"
+        fi
+        grant_shared_group_write_excluding "$state_root" "$service_group" "$channel_security_root"
+    fi
+    prepare_isolated_service_ancestors "$state_root" "$visible_root" "$service_group"
+    if [[ "$appliance" != 'true' ]]; then
+        normalize_sidecar_data_permissions "$state_root"
+    fi
+}
+
 prepare_isolated_service_ancestors() {
     local internal_state_root="$1"
     local visible_root="$2"
@@ -3137,6 +3171,9 @@ PY
     fi
     # Seed the installed release's channel only on a fresh install. Preserve any
     # channel the user has already chosen when reinstalling or upgrading.
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        prepare_appliance_state_directories "$internal_state_root" "$service_user" "$service_group"
+    fi
     write_initial_update_runtime_policy "$internal_state_root" "$release_channel" "$service_user" "$service_group"
     if [[ "$appliance_image_payload" != 'true' ]]; then
         ensure_isolated_service_account kautuka-gateway kautuka-gateway
@@ -3277,14 +3314,7 @@ PY
 
     chown -R root:root "$install_root"
     chmod -R go-w "$install_root"
-    local channel_security_root="$internal_state_root/security"
-    chown_tree_excluding "$internal_state_root" "$service_user:$service_group" "$channel_security_root"
-    if [[ "$visible_root" != "$internal_state_root" ]]; then
-        chown_tree_excluding "$visible_root" "$service_user:$service_group" "$channel_security_root"
-    fi
-    grant_shared_group_write_excluding "$internal_state_root" "$service_group" "$channel_security_root"
-    prepare_isolated_service_ancestors "$internal_state_root" "$visible_root" "$service_group"
-    normalize_sidecar_data_permissions "$internal_state_root"
+    prepare_install_state_permissions "$internal_state_root" "$visible_root" "$service_user" "$service_group" "$appliance_image_payload"
     if [[ "$appliance_image_payload" == 'true' ]]; then
         local channel_executable="$tmp_root/extracted/services/channelhost/kautuka-channelhost"
         [[ -f "$channel_executable" && ! -L "$channel_executable" && -x "$channel_executable" ]] \
