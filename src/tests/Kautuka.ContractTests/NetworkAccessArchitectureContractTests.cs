@@ -584,8 +584,35 @@ public sealed class NetworkAccessArchitectureContractTests
             return handlerType is "NetworkAccessCheckHandler" or "RemoteMcpRequestHandler";
         }
 
+        if (expr is ConditionalExpressionSyntax conditional)
+        {
+            return IsCheckedHandlerExpression(normalizedPath, conditional.WhenTrue, enclosingScope, depth + 1)
+                && IsCheckedHandlerExpression(normalizedPath, conditional.WhenFalse, enclosingScope, depth + 1);
+        }
+
+        if (expr is InvocationExpressionSyntax { Expression: IdentifierNameSyntax factory })
+        {
+            if (normalizedPath == "Kautuka.Gateway/Infrastructure/Agents/McpHttpClientFactory.cs"
+                && factory.Identifier.ValueText == "CreateRequestHandler")
+            {
+                return enclosingScope.SyntaxTree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>().Any(method =>
+                    method.Identifier.ValueText == factory.Identifier.ValueText
+                    && ShortTypeName(method.ReturnType.ToString()) == "RemoteMcpRequestHandler");
+            }
+
+            // Gateway DI supplies GatewayOutboundHttpTransport.CreateModelHandler, which always wraps the transport in NAC.
+            return factory.Identifier.ValueText == "transportFactory"
+                && normalizedPath is "Kautuka.Gateway/Infrastructure/AI/GoogleAiClientProvider.cs"
+                    or "Kautuka.Gateway/Infrastructure/AI/OllamaAiClientProvider.cs";
+        }
+
         if (expr is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.CoalesceExpression))
         {
+            if (binary.Right is ThrowExpressionSyntax)
+            {
+                return IsCheckedHandlerExpression(normalizedPath, binary.Left, enclosingScope, depth + 1);
+            }
+
             return IsCheckedHandlerExpression(normalizedPath, binary.Right, enclosingScope, depth + 1)
                 && IsAllowedCoalesceLeft(normalizedPath, binary.Left, enclosingScope, depth + 1);
         }
@@ -700,8 +727,11 @@ public sealed class NetworkAccessArchitectureContractTests
             return true;
         }
 
-        // 2. Stored directly into a variable immediately passed into new NetworkAccessCheckHandler(..., var) in the same block
-        if (creationNode.Parent is EqualsValueClauseSyntax eq
+        // 2. Stored in a variable passed to the network access wrapper in the same block.
+        ExpressionSyntax transport = creationNode.Parent is BinaryExpressionSyntax coalesce && coalesce.IsKind(SyntaxKind.CoalesceExpression)
+            ? coalesce
+            : creationNode;
+        if (transport.Parent is EqualsValueClauseSyntax eq
             && eq.Parent is VariableDeclaratorSyntax varDecl
             && creationNode.Ancestors().OfType<BlockSyntax>().FirstOrDefault() is { } block)
         {
@@ -749,6 +779,17 @@ public sealed class NetworkAccessArchitectureContractTests
             {
                 return true;
             }
+        }
+
+        if (typeName == "SocketsHttpHandler"
+            && normalizedPath == "Kautuka.Gateway/Infrastructure/Egress/GatewayConnectTransport.cs"
+            && creationNode.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault()?.Identifier.ValueText == "SendAsync"
+            && creationNode is ObjectCreationExpressionSyntax { Initializer: { } initializer })
+        {
+            string[] settings = initializer.Expressions.Select(expression => expression.NormalizeWhitespace().ToString()).ToArray();
+            return settings.Contains("UseProxy = false", StringComparer.Ordinal)
+                && settings.Contains("AllowAutoRedirect = false", StringComparer.Ordinal)
+                && settings.Contains("ConnectCallback = (context, token) => ConnectAsync(context.DnsEndPoint, snapshot, token)", StringComparer.Ordinal);
         }
 
         return false;

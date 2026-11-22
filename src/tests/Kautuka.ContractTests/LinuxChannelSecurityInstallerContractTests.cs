@@ -21,10 +21,15 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("semanage fcontext -a -t bin_t \"$rule\"", source, StringComparison.Ordinal);
         Assert.Contains("/opt/kautuka/[^/]+/versions/[^/]+/kautuka-[^/]+", source, StringComparison.Ordinal);
         Assert.Contains("stop_existing_kautuka_runtime() {", source, StringComparison.Ordinal);
-        Assert.Contains(
-            "stop_existing_kautuka_runtime \"$service_user\" \"$service_home\" \"$xdg_runtime_dir\"\n\n    # Clear generated workspace runtime state only after the old services stop.\n    clear_generated_agent_workspace_state \"$visible_root\"\n\n    rm -rf \"$version_root\"",
-            source,
-            StringComparison.Ordinal);
+        const string stopRuntime = "stop_existing_kautuka_runtime \"$service_user\" \"$service_home\" \"$xdg_runtime_dir\"";
+        int legacyStop = source.IndexOf(stopRuntime, StringComparison.Ordinal);
+        int replaceVersion = source.IndexOf("rm -rf \"$version_root\"", legacyStop, StringComparison.Ordinal);
+        int prepareImages = source.IndexOf("--prepare-appliance-images --candidate-version", replaceVersion, StringComparison.Ordinal);
+        int applianceStop = source.IndexOf(stopRuntime, prepareImages, StringComparison.Ordinal);
+        int clearWorkspaces = source.IndexOf("clear_generated_agent_workspace_state \"$visible_root\"", applianceStop, StringComparison.Ordinal);
+        Assert.True(legacyStop >= 0 && legacyStop < replaceVersion && replaceVersion < prepareImages &&
+            prepareImages < applianceStop && applianceStop < clearWorkspaces,
+            "Stop legacy services before replacing their binaries. Prepare signed appliance images before stopping the appliance. Clear workspace state only after either layout has stopped.");
         Assert.Contains("could not stop existing $unit before replacing installed binaries", source, StringComparison.Ordinal);
         Assert.Contains("copy_runtime_payload \"$source_root\" \"$version_root\"", source, StringComparison.Ordinal);
         Assert.Contains("# Do not alter SELinux policy until the signed manifest and archive pass.", source, StringComparison.Ordinal);
@@ -82,7 +87,8 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("prepare_gateway_database_owner() {", source, StringComparison.Ordinal);
         Assert.Contains("chown \"kautuka-gateway:kautuka\" \"$database_sidecar\"", source, StringComparison.Ordinal);
         Assert.Contains("chmod 0600 \"$database_sidecar\"", source, StringComparison.Ordinal);
-        Assert.Contains("normalize_sidecar_data_permissions \"$internal_state_root\"\n    prepare_gateway_database_owner \"$internal_state_root\"", source, StringComparison.Ordinal);
+        Assert.Contains("normalize_sidecar_data_permissions \"$internal_state_root\"\n    if [[ \"$appliance_image_payload\" == 'true' ]]; then", source, StringComparison.Ordinal);
+        Assert.Contains("provision_appliance_channel_security_material \"$internal_state_root\" \"$channel_executable\" \"$service_user:$service_group\"\n    else\n        prepare_gateway_database_owner \"$internal_state_root\"", source, StringComparison.Ordinal);
         Assert.Contains("chown -R \"kautuka-gateway:$service_group\" \"$bundle_root\"", source, StringComparison.Ordinal);
         Assert.Contains("no pinned update source written; UpdateService discovers signed GitHub releases by channel", source, StringComparison.Ordinal);
         Assert.Contains("wait_for_web_ui \"$service_user\"", source, StringComparison.Ordinal);
