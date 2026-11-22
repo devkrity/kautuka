@@ -2941,7 +2941,8 @@ main() {
     fi
 
     local tmp_root
-    tmp_root="$(mktemp -d)"
+    # The compressed release and extracted OCI archives can exceed a memory-backed /tmp.
+    tmp_root="$(mktemp -d -- "${TMPDIR:-/var/tmp}/kautuka-install.XXXXXXXX")"
     local quoted_tmp_root
     quoted_tmp_root="$(printf '%q' "$tmp_root")"
     trap "rm -rf ${quoted_tmp_root}" EXIT
