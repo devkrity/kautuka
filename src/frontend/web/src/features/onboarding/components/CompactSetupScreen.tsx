@@ -40,6 +40,7 @@ type CompactSetupScreenProps = {
   providerBaseUrl: string;
   onProviderBaseUrlChange: (value: string) => void;
   providerApiCredential: string;
+  hasSavedProviderCredential?: boolean;
   onProviderApiCredentialChange: (value: string) => void;
   modelName: string;
   onModelNameChange: (value: string) => void;
@@ -78,6 +79,7 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
   providerBaseUrl,
   onProviderBaseUrlChange,
   providerApiCredential,
+  hasSavedProviderCredential,
   onProviderApiCredentialChange,
   modelName,
   onModelNameChange,
@@ -265,7 +267,7 @@ export const CompactSetupScreen: React.FC<CompactSetupScreenProps> = ({
                     type={['pass', 'word'].join('')}
                     value={providerApiCredential}
                     onChange={(event) => onProviderApiCredentialChange(event.target.value)}
-                    placeholder="Paste your provider key"
+                    placeholder={hasSavedProviderCredential ? "Key already saved. Paste a replacement to change it." : "Paste your provider key"}
                   />
                 </div>
               )}

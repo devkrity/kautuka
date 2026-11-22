@@ -7,6 +7,7 @@ import { RecommendationsScreen } from '../components/RecommendationsScreen';
 import { SuccessMilestone } from '../components/SuccessMilestone';
 import { TelegramSetupScreen } from '../components/TelegramSetupScreen';
 import { WIZARD_STAGES, useOnboardingFlow } from '../hooks/useOnboardingFlow';
+import { getRecommendedProviderModel } from '../utils/wizardNaming';
 
 const AGENT_TYPE_PRESETS: AgentTypePreset[] = [
   {
@@ -193,6 +194,7 @@ export const OnboardingWizard: React.FC = () => {
     configureManually,
     checkingExisting,
     hasExistingSetup,
+    canResumeSetup,
     loadExistingSetup,
     canImportConnectors,
     canImportSkills,
@@ -203,6 +205,7 @@ export const OnboardingWizard: React.FC = () => {
     selectedBrainPresetId,
     setSelectedBrainPresetId,
     providerForm,
+    hasSavedProviderCredential,
     setProviderForm,
     saveSetup,
     providerValidation,
@@ -264,7 +267,12 @@ export const OnboardingWizard: React.FC = () => {
       base_url: baseUrl,
     }));
     if (changed) {
-      setModelForm((prev) => ({ ...prev, id: '', providerId: '' }));
+      setModelForm((prev) => ({
+        ...prev,
+        id: '',
+        providerId: '',
+        modelName: type !== providerForm.type ? getRecommendedProviderModel(type) : prev.modelName,
+      }));
     }
   };
 
@@ -355,6 +363,16 @@ export const OnboardingWizard: React.FC = () => {
                         </Button>
                       </div>
                     </div>
+                  ) : canResumeSetup ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        loadExistingSetup();
+                        goNext(WIZARD_STAGES.setup);
+                      }}
+                    >
+                      Resume helper setup
+                    </Button>
                   ) : null}
                 </div>
 
@@ -418,6 +436,7 @@ export const OnboardingWizard: React.FC = () => {
                 providerBaseUrl={providerForm.base_url}
                 onProviderBaseUrlChange={(value) => changeProvider(providerForm.type, value)}
                 providerApiCredential={providerForm.apiCredential}
+                hasSavedProviderCredential={hasSavedProviderCredential}
                 onProviderApiCredentialChange={(value) =>
                   setProviderForm((prev) => ({ ...prev, apiCredential: value }))
                 }

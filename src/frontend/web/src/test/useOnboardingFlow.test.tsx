@@ -226,6 +226,47 @@ describe('useOnboardingFlow existing setup detection', () => {
     expect(result.current.hasExistingSetup).toBe(true);
   });
 
+  it('edits the bound helper without touching its model, key, or history', async () => {
+    listProvidersMock.mockResolvedValue({ data: { providers: [
+      { id: 'unrelated', type: 'gemini', settings: {}, hasApiKey: true },
+      { id: 'provider-1', type: 'groq', settings: { http_timeout_seconds: 30 }, hasApiKey: true },
+    ] } });
+    listModelsMock.mockResolvedValue({ data: { models: [
+      { id: 'model-1', providerId: 'provider-1', modelName: 'custom-model', settings: { custom_output_text: 'Preserve' }, capabilities: null },
+    ] } });
+    const original = createAgent();
+    listAgentsMock.mockResolvedValue({ data: { agents: [
+      { ...original, session: { ...original.session, historyEnabled: false } },
+    ] } });
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.hasExistingSetup).toBe(true));
+    act(() => result.current.loadExistingSetup());
+    await waitFor(() => expect(result.current.modelForm.modelName).toBe('custom-model'));
+    expect(result.current.providerForm.id).toBe('provider-1');
+    expect(result.current.hasSavedProviderCredential).toBe(true);
+    act(() => result.current.setAgentForm((previous) => ({ ...previous, name: 'Renamed helper' })));
+    await act(async () => result.current.saveSetup());
+
+    expect(saveProviderMock).not.toHaveBeenCalled();
+    expect(saveModelMock).not.toHaveBeenCalled();
+    expect(saveAgentMock).toHaveBeenCalledWith('agent-1', expect.objectContaining({
+      name: 'Renamed helper', modelId: 'model-1', session: expect.objectContaining({ historyEnabled: false }),
+    }));
+  });
+
+  it('reuses the saved provider after helper setup was interrupted', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    listModelsMock.mockResolvedValue({ data: { models: [] } });
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(result.current.canResumeSetup).toBe(true));
+    act(() => result.current.loadExistingSetup());
+
+    expect(result.current.providerForm.id).toBe('provider-1');
+    expect(result.current.hasSavedProviderCredential).toBe(true);
+  });
+
   it('routes manual setup directly to the provider settings tab', async () => {
     listAgentsMock.mockResolvedValue({ data: { agents: [] } });
 

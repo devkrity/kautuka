@@ -4,13 +4,15 @@ import type { PropsWithChildren } from 'react';
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { fetchProvidersMock, apiClientGetMock } = vi.hoisted(() => ({
+const { fetchProvidersMock, apiClientGetMock, listAgentsMock } = vi.hoisted(() => ({
   fetchProvidersMock: vi.fn(),
   apiClientGetMock: vi.fn(),
+  listAgentsMock: vi.fn(),
 }));
 
 vi.mock('@/features/settings', () => ({
   fetchProviders: fetchProvidersMock,
+  settingsAdmin: { listAgents: listAgentsMock },
 }));
 
 vi.mock('@/lib/apiClient', () => ({
@@ -24,6 +26,7 @@ import { useSettingsStatus } from '@/features/onboarding/hooks/useSettingsStatus
 describe('useSettingsStatus', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
     apiClientGetMock.mockResolvedValue({
       data: {
         lifecycle: {
@@ -76,5 +79,6 @@ describe('useSettingsStatus', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.data?.providersCount).toBe(1);
     expect(result.current.data?.hasProviders).toBe(true);
+    expect(result.current.data?.hasConfiguredHelper).toBe(false);
   });
 });
