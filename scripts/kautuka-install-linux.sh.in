@@ -310,6 +310,13 @@ ensure_selinux_runtime_exec_policy() {
         return 0
     fi
 
+    if { ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; } \
+        && command -v dnf >/dev/null 2>&1; then
+        echo 'Installing SELinux runtime labeling tools.'
+        dnf install -y policycoreutils-python-utils policycoreutils \
+            || fail 'could not install SELinux labeling tools; check the DNF repositories and rerun the installer'
+    fi
+
     if ! command -v semanage >/dev/null 2>&1 || ! command -v restorecon >/dev/null 2>&1; then
         fail "SELinux is enabled; install policycoreutils-python-utils and policycoreutils to label Kautuka service executables"
     fi
