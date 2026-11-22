@@ -95,10 +95,9 @@ jobs:
       - name: Run launcher tests
         run: node --test scripts/test-launcher-nac-hook.mjs scripts/test-launcher-web-tools.mjs scripts/launcher-readiness.test.mjs
 
-      - name: Build NAC acceptance and integration tests
+      - name: Build Solution
         run: |
-          dotnet build src/tests/Kautuka.NetworkAccess.Acceptance/Kautuka.NetworkAccess.Acceptance.csproj -c Release
-          dotnet build src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -c Release
+          dotnet build src/Kautuka.slnx -c Release
 
       - name: Prepare rootless Podman runtime directory
         run: |
