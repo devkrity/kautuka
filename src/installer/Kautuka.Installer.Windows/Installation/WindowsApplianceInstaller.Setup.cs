@@ -170,7 +170,8 @@ internal static partial class WindowsApplianceInstaller
         if (string.IsNullOrWhiteSpace(installerExecutablePath))
             throw new InvalidOperationException("Unable to determine the installer executable path for resume registration.");
 
-        var command = $"\"{installerExecutablePath}\" --express --resume --distro-name \"{distroName}\"";
+        string stagedInstaller = WindowsApplianceStateStore.StageResumeExecutable(installerExecutablePath);
+        var command = $"\"{stagedInstaller}\" --resume --distro-name \"{distroName}\"";
         using var hive = PlatformInstaller.OpenUserHive(writable: true);
         using var key = hive.CreateSubKey(
             @"Software\Microsoft\Windows\CurrentVersion\RunOnce");

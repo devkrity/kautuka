@@ -8,7 +8,7 @@ Use [Development workflow](../development/workflow.md) for a source checkout. De
 
 `Kautuka.Installer.exe` is the supported Windows entry point. It checks/enables WSL prerequisites, preserves reboot-resume state, resolves a release, imports the appliance into the selected Windows directory, starts the appliance, and waits for `http://localhost:20229` before reporting success.
 
-After installation, the Windows installer displays the one-time setup token in its local window and waits for the user to copy it and acknowledge that it is needed to create the first administrator in Kautuka's setup page. The token is deleted after successful use. If the installer window was closed, run `wsl.exe -d <distro-name> -u root -- cat /var/lib/kautuka/setup-token` in PowerShell, substituting the selected distro name.
+After installation, the Windows installer displays the one-time setup token in its local window and waits for the user to copy it and acknowledge that it is needed to create the first administrator in Kautuka's setup page. The token is deleted after successful use. If the installer window was closed, run `wsl.exe -d <distro-name> -u root -- cat /var/lib/kautuka/gateway/setup-token` in PowerShell, substituting the selected distro name.
 
 The selected Windows directory stores the WSL distribution. Runtime paths remain inside the imported appliance. Uninstall unregisters the distribution and may remove the selected data when requested.
 
@@ -37,7 +37,7 @@ Before stopping an existing installation, the Linux installer uses the `kautuka`
 
 For Linux uninstall, data is preserved by default. `--delete-data` explicitly selects deletion but still requires typing `UNINSTALL` in the interactive confirmation. `--yes` skips prompts and confirms deletion of databases and workspace files as well as uninstalling services and binaries; use it only when all Kautuka data should be removed.
 
-When first-run setup is required, the Linux installer displays the one-time token only in the controlling terminal and waits for the user to type `COPIED`. It explains that the token is needed to create the first administrator in Kautuka's setup page. If the terminal was closed, retrieve it with `sudo cat /var/lib/kautuka/setup-token`. The file remains owner-only; the token is deleted after successful use. Never include it in logs or support reports.
+When first-run setup is required, the Linux installer displays the one-time token only in the controlling terminal and waits for the user to type `COPIED`. It explains that the token is needed to create the first administrator in Kautuka's setup page. If the terminal was closed, retrieve the appliance token with `sudo cat /var/lib/kautuka/gateway/setup-token`. Legacy host-service installs use `/var/lib/kautuka/setup-token`. The file remains owner-only and the token is deleted after successful use. Never include it in logs or support reports.
 
 Place `/var/lib/kautuka` on LUKS/dm-crypt or equivalently encrypted managed storage when file encryption at rest is required. Encrypt backups and snapshots separately; filesystem permissions alone are not encryption.
 

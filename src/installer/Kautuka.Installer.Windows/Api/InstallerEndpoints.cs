@@ -58,20 +58,18 @@ internal static class InstallerEndpoints
                 return Results.StatusCode(StatusCodes.Status403Forbidden);
             }
 
-            var request = await ctx.Request.ReadFromJsonAsync(
-                InstallerJsonContext.Default.InstallerSetupTokenRequest,
-                ctx.RequestAborted).ConfigureAwait(false)
-                ?? new InstallerSetupTokenRequest();
-
-            string? token = await WindowsApplianceInstaller.ReadFirstRunSetupTokenAsync(
-                request.DistroName,
-                ctx.RequestAborted).ConfigureAwait(false);
-
             ctx.Response.Headers.CacheControl = "no-store, no-cache";
             ctx.Response.Headers.Pragma = "no-cache";
-            return Results.Json(
-                new InstallerSetupTokenResponse(token is not null, token),
-                InstallerJsonContext.Default.InstallerSetupTokenResponse);
+            try
+            {
+                InstallerSetupTokenResponse setup = await WindowsApplianceInstaller
+                    .GetFirstRunSetupAsync(ctx.RequestAborted).ConfigureAwait(false);
+                return Results.Json(setup, InstallerJsonContext.Default.InstallerSetupTokenResponse);
+            }
+            catch (Exception ex) when (ex is IOException or JsonException or InvalidOperationException)
+            {
+                return Results.Problem("Could not read administrator setup status. Start Kautuka and try again.");
+            }
         });
 
         app.MapPost("/api/appliance/run-install", RunWindowsApplianceInstallSse);

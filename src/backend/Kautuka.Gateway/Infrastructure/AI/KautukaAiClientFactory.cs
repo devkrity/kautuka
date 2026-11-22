@@ -150,6 +150,7 @@ internal sealed class KautukaAiClientFactory(
         string providerType,
         JsonObject settings,
         bool throwOnFailure = false,
+        bool useStoredCredential = true,
         CancellationToken ct = default)
     {
         string normalizedProviderType = ProviderTypeCatalogSettings.NormalizeType(providerType);
@@ -168,7 +169,9 @@ internal sealed class KautukaAiClientFactory(
         }
 
         // Inline api_key (e.g. from test request) takes priority; falls back to CredentialsHost.
-        string? apiKey = await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false);
+        string? apiKey = useStoredCredential
+            ? await ResolveApiKeyAsync(providerId, normalizedProviderType, settings, ct).ConfigureAwait(false)
+            : AiProviderSettings.GetString(settings, "api_key");
 
         return await strategy.DiscoverModelsAsync(settings, apiKey, throwOnFailure, ct).ConfigureAwait(false);
     }

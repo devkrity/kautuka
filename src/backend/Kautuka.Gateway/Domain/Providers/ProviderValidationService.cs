@@ -26,14 +26,15 @@ internal sealed class ProviderValidationService : IProviderValidationService
 
     public async Task<GatewayProviderTestResult> TestProviderAsync(JsonElement body, CancellationToken cancellationToken = default)
     {
-        if (!TryResolveProviderRequest(body, out string providerId, out string providerType, out JsonObject settings, out string errorMessage))
+        if (!TryResolveProviderRequest(body, out string providerId, out string providerType, out JsonObject settings,
+                out bool useStoredCredential, out string errorMessage))
         {
             return new GatewayProviderTestResult(false, errorMessage);
         }
 
         try
         {
-            return await ValidateProviderConnectivityAsync(providerId, providerType, settings, cancellationToken).ConfigureAwait(false);
+            return await ValidateProviderConnectivityAsync(providerId, providerType, settings, useStoredCredential, cancellationToken).ConfigureAwait(false);
         }
         catch (HttpRequestException ex)
         {
@@ -62,6 +63,7 @@ internal sealed class ProviderValidationService : IProviderValidationService
         out string providerId,
         out string providerType,
         out JsonObject settings,
+        out bool useStoredCredential,
         out string errorMessage)
     {
         providerId = body.GetStringProperty("provider_id", string.Empty).Trim();
@@ -89,9 +91,18 @@ internal sealed class ProviderValidationService : IProviderValidationService
             }
         }
 
-        if (existingProvider is not null)
+        useStoredCredential = existingProvider is not null
+            && ProviderTypeCatalogSettings.HasSameCredentialDestination(existingProvider, providerType, settings, providerTypeCatalog);
+        if (useStoredCredential)
         {
-            settings = GatewayState.PreserveSecretSetting(settings, existingProvider.Settings, "api_key");
+            settings = GatewayState.PreserveSecretSetting(settings, existingProvider!.Settings, "api_key");
+        }
+        else if (existingProvider is not null)
+        {
+            // The merged settings started from the saved provider. Retain only an explicitly supplied key.
+            settings.Remove("api_key");
+            if (settingsElement.ValueKind == JsonValueKind.Object && settingsElement.TryGetProperty("api_key", out JsonElement supplied))
+                settings["api_key"] = JsonNode.Parse(supplied.GetRawText());
         }
         else
         {
@@ -119,12 +130,13 @@ internal sealed class ProviderValidationService : IProviderValidationService
         string providerId,
         string providerType,
         JsonObject settings,
+        bool useStoredCredential,
         CancellationToken ct)
     {
         try
         {
             IReadOnlyList<DiscoveredModelDefinition> discoveredModels = await aiClientFactory
-                .DiscoverModelsAsync(providerId, providerType, settings, throwOnFailure: true, ct)
+                .DiscoverModelsAsync(providerId, providerType, settings, throwOnFailure: true, useStoredCredential, ct)
                 .ConfigureAwait(false);
 
             return discoveredModels.Count > 0

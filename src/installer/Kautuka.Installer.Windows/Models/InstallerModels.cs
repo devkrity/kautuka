@@ -44,11 +44,6 @@ internal sealed record ApplianceSuperviseRequest
     public required string InstallDir { get; init; }
 }
 
-internal sealed record InstallerSetupTokenRequest
-{
-    public string DistroName { get; init; } = "kautuka";
-}
-
 internal sealed record InstallerSetupTokenResponse(bool NeedsSetup, string? Token);
 
 internal sealed record WindowsApplianceStatusResponse
@@ -135,7 +130,6 @@ internal sealed record WindowsApplianceInstallState
 [JsonSerializable(typeof(WindowsApplianceStatusResponse))]
 [JsonSerializable(typeof(WindowsApplianceBootstrapResponse))]
 [JsonSerializable(typeof(WindowsApplianceInstallState))]
-[JsonSerializable(typeof(InstallerSetupTokenRequest))]
 [JsonSerializable(typeof(InstallerSetupTokenResponse))]
 [JsonSerializable(typeof(InstallerPlatformReleaseManifest))]
 [JsonSerializable(typeof(InstallerPlatformReleaseSignature))]

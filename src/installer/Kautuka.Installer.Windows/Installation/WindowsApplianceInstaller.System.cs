@@ -352,9 +352,42 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         return index < 0 ? "unknown" : value[(index + marker.Length)..].Split(' ', 2)[0];
     }
 
-    public static async Task<string?> ReadFirstRunSetupTokenAsync(
-        string distroName,
-        CancellationToken cancellationToken)
+    internal static async Task<InstallerSetupTokenResponse> GetFirstRunSetupAsync(CancellationToken cancellationToken)
+    {
+        string distroName = GetVerifiedExistingDistroName()
+            ?? throw new InvalidOperationException("The Kautuka installation could not be verified.");
+        if (!await FirstRunSetupRequiredAsync(distroName, cancellationToken).ConfigureAwait(false))
+            return new InstallerSetupTokenResponse(false, null);
+
+        string? token = await ReadFirstRunSetupTokenAsync(distroName, cancellationToken).ConfigureAwait(false);
+        if (token is not null)
+            return new InstallerSetupTokenResponse(true, token);
+
+        // Another window can finish setup between the status probe and reading the file.
+        if (!await FirstRunSetupRequiredAsync(distroName, cancellationToken).ConfigureAwait(false))
+            return new InstallerSetupTokenResponse(false, null);
+        throw new IOException("Administrator setup is required, but its token could not be read.");
+    }
+
+    private static async Task<bool> FirstRunSetupRequiredAsync(string distroName, CancellationToken cancellationToken)
+    {
+        ProcessResult result = await RunProcessAsync(
+            "wsl.exe",
+            ["-d", distroName, "--exec", "/usr/bin/curl", "--noproxy", "*", "--max-time", "6", "-fsS",
+             "http://127.0.0.1:20229/api/auth/setup/status"],
+            allowFailure: true,
+            cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+            throw new IOException("The appliance setup status is unavailable.");
+
+        using JsonDocument document = JsonDocument.Parse(result.StandardOutput);
+        if (document.RootElement.TryGetProperty("needsSetup", out JsonElement needsSetup)
+            && needsSetup.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            return needsSetup.GetBoolean();
+        throw new InvalidDataException("The appliance returned an invalid setup status.");
+    }
+
+    private static async Task<string?> ReadFirstRunSetupTokenAsync(string distroName, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(distroName);
 
@@ -488,6 +521,26 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             string destination = Path.Combine(installerStateDir, $"rootfs-{Guid.NewGuid():N}.tar.gz");
             try { File.Copy(source, destination, overwrite: false); return destination; }
             catch { if (File.Exists(destination)) File.Delete(destination); throw; }
+        }
+
+        public static string StageResumeExecutable(string source)
+        {
+            EnsureProtectedDirectory();
+            string destination = Path.Combine(installerStateDir, "Kautuka.ResumeInstaller.exe");
+            if (PathsEqual(source, destination))
+                return destination;
+
+            string staging = Path.Combine(installerStateDir, $"resume-{Guid.NewGuid():N}.exe");
+            try
+            {
+                File.Copy(source, staging, overwrite: false);
+                File.Move(staging, destination, overwrite: true);
+                return destination;
+            }
+            finally
+            {
+                File.Delete(staging);
+            }
         }
 
         public static string HashFile(string path)

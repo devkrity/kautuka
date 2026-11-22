@@ -275,6 +275,27 @@ public sealed class ProviderSettingsEndpointTests
             "api_key must not be stored in the provider catalog settings.");
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("fixture-replacement-key")]
+    public async Task SavedCredentialCannotMoveToADifferentProviderDestination(string? replacement)
+    {
+        await using var fixture = await ProviderModelFixture.CreateAsync();
+        string token = await fixture.LoginAsBootstrapAdminAsync();
+        const string path = "/api/settings/providers/save";
+        const string original = "https://api.openai.com/v1";
+        using JsonDocument saved = await fixture.SendJsonAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = original, api_key = "fixture-key" } }, token);
+
+        using HttpResponseMessage changed = await fixture.SendAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = "https://provider.example.test/v1", api_key = replacement } }, token);
+        Assert.Equal(HttpStatusCode.BadRequest, changed.StatusCode);
+
+        using JsonDocument same = await fixture.SendJsonAsync(HttpMethod.Post, path,
+            new { id = "bound-provider", type = "openai", settings = new { base_url = original, http_timeout_seconds = 40 } }, token);
+        Assert.True(same.RootElement.GetProperty("provider").GetProperty("hasApiKey").GetBoolean());
+    }
+
     [Fact]
     public async Task SaveProviderCopiesCatalogDefaultsWhenSettingsAreOmitted()
     {
@@ -737,6 +758,25 @@ public sealed class AiClientFactoryDiscoveryTests
 
         Assert.Equal(StatusCode.Unavailable, exception.StatusCode);
         Assert.Null(capturer.LastApiKeyReceived);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("fixture-explicit-key")]
+    public async Task UnboundProviderTestUsesOnlyAnExplicitKey(string? suppliedKey)
+    {
+        var capturer = new CapturingAiClientProvider("openai");
+        var client = new FakeCredentialsServiceClient();
+        var credentials = new CredentialResolverService(new Lazy<CredentialsService.CredentialsServiceClient>(() => client));
+        var factory = new KautukaAiClientFactory([capturer], credentials);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await credentials.SetSystemAsync(new Dictionary<string, string> { ["provider.fixture.api_key"] = "fixture-saved-key" },
+            cancellationToken);
+
+        await factory.DiscoverModelsAsync("fixture", "openai", new JsonObject { ["api_key"] = suppliedKey },
+            useStoredCredential: false, ct: cancellationToken);
+
+        Assert.Equal(suppliedKey, capturer.LastApiKeyReceived);
     }
 
     [Fact]

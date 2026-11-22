@@ -26,6 +26,22 @@ internal static class ProviderTypeCatalogSettings
     public static string NormalizeType(string providerType)
         => new(providerType.Trim().Select(char.ToLowerInvariant).ToArray());
 
+    public static string? GetEffectiveBaseUrl(JsonObject settings, string providerType, IProviderTypeCatalog catalog)
+    {
+        string? baseUrl = AiProviderSettings.GetString(settings, "base_url");
+        return !string.IsNullOrWhiteSpace(baseUrl) ? baseUrl
+            : catalog.TryGet(providerType, out AiProviderCatalog.ProviderMetadata? metadata) ? metadata?.DefaultBaseUrl : null;
+    }
+
+    public static bool HasSameCredentialDestination(
+        GatewayProvider stored, string providerType, JsonObject settings, IProviderTypeCatalog catalog)
+    {
+        string storedType = NormalizeType(stored.Type);
+        return string.Equals(storedType, providerType, StringComparison.Ordinal)
+            && string.Equals(GetEffectiveBaseUrl(stored.Settings, storedType, catalog),
+                GetEffectiveBaseUrl(settings, providerType, catalog), StringComparison.Ordinal);
+    }
+
     public static JsonObject ApplyCreateDefaults(JsonObject settings, string providerType, IProviderTypeCatalog? catalog)
     {
         if (catalog is null || !catalog.TryGet(providerType, out AiProviderCatalog.ProviderMetadata? metadata) || metadata is null)

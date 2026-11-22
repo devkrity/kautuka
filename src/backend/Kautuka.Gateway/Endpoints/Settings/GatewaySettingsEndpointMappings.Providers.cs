@@ -12,6 +12,15 @@ namespace Kautuka.Gateway.Endpoints.Settings;
 
 internal static partial class GatewaySettingsEndpointMappings
 {
+    private static readonly SemaphoreSlim providerWrites = new(1);
+
+    private static async ValueTask<object?> SerializeProviderWriteAsync(
+        EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        await providerWrites.WaitAsync(context.HttpContext.RequestAborted).ConfigureAwait(false);
+        try { return await next(context).ConfigureAwait(false); }
+        finally { providerWrites.Release(); }
+    }
 
     private static GatewayProviderListItem ToProviderListItem(GatewayProvider provider, bool hasApiKey)
         => new(provider.Id, provider.Type, provider.Settings, provider.CreatedAt, hasApiKey);
@@ -168,36 +177,30 @@ internal static partial class GatewaySettingsEndpointMappings
             {
                 return Results.Json(new GatewayErrorResponse(validationError), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
-            string? proposedBaseUrl = AiProviderSettings.GetString(proposedSettings, "base_url");
-            if (string.IsNullOrWhiteSpace(proposedBaseUrl) && providerTypeCatalog.TryGet(providerType, out AiProviderCatalog.ProviderMetadata? targetMetadata))
-                proposedBaseUrl = targetMetadata?.DefaultBaseUrl;
+            string? proposedBaseUrl = ProviderTypeCatalogSettings.GetEffectiveBaseUrl(proposedSettings, providerType, providerTypeCatalog);
             Uri? providerTarget = Uri.TryCreate(proposedBaseUrl, UriKind.Absolute, out Uri? proposedUri) && proposedUri.Scheme is "http" or "https" ? proposedUri : null;
             if (providerTarget is null)
             {
                 return Results.Json(new GatewayErrorResponse("Provider endpoint is invalid."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            if (requiresApiKey && !hasApiKey)
+            if (previousProvider is not null && (requiresApiKey || hasApiKey
+                    || (providerTypeCatalog.TryGet(previousProvider.Type, out AiProviderCatalog.ProviderMetadata? previousMetadata)
+                        && previousMetadata?.RequiresApiKey is true))
+                && !ProviderTypeCatalogSettings.HasSameCredentialDestination(previousProvider, providerType, proposedSettings, providerTypeCatalog))
             {
-                if (string.IsNullOrWhiteSpace(providerId)
-                    || !catalog.TryGetProvider(providerId, out GatewayProvider? existingProvider)
-                    || existingProvider is null)
-                {
-                    return Results.Json(
-                        new GatewayErrorResponse($"Provider type '{providerType}' requires an API key."),
-                        KautukaJsonContext.Default.GatewayErrorResponse,
-                        statusCode: StatusCodes.Status400BadRequest);
-                }
+                return Results.BadRequest(new GatewayErrorResponse("Create a new provider to use a different credential destination."));
+            }
 
+            if (requiresApiKey && (!providerExists || !hasApiKey))
+            {
                 IReadOnlyList<string> existingKeys = await credentialResolver.ListSystemKeysAsync(ct).ConfigureAwait(false);
-                hasApiKey = existingKeys.Contains($"provider.{providerId}.api_key", StringComparer.Ordinal);
+                bool hasStoredKey = existingKeys.Contains($"provider.{providerId}.api_key", StringComparer.Ordinal);
+                if (!providerExists && hasStoredKey)
+                    return Results.BadRequest(new GatewayErrorResponse("This provider ID still has a saved credential. Choose a new provider ID."));
+                hasApiKey |= providerExists && hasStoredKey;
                 if (!hasApiKey)
-                {
-                    return Results.Json(
-                        new GatewayErrorResponse($"Provider type '{providerType}' requires an API key."),
-                        KautukaJsonContext.Default.GatewayErrorResponse,
-                        statusCode: StatusCodes.Status400BadRequest);
-                }
+                    return Results.BadRequest(new GatewayErrorResponse($"Provider type '{providerType}' requires an API key."));
             }
 
             var manager = context.RequestServices.GetRequiredService<IManagerGrpcService>();
@@ -261,7 +264,7 @@ internal static partial class GatewaySettingsEndpointMappings
             return Results.Json(
                 new GatewayProviderResponse(ToProviderListItem(saved, hasApiKey)),
                 KautukaJsonContext.Default.GatewayProviderResponse);
-        });
+        }).AddEndpointFilter(SerializeProviderWriteAsync);
 
         app.MapDelete("/api/settings/providers/{providerId}", (string providerId, IGatewayCatalogStore catalog, IGatewayAuthGuard auth, HttpContext context) =>
         {
@@ -274,12 +277,13 @@ internal static partial class GatewaySettingsEndpointMappings
             return catalog.DeleteProvider(providerId)
                 ? Results.Json(new GatewayBooleanSuccessResponse(true), KautukaJsonContext.Default.GatewayBooleanSuccessResponse)
                 : Results.Json(new GatewayErrorResponse("Provider not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
-        });
+        }).AddEndpointFilter(SerializeProviderWriteAsync);
     }
 
     private static Uri? ResolveProviderTarget(JsonElement body, IGatewayCatalogStore catalog, IProviderTypeCatalog types)
     {
-        string id = body.GetStringProperty("id", body.GetStringProperty("provider_id", string.Empty));
+        string id = body.GetStringProperty("provider_id", string.Empty).Trim();
+        if (id.Length == 0) id = body.GetStringProperty("id", string.Empty).Trim();
         catalog.TryGetProvider(id, out GatewayProvider? existing);
         string type = ProviderTypeCatalogSettings.NormalizeType(body.GetStringProperty("type", existing?.Type ?? string.Empty));
         bool hasBaseUrl = body.TryGetProperty("settings", out JsonElement settings) && settings.ValueKind == JsonValueKind.Object
