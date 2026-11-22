@@ -148,6 +148,37 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => probe);
     }
 
+    [Theory]
+    [InlineData(true, WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, "Network protection paused")]
+    [InlineData(false, WorkspaceMcpConnectorUnavailabilityReason.StartupTimeout, "probe timed out")]
+    public async Task ProbeDistinguishesAdmissionClosureFromItsRequestDeadline(
+        bool closeAdmission, WorkspaceMcpConnectorUnavailabilityReason reason, string message)
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        using var admission = new CancellableProbeAdmission();
+        string policyPath = Path.Combine(Path.GetTempPath(), $"probe-admission-{Guid.NewGuid():N}.json");
+        using var policy = new NetworkAccessPolicyStore(policyPath);
+        var runner = new PodmanCommandRunner(async (args, token) =>
+        {
+            Assert.Equal("image", args[0]);
+            if (closeAdmission) admission.CloseLaunchAdmission();
+            else await request.CancelAsync();
+            token.ThrowIfCancellationRequested();
+            throw new InvalidOperationException("Fixture expected image inspection to be cancelled.");
+        });
+        await using var service = new WorkspaceContainerConnectorExecutionService(new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance), new PodmanContainerTool(runner),
+            NullLogger<WorkspaceContainerConnectorExecutionService>.Instance, workloadLaunchGate: new WorkloadLaunchGate(admission, policy));
+        var connector = new WorkspaceMcpContainerConnectorDefinition("test", "localhost/test:latest", "server", [], true, false, null, null, [], 30, 600);
+
+        var result = await service.ProbeConnectorAsync(connector, 30, request.Token, userId: "fixture-user");
+
+        Assert.False(result.Ok);
+        Assert.Equal(reason, result.UnavailabilityReason);
+        Assert.Contains(message, result.FailureMessage, StringComparison.Ordinal);
+        Assert.True(admission.LeaseReleased);
+    }
+
     [Fact]
     public async Task ImageCompatibilityLookupResolvesMaterializedTagToImmutableImageId_WithNegativeControl()
     {
@@ -2750,5 +2781,21 @@ Egress: "normal", Attribution: "user", CompatProfile: null, DateTimeOffset.UtcNo
     private sealed class TestWorkloadStartupState(bool isStartupGateOpen) : IWorkloadStartupState
     {
         public bool IsStartupGateOpen { get; } = isStartupGateOpen;
+    }
+
+    private sealed class CancellableProbeAdmission : IWorkloadStartupState, IWorkloadLaunchAdmission, IWorkloadLaunchLease, IDisposable
+    {
+        private readonly CancellationTokenSource cancellation = new();
+        public bool IsStartupGateOpen => !cancellation.IsCancellationRequested;
+        public bool LeaseReleased { get; private set; }
+        public CancellationToken CancellationToken => cancellation.Token;
+        public void CloseLaunchAdmission() => cancellation.Cancel();
+        public ValueTask<IWorkloadLaunchLease> AcquireLaunchLeaseAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IWorkloadLaunchLease>(this);
+        public ValueTask DisposeAsync()
+        {
+            LeaseReleased = true;
+            return ValueTask.CompletedTask;
+        }
+        public void Dispose() => cancellation.Dispose();
     }
 }

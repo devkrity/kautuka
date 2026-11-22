@@ -42,6 +42,7 @@ The local development launcher does not start the optional release-feed server o
 ## Browser failures
 
 - If the appliance pauses helpers because it cannot verify network protection, reopen the usual local address. Manager’s read-only recovery page shows the reason and a scheduled retry or next step when available. Leave it open during an automatic retry. It returns to Kautuka once WebHost answers on that address.
+- If a connector probe reports that network protection paused startup, retry after the appliance is ready. Manager canceled the launch while it verified the network boundary.
 - Verify `/api/auth/setup/status`, authenticated `/api/auth/me`, and `/api/narad/v1` discovery before debugging React state.
 - Agent routes must reference an agent returned by runtime discovery after synchronization.
 - Thread ownership/agent mismatch is a server validation problem, not something the browser should repair.

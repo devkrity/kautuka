@@ -408,6 +408,13 @@ public sealed class WorkspaceContainerConnectorExecutionService(
 
             return (true, tools, null, null, transportLaunch.ImageDigest);
         }
+        catch (Exception exception) when (exception is ConnectorAdmissionInterruptedException
+            || (exception is OperationCanceledException && transportLaunch?.CancellationToken.IsCancellationRequested == true))
+        {
+            MarkConnectorFailed(connectorId, "probe-admission-interrupted");
+            logger.LogWarning("[ContainerConnector] Network protection interrupted the probe for connector '{ConnectorId}'", connectorId);
+            return (false, [], WorkspaceMcpConnectorUnavailabilityReason.InitializeFailed, ConnectorAdmissionInterruptedException.UserMessage, null);
+        }
         catch (OperationCanceledException)
         {
             logger.LogWarning("[ContainerConnector] Probe timed out for connector '{ConnectorId}'", connectorId);
@@ -964,6 +971,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             var transportLaunch = new TransportLaunch(transport, ephemeralWorkload, launchLease, imageDigest, persistentContainerId, persistentUse);
             leaseTransferred = true;
             return transportLaunch;
+        }
+        catch (OperationCanceledException exception) when (isProbe && launchLease.CancellationToken.IsCancellationRequested)
+        {
+            throw new ConnectorAdmissionInterruptedException(ConnectorAdmissionInterruptedException.UserMessage, exception);
         }
         finally
         {
@@ -2611,6 +2622,14 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         value is { Length: 64 } && value.All(static character => char.IsAsciiHexDigit(character));
 
     private sealed record PersistentConnectorUse(WorkspaceMcpContainerConnectorDefinition Connector, string RuntimeKey, string ContainerName);
+
+    private sealed class ConnectorAdmissionInterruptedException : InvalidOperationException
+    {
+        internal const string UserMessage = "Network protection paused connector startup. Try again when Kautuka is ready.";
+        public ConnectorAdmissionInterruptedException() : base(UserMessage) { }
+        public ConnectorAdmissionInterruptedException(string message) : base(message) { }
+        public ConnectorAdmissionInterruptedException(string message, Exception innerException) : base(message, innerException) { }
+    }
 
     private sealed class TransportLaunch(IClientTransport transport, EphemeralWorkload? ephemeralWorkload, NetworkAccess.IWorkloadLaunchLease? launchLease, string? imageDigest = null, string? containerId = null, PersistentConnectorUse? persistentUse = null)
     {
