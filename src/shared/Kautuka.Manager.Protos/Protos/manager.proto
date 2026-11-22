@@ -150,6 +150,7 @@ message ApplianceRecoveryStatus {
   string source_version = 4;
   string target_version = 5;
   int64 updated_unix_milliseconds = 6;
+  string snapshot_prune_status = 7;
 }
 
 message ManagerRuntimeContainerMessage {

@@ -89,7 +89,8 @@ public sealed class UpdateServiceIntegration(
                 RecoveryTargetRelease: applianceRecovery is { TargetVersion.Length: > 0 } ? "v" + applianceRecovery.TargetVersion : null,
                 ApplianceBootConfirmed: isReady && !KautukaMaintenanceMode.IsApplianceVerification
                     && applianceRecovery is { RecoveryRequired: false },
-                ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecovery?.UpdatedUnixMilliseconds ?? 0);
+                ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecovery?.UpdatedUnixMilliseconds ?? 0,
+                ApplianceSnapshotPruneStatus: applianceRecovery?.SnapshotPruneStatus);
 
         string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
         string managerVersion = ResolveManagerVersion(managerInstallRoot);

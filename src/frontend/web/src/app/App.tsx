@@ -109,7 +109,7 @@ function AppShell() {
       const state = nextStatus?.state.toLowerCase();
       const version = nextStatus?.currentRelease?.version ?? nextStatus?.managerVersion;
       if (restart && (Date.now() >= restart.until ||
-          (nextStatus?.ok === true && state === 'current' && version === restart.targetVersion) ||
+          (nextStatus?.ok === true && (state === 'current' || state === 'verificationfailed') && version === restart.targetVersion) ||
           (state === 'available' && Boolean(nextStatus?.lastError)) ||
           (nextStatus?.ok === false && nextStatus.message !== 'update-status-unavailable'))) {
         updateRestartRef.current = null;
@@ -401,6 +401,8 @@ function AppShell() {
           : 'Update preflight checks in progress';
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
+      case 'verificationfailed':
+        return 'Update requires attention';
       case 'current':
         return hasPreviousRelease
           ? `Update applied: ${updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion}`

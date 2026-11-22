@@ -22,6 +22,7 @@ internal sealed class UpdateCoordinator(
     IOptions<UpdateOptions> options,
     ILogger<UpdateCoordinator> logger) : IUpdateCoordinator
 {
+    private const string snapshotPruneFailure = "Kautuka is running the new release. The update could not remove superseded backup snapshots.";
     private readonly IUpdateStateStore stateStore = stateStore;
     private readonly IUpdateRuntimePolicyStore runtimePolicyStore = runtimePolicyStore;
     private readonly IReleaseDiscoveryClient discoveryClient = discoveryClient;
@@ -422,7 +423,7 @@ internal sealed class UpdateCoordinator(
         {
             UpdateStateRecord notConfiguredState = state with
             {
-                LastError = "Update service is not fully configured.",
+                LastError = state.LastError == snapshotPruneFailure ? state.LastError : "Update service is not fully configured.",
                 AvailableRelease = null,
                 EligibilityState = UpdateEligibilityState.None,
                 EligibilityReason = UpdateEligibilityReason.None,
@@ -455,7 +456,7 @@ internal sealed class UpdateCoordinator(
             logger.LogWarning(ex, "Manager update discovery request failed.");
             UpdateStateRecord failedState = state with
             {
-                LastError = ex.Message,
+                LastError = state.LastError == snapshotPruneFailure ? state.LastError : ex.Message,
                 AvailableRelease = null,
                 EligibilityState = UpdateEligibilityState.None,
                 EligibilityReason = UpdateEligibilityReason.None,
@@ -512,7 +513,8 @@ internal sealed class UpdateCoordinator(
             AvailableRelease = result.NotModified && !policyChanged ? availableRelease : availableRelease,
             StagedRelease = stagedRelease,
             PreparedArtifacts = preparedArtifacts,
-            LastError = result.FailureReason ?? untrustedSourceUrl
+            LastError = (availableRelease is null && state.LastError == snapshotPruneFailure ? state.LastError : null)
+                ?? result.FailureReason ?? untrustedSourceUrl
                 ?? (state.State == UpdateWorkflowState.Applying || IsActivationFailure(state.LastError) ? state.LastError : null),
             EligibilityState = eligibilityState,
             EligibilityReason = eligibilityReason,
@@ -526,7 +528,8 @@ internal sealed class UpdateCoordinator(
     private static bool IsActivationFailure(string? error)
         => error?.StartsWith("The update apply for release ", StringComparison.Ordinal) == true
             || error?.StartsWith("The update failed. Kautuka restored the previous version", StringComparison.Ordinal) == true
-            || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true;
+            || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true
+            || error == snapshotPruneFailure;
 
     private static bool IsDiscoveryConfigured(UpdateOptions options)
     {
@@ -589,8 +592,8 @@ internal sealed class UpdateCoordinator(
                 CompletedAtUtc: DateTimeOffset.UtcNow,
                 FromVersion: persistedState.CurrentRelease?.Version ?? persistedState.LastKnownGoodRelease?.Version,
                 ToVersion: state.StagedRelease!.Version,
-                Succeeded: true,
-                ErrorMessage: null), CancellationToken.None).ConfigureAwait(false);
+                Succeeded: finalizedState.LastError is null,
+                ErrorMessage: finalizedState.LastError), CancellationToken.None).ConfigureAwait(false);
             return (finalizedState, hostContext);
         }
 
@@ -824,16 +827,26 @@ internal sealed class UpdateCoordinator(
             return false;
         }
 
+        string? pruneStatus = hostContext is { ApplianceBootConfirmed: true, RecoveryPhase: "committed" }
+            && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase)
+                ? hostContext.ApplianceSnapshotPruneStatus : null;
+        if (pruneStatus == "pending")
+        {
+            finalizedState = state;
+            return false;
+        }
+
+        bool pruneFailed = pruneStatus == "failed";
         finalizedState = state with
         {
-            State = UpdateWorkflowState.Current,
+            State = pruneFailed ? UpdateWorkflowState.VerificationFailed : UpdateWorkflowState.Current,
             StateChangedAtUtc = DateTimeOffset.UtcNow,
             CurrentRelease = state.StagedRelease,
             AvailableRelease = null,
             StagedRelease = null,
             PreparedArtifacts = null,
             PendingOperation = null,
-            LastError = null,
+            LastError = pruneFailed ? snapshotPruneFailure : null,
         };
 
         return true;
@@ -952,6 +965,10 @@ internal sealed class UpdateCoordinator(
         if (currentState.State == UpdateWorkflowState.Applying)
         {
             return UpdateWorkflowState.Applying;
+        }
+        if (availableRelease is null && currentState.LastError == snapshotPruneFailure)
+        {
+            return UpdateWorkflowState.VerificationFailed;
         }
 
         if (result.FailureReason is not null)

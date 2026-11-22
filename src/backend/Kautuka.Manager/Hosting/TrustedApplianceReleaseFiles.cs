@@ -68,6 +68,8 @@ internal static class TrustedApplianceReleaseFiles
             SourceVersion = record.GetProperty("sourceRelease").GetString() ?? string.Empty,
             TargetVersion = record.GetProperty("targetRelease").GetString() ?? string.Empty,
             UpdatedUnixMilliseconds = record.TryGetProperty("updatedUnixMilliseconds", out JsonElement updated) && updated.TryGetInt64(out long value) ? value : 0,
+            SnapshotPruneStatus = record.TryGetProperty("snapshotPruneStatus", out JsonElement prune)
+                ? prune.GetString() ?? string.Empty : string.Empty,
         };
     }
 

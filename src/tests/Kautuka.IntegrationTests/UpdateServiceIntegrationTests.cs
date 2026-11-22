@@ -1936,6 +1936,50 @@ public sealed class UpdateServiceIntegrationTests
         Assert.Equal(expected, status.State);
     }
 
+    [Theory]
+    [InlineData("succeeded", UpdateWorkflowState.Current)]
+    [InlineData("failed", UpdateWorkflowState.VerificationFailed)]
+    public async Task CommittedUpdateWaitsForSnapshotPruningAndRetainsTheRunningRelease(
+        string pruneOutcome, UpdateWorkflowState terminalState)
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "apply",
+            CurrentRelease = source,
+            LastKnownGoodRelease = source,
+            StagedRelease = target,
+        });
+        var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), target.Version,
+            recoveryPhase: "committed", recoverySource: source.ReleaseId, recoveryTarget: target.ReleaseId,
+            applianceBootConfirmed: true)
+        { SnapshotPruneStatus = "pending" };
+        var history = new UpdateOperationHistoryStore(Options.Create(new UpdateOptions { StateRootPath = CreateTempDirectory() }));
+        var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), target.Version,
+            integration: integration, operationHistory: history);
+        CancellationToken token = TestContext.Current.CancellationToken;
+
+        Assert.Equal(UpdateWorkflowState.Applying, (await coordinator.GetStatusAsync(token)).State);
+        Assert.Empty(await history.GetRecentAsync(token));
+
+        integration.SnapshotPruneStatus = pruneOutcome;
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(token);
+        Assert.Equal(terminalState, status.State);
+        Assert.Equal(target, status.CurrentRelease);
+        Assert.Equal(source, status.LastKnownGoodRelease);
+        UpdateOperationRecord activation = Assert.Single(await history.GetRecentAsync(token));
+        Assert.Equal(pruneOutcome == "succeeded", activation.Succeeded);
+        if (!activation.Succeeded)
+        {
+            Assert.Contains("superseded backup snapshots", activation.ErrorMessage, StringComparison.Ordinal);
+            await coordinator.RefreshDiscoveryAsync(token);
+            Assert.Equal(activation.ErrorMessage, (await coordinator.GetStatusAsync(token)).LastError);
+        }
+    }
+
     [Fact]
     public async Task SuccessfulDiscoveryDoesNotEraseAnUpdateFailure()
     {
@@ -2063,7 +2107,8 @@ public sealed class UpdateServiceIntegrationTests
         TimeSpan? activationTimeout = null,
         bool updaterRunningCurrent = true,
         bool pointersConsistent = true,
-        IUpdateServiceIntegration? integration = null)
+        IUpdateServiceIntegration? integration = null,
+        UpdateOperationHistoryStore? operationHistory = null)
     {
         var services = new ServiceCollection();
         services.AddHttpClient("kautuka.updateservice.github");
@@ -2084,7 +2129,7 @@ public sealed class UpdateServiceIntegrationTests
             discoveryClient,
             httpClientFactory,
             integration ?? new RecordingUpdateServiceIntegration(CreateTempDirectory(), managerVersion, managerReleaseId, updaterRunningCurrent: updaterRunningCurrent, pointersConsistent: pointersConsistent),
-            new UpdateOperationHistoryStore(updateOptions),
+            operationHistory ?? new UpdateOperationHistoryStore(updateOptions),
             updateOptions,
             NullLogger<UpdateCoordinator>.Instance);
     }
@@ -2364,9 +2409,10 @@ public sealed class UpdateServiceIntegrationTests
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
         public int ActiveExecutions { get; set; }
+        public string? SnapshotPruneStatus { get; set; }
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, ActiveExecutions, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, ActiveExecutions, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated, ApplianceSnapshotPruneStatus: SnapshotPruneStatus));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {

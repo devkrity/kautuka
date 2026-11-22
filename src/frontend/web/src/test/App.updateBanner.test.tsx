@@ -477,6 +477,25 @@ describe('App update banner', () => {
     expect(screen.getByText('The update apply for release 2.0.0 did not complete. The current release is still active.')).toBeInTheDocument();
   });
 
+  it('reports failed cleanup after the new release is running', async () => {
+    const failure = 'Kautuka is running the new release. The update could not remove superseded backup snapshots.';
+    const release = { releaseId: 'v2', version: '2.0.0', channel: 'preview',
+      releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v2' };
+    fetchUpdateStatusMock.mockResolvedValue({
+      ok: true, message: 'update-status', state: 'VerificationFailed', effectiveReleaseChannel: 'preview',
+      eligibilityState: 'None', eligibilityReason: 'None', currentRelease: release, availableRelease: null,
+      lastKnownGoodRelease: { ...release, releaseId: 'v1', version: '1.0.0', tag: 'v1' },
+      lastDiscoveryAttemptUtc: null, lastDiscoverySuccessUtc: null, managerVersion: '2.0.0',
+      hostReady: true, activeExecCount: 0, lastError: failure,
+    });
+    renderApp();
+
+    const banner = await screen.findByRole('alert');
+    expect(banner).toHaveTextContent('Update requires attention');
+    expect(banner).toHaveTextContent(failure);
+    expect(screen.queryByText('Update applied: 2.0.0')).not.toBeInTheDocument();
+  });
+
   it('shows preflight progress messaging while apply is in progress', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: true,

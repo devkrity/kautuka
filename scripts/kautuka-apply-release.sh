@@ -326,10 +326,13 @@ import json, os, sys, tempfile, time
 path, operation, phase, source, target, snapshot, data_root, *pairs = sys.argv[1:]
 pointers = {}
 manifest_sha256 = None
+snapshot_prune_status = None
 for pair in pairs:
     name, value = pair.split('=', 1)
     if name == 'snapshotManifestSha256':
         manifest_sha256 = value
+    elif name == 'snapshotPruneStatus':
+        snapshot_prune_status = value
     else:
         pointers[name] = value
 document = {
@@ -345,6 +348,8 @@ document = {
 }
 if manifest_sha256 is not None:
     document['snapshotManifestSha256'] = manifest_sha256
+if snapshot_prune_status is not None:
+    document['snapshotPruneStatus'] = snapshot_prune_status
 os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
 fd, temporary = tempfile.mkstemp(prefix='.record-', dir=os.path.dirname(path))
 try:
@@ -395,7 +400,7 @@ PY
 }
 
 set_operation_phase() {
-    local phase="$1" manifest_sha256
+    local phase="$1" prune_status="${2:-}" write_fence="${3:-true}" manifest_sha256
     local operation_id source_release target_release snapshot
     local pointer_pairs=()
     operation_id="$(read_journal_field operationId)"
@@ -421,8 +426,11 @@ with open(sys.argv[1], encoding='utf-8') as stream:
 PY
 )"
     [[ -z "$manifest_sha256" ]] || pointer_pairs+=("snapshotManifestSha256=$manifest_sha256")
+    [[ -z "$prune_status" ]] || pointer_pairs+=("snapshotPruneStatus=$prune_status")
     write_durable_record "$journal_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}" || return 1
-    write_durable_record "$maintenance_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}"
+    if [[ "$write_fence" == 'true' ]]; then
+        write_durable_record "$maintenance_path" "$operation_id" "$phase" "$source_release" "$target_release" "$snapshot" "${pointer_pairs[@]}"
+    fi
 }
 
 ensure_maintenance_fence_from_journal() {
@@ -1748,7 +1756,7 @@ retain_appliance_snapshot() {
 }
 
 recover_appliance_operation() {
-    local boot_only="$1" phase expected operation_id manifest_digest source_release target_release
+    local boot_only="$1" phase expected operation_id manifest_digest source_release target_release prune_status
     [[ -e "$journal_path" || -L "$journal_path" || -e "$maintenance_path" || -L "$maintenance_path" ]] || return 0
     [[ -f "$journal_path" && ! -L "$journal_path" && "$(stat -c '%u' "$journal_path")" == 0 &&
         -z "$(find "$journal_path" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
@@ -1777,14 +1785,25 @@ recover_appliance_operation() {
     clear_maintenance_fence || return 1
     if [[ "$boot_only" != 'true' ]]; then
         start_appliance_manager normal && wait_for_appliance_release "$expected" normal || return 1
-        if [[ "$phase" == committed || "$phase" == completed ]]; then
+    fi
+    if [[ "$phase" == committed || "$phase" == completed ]]; then
+        prune_status="$(read_journal_field snapshotPruneStatus 2>/dev/null || true)"
+        if [[ "$boot_only" != 'true' || "$prune_status" == pending ]]; then
             operation_id="$(read_journal_field operationId)" || return 1
             manifest_digest="$(read_journal_field snapshotManifestSha256)" || return 1
             source_release="$(read_journal_field sourceRelease)" || return 1
             target_release="$(read_journal_field targetRelease)" || return 1
-            if ! python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release"; then
-                echo 'error: the selected appliance release is running, but superseded backups could not be pruned' >&2
-                return 1
+            if python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release"; then
+                prune_status=succeeded
+            else
+                prune_status=failed
+            fi
+            if [[ "$phase" == committed ]]; then
+                set_operation_phase committed "$prune_status" false || return 1
+            fi
+            if [[ "$prune_status" == failed ]]; then
+                echo 'error: the selected appliance release was retained, but superseded backups could not be pruned' >&2
+                [[ "$boot_only" == 'true' ]] || return 1
             fi
         fi
     fi
@@ -1824,7 +1843,7 @@ activate_appliance_version() {
         recover_appliance_operation false || echo 'error: appliance recovery remains pending' >&2
         return 1
     fi
-    set_operation_phase committed || return 1
+    set_operation_phase committed pending || return 1
     test_crash_at committed
     recover_appliance_operation false || return 1
     echo "Committed signed appliance release $target."
