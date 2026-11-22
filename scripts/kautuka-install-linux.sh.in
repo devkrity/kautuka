@@ -3145,7 +3145,7 @@ PY
             if [[ -e "$install_root/current" || -L "$install_root/current" || -e "$internal_state_root/kautuka.db" ||
                   -e "$internal_state_root/gateway" || -e "$internal_state_root/credentialsHost" ||
                   -e "$internal_state_root/channelHost" || -e "$internal_state_root/security/channel" ]]; then
-                fail 'appliance installation found an existing runtime or service data; use managed activation or migration'
+                fail 'the installer found an existing runtime or service data. Use in-app updates for an existing appliance, or install on a clean host.'
             fi
             local checkpoint_temp
             checkpoint_temp="$(mktemp "$recovery_dir/.first-install.XXXXXXXX")"

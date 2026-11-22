@@ -83,11 +83,11 @@ On a fresh signed Linux appliance installation, the installer provisions private
 
 While Manager is running, reopen the usual local browser address if WebHost becomes unavailable. Manager can temporarily serve a read-only recovery message there after WebHost releases the port. The page shows a scheduled retry when one is pending or an action when recovery needs help. If a saved network pause prevents verification at startup, the page reports that pause and directs the owner to support. The workload admission gate stays closed during a network protection failure. Manager releases the port before WebHost restarts, so a refresh during the handoff can briefly fail.
 
-The signed appliance installer currently requires a fresh state root. Existing installations need a managed migration and activation transaction to preserve their data.
+The signed appliance installer requires a fresh state root. Update an existing signed appliance from its update screen. Install on a clean host when moving from the older host-service layout.
 
 Build a Linux-only signed preview with `scripts/build-release-assets.sh --linux-appliance-only`, the existing appliance image options, and the preview's exact artifact base URL. The output includes the Linux archive, signed manifest, and Linux installer. Verify this artifact set with `scripts/verify-release-artifacts.mjs --linux-appliance-only true` and the usual release identity and public key arguments.
 
-Use a dedicated distribution path for these artifacts. The shared Windows Preview installer currently selects the newest eligible tag before checking for a Windows artifact.
+Keep Linux-only build artifacts private for verification. Published Preview releases include both Linux and Windows install assets under the same release tag.
 
 On a fresh signed Linux appliance, pass `--web-port 23084` to publish WebHost on a different localhost port. Manager saves the port in its systemd user unit. The default is `20229`. The container listener and its egress rules stay the same.
 
