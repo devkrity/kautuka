@@ -359,15 +359,16 @@ public sealed partial class ManagerRuntimeAdapter(
             return new ManagedContainerReconcileResult(false, 0, $"{role}_container_discovery_failed");
         }
 
-        string[] stale = [.. listed.StdOut
+        var retainedConnectorNames = role == "connector" ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
+        string[] listedNames = [.. listed.StdOut
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(name => !desired.Contains(name))
             .Distinct(StringComparer.OrdinalIgnoreCase)];
         int removed = 0;
-        foreach (string name in stale)
+        foreach (string name in listedNames)
         {
-            if (role == "connector" && isActiveConnector?.Invoke(name) == true)
+            if (desired.Contains(name) || (role == "connector" && isActiveConnector?.Invoke(name) == true))
             {
+                retainedConnectorNames?.Add(name);
                 continue;
             }
             PodmanCommandResult remove = await podmanCommandRunner.RunAsync(["rm", "-f", name], 15, cancellationToken).ConfigureAwait(false);
@@ -380,7 +381,10 @@ public sealed partial class ManagerRuntimeAdapter(
             removed++;
         }
 
-        return new ManagedContainerReconcileResult(true, removed, null);
+        return new ManagedContainerReconcileResult(true, removed, null)
+        {
+            RetainedConnectorNames = retainedConnectorNames,
+        };
     }
 
     /// <summary>

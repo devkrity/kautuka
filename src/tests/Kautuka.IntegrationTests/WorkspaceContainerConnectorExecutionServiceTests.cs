@@ -1860,12 +1860,17 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
         ])!).ConfigureAwait(false);
 
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
-        int inspectCountBeforeReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
+        int commandsBeforeReconcile = commands.Count;
+        _ = await service.ReconcileDesiredConnectorsAsync(
+            [connector], null, CancellationToken.None, new HashSet<string>());
+        Assert.Equal(commandsBeforeReconcile, commands.Count);
 
-        _ = await service.ReconcileDesiredConnectorsAsync([connector], null, CancellationToken.None);
+        _ = await service.ReconcileDesiredConnectorsAsync(
+            [connector], null, CancellationToken.None, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerName });
 
-        int inspectCountAfterReconcile = commands.Count(args => args[0] == "inspect" && args.Length > 1 && args[1] == containerName);
-        Assert.True(inspectCountAfterReconcile > inspectCountBeforeReconcile, "Reconciliation must inspect this user and agent's actual container name.");
+        string[][] inspected = [.. commands.Skip(commandsBeforeReconcile).Where(static args => args[0] == "inspect")];
+        Assert.Contains(inspected, args => args[1] == containerName);
+        Assert.All(inspected, args => Assert.Contains(args[1], new[] { containerName, containerId }));
         Assert.Equal(1, commands.Count(static args => args[0] == "run"));
         Assert.DoesNotContain(commands, static args => args[0] == "rm");
         Assert.Equal(1, registry.Count);

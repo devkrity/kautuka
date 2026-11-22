@@ -91,7 +91,8 @@ public sealed class WorkspaceContainerConnectorExecutionService(
     public async Task<ConnectorReconciliationResult> ReconcileDesiredConnectorsAsync(
         IReadOnlyList<WorkspaceMcpContainerConnectorDefinition> connectors,
         WorkspaceDesiredStateSnapshot? capturedSnapshot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? observedContainerNames = null)
     {
         ArgumentNullException.ThrowIfNull(connectors);
         WorkspaceDesiredStateSnapshot authoritativeSnapshot = capturedSnapshot ?? desiredStateStore.Snapshot;
@@ -100,7 +101,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         ContainerContext[] workspaces = [.. authoritativeSnapshot.DesiredWorkspaces
             .Where(static workspace => !string.IsNullOrWhiteSpace(workspace.UserId))
             .DistinctBy(static workspace => (workspace.ScopeType, workspace.ScopeId, workspace.UserId))];
-        if (workspaces.Length == 0)
+        if (workspaces.Length == 0 || observedContainerNames is { Count: 0 })
         {
             return new ConnectorReconciliationResult(complete, notes);
         }
@@ -118,6 +119,10 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                 foreach (WorkspaceMcpExecutionContext executionContext in executionContexts)
                 {
                     string containerName = BuildContainerName(connector.ConnectorId, executionContext, workspace);
+                    // JIT launches after the inventory are verified on the launch path.
+                    // Reconciliation still inspects the live spec for containers it found.
+                    if (observedContainerNames?.Contains(containerName) == false) continue;
+
                     string runtimeKey = BuildRuntimeKey(connector.ConnectorId, executionContext, workspace);
                     try
                     {

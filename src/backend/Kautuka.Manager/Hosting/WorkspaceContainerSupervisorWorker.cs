@@ -360,7 +360,8 @@ internal sealed partial class WorkspaceContainerSupervisorWorker(
         var connectorResult = await connectorExecutionService.ReconcileDesiredConnectorsAsync(
             snapshot.DesiredContainerConnectors,
             snapshot,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            connectorOrphanResult.RetainedConnectorNames).ConfigureAwait(false);
         desiredStateStore.ReplaceDriftActions([
             .. sidecarSupervisor.TakeDriftNotes(),
             .. connectorExecutionService.TakeSandboxDriftNotes(),

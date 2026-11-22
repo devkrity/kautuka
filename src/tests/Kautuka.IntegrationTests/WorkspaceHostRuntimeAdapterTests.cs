@@ -20,6 +20,7 @@ public sealed class WorkspaceHostRuntimeAdapterTests
         var result = await adapter.RemoveOrphanedManagedContainersAsync("connector", [], TestContext.Current.CancellationToken, name => name == "active-tmp");
         Assert.True(result.Succeeded);
         Assert.Equal(["stale-tmp"], removed);
+        Assert.Equal(["active-tmp"], Assert.IsAssignableFrom<IReadOnlySet<string>>(result.RetainedConnectorNames));
     }
 
     [Fact]
