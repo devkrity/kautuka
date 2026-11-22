@@ -97,18 +97,6 @@ const BRAIN_PRESETS: BrainPresetOption[] = [
   },
 ];
 
-function getLifecycleSummary(status?: string) {
-  if (status === 'agents_ready') {
-    return 'Core ready. Agents ready.';
-  }
-
-  if (status === 'agents_pending') {
-    return 'Core ready. Agents pending setup.';
-  }
-
-  return 'Core services are not ready yet.';
-}
-
 function getProviderLabel(providerType: string) {
   switch (providerType) {
     case 'gemini':
@@ -186,11 +174,11 @@ class WizardErrorBoundary extends React.Component<
 
 export const OnboardingWizard: React.FC = () => {
   const [manualBrainSelection, setManualBrainSelection] = React.useState(false);
-  const [recommendationsBackStage, setRecommendationsBackStage] = React.useState<string>(WIZARD_STAGES.setup);
   const {
     stage,
     goNext,
     skipToDashboard,
+    chatWithHelper,
     configureManually,
     checkingExisting,
     hasExistingSetup,
@@ -322,19 +310,11 @@ export const OnboardingWizard: React.FC = () => {
                     </p>
                   </div>
 
-                  <div className="w-full rounded-xl border border-border bg-card px-5 py-4 text-sm shadow-sm">
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="font-semibold text-foreground">Platform status</span>
-                      <span className="rounded-full border border-border bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
-                        {getLifecycleSummary(onboardingHealth?.lifecycleStatus)}
-                      </span>
-                    </div>
-                    {onboardingHealth?.actionHints?.length ? (
-                      <p className="mt-3 text-muted-foreground">
-                        Suggested next actions: {onboardingHealth.actionHints.join(', ')}
-                      </p>
-                    ) : null}
-                  </div>
+                  {onboardingHealth?.coreReady === false && (
+                    <p role="status" className="text-sm text-muted-foreground">
+                      Kautuka is getting ready. If setup cannot continue, refresh this page in a moment.
+                    </p>
+                  )}
 
                   {checkingExisting ? (
                     <p className="text-sm text-muted-foreground animate-pulse">
@@ -461,7 +441,7 @@ export const OnboardingWizard: React.FC = () => {
               <RecommendationsScreen
                 canImportConnectors={canImportConnectors}
                 canImportSkills={canImportSkills}
-                onBack={() => goNext(recommendationsBackStage as typeof stage)}
+                onBack={() => goNext(WIZARD_STAGES.success)}
                 onContinue={() => goNext(WIZARD_STAGES.success)}
                 onSetupTelegram={() => goNext(WIZARD_STAGES.telegram)}
               />
@@ -485,11 +465,8 @@ export const OnboardingWizard: React.FC = () => {
             {stage === WIZARD_STAGES.success && (
               <SuccessMilestone
                 telegramConfigured={telegramConfiguredInWizard}
-                onContinue={skipToDashboard}
-                onReviewAbilities={() => {
-                  setRecommendationsBackStage(WIZARD_STAGES.success);
-                  goNext(WIZARD_STAGES.recommendations);
-                }}
+                onContinue={chatWithHelper}
+                onReviewAbilities={() => goNext(WIZARD_STAGES.recommendations)}
                 onOpenSettings={openSettings}
               />
             )}

@@ -353,7 +353,9 @@ describe('useOnboardingFlow existing setup detection', () => {
     });
     await waitFor(() => expect(saveModelMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveAgentMock).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(result.current.stage).toBe('recommendations'));
+    await waitFor(() => expect(result.current.stage).toBe('success'));
+    act(() => result.current.chatWithHelper());
+    expect(currentRoute).toBe(`/workspace/${result.current.agentForm.id}`);
   });
 
   it('asks for the exact provider permission before creating the helper', async () => {
@@ -463,6 +465,6 @@ describe('useOnboardingFlow existing setup detection', () => {
 
     await waitFor(() => expect(saveModelMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveAgentMock).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(result.current.stage).toBe('recommendations'));
+    await waitFor(() => expect(result.current.stage).toBe('success'));
   });
 });

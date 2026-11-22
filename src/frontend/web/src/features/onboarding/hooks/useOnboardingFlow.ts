@@ -541,7 +541,7 @@ export function useOnboardingFlow() {
       // stale providersCount=0 and immediately redirects back to /onboarding.
       await queryClient.invalidateQueries({ queryKey: ['system-setup-status'] });
       await queryClient.refetchQueries({ queryKey: ['system-setup-status'] });
-      goNext(WIZARD_STAGES.recommendations);
+      goNext(WIZARD_STAGES.success);
   };
 
   const saveTelegramSetup = async () => {
@@ -587,6 +587,10 @@ export function useOnboardingFlow() {
 
   const skipToDashboard = () => {
     navigate('/dashboard', { replace: true, state: createOnboardingHandoffState() });
+  };
+
+  const chatWithHelper = () => {
+    navigate(`/workspace/${encodeURIComponent(agentForm.id)}`, { replace: true, state: createOnboardingHandoffState() });
   };
 
   const configureManually = () => {
@@ -652,6 +656,7 @@ export function useOnboardingFlow() {
     saveTelegramSetup,
     skipTelegramSetup,
     skipToDashboard,
+    chatWithHelper,
     configureManually,
     openSettings,
   };

@@ -24,6 +24,8 @@ On a new installation, complete the first-run flow:
 1. Create the initial administrator account. During install, copy the one-time setup token shown by the installer and acknowledge the prompt. Enter it in Kautuka's first-run setup page. The token authorizes creation of the first account, which manages Kautuka configuration and access; it is removed after successful use. Keep it private and do not include it in logs or support reports. If you closed the installer, use its documented token-recovery command.
 2. Continue through onboarding or choose manual configuration.
 3. Configure an AI provider and save a model supported by that provider. The onboarding presets include Gemini, Ollama, and OpenRouter; the manual provider catalog may include additional options.
+
+After saving a helper in onboarding, select **Chat with my helper** to open that helper’s workspace and send a first message. Connector, skill, and Telegram setup remain available under **Explore optional setup**.
 4. Create an agent and assign the configured model to it.
 5. Open the agent workspace, start a session, and send a test prompt. A configured provider and model must be assigned to an agent before the agent can use them.
 6. Configure tools, connectors, documents, skills, workflows, channels, or schedules as needed. Review the permissions and approval behavior for each capability before enabling it.

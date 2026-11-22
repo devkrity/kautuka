@@ -1,4 +1,3 @@
-import React, { useState } from 'react';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 
@@ -25,11 +24,7 @@ export function SuccessMilestone({
           Your helper is ready
         </h1>
         <p className="text-xl text-muted-foreground">
-          Kautuka is set up on this installation, your AI connection is ready, and your helper can
-          start working now.
-        </p>
-        <p className="text-sm text-muted-foreground">
-          Your AI model can run locally or in the cloud, but Kautuka runs here and performs tool work here.
+          Send a first message to try it out.
         </p>
         {telegramConfigured && (
           <Alert variant="info" className="text-left">
@@ -47,7 +42,7 @@ export function SuccessMilestone({
           onClick={onContinue}
           className="flex-1 font-semibold whitespace-normal md:whitespace-nowrap"
         >
-          Start chatting
+          Chat with my helper
         </Button>
         <Button
           size="lg"
@@ -55,7 +50,7 @@ export function SuccessMilestone({
           onClick={onReviewAbilities}
           className="flex-1 whitespace-normal md:whitespace-nowrap"
         >
-          Review abilities
+          Explore optional setup
         </Button>
         <Button
           size="lg"
