@@ -191,6 +191,30 @@ public sealed class RemoteMcpRequestHandlerTests
     }
 
     [Fact]
+    public async Task NetworkBlockPreventsSecretResolutionAndSendOnTheNextRequest()
+    {
+        var checker = new TestNetworkChecker();
+        var inner = new RecordingHandler();
+        int resolved = 0;
+        var context = CreateContext((keys, _) =>
+        {
+            resolved++;
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(
+                new Dictionary<string, string> { [keys[0]] = "fixture-value" });
+        });
+        using var client = new HttpClient(new RemoteMcpRequestHandler(context, checker, inner));
+        using HttpResponseMessage first = await client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(1, resolved);
+
+        checker.Blocked = true;
+        await Assert.ThrowsAsync<Kautuka.NetworkAccess.Client.NetworkAccessDeniedException>(
+            () => client.GetAsync(context.Endpoint, TestContext.Current.CancellationToken));
+        Assert.Equal(1, resolved);
+        Assert.Equal(1, inner.Sends);
+    }
+
+    [Fact]
     public async Task RevalidatesPolicyOnEverySendAndAfterResolution()
     {
         bool allowed = true;
@@ -284,14 +308,18 @@ public sealed class RemoteMcpRequestHandlerTests
             [new("api-key", "API key", false)], [new("X-Mode", "free"), new("Authorization", CredentialKey: "api-key", Prefix: "Bearer ")], resolve, CredentialNamespace: "namespace-one");
 
     private static RemoteMcpRequestHandler CreateHandler(RemoteMcpRequestContext context, HttpMessageHandler inner)
-        => new(context, new AllowAllTestChecker(), inner);
+        => new(context, new TestNetworkChecker(), inner);
 
-    private sealed class AllowAllTestChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
+    private sealed class TestNetworkChecker : Kautuka.NetworkAccess.Client.INetworkAccessChecker
     {
+        public bool Blocked { get; set; }
+
         public Task<Kautuka.NetworkAccess.Client.NetworkAccessCheckResult> CheckAsync(
             Kautuka.NetworkAccess.Client.OutboundTarget target,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("test_allowed"));
+            => Task.FromResult(Blocked
+                ? Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateDenied("blocked")
+                : Kautuka.NetworkAccess.Client.NetworkAccessCheckResult.CreateAllowed("test_allowed"));
     }
 
     private sealed class RecordingHandler : HttpMessageHandler
