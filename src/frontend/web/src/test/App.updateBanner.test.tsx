@@ -483,7 +483,7 @@ describe('App update banner', () => {
     const release = { releaseId: 'v2', version: '2.0.0', channel: 'preview',
       releaseFingerprint: '', sourceUrl: null, publishedAtUtc: null, tag: 'v2' };
     fetchUpdateStatusMock.mockResolvedValue({
-      ok: true, message: 'update-status', state: 'VerificationFailed', effectiveReleaseChannel: 'preview',
+      ok: false, message: 'update-status', state: 'VerificationFailed', effectiveReleaseChannel: 'preview',
       eligibilityState: 'None', eligibilityReason: 'None', currentRelease: release, availableRelease: null,
       lastKnownGoodRelease: { ...release, releaseId: 'v1', version: '1.0.0', tag: 'v1' },
       lastDiscoveryAttemptUtc: null, lastDiscoverySuccessUtc: null, managerVersion: '2.0.0',

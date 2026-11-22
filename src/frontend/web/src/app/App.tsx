@@ -355,6 +355,10 @@ function AppShell() {
   }
 
   const updateBannerTitle = (() => {
+    if (updateState === 'verificationfailed') {
+      return 'Update requires attention';
+    }
+
     if (hasUpdateStatusFailure) {
       switch (updateStatus?.message) {
         case 'update-apply-failed':
@@ -402,8 +406,6 @@ function AppShell() {
           : 'Update preflight checks in progress';
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
-      case 'verificationfailed':
-        return 'Update requires attention';
       case 'current':
         return hasPreviousRelease
           ? `Update applied: ${updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion}`
