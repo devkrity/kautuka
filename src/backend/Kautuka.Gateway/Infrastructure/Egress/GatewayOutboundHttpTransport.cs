@@ -49,24 +49,27 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
     internal HttpMessageHandler? CreateScopedHandler(Func<GatewayEgressScope> resolveScope)
         => connect is null ? null : new ScopedConnectHandler(connect, resolveScope);
 
+    internal HttpMessageHandler? CreateApplicationTransport()
+        => CreateScopedHandler(static () => ResolveScope("http-request"));
+
     internal HttpMessageHandler CreateModelHandler(INetworkAccessChecker? checker)
     {
 #pragma warning disable CA2000 // The returned delegating handler owns the selected transport.
-        HttpMessageHandler transport = CreateScopedHandler(ResolveModelScope)
+        HttpMessageHandler transport = CreateScopedHandler(static () => ResolveScope("model"))
             ?? new SocketsHttpHandler { AllowAutoRedirect = false };
         return new NetworkAccessCheckHandler(checker ?? FailClosedNetworkAccessChecker.Instance, transport);
 #pragma warning restore CA2000
     }
 
-    private static GatewayEgressScope ResolveModelScope()
+    private static GatewayEgressScope ResolveScope(string defaultPurpose)
     {
         NetworkAccessScope? caller = NetworkAccessContext.Current;
         if (caller?.UserId is not { Length: > 0 } user)
         {
-            throw new HttpRequestException("Gateway model egress requires a caller identity.");
+            throw new HttpRequestException("Gateway egress requires a caller identity.");
         }
 
-        return new GatewayEgressScope(user, caller.AgentId, caller.ConnectorId, caller.Purpose ?? "model", caller.CorrelationId);
+        return new GatewayEgressScope(user, caller.AgentId, caller.ConnectorId, caller.Purpose ?? defaultPurpose, caller.CorrelationId);
     }
 
     public void Dispose()

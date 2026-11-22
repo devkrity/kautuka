@@ -62,6 +62,9 @@ internal sealed class GatewayConnectTransport : IDisposable
             request.Headers.Host is not null || uri.HostNameType == UriHostNameType.IPv6 || uri.Host.EndsWith('.'))
             throw new InvalidOperationException("Gateway egress requires an HTTP or HTTPS URI with a canonical host and no user info or Host override.");
         ValidateScope(scope);
+        // Only provider tests use correlation as an authorization credential.
+        // Ordinary request IDs do not belong to a reusable connection.
+        GatewayEgressScope snapshot = scope.Purpose == "provider-test" ? scope : scope with { Correlation = null };
         // HTTP/3 uses QUIC and can bypass ConnectCallback. Preserve 1.1/2
         // requests unless their policy could negotiate a higher protocol.
         if (request.Version.Major >= 3 || request.VersionPolicy == HttpVersionPolicy.RequestVersionOrHigher)
@@ -73,7 +76,7 @@ internal sealed class GatewayConnectTransport : IDisposable
         lock (poolLock)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!pools.TryGetValue(scope, out pool!))
+            if (!pools.TryGetValue(snapshot, out pool!))
             {
                 if (pools.Count >= maximumScopes)
                 {
@@ -83,8 +86,6 @@ internal sealed class GatewayConnectTransport : IDisposable
                     pools.Remove(idle.Value.Key);
                     idle.Value.Value.Invoker.Dispose();
                 }
-                // A record copy captures the explicit caller scope before pool selection.
-                GatewayEgressScope snapshot = scope with { };
                 var handler = new SocketsHttpHandler
                 {
                     UseProxy = false,

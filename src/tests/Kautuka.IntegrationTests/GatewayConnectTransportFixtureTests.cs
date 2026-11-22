@@ -62,22 +62,25 @@ public sealed class GatewayConnectTransportFixtureTests
         Assert.Contains("x-kautuka-agent: agent-1\r\n", connect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-connector: connector-1\r\n", connect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-purpose: model\r\n", connect, StringComparison.Ordinal);
-        Assert.Contains("x-kautuka-correlation: correlation-1\r\n", connect, StringComparison.Ordinal);
+        Assert.DoesNotContain("x-kautuka-correlation:", connect, StringComparison.Ordinal);
         Assert.DoesNotContain("GET /path", connect, StringComparison.Ordinal);
-        Task<string> acceptedTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true);
+        Task<string> acceptedTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true, originRequests: 2);
         using var httpRequest = new HttpRequestMessage(HttpMethod.Get, "http://example.com/resource");
         using HttpResponseMessage response = await transport.SendAsync(httpRequest, scope with { Correlation = "correlation-2" }, timeout.Token);
         using var blocked = new HttpRequestMessage(HttpMethod.Get, "http://example.com/");
-        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.SendAsync(blocked, scope with { Correlation = "correlation-3" }, timeout.Token));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => transport.SendAsync(blocked, scope with { User = "different-user" }, timeout.Token));
         Assert.Equal("ok", await response.Content.ReadAsStringAsync(timeout.Token));
+        using var secondRequest = new HttpRequestMessage(HttpMethod.Get, "http://example.com/another-resource");
+        using HttpResponseMessage secondResponse = await transport.SendAsync(secondRequest, scope with { Correlation = "correlation-3" }, timeout.Token);
+        Assert.Equal("ok", await secondResponse.Content.ReadAsStringAsync(timeout.Token));
         string secondConnect = await acceptedTask;
         Assert.StartsWith("CONNECT example.com:80 HTTP/1.1\r\n", secondConnect, StringComparison.Ordinal);
-        Assert.Contains("x-kautuka-correlation: correlation-2\r\n", secondConnect, StringComparison.Ordinal);
+        Assert.DoesNotContain("x-kautuka-correlation:", secondConnect, StringComparison.Ordinal);
         response.Dispose();
         Task<string> lastTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token);
         using var lastRequest = new HttpRequestMessage(HttpMethod.Get, "http://example.com/");
-        await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Correlation = "correlation-3" }, timeout.Token));
-        Assert.Contains("x-kautuka-correlation: correlation-3\r\n", await lastTask, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<HttpRequestException>(() => transport.SendAsync(lastRequest, scope with { Purpose = "provider-test", Correlation = "test-token" }, timeout.Token));
+        Assert.Contains("x-kautuka-correlation: test-token\r\n", await lastTask, StringComparison.Ordinal);
 
         using var outbound = new GatewayOutboundHttpTransport(transport);
         var provider = new OllamaAiClientProvider(checker: new FixtureNetworkAccessChecker(), transportFactory: outbound.CreateModelHandler);
@@ -97,7 +100,18 @@ public sealed class GatewayConnectTransportFixtureTests
         Assert.Contains("x-kautuka-user: model-user\r\n", discoveryConnect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-agent: model-agent\r\n", discoveryConnect, StringComparison.Ordinal);
         Assert.Contains("x-kautuka-purpose: ai-discovery\r\n", discoveryConnect, StringComparison.Ordinal);
-        Assert.Contains("x-kautuka-correlation: discovery-request\r\n", discoveryConnect, StringComparison.Ordinal);
+        Assert.DoesNotContain("x-kautuka-correlation:", discoveryConnect, StringComparison.Ordinal);
+
+        Task<string> loginTask = ReceiveDeniedConnectAsync(listener, server, client, timeout.Token, accepted: true);
+        using (NetworkAccessContext.BeginScope("system", "gateway", purpose: "oidc-login", service: "external-auth"))
+        using (var authClient = new HttpClient(new NetworkAccessCheckHandler(new FixtureNetworkAccessChecker(), outbound.CreateApplicationTransport()!)))
+        {
+            Assert.Equal("ok", await authClient.GetStringAsync(new Uri("http://auth.example.test/token"), timeout.Token));
+        }
+        string loginConnect = await loginTask;
+        Assert.Contains("x-kautuka-user: system\r\n", loginConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-agent: gateway\r\n", loginConnect, StringComparison.Ordinal);
+        Assert.Contains("x-kautuka-purpose: oidc-login\r\n", loginConnect, StringComparison.Ordinal);
 
         var mcpFactory = new McpHttpClientFactory(new FixtureNetworkAccessChecker(), outbound);
         var mcpEndpoint = new Uri("http://mcp.example.test/mcp", UriKind.Absolute);
@@ -134,7 +148,7 @@ public sealed class GatewayConnectTransportFixtureTests
     }
 
 #pragma warning restore CA2025
-    private static async Task<string> ReceiveDeniedConnectAsync(TcpListener listener, X509Certificate2 server, X509Certificate2 client, CancellationToken token, bool accepted = false, bool originTls = false, bool ollamaDiscovery = false)
+    private static async Task<string> ReceiveDeniedConnectAsync(TcpListener listener, X509Certificate2 server, X509Certificate2 client, CancellationToken token, bool accepted = false, bool originTls = false, bool ollamaDiscovery = false, int originRequests = 1)
     {
         using TcpClient socket = await listener.AcceptTcpClientAsync(token);
         using var tls = new SslStream(socket.GetStream(), false, (_, cert, _, _) => cert?.GetCertHashString() == client.GetCertHashString());
@@ -156,21 +170,25 @@ public sealed class GatewayConnectTransportFixtureTests
                 Assert.Equal((byte)0x16, buffer[0]); // TLS handshake record, never a plaintext HTTP method.
                 return Encoding.ASCII.GetString(bytes.ToArray());
             }
-            using var originHeaders = new MemoryStream();
-            while (originHeaders.Length < 16384)
+            for (int request = 0; request < originRequests; request++)
             {
-                if (await tls.ReadAsync(buffer, token) == 0) throw new IOException("Origin request ended early.");
-                originHeaders.WriteByte(buffer[0]);
-                if (originHeaders.Length >= 4 && originHeaders.GetBuffer().AsSpan((int)originHeaders.Length - 4, 4).SequenceEqual("\r\n\r\n"u8)) break;
+                using var originHeaders = new MemoryStream();
+                while (originHeaders.Length < 16384)
+                {
+                    if (await tls.ReadAsync(buffer, token) == 0) throw new IOException("Origin request ended early.");
+                    originHeaders.WriteByte(buffer[0]);
+                    if (originHeaders.Length >= 4 && originHeaders.GetBuffer().AsSpan((int)originHeaders.Length - 4, 4).SequenceEqual("\r\n\r\n"u8)) break;
+                }
+                string body = "ok";
+                if (ollamaDiscovery)
+                {
+                    Assert.StartsWith("GET /api/tags HTTP/1.1\r\n", Encoding.ASCII.GetString(originHeaders.ToArray()), StringComparison.Ordinal);
+                    body = """{"models":[{"name":"fixture-model"}]}""";
+                }
+                string connection = request == originRequests - 1 ? "close" : "keep-alive";
+                await tls.WriteAsync(Encoding.ASCII.GetBytes(FormattableString.Invariant(
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: {connection}\r\n\r\n{body}")), token);
             }
-            string body = "ok";
-            if (ollamaDiscovery)
-            {
-                Assert.StartsWith("GET /api/tags HTTP/1.1\r\n", Encoding.ASCII.GetString(originHeaders.ToArray()), StringComparison.Ordinal);
-                body = """{"models":[{"name":"fixture-model"}]}""";
-            }
-            await tls.WriteAsync(Encoding.ASCII.GetBytes(FormattableString.Invariant(
-                $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}")), token);
         }
         else await tls.WriteAsync("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), token);
         return Encoding.ASCII.GetString(bytes.ToArray());

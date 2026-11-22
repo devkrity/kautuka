@@ -49,7 +49,7 @@ internal static partial class GatewayAuthEndpointMappings
         BrokerInstallationIdentity installation;
         using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
             userId: actorId ?? "system",
-            agentId: actorId is null ? "system" : "gateway",
+            agentId: "gateway",
             purpose: intent == "LINK" ? "oidc-link" : "oidc-login",
             service: "external-auth");
         try
@@ -97,7 +97,7 @@ internal static partial class GatewayAuthEndpointMappings
         string oidcUserId = session.Intent == "LINK" && !string.IsNullOrWhiteSpace(session.LinkUserId) ? session.LinkUserId : "system";
         using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
             userId: oidcUserId,
-            agentId: oidcUserId == "system" ? "system" : "gateway",
+            agentId: "gateway",
             purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
             service: "external-auth");
         try { await broker.BindBrowserAsync(new Uri(session.BrokerOrigin), session.BrokerFlowId, body.Nonce!, ct).ConfigureAwait(false); }
@@ -130,7 +130,7 @@ internal static partial class GatewayAuthEndpointMappings
             string oidcUserId = session.Intent == "LINK" && !string.IsNullOrWhiteSpace(session.LinkUserId) ? session.LinkUserId : "system";
             using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
                 userId: oidcUserId,
-                agentId: oidcUserId == "system" ? "system" : "gateway",
+                agentId: "gateway",
                 purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
                 service: "external-auth");
             string? token;

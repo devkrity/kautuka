@@ -191,7 +191,7 @@ internal static partial class GatewayAuthEndpointMappings
 
         using IDisposable nacScope = Kautuka.NetworkAccess.Client.NetworkAccessContext.BeginScope(
             userId: oidcUserId,
-            agentId: oidcUserId == "system" ? "system" : "gateway",
+            agentId: "gateway",
             purpose: session.Intent == "LINK" ? "oidc-link" : "oidc-login",
             service: "external-auth");
 

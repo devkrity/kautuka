@@ -1,6 +1,7 @@
 using System.Text.Json;
 
 using Kautuka.Gateway.Domain.Connectors;
+using Kautuka.Gateway.Infrastructure.Egress;
 using Kautuka.NetworkAccess.Client;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
@@ -25,19 +26,19 @@ internal sealed class ConnectorAuthorizationClient : IDisposable
     {
     }
 
-    public ConnectorAuthorizationClient(INetworkAccessChecker? checker = null, HttpMessageHandler? handler = null)
+    public ConnectorAuthorizationClient(INetworkAccessChecker? checker = null, HttpMessageHandler? handler = null, GatewayOutboundHttpTransport? outbound = null)
     {
         if (handler is null)
         {
 #pragma warning disable CA2000 // Disposed by ownedHandler in ConnectorAuthorizationClient.Dispose
-            var sockets = new SocketsHttpHandler
+            HttpMessageHandler transport = outbound?.CreateApplicationTransport() ?? new SocketsHttpHandler
             {
                 AllowAutoRedirect = false,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
             };
             ownedHandler = new NetworkAccessCheckHandler(
                 checker ?? FailClosedNetworkAccessChecker.Instance,
-                sockets);
+                transport);
 #pragma warning restore CA2000
             http = new HttpClient(ownedHandler, disposeHandler: false);
         }

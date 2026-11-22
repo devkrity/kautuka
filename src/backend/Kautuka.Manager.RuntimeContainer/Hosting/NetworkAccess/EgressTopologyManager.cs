@@ -2535,6 +2535,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         List<InfraAllowlistEntry> allowlistEntries,
         CancellationToken cancellationToken)
     {
+        if (gatewayConnectEnvoyDirectory is not null)
+            createArgs = [createArgs[0], "--pull=never", .. createArgs.Skip(1)];
+
         PodmanCommandResult inspect = await podmanRunner
             .RunAsync(["inspect", containerName], 10, cancellationToken)
             .ConfigureAwait(false);
@@ -2686,7 +2689,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    private async Task EnsureBoundaryImageAsync(CancellationToken cancellationToken)
+    internal async Task EnsureBoundaryImageAsync(CancellationToken cancellationToken)
     {
         PodmanCommandResult inspect = await podmanRunner
             .RunAsync(["image", "exists", BoundaryInitImage], 10, cancellationToken)
@@ -2696,6 +2699,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             return;
         }
+
+        if (inspect.ExitCode != 1)
+            throw new InvalidOperationException($"Could not check the pinned boundary image '{BoundaryInitImage}': {inspect.StdErr}");
+
+        if (gatewayConnectEnvoyDirectory is not null)
+            throw new InvalidOperationException($"Pinned appliance boundary image '{BoundaryInitImage}' is missing. Restore it from the verified release image archive.");
 
         PodmanCommandResult pull = await podmanRunner
             .RunAsync(["pull", BoundaryInitImage], 300, cancellationToken)
