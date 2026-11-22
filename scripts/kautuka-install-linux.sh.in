@@ -566,6 +566,15 @@ icu_library_available() {
 }
 
 ensure_dotnet_host_libraries() {
+    # The Native AOT host currently needs OpenSSL 3 when the distribution defaults to OpenSSL 4.
+    if command -v dnf >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 \
+        && [[ "$(openssl version)" == 'OpenSSL 4.'* ]] \
+        && ! rpm -q openssl3-libs >/dev/null 2>&1; then
+        echo 'Installing OpenSSL 3 compatibility libraries for Kautuka host services.'
+        dnf install -y openssl3-libs \
+            || fail 'could not install the OpenSSL 3 compatibility libraries; check the DNF repositories and rerun the installer'
+    fi
+
     if icu_library_available libicuuc; then
         return
     fi

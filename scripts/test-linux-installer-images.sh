@@ -226,4 +226,28 @@ grep -F '"releaseChannel": "stable"' "$policy_state/updateService/update-runtime
   exit 1
 }
 
+# A Native AOT appliance host on stock Fedora 45 needs the packaged OpenSSL 3 ABI.
+KAUTUKA_INSTALL_MANAGER_RELEASE_SOURCE_ONLY=1 bash -c '
+  source "$1/scripts/kautuka-install-linux.sh.in"
+  icu_library_available() { return 0; }
+  openssl() { printf "OpenSSL %s.0.3\n" "${OPENSSL_MAJOR:-4}"; }
+  fixture="$2"
+  rpm() { [[ "$*" == "-q openssl3-libs" && -f "$fixture/openssl3-ready" ]]; }
+  dnf() {
+    [[ "$*" == "install -y openssl3-libs" && "${DNF_FAIL:-no}" != yes ]] || return 1
+    printf "%s\n" installed >> "$fixture/openssl3-installs"
+    touch "$fixture/openssl3-ready"
+  }
+  OPENSSL_MAJOR=3 ensure_dotnet_host_libraries
+  test ! -e "$fixture/openssl3-installs"
+  if (DNF_FAIL=yes ensure_dotnet_host_libraries) >"$fixture/openssl3-failure" 2>&1; then
+    echo "failed OpenSSL 3 compatibility installation was accepted" >&2
+    exit 1
+  fi
+  grep -Fq "could not install the OpenSSL 3 compatibility libraries" "$fixture/openssl3-failure"
+  ensure_dotnet_host_libraries
+  ensure_dotnet_host_libraries
+  test "$(wc -l < "$fixture/openssl3-installs")" -eq 1
+' _ "$repo_root" "$test_root"
+
 echo 'Linux installer image preparation tests passed.'
