@@ -474,15 +474,9 @@ public sealed class NetworkAccessController
             if (platformRules.Any(static rule => rule.Allowed))
                 return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system",
                     allowLan: platformRules.Any(static rule => rule.Allowed && rule.AllowLan) || explicitSystemRule is { Allowed: true, AllowLan: true });
-            if (explicitSystemRule is not null)
+            if (explicitSystemRule is { Allowed: true })
             {
-                if (explicitSystemRule.Allowed)
-                {
-                    return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system", allowLan: explicitSystemRule.AllowLan);
-                }
-
-                policyStore.IncrementBlockedRequestAttemptInMemory("system", agentId, null, destKind, normalizedDestination, input.Port);
-                return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
+                return RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, "rule_system", allowLan: explicitSystemRule.AllowLan);
             }
 
             if (seedRule is not null && seedRule.Allowed)

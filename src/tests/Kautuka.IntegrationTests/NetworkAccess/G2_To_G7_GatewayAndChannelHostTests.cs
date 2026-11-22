@@ -919,6 +919,30 @@ public sealed class G2_To_G7_GatewayAndChannelHostTests : IDisposable
     }
 
     [Fact]
+    public async Task GatewayAdapterPreservesUserConnectorScopeWithoutAnAgent()
+    {
+        const string connector = "user-a::review-connector";
+        const string host = "review-connector.example";
+        NetworkAccessDecisionResult direct = nacController.EvaluateOutboundCheck(
+            new OutboundCheckInput("user-a", string.Empty, connector, host, 443, "remote-mcp", null, "gateway"));
+        NetworkAccessCheckOutboundResponse response = await grpcService.CheckOutbound(
+            new NetworkAccessCheckOutboundRequest
+            {
+                Host = host,
+                Port = 443,
+                UserId = "user-a",
+                ConnectorId = connector,
+                Purpose = "remote-mcp",
+            },
+            new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName));
+
+        Assert.False(response.Allowed);
+        Assert.NotNull(direct.RequestId);
+        Assert.Equal(direct.Reason, response.Reason);
+        Assert.Equal(direct.RequestId, response.RequestId);
+    }
+
+    [Fact]
     public async Task UnrelatedToolFailureIsNotRelabeledByAnOldPendingRequest()
     {
         await grpcService.CheckOutbound(new NetworkAccessCheckOutboundRequest { Host = "old.example", Port = 443, UserId = "user-a", AgentId = "agent-a", Purpose = "tool" }, new TestServerCallContextWithCert(ManagerClientIdentities.GatewayCommonName));

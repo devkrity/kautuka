@@ -72,7 +72,7 @@ public sealed partial class WorkspaceGrpcService
                 }
 
                 effectiveUserId = request.UserId.Trim();
-                effectiveAgentId = string.IsNullOrWhiteSpace(request.AgentId) ? "gateway" : request.AgentId.Trim();
+                effectiveAgentId = request.AgentId.Trim();
             }
 
             NetworkAccessDecisionResult decision = Nac.EvaluateOutboundCheck(new OutboundCheckInput(
