@@ -576,8 +576,11 @@ public sealed class WorkloadRegistryTrustLifecycleTests
         Assert.Null(registry.FindByIp(oldIp));
     }
 
-    [Fact]
-    public async Task DesiredReconcileReverifiesAndRestoresRunningSystemwideConnectorWithTrustedCompatProfile()
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("3", false)]
+    [InlineData(null, false)]
+    public async Task DesiredReconcileRetainsOnlyConnectorsWithAValidInstalledRevision(string? installedRevision, bool shouldReuse)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -602,13 +605,14 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 CatalogScope = "system",
             };
             var desiredState = new WorkspaceDesiredStateStore();
+            var runtime = new ManagerRuntimeSettings(
+                new ManagerWorkspaceDefinition { BaseRoot = root },
+                new ManagerSandboxRuntimeDefinition { Image = imageDigest, DefaultTimeout = 30 },
+                new WorkspaceTelemetryDefinition());
             _ = desiredState.ApplyDesiredState(
                 1,
                 WorkspaceDesiredStateSyncReason.Bootstrap,
-                new ManagerRuntimeSettings(
-                    new ManagerWorkspaceDefinition { BaseRoot = root },
-                    new ManagerSandboxRuntimeDefinition { Image = imageDigest, DefaultTimeout = 30 },
-                    new WorkspaceTelemetryDefinition()),
+                runtime,
                 [workspace, userWorkspace],
                 [connector],
                 []);
@@ -630,6 +634,18 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             string ruleset = BoundaryRulesetRenderer.ResolveTemplate("kautuka_workload.nft.json.tmpl")
                 .Replace("{{IP}}", ip, StringComparison.Ordinal);
             string inspectJson = CreateConnectorInspectJson(containerId, ip, imageDigest, fingerprint, desiredConnector.ConnectorId, agentId: "agent-a");
+            JsonObject inspection = JsonNode.Parse(inspectJson)!.AsObject();
+            JsonObject labels = inspection["Config"]!["Labels"]!.AsObject();
+            if (installedRevision is null)
+                labels.Remove("kautuka.desired-version");
+            else
+                labels["kautuka.desired-version"] = installedRevision;
+            inspectJson = inspection.ToJsonString();
+            Assert.True(desiredState.ApplyDesiredState(2, WorkspaceDesiredStateSyncReason.Change, runtime,
+                [workspace, userWorkspace with { HostWorkspacePath = Path.Combine(root, "edited-user-workspace") }],
+                [connector], []).Accepted);
+            desiredConnector = Assert.Single(desiredState.Snapshot.DesiredContainerConnectors);
+            int recycleCommands = 0;
             var runner = new PodmanCommandRunner((args, _) => Task.FromResult(args[0] switch
             {
                 "inspect" when args[1].Contains("-files-", StringComparison.Ordinal) => new PodmanCommandResult(1, string.Empty, "no such container", ProcessTerminationReason.NonZeroExit),
@@ -638,6 +654,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 "image" => new PodmanCommandResult(0, args.Contains("--format", StringComparer.Ordinal) ? imageDigest : "[{\"Id\":\"" + imageDigest + "\",\"RepoDigests\":[\"example/image@" + imageDigest + "\"]}]", string.Empty, ProcessTerminationReason.Completed),
                 "machine" when args.Contains("cat", StringComparer.Ordinal) => new PodmanCommandResult(0, "1", string.Empty, ProcessTerminationReason.Completed),
                 "machine" => new PodmanCommandResult(0, ruleset, string.Empty, ProcessTerminationReason.Completed),
+                "rm" or "run" => new PodmanCommandResult(Interlocked.Increment(ref recycleCommands), string.Empty, "unexpected recycle", ProcessTerminationReason.NonZeroExit),
                 _ => new PodmanCommandResult(0, string.Empty, string.Empty, ProcessTerminationReason.Completed),
             }));
             var registry = new WorkloadRegistry();
@@ -657,7 +674,16 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 compatibilityStore,
                 new WorkloadLaunchGate(new OpenStartupState(), policyStore));
 
-            _ = await service.ReconcileDesiredConnectorsAsync([desiredConnector], null, TestContext.Current.CancellationToken);
+            var repaired = await service.ReconcileDesiredConnectorsAsync([desiredConnector], null, TestContext.Current.CancellationToken);
+            Assert.Equal(shouldReuse, repaired.Complete);
+            if (!shouldReuse)
+            {
+                Assert.True(recycleCommands > 0);
+                Assert.False(registry.IsVerified(ip, containerId));
+                return;
+            }
+
+            Assert.Equal(0, recycleCommands);
 
             RegistryEntry recovered = Assert.Single(registry.GetAll());
             Assert.Equal(containerId, recovered.ContainerId);
@@ -1189,7 +1215,7 @@ public sealed class WorkloadRegistryTrustLifecycleTests
                 .GetMethod("CompleteEphemeralWorkloadAsync", BindingFlags.Instance | BindingFlags.NonPublic)
                 ?? throw new InvalidOperationException("CompleteEphemeralWorkloadAsync was not found.");
 
-            Assert.True(await ((Task<bool>)complete.Invoke(service, [workload])!).ConfigureAwait(false));
+            await ((Task)complete.Invoke(service, [workload])!).ConfigureAwait(false);
             Assert.Equal(containerId, cleanupTarget);
 
             if (shouldDeregister)

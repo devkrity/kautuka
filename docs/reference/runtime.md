@@ -36,7 +36,7 @@ On a fresh installation the bundled connectors start disabled. An administrator 
 When an administrator signs in, the open application checks for enabled bundled connectors whose saved tools are missing or outdated and refreshes them in the background using the administrator's identity. It retries once; if refresh still fails, Test connection remains available on the connector.
 Local connector tool definitions are cached when the connector is saved or tested; an agent run uses those definitions rather than listing the local connector tools again.
 
-Connector reconciliation reuses the Podman inventory from orphan cleanup and inspects only the retained instances it found. Connectors started after that listing are verified on the launch path. Accepting desired state records removed connectors as deleted. Reconciliation uses the Podman inventory to clean up their inactive containers.
+Connector reconciliation reuses the Podman inventory from orphan cleanup and inspects only the retained instances it found. A healthy isolated connector can keep its container across unrelated desired-state revisions when its fingerprint and live specification still match. Manager checks the current publication when promoting a verified connector. Idle cooldown starts after the last overlapping call finishes. Accepting desired state records removed connectors as deleted, and reconciliation cleans up their inactive containers.
 
 Built-in mail connectors are available systemwide and use the invoking user's network permissions. A denied Gmail or Microsoft Graph request can therefore appear as a network access request for approval.
 

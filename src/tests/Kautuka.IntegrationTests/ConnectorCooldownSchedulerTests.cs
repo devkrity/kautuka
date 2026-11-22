@@ -10,6 +10,36 @@ namespace Kautuka.IntegrationTests;
 public sealed class ConnectorCooldownSchedulerTests
 {
     [Fact]
+    public async Task ExpiredCooldownCannotStopAConnectorWhileAnOverlappingCallRemains()
+    {
+        int podmanCalls = 0;
+        var runner = new PodmanCommandRunner((_, _) =>
+        {
+            Interlocked.Increment(ref podmanCalls);
+            throw new InvalidOperationException("An active connector must not be inspected for idle shutdown.");
+        });
+        await using var service = new WorkspaceContainerConnectorExecutionService(
+            new WorkspaceDesiredStateStore(), runner,
+            new McpbImageMaterializer(runner, NullLogger<McpbImageMaterializer>.Instance),
+            new PodmanContainerTool(runner), NullLogger<WorkspaceContainerConnectorExecutionService>.Instance);
+        var scheduler = (ConnectorCooldownScheduler)typeof(WorkspaceContainerConnectorExecutionService)
+            .GetField("connectorCooldowns", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service)!;
+        MethodInfo stop = typeof(WorkspaceContainerConnectorExecutionService)
+            .GetMethod("StopConnectorContainerAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        scheduler.BeginUse("connector");
+        scheduler.BeginUse("connector");
+        Assert.False(scheduler.EndUse("connector"));
+        var stopTask = (Task)stop.Invoke(service,
+            ["connector", "connector", "container", "connector-cooldown-expired", TestContext.Current.CancellationToken])!;
+        await stopTask;
+        Assert.Equal(0, podmanCalls);
+        Assert.False(scheduler.IsScheduled("connector"));
+        Assert.True(scheduler.EndUse("connector"));
+        Assert.False(scheduler.IsInUse("connector"));
+    }
+
+    [Fact]
     public async Task CancellationReleasesExpiredCallbackWaitingForConnectorLock()
     {
         var runner = new PodmanCommandRunner();

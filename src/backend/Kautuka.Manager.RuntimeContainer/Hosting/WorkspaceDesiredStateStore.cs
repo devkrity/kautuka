@@ -399,6 +399,17 @@ public sealed class WorkspaceDesiredStateStore
         }
     }
 
+    internal bool TryCommitConnectorAdmission(WorkspaceDesiredStateSnapshot expected, Func<bool> promote)
+    {
+        lock (sync)
+        {
+            return acceptedDesiredStateVersion == expected.AcceptedVersion
+                && string.Equals(acceptedPublisherEpoch, expected.PublisherEpoch, StringComparison.Ordinal)
+                && string.Equals(acceptedContentHash, expected.ContentHash, StringComparison.Ordinal)
+                && promote();
+        }
+    }
+
     public bool TryTransitionConnectorState(string connectorId, WorkspaceMcpContainerLifecycleState nextState, string eventName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectorId);
