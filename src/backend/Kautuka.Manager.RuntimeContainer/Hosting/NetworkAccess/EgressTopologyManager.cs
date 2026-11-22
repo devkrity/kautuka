@@ -150,7 +150,9 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     private readonly ConcurrentDictionary<string, RegistryEntry> transientWorkloadDenials = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly string? gatewayConnectEnvoyDirectory;
-    private readonly string? telemetryAuthorization;
+    private string? telemetryAuthorization;
+    private string? pendingTelemetryAuthorization;
+    private readonly SemaphoreSlim reconcileWake = new(0, 1);
 
     public EgressTopologyManager(
         PodmanCommandRunner podmanRunner,
@@ -247,6 +249,20 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
     public bool IsStartupRetryPending => startupCanaryRetryPending;
     public bool RequiresOperatorRecovery => topologyIncidentLatched;
     public bool IsRecoveryWaitingForNetworkResume => startupCanaryRetryPending && IsCanaryIdentityBraked();
+    public bool TelemetryConfigurationPending => Volatile.Read(ref pendingTelemetryAuthorization) is not null;
+    public bool HasTelemetryAuthorization => Volatile.Read(ref telemetryAuthorization) is not null || TelemetryConfigurationPending;
+
+    public void ScheduleTelemetryAuthorization(string authorization)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(authorization);
+        lock (gateLock)
+        {
+            if (launchAdmissionClosed || HasTelemetryAuthorization) return;
+            Volatile.Write(ref pendingTelemetryAuthorization, authorization);
+            reconcileWake.Release();
+        }
+    }
+
     public DateTimeOffset? NextRecoveryRetryUtc
     {
         get
@@ -2749,7 +2765,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 try
                 {
                     Interlocked.Exchange(ref nextReconcileUtcTicks, (DateTimeOffset.UtcNow + interval).UtcTicks);
-                    await Task.Delay(interval, token).ConfigureAwait(false);
+                    await reconcileWake.WaitAsync(interval, token).ConfigureAwait(false);
                     Interlocked.Exchange(ref nextReconcileUtcTicks, 0);
                     await ReconcileOnceAsync(registry, token).ConfigureAwait(false);
                 }
@@ -2969,6 +2985,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
+        if (Volatile.Read(ref pendingTelemetryAuthorization) is { } authorization)
+        {
+            // Validate the current boundary above before replacing its configuration.
+            Volatile.Write(ref telemetryAuthorization, authorization);
+            try { await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false); }
+            finally { Volatile.Write(ref pendingTelemetryAuthorization, null); }
+            return;
+        }
         await ReconcileWorkloadRegistryAsync(registry, cancellationToken).ConfigureAwait(false);
     }
 
@@ -3914,5 +3938,6 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
             cts.Dispose();
         }
+        reconcileWake.Dispose();
     }
 }

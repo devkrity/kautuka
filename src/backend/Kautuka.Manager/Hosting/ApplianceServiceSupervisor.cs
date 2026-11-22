@@ -45,6 +45,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
     private readonly Service updater = new(UpdateRole, "updateService", networked: true);
     private long nextServiceRetryUtcTicks;
+    private DateTimeOffset nextTelemetryProvisioningUtc;
     private volatile bool cohortReady;
     private volatile bool verificationPackageReady;
     private volatile bool verificationTelemetryReady;
@@ -124,7 +125,27 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
 
         if (superviseObservability)
+        {
             await TryReconcileAsync(observability, FindContainer(observability), token).ConfigureAwait(false);
+            if (topology is { IsStartupGateOpen: true, HasTelemetryAuthorization: false }
+                && observability.Ready && observability.ActiveContainer is { } collector
+                && DateTimeOffset.UtcNow >= nextTelemetryProvisioningUtc)
+            {
+                nextTelemetryProvisioningUtc = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(15);
+                try
+                {
+                    string? authorization = await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token).ConfigureAwait(false)
+                        ?? await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, collector, token).ConfigureAwait(false);
+                    if (authorization is not null) topology.ScheduleTelemetryAuthorization(authorization);
+                }
+                catch (Exception error) when (!token.IsCancellationRequested
+                    && error is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    LogReconcileFailed(logger, ObservabilityRole, "Could not provision the ingestion credential.");
+                }
+            }
+            if (topology?.TelemetryConfigurationPending == true) return;
+        }
         await TryReconcileAsync(credentials, FindContainer(credentials), token).ConfigureAwait(false);
         await TryReconcileAsync(channel, FindContainer(channel), token).ConfigureAwait(false);
         if (superviseUpdateService && topology?.IsStartupGateOpen == true)

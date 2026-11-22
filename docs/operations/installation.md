@@ -73,6 +73,8 @@ Both commands accept `--candidate-version <version>` to inspect a staged release
 
 In appliance mode, Manager's existing `GetHostStatus` RPC reports `core_ready` once the Podman runtime is available, the egress startup gate is open, and the supervised application services pass their local health checks. Manager also checks that the observability container is running.
 
+On first boot, Manager provisions the OpenObserve ingestion credential through the collector's private loopback interface. Envoy receives the named ingestion token for its fixed OTLP endpoint. Manager stores the token as a Podman secret for subsequent boots. The collector's root credential stays with the collector and Manager's provisioning call.
+
 When the egress inventory detects that the package proxy stopped, Manager requests a workspace sidecar reconciliation. Package requests stay blocked until the proxy is ready again.
 
 The application containers use an explicit temporary home directory for .NET certificate validation across starts.

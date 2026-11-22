@@ -131,7 +131,9 @@ if (applianceEnabled)
         builder.Services.AddHostedService(sp => new GatewayConnectRenewalService(
             connectRenewal, sp.GetRequiredService<IHostApplicationLifetime>(),
             sp.GetRequiredService<ILogger<GatewayConnectRenewalService>>()));
-    telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podmanCommandRunner, stateRoot, CancellationToken.None)
+    await ApplianceTelemetry.EnsureRootSecretAsync(podmanCommandRunner, stateRoot, CancellationToken.None)
+        .ConfigureAwait(false);
+    telemetryAuthorization = await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podmanCommandRunner, CancellationToken.None)
         .ConfigureAwait(false);
     builder.Services.AddSingleton(sp => new ApplianceServiceSupervisor(
         podmanCommandRunner, release, Path.Combine(managerRoot, "versions", release.Version),

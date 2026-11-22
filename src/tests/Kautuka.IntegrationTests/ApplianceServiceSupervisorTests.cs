@@ -388,7 +388,8 @@ public sealed class ApplianceServiceSupervisorTests
         Assert.True(load.ExitCode == 0, load.StdErr);
         string networkState = Path.Combine(runtime, "network");
         string envoySockets = Path.Combine(sockets, "envoy");
-        string telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podman, runtime, token);
+        await ApplianceTelemetry.EnsureRootSecretAsync(podman, runtime, token);
+        string? telemetryAuthorization = await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token);
         var registry = new WorkloadRegistry();
         using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
         policy.SetRule(new NetworkAccessActor("fixture-admin", true),
@@ -446,9 +447,23 @@ public sealed class ApplianceServiceSupervisorTests
             }
             string collector = await gateway.EnsureRunningAsync("observability", token);
             Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
-            Assert.True(telemetryAuthorization == await ApplianceTelemetry.EnsureAuthorizationAsync(podman, runtime, token),
-                "The retained observability secret was not reused.");
             await WaitForCollectorAsync(podman, collector, token);
+            if (telemetryAuthorization is null)
+            {
+                telemetryAuthorization = await ApplianceTelemetry.ProvisionIngestionAuthorizationAsync(podman, collector, token);
+                Assert.NotNull(telemetryAuthorization);
+                topology.ScheduleTelemetryAuthorization(telemetryAuthorization);
+                DateTimeOffset configDeadline = DateTimeOffset.UtcNow.AddSeconds(45);
+                while (topology.TelemetryConfigurationPending && DateTimeOffset.UtcNow < configDeadline)
+                    await Task.Delay(100, token);
+                Assert.False(topology.TelemetryConfigurationPending);
+                Assert.True(topology.IsStartupGateOpen);
+            }
+            Assert.True(telemetryAuthorization == await ApplianceTelemetry.ReadIngestionAuthorizationAsync(podman, token),
+                "The retained ingestion secret was not reused.");
+            string rootAuthorization = await ApplianceTelemetry.ReadRootAuthorizationAsync(podman, token);
+            string envoyConfiguration = await File.ReadAllTextAsync(Path.Combine(networkState, "nac", "envoy", "envoy.yaml"), token);
+            Assert.False(envoyConfiguration.Contains(rootAuthorization, StringComparison.Ordinal), "Envoy received the collector's root credential.");
             Assert.Equal(0, (await podman.RunAsync(["stop", collector], 30, token)).ExitCode);
             Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
             await WaitForCollectorAsync(podman, collector, token);
@@ -504,7 +519,7 @@ public sealed class ApplianceServiceSupervisorTests
             {
                 webHostPort = await CheckPublishedWebHostAsync(gateway, podman, images, token);
                 Assert.True(File.Exists(Path.Combine(runtime, "gateway", "setup-token")));
-                await WaitForServiceLogsAsync(podman, collector, telemetryAuthorization, token);
+                await WaitForServiceLogsAsync(podman, collector, rootAuthorization, token);
                 Assert.False(gateway.IsReady);
                 await gateway.ReconcileServicesAsync(token);
                 Assert.True(gateway.IsReady);
