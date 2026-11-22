@@ -39,6 +39,8 @@ Before stopping an existing installation, the Linux installer uses the `kautuka`
 
 For Linux uninstall, data is preserved by default. `--delete-data` explicitly selects deletion but still requires typing `UNINSTALL` in the interactive confirmation. `--yes` skips prompts and confirms deletion of databases and workspace files as well as uninstalling services and binaries; use it only when all Kautuka data should be removed.
 
+If initial appliance installation is interrupted, retry with the same signed release and web port. The installer records those values in a root-owned checkpoint, reuses already-published channel trust material, and clears the checkpoint once readiness passes. Use the exact release named in the retry message if the Preview channel has advanced. A completed appliance uses the managed update path.
+
 When first-run setup is required, the Linux installer displays the one-time token only in the controlling terminal and waits for the user to type `COPIED`. It explains that the token is needed to create the first administrator in Kautuka's setup page. If the terminal was closed, retrieve the appliance token with `sudo cat /var/lib/kautuka/gateway/setup-token`. Legacy host-service installs use `/var/lib/kautuka/setup-token`. The file remains owner-only and the token is deleted after successful use. Never include it in logs or support reports.
 
 Place `/var/lib/kautuka` on LUKS/dm-crypt or equivalently encrypted managed storage when file encryption at rest is required. Encrypt backups and snapshots separately; filesystem permissions alone are not encryption.

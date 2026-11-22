@@ -63,6 +63,51 @@ class RecoverySnapshotTests(unittest.TestCase):
         values.update(kwargs)
         return type("Args", (), values)()
 
+    @unittest.skipUnless(hasattr(os, "geteuid"), "Unix recovery ownership")
+    def test_appliance_retention_preserves_verified_point_candidates_and_unrelated_data(self):
+        backups = self.backups
+        backups.mkdir()
+
+        def snapshot(name, layout="appliance", operation=None):
+            path = backups / name
+            path.mkdir()
+            (path / "manifest.json").write_text(json.dumps({
+                "format": recovery.FORMAT, "layout": layout,
+                "operationId": operation or name, "entries": [],
+            }), encoding="utf-8")
+            return path
+
+        old = snapshot("a" * 32)
+        current = backups / ("b" * 32)
+        self._make_database(self.root / "gateway/kautuka.db", "registry", "current")
+        recovery.capture(self._args(layout="appliance", destination=str(current), operation=current.name))
+        pending = snapshot(".candidate-" + "c" * 32)
+        unrelated = snapshot("d" * 32, operation="another-owner")
+        legacy = snapshot("e" * 32, layout="host-service")
+        pointer = backups / "last-known-good"
+        pointer.symlink_to(old, target_is_directory=True)
+        args = self._args(backups=str(backups), operation=current.name,
+                          manifest_sha256=recovery.digest(current / "manifest.json"), layout="appliance")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            recovery.prune_appliance_snapshots(args)
+        self.assertTrue(old.exists())
+
+        pointer.unlink()
+        pointer.symlink_to(current, target_is_directory=True)
+        payload = current / "state/gateway/kautuka.db"
+        valid_payload = payload.read_bytes()
+        payload.write_bytes(b"invalid")
+        with self.assertRaises(RuntimeError):
+            recovery.prune_appliance_snapshots(args)
+        self.assertTrue(old.exists())
+        payload.write_bytes(valid_payload)
+        recovery.prune_appliance_snapshots(args)
+        recovery.prune_appliance_snapshots(args)
+        self.assertFalse(old.exists())
+        for preserved in (current, pending, unrelated, legacy):
+            self.assertTrue(preserved.is_dir())
+        self.assertEqual(pointer.resolve(), current)
+
     def test_appliance_restores_gateway_data_under_its_container_state_directory(self):
         args = self._args(layout="appliance")
         gateway_root = self.root / "gateway"

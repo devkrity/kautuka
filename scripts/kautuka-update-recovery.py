@@ -406,7 +406,7 @@ def read_manifest(snapshot: Path, operation: str | None = None,
     if path.is_symlink() or not path.is_file():
         fail(f"snapshot manifest missing or invalid: {path}")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if manifest.get("format") != FORMAT:
+    if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
         fail("unsupported snapshot format")
     if manifest.get("layout", HOST_SERVICE_LAYOUT) not in (HOST_SERVICE_LAYOUT, APPLIANCE_LAYOUT):
         fail("unsupported snapshot layout")
@@ -416,6 +416,36 @@ def read_manifest(snapshot: Path, operation: str | None = None,
     if not isinstance(manifest.get("entries"), list):
         fail("snapshot inventory is invalid")
     return manifest
+
+
+def prune_appliance_snapshots(args: argparse.Namespace) -> None:
+    root = Path(args.backups)
+    owner = os.geteuid()
+    operation = args.operation
+    if not re.fullmatch(r"[0-9a-f]{32}", operation):
+        fail("invalid retained appliance operation")
+    root_stat = root.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != owner or root_stat.st_mode & 0o022:
+        fail("untrusted appliance backup directory")
+    retained = root / operation
+    pointer = root / "last-known-good"
+    if not pointer.is_symlink() or pointer.resolve(strict=True) != retained.resolve(strict=True):
+        fail("retained appliance backup does not match the current operation")
+    verify(args, snapshot=retained)
+
+    for directory in root.iterdir():
+        if directory == retained or not re.fullmatch(r"[0-9a-f]{32}", directory.name):
+            continue
+        record = directory.lstat()
+        if not stat.S_ISDIR(record.st_mode) or record.st_uid != owner or record.st_mode & 0o022:
+            continue
+        try:
+            manifest = read_manifest(directory, directory.name)
+        except (OSError, ValueError, RuntimeError):
+            continue
+        if manifest.get("layout") == APPLIANCE_LAYOUT:
+            shutil.rmtree(directory)
+    fsync_dir(root)
 
 
 def verify(args: argparse.Namespace, snapshot: Path | None = None) -> None:
@@ -913,13 +943,22 @@ def parser() -> argparse.ArgumentParser:
             cmd.add_argument("--manifest-sha256")
             if name == "restore":
                 cmd.add_argument("--lock-journal")
+    prune = subs.add_parser("prune-appliance")
+    prune.add_argument("--backups", required=True)
+    prune.add_argument("--operation", required=True)
+    prune.add_argument("--manifest-sha256", required=True)
+    prune.add_argument("--data-root", required=True)
+    prune.add_argument("--source", required=True)
+    prune.add_argument("--target", required=True)
+    prune.set_defaults(layout=APPLIANCE_LAYOUT)
     return p
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
-        {"capture": capture, "verify": verify, "restore": restore}[args.command](args)
+        {"capture": capture, "verify": verify, "restore": restore,
+         "prune-appliance": prune_appliance_snapshots}[args.command](args)
         print(f"{args.command} verified")
         return 0
     except (OSError, sqlite3.Error, ValueError, RuntimeError, json.JSONDecodeError) as ex:

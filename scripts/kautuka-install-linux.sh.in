@@ -1640,6 +1640,25 @@ provision_appliance_channel_security_material() (
     local security_root="$internal_state_root/security" channel_security_root
     [[ ! -L "$security_root" ]] || fail 'appliance security root must be a real directory'
     install -d -o root -g root -m 0711 "$security_root"
+    local published="$security_root/channel"
+    if [[ -e "$published" || -L "$published" ]]; then
+        [[ -d "$published" && ! -L "$published" ]] || fail 'appliance channel security root is not a real directory'
+        validate_material_owner_mode "$published" 'root:root:711'
+        validate_existing_channel_security_inventory "$internal_state_root"
+        local role_dir path
+        for role_dir in gateway-private gateway-trust channel-private channel-trust offline-authority; do
+            path="$published/$role_dir"
+            [[ -d "$path" && ! -L "$path" ]] || fail 'appliance channel security inventory is incomplete'
+            if [[ "$role_dir" == offline-authority ]]; then
+                validate_material_owner_mode "$path" 'root:root:700'
+            else
+                validate_material_owner_mode "$path" "$owner:700"
+            fi
+            [[ -z "$(find "$path" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" ]] ||
+                fail 'appliance channel security material must be regular files'
+        done
+        return 0
+    fi
     channel_security_root="$(mktemp -d "$security_root/.channel.XXXXXXXX")"
     trap 'rm -rf -- "$channel_security_root"' EXIT
     Kautuka__Mode=prod "$channelhost_executable" --provision-channel-security \
@@ -2374,6 +2393,9 @@ uninstall_release() {
 
     best_effort_remove_file '/usr/local/bin/kautuka'
     best_effort_remove_file '/usr/local/bin/kautuka-tui'
+    if [[ ! -L /var/lib/kautuka-recovery ]]; then
+        best_effort_remove_file '/var/lib/kautuka-recovery/first-install.pending'
+    fi
     local legacy_config_file=''
     for legacy_config_file in "${legacy_config_files[@]}"; do
         best_effort_remove_file "$legacy_config_file"
@@ -2436,6 +2458,7 @@ wait_for_web_ui() {
     local appliance_image_payload="${4:-false}"
     local appliance_manager="${5:-}"
     local defer_admin_setup="${6:-false}"
+    local first_install_checkpoint="${7:-}"
     local elapsed=0
     local service_uid=''
     local xdg_runtime_dir=''
@@ -2547,6 +2570,10 @@ PY
                 runtime_units_ready=true
             fi
             if [[ "$ui_ready" == 'true' && "$runtime_units_ready" == 'true' ]]; then
+                if [[ -n "$first_install_checkpoint" ]]; then
+                    rm -f -- "$first_install_checkpoint"
+                    sync -f "$(dirname -- "$first_install_checkpoint")"
+                fi
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
                 if [[ "$setup_needs_setup" == 'true' && "$defer_admin_setup" != 'true' ]]; then
@@ -3033,11 +3060,44 @@ PY
     exec 9>/run/kautuka-apply.lock
     flock -n 9 || fail 'another Kautuka update or installation is in progress; retry after it finishes'
     assert_no_unresolved_update
-    if [[ "$appliance_image_payload" == 'true' ]] &&
-        [[ -e "$install_root/current" || -L "$install_root/current" || -e "$internal_state_root/kautuka.db" ||
-            -e "$internal_state_root/gateway" || -e "$internal_state_root/credentialsHost" ||
-            -e "$internal_state_root/channelHost" || -e "$internal_state_root/security/channel" ]]; then
-        fail 'appliance installation found an existing runtime or service data; use managed activation or migration'
+    local first_install_checkpoint='' resuming_first_install=false selected_first_install=false
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local recovery_dir=/var/lib/kautuka-recovery manifest_digest checkpoint_record
+        [[ ! -L "$recovery_dir" ]] || fail 'unsafe appliance recovery directory'
+        if [[ ! -e "$recovery_dir" ]]; then
+            install -d -o root -g root -m 0755 "$recovery_dir"
+        fi
+        [[ "$(stat -c '%u' "$recovery_dir")" == 0 &&
+            -z "$(find "$recovery_dir" -maxdepth 0 -perm /022 -print -quit)" ]] || fail 'unsafe appliance recovery directory'
+        first_install_checkpoint="$recovery_dir/first-install.pending"
+        manifest_digest="$(sha256sum "$manifest_path" | cut -d' ' -f1)"
+        checkpoint_record="$version $manifest_digest $web_port"
+        if [[ -e "$first_install_checkpoint" || -L "$first_install_checkpoint" ]]; then
+            [[ -f "$first_install_checkpoint" && ! -L "$first_install_checkpoint" &&
+                "$(stat -c '%u:%a' "$first_install_checkpoint")" == '0:600' ]] ||
+                fail 'unsafe initial appliance installation checkpoint'
+            local resume_version resume_digest resume_port
+            read -r resume_version resume_digest resume_port < "$first_install_checkpoint" ||
+                fail 'invalid initial appliance installation checkpoint'
+            [[ "$resume_version" =~ ^[a-zA-Z0-9][a-zA-Z0-9.+-]*$ && "$resume_digest" =~ ^[a-f0-9]{64}$ &&
+                "$resume_port" =~ ^[0-9]+$ ]] || fail 'invalid initial appliance installation checkpoint'
+            [[ "$(cat -- "$first_install_checkpoint")" == "$checkpoint_record" ]] ||
+                fail "resume the interrupted installation using signed release $resume_version and web port $resume_port"
+            resuming_first_install=true
+            echo "Resuming initial installation of signed appliance release $version."
+        else
+            if [[ -e "$install_root/current" || -L "$install_root/current" || -e "$internal_state_root/kautuka.db" ||
+                  -e "$internal_state_root/gateway" || -e "$internal_state_root/credentialsHost" ||
+                  -e "$internal_state_root/channelHost" || -e "$internal_state_root/security/channel" ]]; then
+                fail 'appliance installation found an existing runtime or service data; use managed activation or migration'
+            fi
+            local checkpoint_temp
+            checkpoint_temp="$(mktemp "$recovery_dir/.first-install.XXXXXXXX")"
+            printf '%s\n' "$checkpoint_record" > "$checkpoint_temp"
+            sync -f "$checkpoint_temp"
+            mv -T -- "$checkpoint_temp" "$first_install_checkpoint"
+            sync -f "$recovery_dir"
+        fi
     fi
     validate_existing_channel_security_inventory "$internal_state_root"
 
@@ -3114,8 +3174,13 @@ PY
         done
         if [[ -e "$current_link" || -L "$current_link" ]]; then
             selected="$(readlink -f -- "$current_link")" || fail 'could not resolve the active Manager release'
-            [[ "$selected" != "$(realpath -m -- "$version_root")" ]] \
-                || fail 'appliance candidate is already selected; stage a different release version'
+            [[ "$resuming_first_install" == 'true' && "$selected" == "$(realpath -- "$version_root")" &&
+                ! -L "$version_root" && "$(stat -c '%u' "$version_root")" == 0 &&
+                -z "$(find "$version_root" -maxdepth 0 -perm /022 -print -quit)" &&
+                -f "$version_root/kautuka-platform-release.json" && ! -L "$version_root/kautuka-platform-release.json" ]] \
+                && cmp -s -- "$manifest_path" "$version_root/kautuka-platform-release.json" ||
+                fail 'active Manager release does not match the interrupted signed initial installation'
+            selected_first_install=true
         fi
     fi
     write_trusted_manifest_public_key "$KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM"
@@ -3132,14 +3197,16 @@ PY
         stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
     fi
 
-    rm -rf "$version_root"
-    mkdir -p "$version_root"
-    copy_runtime_payload "$content_root" "$version_root"
-    if [[ -n "$manifest_url" ]]; then
-        install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path" "$appliance_image_payload"
-    fi
-    if [[ "$appliance_image_payload" == 'true' ]]; then
-        install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"
+    if [[ "$selected_first_install" != 'true' ]]; then
+        rm -rf "$version_root"
+        mkdir -p "$version_root"
+        copy_runtime_payload "$content_root" "$version_root"
+        if [[ -n "$manifest_url" ]]; then
+            install_verified_release_metadata "$version_root" "$manifest_path" "$signature_path" "$appliance_image_payload"
+        fi
+        if [[ "$appliance_image_payload" == 'true' ]]; then
+            install_appliance_image_payload "$tmp_root/extracted/service-images" "$version_root"
+        fi
     fi
     chmod +x "$version_root/kautuka-manager"
     if [[ "$appliance_image_payload" == 'true' ]]; then
@@ -3157,7 +3224,9 @@ PY
         stop_existing_kautuka_runtime "$service_user" "$service_home" "$xdg_runtime_dir"
     fi
 
-    clear_generated_agent_workspace_state "$visible_root"
+    if [[ "$resuming_first_install" != 'true' ]]; then
+        clear_generated_agent_workspace_state "$visible_root"
+    fi
     install_apply_release_helper "$tmp_root/extracted" "$appliance_image_payload"
     if [[ "$appliance_image_payload" == 'true' ]]; then
         install_appliance_update_path
@@ -3306,7 +3375,7 @@ PY
     if [[ "$appliance_image_payload" != 'true' ]]; then
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
     fi
-    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager" "$defer_admin_setup"
+    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager" "$defer_admin_setup" "$first_install_checkpoint"
 
     echo "Installed Manager version '$version'."
     echo "Current symlink: $current_link -> $(readlink -f "$current_link")"

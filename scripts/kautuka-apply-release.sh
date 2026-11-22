@@ -1748,7 +1748,7 @@ retain_appliance_snapshot() {
 }
 
 recover_appliance_operation() {
-    local boot_only="$1" phase expected
+    local boot_only="$1" phase expected operation_id manifest_digest source_release target_release
     [[ -e "$journal_path" || -L "$journal_path" || -e "$maintenance_path" || -L "$maintenance_path" ]] || return 0
     [[ -f "$journal_path" && ! -L "$journal_path" && "$(stat -c '%u' "$journal_path")" == 0 &&
         -z "$(find "$journal_path" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
@@ -1771,11 +1771,20 @@ recover_appliance_operation() {
     if [[ "$phase" == recovered ]]; then
         retain_appliance_snapshot || return 1
         set_operation_phase completed || return 1
+        phase=completed
     fi
     release_database_writer_exclusion || return 1
     clear_maintenance_fence || return 1
     if [[ "$boot_only" != 'true' ]]; then
         start_appliance_manager normal && wait_for_appliance_release "$expected" normal || return 1
+        if [[ "$phase" == committed || "$phase" == completed ]]; then
+            operation_id="$(read_journal_field operationId)" || return 1
+            manifest_digest="$(read_journal_field snapshotManifestSha256)" || return 1
+            source_release="$(read_journal_field sourceRelease)" || return 1
+            target_release="$(read_journal_field targetRelease)" || return 1
+            python3 "$recovery_tool" prune-appliance --backups "$backups_root" --operation "$operation_id" --manifest-sha256 "$manifest_digest" --data-root "$database_root" --source "$source_release" --target "$target_release" ||
+                echo 'warning: superseded appliance backups could not be pruned' >&2
+        fi
     fi
     echo "Appliance recovery selected release $expected."
 }

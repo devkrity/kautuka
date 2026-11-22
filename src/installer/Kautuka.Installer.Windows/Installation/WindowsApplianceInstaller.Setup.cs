@@ -158,7 +158,9 @@ internal static partial class WindowsApplianceInstaller
             set -euo pipefail
             systemctl is-system-running --wait >/dev/null 2>&1 || true
             test -x /usr/local/lib/kautuka/bootstrap-wsl.sh
-            if [[ ! -f /opt/kautuka/manager/current/kautuka-platform-release.json ]]; then
+            if [[ ! -f /opt/kautuka/manager/current/kautuka-platform-release.json ||
+                -e /var/lib/kautuka-recovery/first-install.pending ||
+                -L /var/lib/kautuka-recovery/first-install.pending ]]; then
                 /usr/local/lib/kautuka/bootstrap-wsl.sh --defer-admin-setup
             fi
             """,
