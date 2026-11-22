@@ -176,7 +176,13 @@ public sealed class C2_C3_C4_C5_C14_C16_ListenerAndHostTests
             await AssertDenied(attributes => attributes.ContextExtensions.Clear(), "unauthenticated_gateway");
             await AssertDenied(attributes => attributes.Request = null, "bad_connect_authority");
             await AssertDenied(attributes => attributes.Request.Http.Method = "GET", "bad_connect_authority");
+            await AssertDenied(attributes =>
+            {
+                attributes.Request.Http.Method = "POST";
+                attributes.Request.Http.Host = "unapproved.example.test:443";
+            }, "bad_connect_authority");
             await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:0443", "bad_connect_authority");
+            Assert.Empty(store.ListRequests(actor).Requests);
             await AssertDenied(attributes => attributes.Request.Http.Host = "mcp.example.test:444", "no_rule");
             await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-user"] = "user-b", "no_rule");
             await AssertDenied(attributes => attributes.Request.Http.Headers["x-kautuka-connector"] = "connector-b", "no_rule");

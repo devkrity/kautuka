@@ -30,7 +30,8 @@ public sealed partial class EnvoyAuthorizationService
         }
 
         HttpRequest? http = attributes.Request?.Http;
-        if (http?.Method != "CONNECT" || !TryParseConnectAuthority(http.Host, out string host, out int port))
+        bool validAuthority = TryParseConnectAuthority(http?.Host ?? string.Empty, out string host, out int port);
+        if (!validAuthority || http?.Method != "CONNECT")
         {
             return CreateDenyResponse("bad_connect_authority");
         }
