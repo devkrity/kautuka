@@ -160,6 +160,10 @@ public sealed class WorkspaceDesiredStateStoreTests
         Assert.Single(snapshot.DesiredWorkspaces, static workspace => workspace.ScopeId == "scope-b");
         Assert.Single(snapshot.DesiredContainerConnectors, static connector => connector.ConnectorId == "connector-b");
         Assert.NotNull(snapshot.RuntimeSettings);
+        WorkspaceMcpContainerRuntimeStatus removedConnector = Assert.IsType<WorkspaceMcpContainerRuntimeStatus>(
+            store.GetConnectorStatus(firstConnector.ConnectorId));
+        Assert.Equal(WorkspaceMcpContainerLifecycleState.Deleted, removedConnector.State);
+        Assert.Equal("connector-removed", removedConnector.LastEvent);
 
         Assert.True(await store.Updates.WaitToReadAsync(TestContext.Current.CancellationToken).ConfigureAwait(true));
         Assert.True(store.Updates.TryRead(out WorkspaceReconcileTriggerKind triggerKind));

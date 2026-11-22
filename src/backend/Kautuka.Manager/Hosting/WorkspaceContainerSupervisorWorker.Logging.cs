@@ -44,10 +44,6 @@ internal sealed partial class WorkspaceContainerSupervisorWorker
         Message = "Registered desired MCP container connector {ConnectorId} with image {Image} and JIT cooldown {JitCooldownSeconds}s.")]
     private static partial void LogMcpConnectorDesired(ILogger logger, string connectorId, string image, int jitCooldownSeconds);
 
-    [LoggerMessage(EventId = 52, Level = LogLevel.Information,
-        Message = "Removing stale MCP container connector {ConnectorId} from tracking.")]
-    private static partial void LogMcpConnectorRemoved(ILogger logger, string connectorId);
-
     [LoggerMessage(EventId = 53, Level = LogLevel.Debug,
         Message = "Skipped marking desired-state version {Version} as reconciled because a newer accepted version is now present.")]
     private static partial void LogReconcileCursorAdvancedByNewerVersion(ILogger logger, long version);
