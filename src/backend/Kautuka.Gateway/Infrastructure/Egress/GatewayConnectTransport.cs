@@ -28,12 +28,13 @@ internal sealed class GatewayConnectTransport : IDisposable
     private readonly X509Certificate2 trustedRoot;
     private readonly X509Certificate2 clientCertificate;
     private readonly int maximumScopes;
+    private readonly TimeSpan connectTimeout;
     private readonly Dictionary<GatewayEgressScope, Pool> pools = [];
     private readonly Lock poolLock = new();
     private bool disposed;
 
     internal GatewayConnectTransport(string envoyAddress, int envoyPort, string envoyServerName,
-        X509Certificate2 trustedRoot, X509Certificate2 clientCertificate, int maximumScopes = 128)
+        X509Certificate2 trustedRoot, X509Certificate2 clientCertificate, int maximumScopes = 128, TimeSpan? connectTimeout = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(envoyAddress);
         ArgumentException.ThrowIfNullOrWhiteSpace(envoyServerName);
@@ -50,6 +51,7 @@ internal sealed class GatewayConnectTransport : IDisposable
         this.trustedRoot = trustedRoot;
         this.clientCertificate = clientCertificate;
         this.maximumScopes = maximumScopes;
+        this.connectTimeout = connectTimeout ?? TimeSpan.FromSeconds(25);
     }
 
 #pragma warning disable CA2000 // Handlers are owned by pool entries and disposed on eviction or transport disposal.
@@ -91,7 +93,7 @@ internal sealed class GatewayConnectTransport : IDisposable
                     UseProxy = false,
                     AllowAutoRedirect = false,
                     UseCookies = false,
-                    ConnectTimeout = TimeSpan.FromSeconds(25),
+                    ConnectTimeout = connectTimeout,
                     PooledConnectionLifetime = TimeSpan.FromMinutes(2),
                     PooledConnectionIdleTimeout = TimeSpan.FromMinutes(1),
                     SslOptions = new SslClientAuthenticationOptions

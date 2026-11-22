@@ -52,7 +52,7 @@ public sealed partial class EnvoyAuthorizationService
         var input = new OutboundCheckInput(user, agent ?? string.Empty, connector, host, port, purpose, correlation);
         NetworkAccessDecisionResult decision = controller.EvaluateGatewayConnect(input, publicOnly);
         if (decision.Reason == "no_rule" && purpose is not ("provider-test" or "probe" or "save-discovery"))
-            decision = await controller.RecheckAfterApprovalAsync(decision,
+            decision = await controller.RecheckAfterApprovalAsync(decision, user,
                 () => controller.EvaluateGatewayConnect(input, publicOnly, recordPendingRequest: false), cancellationToken).ConfigureAwait(false);
         if (!decision.Allowed)
         {

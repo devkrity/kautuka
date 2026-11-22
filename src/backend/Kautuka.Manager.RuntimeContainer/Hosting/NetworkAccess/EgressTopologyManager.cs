@@ -151,6 +151,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private readonly string? gatewayConnectEnvoyDirectory;
     private string? telemetryAuthorization;
+    private readonly TimeSpan approvalHold;
     private string? pendingTelemetryAuthorization;
     private readonly SemaphoreSlim reconcileWake = new(0, 1);
 
@@ -173,7 +174,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         bool useDevelopmentSelinuxDomain = false,
         PodmanImageArchiveStore? imageArchives = null,
         string? gatewayConnectEnvoyDirectory = null,
-        string? telemetryAuthorization = null)
+        string? telemetryAuthorization = null,
+        TimeSpan approvalHold = default)
     {
         ArgumentNullException.ThrowIfNull(podmanRunner);
         ArgumentNullException.ThrowIfNull(addressAllocator);
@@ -191,6 +193,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         this.imageArchives = imageArchives;
         this.gatewayConnectEnvoyDirectory = gatewayConnectEnvoyDirectory;
         this.telemetryAuthorization = telemetryAuthorization;
+        this.approvalHold = approvalHold;
         this.registry = registry;
         this.windowsDecisionEndpointIp = windowsDecisionEndpointIp;
         this.windowsEnvoyCertificateDirectory = string.IsNullOrWhiteSpace(windowsEnvoyCertificateDirectory)
@@ -1607,6 +1610,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             isWindowsMtls: isWindowsHostNativeDev,
             includeGatewayConnect: includeGatewayConnect,
             includeApplianceTelemetry: includeTelemetry,
+            approvalHold: approvalHold,
             telemetryAuthorization: telemetryAuthorization);
         string corefile = BoundaryRulesetRenderer.RenderCorefile(EgressPodIp, [OutsideGatewayIp]);
 

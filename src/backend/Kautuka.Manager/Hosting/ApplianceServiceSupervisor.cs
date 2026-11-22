@@ -27,7 +27,8 @@ internal sealed partial class ApplianceServiceSupervisor(
     bool verificationMode = false,
     WorkspaceSidecarSupervisor? verificationSidecars = null,
     int publishedWebPort = WorkloadRulesetRenderer.WebHostPort,
-    ApplianceRecoveryPage? recoveryPage = null) : BackgroundService
+    ApplianceRecoveryPage? recoveryPage = null,
+    TimeSpan approvalHold = default) : BackgroundService
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
@@ -563,6 +564,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         {
             args.AddRange([
                 "--dns", WorkloadRulesetRenderer.EgressPodIp,
+                "--env", $"Kautuka__NetworkAccess__ApprovalHold__Duration={approvalHold.ToString("c", System.Globalization.CultureInfo.InvariantCulture)}",
                 "--volume", $"{RequireMountSource(gatewayConnectDirectory!, directory: true)}:/run/kautuka-gateway-connect:ro,Z",
             ]);
             AddGatewayPeerMounts(args, dataRoot);

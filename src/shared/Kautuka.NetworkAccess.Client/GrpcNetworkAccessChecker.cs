@@ -16,10 +16,9 @@ namespace Kautuka.NetworkAccess.Client;
 public sealed partial class GrpcNetworkAccessChecker(
     Func<ManagerService.ManagerServiceClient> clientAccessor,
     ILogger<GrpcNetworkAccessChecker>? logger = null,
-    bool waitForApproval = false) : INetworkAccessChecker
+    TimeSpan approvalHold = default) : INetworkAccessChecker
 {
     private static readonly TimeSpan deadlineTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan applianceApprovalDeadline = TimeSpan.FromSeconds(22);
     private readonly ILogger logger = logger ?? NullLogger<GrpcNetworkAccessChecker>.Instance;
 
     public GrpcNetworkAccessChecker(ManagerService.ManagerServiceClient client, ILogger<GrpcNetworkAccessChecker>? logger = null)
@@ -70,8 +69,8 @@ public sealed partial class GrpcNetworkAccessChecker(
         try
         {
             ManagerService.ManagerServiceClient client = clientAccessor();
-            bool hold = waitForApproval && target.Purpose is not ("provider-test" or "probe" or "save-discovery");
-            DateTime deadline = DateTime.UtcNow.Add(hold ? applianceApprovalDeadline : deadlineTimeout);
+            bool hold = approvalHold > TimeSpan.Zero && target.Purpose is not ("provider-test" or "probe" or "save-discovery");
+            DateTime deadline = DateTime.UtcNow.Add(hold ? approvalHold + deadlineTimeout : deadlineTimeout);
 
             long started = Stopwatch.GetTimestamp();
             using AsyncUnaryCall<NetworkAccessCheckOutboundResponse> call = client.CheckOutboundAsync(

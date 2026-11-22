@@ -93,7 +93,7 @@ public sealed partial class WorkspaceGrpcService
             && input.Purpose is not ("provider-test" or "probe" or "save-discovery"))
         {
             await context.WriteResponseHeadersAsync(new Metadata { { "kautuka-approval-pending", "1" } }).ConfigureAwait(false);
-            decision = await Nac.RecheckAfterApprovalAsync(decision,
+            decision = await Nac.RecheckAfterApprovalAsync(decision, input.UserId,
                 () => Nac.EvaluateGatewayConnect(input, publicOnly: false, recordPendingRequest: false), context.CancellationToken).ConfigureAwait(false);
         }
         return new NetworkAccessCheckOutboundResponse

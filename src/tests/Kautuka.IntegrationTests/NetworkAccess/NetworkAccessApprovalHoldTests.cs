@@ -1,5 +1,6 @@
 using Grpc.Core;
 
+using Kautuka.Manager.RuntimeContainer.Hosting.NetworkAccess;
 using Kautuka.Manager.Protos;
 using Kautuka.NetworkAccess.Client;
 using Kautuka.NetworkAccessController;
@@ -9,12 +10,23 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 public sealed class NetworkAccessApprovalHoldTests
 {
     [Theory]
+    [InlineData(600, "602s", "603s")]
+    [InlineData(45, "47s", "300s")]
+    public void EnvoyKeepsTheConnectionOpenThroughTheConfiguredHold(int holdSeconds, string authorization, string idle)
+    {
+        string config = BoundaryRulesetRenderer.RenderEnvoyConfig(includeGatewayConnect: true,
+            approvalHold: TimeSpan.FromSeconds(holdSeconds));
+        Assert.Contains($"timeout: {authorization}", config, StringComparison.Ordinal);
+        Assert.Contains($"stream_idle_timeout: {idle}", config, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task GatewayCheckerUsesTheLongWaitOnlyAfterManagerAcknowledgesIt(bool acknowledge)
     {
         var client = new ApprovalCheckClient();
-        var checker = new GrpcNetworkAccessChecker(() => client, waitForApproval: true);
+        var checker = new GrpcNetworkAccessChecker(() => client, approvalHold: TimeSpan.FromMinutes(10));
         CancellationToken token = TestContext.Current.CancellationToken;
         Task<NetworkAccessCheckResult> check = checker.CheckAsync(new OutboundTarget("approval.example.test", 443,
             Purpose: "remote-mcp", UserId: "user-a", AgentId: "agent-a"), token);
@@ -63,7 +75,7 @@ public sealed class NetworkAccessApprovalHoldTests
                 policy.DecideRequest(new NetworkAccessActor("admin", IsAdmin: true), requestId, true, "agent", policy.Revision);
             }
             if (decideBeforeWaiting) CloseAndApprove();
-            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial,
+            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial, input.UserId,
                 () => controller.EvaluateGatewayConnect(input, publicOnly: true, recordPendingRequest: false), TestContext.Current.CancellationToken);
             if (!decideBeforeWaiting)
             {
@@ -93,7 +105,7 @@ public sealed class NetworkAccessApprovalHoldTests
                 approvalHold: TimeSpan.FromSeconds(10));
             NetworkAccessDecisionResult initial = controller.EvaluateContainerConnection(ip, NetworkAddressClassifier.SinkholeAddress, 443, true, host);
             RegistryEntry original = Assert.IsType<RegistryEntry>(initial.PendingSource);
-            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial,
+            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial, "user-a",
                 () => controller.EvaluateContainerConnection(ip, NetworkAddressClassifier.SinkholeAddress, 443, true, host,
                     expectedSource: original, recordPendingRequest: false), TestContext.Current.CancellationToken);
 
@@ -124,7 +136,7 @@ public sealed class NetworkAccessApprovalHoldTests
             NetworkAccessDecisionResult initial = controller.EvaluateOutboundCheck(outbound);
             string requestId = Assert.IsType<string>(initial.RequestId);
             Assert.Equal("no_rule", initial.Reason);
-            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial,
+            Task<NetworkAccessDecisionResult> held = controller.RecheckAfterApprovalAsync(initial, outbound.UserId,
                 () => controller.EvaluateOutboundCheck(outbound, recordPendingRequest: false), TestContext.Current.CancellationToken);
 
             Assert.False(held.IsCompleted);
@@ -149,7 +161,7 @@ public sealed class NetworkAccessApprovalHoldTests
                 approvalHold: TimeSpan.FromMilliseconds(25));
             var input = new OutboundCheckInput("user-a", "agent-a", null, "approval.example.test", 443, "agent-run", null);
             NetworkAccessDecisionResult initial = controller.EvaluateOutboundCheck(input);
-            NetworkAccessDecisionResult expired = await controller.RecheckAfterApprovalAsync(initial,
+            NetworkAccessDecisionResult expired = await controller.RecheckAfterApprovalAsync(initial, input.UserId,
                 () => throw new InvalidOperationException("An expired wait cannot authorize traffic."), TestContext.Current.CancellationToken);
             Assert.Equal("no_rule", expired.Reason);
             Assert.Equal(initial.RequestId, expired.RequestId);
@@ -159,26 +171,31 @@ public sealed class NetworkAccessApprovalHoldTests
     }
 
     [Fact]
-    public async Task WaitsReserveFourSlotsAndDuplicateCallsRetainTheOrdinaryDenial()
+    public async Task ConfiguredApprovalLimitsReserveCapacityAcrossUsers()
     {
         string root = Directory.CreateTempSubdirectory("kautuka-approval-capacity-").FullName;
         try
         {
             using var policy = new NetworkAccessPolicyStore(Path.Combine(root, "policy.json"), []);
             var controller = new Kautuka.NetworkAccessController.NetworkAccessController(policy, new WorkloadRegistry(),
-                approvalHold: TimeSpan.FromSeconds(10));
+                approvalHold: TimeSpan.FromSeconds(10), maxHeldCalls: 2, maxHeldCallsPerUser: 1);
             using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
-            NetworkAccessDecisionResult[] pending = Enumerable.Range(1, 5).Select(index => controller.EvaluateOutboundCheck(
-                new OutboundCheckInput("user-a", "agent-a", null, $"host{index}.example.test", 443, "agent-run", null))).ToArray();
+            NetworkAccessDecisionResult Pending(string user, string host) => controller.EvaluateOutboundCheck(
+                new OutboundCheckInput(user, "agent-a", null, host, 443, "agent-run", null));
             NetworkAccessDecisionResult Recheck() => throw new InvalidOperationException("No approval was issued.");
-            Task<NetworkAccessDecisionResult>[] held = pending.Take(4).Select(decision =>
-                controller.RecheckAfterApprovalAsync(decision, Recheck, cancellation.Token)).ToArray();
-
-            Assert.All(held, task => Assert.False(task.IsCompleted));
-            Assert.Equal(pending[0], await controller.RecheckAfterApprovalAsync(pending[0], Recheck, cancellation.Token));
-            Assert.Equal(pending[4], await controller.RecheckAfterApprovalAsync(pending[4], Recheck, cancellation.Token));
+            var first = Pending("user-a", "first.example.test");
+            var second = Pending("user-a", "second.example.test");
+            var otherUser = Pending("user-b", "first.example.test");
+            var thirdUser = Pending("user-c", "first.example.test");
+            Task<NetworkAccessDecisionResult> heldFirst = controller.RecheckAfterApprovalAsync(first, "user-a", Recheck, cancellation.Token);
+            Assert.False(heldFirst.IsCompleted);
+            Assert.Equal(first, await controller.RecheckAfterApprovalAsync(first, "user-a", Recheck, cancellation.Token));
+            Assert.Equal(second, await controller.RecheckAfterApprovalAsync(second, "user-a", Recheck, cancellation.Token));
+            Task<NetworkAccessDecisionResult> heldOther = controller.RecheckAfterApprovalAsync(otherUser, "user-b", Recheck, cancellation.Token);
+            Assert.False(heldOther.IsCompleted);
+            Assert.Equal(thirdUser, await controller.RecheckAfterApprovalAsync(thirdUser, "user-c", Recheck, cancellation.Token));
             await cancellation.CancelAsync();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.WhenAll(held));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.WhenAll(heldFirst, heldOther));
         }
         finally { Directory.Delete(root, recursive: true); }
     }

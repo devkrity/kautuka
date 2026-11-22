@@ -105,6 +105,8 @@ The system Gateway scope starts with HTTPS access to `auth.kautuka.io`, `www.goo
 
 When a remote MCP connection needs approval, the connection test directs the user to Network Access. A block without a pending request points to both rules and requests. DNS, TLS, and provider failures keep their own messages.
 
+The appliance can hold one call per pending network request for up to ten minutes. It defaults to 64 held calls across the appliance and eight per user. Set `Kautuka__NetworkAccess__ApprovalHold__Duration`, `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCalls`, and `Kautuka__NetworkAccess__ApprovalHold__MaxHeldCallsPerUser` in the Manager service environment to change these values. A call cancelled by its caller releases its slot.
+
 After verifying the appliance release, Manager generates a dedicated CONNECT identity and checks its lifetime on later starts. Manager replaces the certificate pair when it reaches the renewal window and starts Gateway and Envoy with the renewed identity. Gateway and Envoy each have an owner-only host directory with their own leaf private key and a public CA certificate. Manager mounts only the listener's certificate files into Envoy and admits CONNECT from the reserved Gateway address.
 
 Manager uses local digest-pinned images for the appliance boundary, Envoy, and CoreDNS. It can restore a missing image from the verified release archive. If the image is still unavailable, the egress startup gate stays closed.

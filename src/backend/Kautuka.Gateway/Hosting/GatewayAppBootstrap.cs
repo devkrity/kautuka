@@ -200,7 +200,7 @@ internal static partial class GatewayAppBootstrap
             var managerGrpc = sp.GetRequiredService<IManagerGrpcService>();
             var logger = sp.GetService<ILogger<GrpcNetworkAccessChecker>>();
             return new GrpcNetworkAccessChecker(() => managerGrpc.Client, logger,
-                waitForApproval: builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled"));
+                approvalHold: GatewayOutboundHttpTransport.ReadApprovalHold(builder.Configuration));
         });
         builder.Services.AddTransient<NetworkAccessCheckHandler>();
         builder.Services.AddSingleton<NetworkAccessWebSocketChecker>();

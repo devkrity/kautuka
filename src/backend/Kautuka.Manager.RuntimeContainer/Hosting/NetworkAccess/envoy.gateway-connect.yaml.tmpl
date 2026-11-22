@@ -31,6 +31,7 @@
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: gateway_connect
                 codec_type: HTTP1
+                stream_idle_timeout: {{GATEWAY_STREAM_IDLE_DEADLINE}}
                 use_remote_address: true
                 access_log:
                   - name: envoy.access_loggers.stderr

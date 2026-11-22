@@ -43,7 +43,9 @@ public sealed class NetworkAccessController
     public const string ClusterOrigDstPublic = "orig_dst_public";
     public const string ClusterOrigDstLan = "orig_dst_lan";
     public const string ClusterPackageProxy = "pkgs_proxy";
-    public const int ApplianceApprovalHoldSeconds = 20;
+    public static TimeSpan DefaultApplianceApprovalHold => TimeSpan.FromMinutes(10);
+    public const int DefaultHeldCallLimit = 64;
+    public const int DefaultHeldCallLimitPerUser = 8;
 
     private readonly NetworkAccessPolicyStore policyStore;
     private readonly IWorkloadRegistry registry;
@@ -53,7 +55,9 @@ public sealed class NetworkAccessController
     private readonly TimeProvider timeProvider;
     private readonly TimeSpan approvalHold;
     private readonly object approvalHoldLock = new();
-    private readonly HashSet<string> outstandingApprovalHolds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> outstandingApprovalHolds = new(StringComparer.Ordinal);
+    private readonly int maxHeldCalls;
+    private readonly int maxHeldCallsPerUser;
 
     private long checks;
     private long allowed;
@@ -69,10 +73,15 @@ public sealed class NetworkAccessController
         Func<bool>? isContainerAuthorizationGateOpen = null,
         Func<bool>? isPackageProxyReady = null,
         TimeProvider? timeProvider = null,
-        TimeSpan approvalHold = default)
+        TimeSpan approvalHold = default,
+        int maxHeldCalls = DefaultHeldCallLimit,
+        int maxHeldCallsPerUser = DefaultHeldCallLimitPerUser)
     {
         ArgumentNullException.ThrowIfNull(policyStore);
         ArgumentNullException.ThrowIfNull(registry);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxHeldCalls);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxHeldCallsPerUser);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(maxHeldCallsPerUser, maxHeldCalls);
         this.policyStore = policyStore;
         this.registry = registry;
         this.auditRing = auditRing ?? new NetworkAccessAuditRing();
@@ -80,6 +89,8 @@ public sealed class NetworkAccessController
         this.isPackageProxyReady = isPackageProxyReady;
         this.timeProvider = timeProvider ?? TimeProvider.System;
         this.approvalHold = approvalHold;
+        this.maxHeldCalls = maxHeldCalls;
+        this.maxHeldCallsPerUser = maxHeldCallsPerUser;
 
         // Fail closed on startup if state.json is malformed (C12).
         this.policyStore.EnsureLoaded();
@@ -93,16 +104,20 @@ public sealed class NetworkAccessController
     public TimeSpan ApprovalHold => approvalHold;
 
     public async Task<NetworkAccessDecisionResult> RecheckAfterApprovalAsync(
-        NetworkAccessDecisionResult initial, Func<NetworkAccessDecisionResult> recheck, CancellationToken cancellationToken)
+        NetworkAccessDecisionResult initial, string userId, Func<NetworkAccessDecisionResult> recheck, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(initial);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userId);
         ArgumentNullException.ThrowIfNull(recheck);
         if (approvalHold <= TimeSpan.Zero || initial.Reason != "no_rule" || initial.RequestId is not { } requestId)
             return initial;
         lock (approvalHoldLock)
         {
             // Reserve authorization capacity for immediate decisions and hold at most one call per request.
-            if (outstandingApprovalHolds.Count >= 4 || !outstandingApprovalHolds.Add(requestId)) return initial;
+            if (outstandingApprovalHolds.Count >= maxHeldCalls
+                || outstandingApprovalHolds.Values.Count(owner => string.Equals(owner, userId, StringComparison.Ordinal)) >= maxHeldCallsPerUser
+                || !outstandingApprovalHolds.TryAdd(requestId, userId))
+                return initial;
         }
 
         try

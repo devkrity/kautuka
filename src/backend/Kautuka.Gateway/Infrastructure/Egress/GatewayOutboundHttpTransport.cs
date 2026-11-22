@@ -35,7 +35,8 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
         try
         {
             clientCertificate = X509CertificateLoader.LoadPkcs12FromFile($"{certificateDirectory}/client.pfx", null, X509KeyStorageFlags.EphemeralKeySet);
-            var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate);
+            var connect = new GatewayConnectTransport("10.247.0.2", 15004, "kautuka-connect.internal", trustedRoot, clientCertificate,
+                connectTimeout: ReadApprovalHold(configuration) + TimeSpan.FromSeconds(5));
             return new GatewayOutboundHttpTransport(connect, trustedRoot, clientCertificate);
         }
         catch
@@ -45,6 +46,11 @@ internal sealed class GatewayOutboundHttpTransport : IDisposable
             throw;
         }
     }
+
+    internal static TimeSpan ReadApprovalHold(IConfiguration configuration)
+        => configuration.GetValue<bool>("Kautuka:Appliance:Enabled")
+            ? configuration.GetValue("Kautuka:NetworkAccess:ApprovalHold:Duration", TimeSpan.FromMinutes(10))
+            : TimeSpan.Zero;
 
     internal HttpMessageHandler? CreateScopedHandler(Func<GatewayEgressScope> resolveScope)
         => connect is null ? null : new ScopedConnectHandler(connect, resolveScope);

@@ -113,7 +113,7 @@ public sealed partial class EnvoyAuthorizationService : Authorization.Authorizat
                 sni);
 
             if (decision.PendingSource is { } originalSource)
-                decision = await controller.RecheckAfterApprovalAsync(decision,
+                decision = await controller.RecheckAfterApprovalAsync(decision, originalSource.UserId ?? "system",
                     () => controller.EvaluateContainerConnection(source.Address, destination.Address, (int)destination.PortValue,
                         isTls, sni, expectedSource: originalSource, recordPendingRequest: false), context.CancellationToken).ConfigureAwait(false);
 
