@@ -198,9 +198,8 @@ write_trusted_manifest_public_key() {
 
     local destination_dir
     destination_dir="$(dirname "$destination")"
-    mkdir -p "$destination_dir"
-    chown root:root "$destination_dir"
-    chmod go-w "$destination_dir"
+    # Manager opens this root-owned directory to read the public key as an unprivileged user.
+    install -d -o root -g root -m 0755 -- "$destination_dir"
     local temporary_key
     temporary_key="$(mktemp "$destination_dir/.manifest-public-key.XXXXXX")"
     cat > "$temporary_key" <<EOF

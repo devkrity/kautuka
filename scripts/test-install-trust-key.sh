@@ -11,6 +11,13 @@ printf 'old user-controlled key\n' > "$key"
 chown nobody "$key"
 
 source <(sed -n '/^write_trusted_manifest_public_key() {/,/^}/p' "$script_dir/kautuka-install-linux.sh.in")
+umask 077
+fresh_directory="$temp_dir/fresh"
+fresh_key="$fresh_directory/manifest-public-key.pem"
+write_trusted_manifest_public_key 'test public key' "$fresh_key"
+[[ "$(stat -c '%U:%G %a' "$fresh_directory")" == 'root:root 755' ]]
+runuser -u nobody -- test -r "$fresh_key"
+
 write_trusted_manifest_public_key 'test public key' "$key"
 [[ "$(stat -c '%U:%G %a' "$key")" == 'root:root 644' ]]
 runuser -u nobody -- test -r "$key"
