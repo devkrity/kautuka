@@ -66,6 +66,11 @@ internal static partial class ConnectorOAuthEndpointMappings
             || !sessions.TryGetForCancellation(body.State, user.Id, origin, context.Request.Cookies[BoundMailCookie + "_" + body.State], body.TabHandle, DateTimeOffset.UtcNow, out BoundMailSession? session)
             || session is null || !TryAuthorizeConnector(catalog, user, session.CatalogConnectorId, out _)) return Results.Unauthorized();
         if (!sessions.Cancel(body.State, user.Id, origin, context.Request.Cookies[BoundMailCookie + "_" + body.State], body.TabHandle, DateTimeOffset.UtcNow)) return Results.Conflict();
+        using IDisposable nacScope = NetworkAccessContext.BeginScope(
+            userId: user.Id,
+            connectorId: session.CatalogConnectorId,
+            purpose: "connector-oauth",
+            service: "connector-auth");
         try
         {
             await coordinator.CancelFlowAsync(session, ct).ConfigureAwait(false);
