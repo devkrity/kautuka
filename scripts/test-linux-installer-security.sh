@@ -630,6 +630,8 @@ fi
   }
   wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager
   [[ -f "$tmp/appliance-setup-ready" ]]
+  confirm_first_admin_setup() { fail 'delegated admin setup must not prompt or read the token'; }
+  wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager true
 )
 
 echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

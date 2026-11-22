@@ -313,7 +313,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         string since = startupUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
         ProcessResult result = await RunProcessAsync(
             "wsl.exe",
-            ["-d", distroName, "-u", "root", "--", "journalctl", "--unit=kautuka-gateway.service", $"--since={since}", "--no-pager", "--output=cat"],
+            ["-d", distroName, "-u", "root", "--", "journalctl", "CONTAINER_NAME=kautuka-appliance-gateway", $"--since={since}", "--no-pager", "--output=cat"],
             allowFailure: true,
             cancellationToken).ConfigureAwait(false);
 
@@ -360,7 +360,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
         ProcessResult result = await RunProcessAsync(
             "wsl.exe",
-            ["-d", distroName, "-u", "root", "--exec", "/bin/cat", "/var/lib/kautuka/setup-token"],
+            ["-d", distroName, "-u", "root", "--exec", "/bin/cat", "/var/lib/kautuka/gateway/setup-token"],
             allowFailure: true,
             cancellationToken).ConfigureAwait(false);
 

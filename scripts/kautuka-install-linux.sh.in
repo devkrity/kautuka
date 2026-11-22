@@ -32,6 +32,7 @@ Options:
     --version <version>       Installed version used under versions/<version>
   --install-root <path>     Install root for Manager versions (default: /opt/kautuka/manager)
     --web-port <port>        Published localhost port for a fresh signed appliance (default: 20229)
+    --defer-admin-setup       Leave first admin setup to the calling installer for a signed appliance
     --internal-state-root <path>
                                                         Internal runtime state root (default: /var/lib/kautuka)
     --visible-root <path>     Visible logs/workspaces root (default: /var/lib/kautuka)
@@ -2414,6 +2415,7 @@ wait_for_web_ui() {
     local timeout_seconds="${3:-${KAUTUKA_INSTALL_READINESS_TIMEOUT_SECONDS:-600}}"
     local appliance_image_payload="${4:-false}"
     local appliance_manager="${5:-}"
+    local defer_admin_setup="${6:-false}"
     local elapsed=0
     local service_uid=''
     local xdg_runtime_dir=''
@@ -2527,7 +2529,7 @@ PY
             if [[ "$ui_ready" == 'true' && "$runtime_units_ready" == 'true' ]]; then
                 echo "Core runtime is ready (lifecycle=${lifecycle_status}; manager=${manager_health})."
                 echo "Verified web UI at: $url"
-                if [[ "$setup_needs_setup" == 'true' ]]; then
+                if [[ "$setup_needs_setup" == 'true' && "$defer_admin_setup" != 'true' ]]; then
                     local token_file='/var/lib/kautuka/setup-token'
                     if [[ "$appliance_image_payload" == 'true' ]]; then token_file='/var/lib/kautuka/gateway/setup-token'; fi
                     confirm_first_admin_setup "$url" "$token_file" || fail 'first-run administrator setup token was not acknowledged'
@@ -2693,6 +2695,7 @@ main() {
     local delete_data="false"
     local assume_yes="false"
     local skip_enable="false"
+    local defer_admin_setup="false"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2721,6 +2724,10 @@ main() {
                     || fail '--web-port must be an integer between 1024 and 65535'
                 web_port="$2"
                 shift 2
+                ;;
+            --defer-admin-setup)
+                defer_admin_setup="true"
+                shift
                 ;;
             --internal-state-root)
                 internal_state_root="${2:-}"
@@ -2994,6 +3001,9 @@ PY
 
     if [[ -n "$web_port" && "$appliance_image_payload" != 'true' ]]; then
         fail '--web-port requires a signed appliance release'
+    fi
+    if [[ "$defer_admin_setup" == 'true' && "$appliance_image_payload" != 'true' ]]; then
+        fail '--defer-admin-setup requires a signed appliance release'
     fi
     web_port="${web_port:-$(resolve_web_ui_port)}"
 
@@ -3273,7 +3283,7 @@ PY
     if [[ "$appliance_image_payload" != 'true' ]]; then
         best_effort_user_systemctl "$service_user" "$service_home" "$xdg_runtime_dir" start kautuka.target
     fi
-    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager"
+    wait_for_web_ui "$service_user" "http://127.0.0.1:$web_port" '' "$appliance_image_payload" "$version_root/kautuka-manager" "$defer_admin_setup"
 
     echo "Installed Manager version '$version'."
     echo "Current symlink: $current_link -> $(readlink -f "$current_link")"
