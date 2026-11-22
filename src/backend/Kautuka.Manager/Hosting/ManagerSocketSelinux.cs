@@ -10,6 +10,7 @@ namespace Kautuka.Manager.Hosting;
 internal static class ManagerSocketSelinux
 {
     internal const string ClientType = "kautuka_manager_client.process";
+    internal const string ServicePeerType = "kautuka_service_peer.process";
     private const string ListenerContext = "system_u:object_r:kautuka_manager_rpc_socket_t:s0";
 
     internal static Socket CreateBoundSocket(EndPoint endpoint, string managerSocketPath)

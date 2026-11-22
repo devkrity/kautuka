@@ -168,8 +168,10 @@ public sealed class ApplianceServiceSupervisorTests
         }
         finally { Directory.Delete(root, true); }
     }
-    [Fact]
-    public void GatewayCreateProfileMountsOnlyScopedPeerMaterial()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GatewayCreateProfileMountsOnlyScopedPeerMaterial(bool confineManagerPeers)
     {
         Assert.SkipUnless(OperatingSystem.IsLinux(), "Gateway appliance mounts require Linux paths.");
         string root = Path.Combine(Path.GetTempPath(), "gateway-mounts-" + Guid.NewGuid().ToString("N"));
@@ -190,12 +192,13 @@ public sealed class ApplianceServiceSupervisorTests
         var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
             new Dictionary<string, string> { ["gateway"] = "registry.example/gateway@sha256:" + Id }));
         using var supervisor = new ApplianceServiceSupervisor(podman, release, version, state, sockets,
-            NullLogger<ApplianceServiceSupervisor>.Instance, gatewayConnectDirectory: connect);
+            NullLogger<ApplianceServiceSupervisor>.Instance, gatewayConnectDirectory: connect, confineManagerPeers: confineManagerPeers);
         try
         {
             object service = typeof(ApplianceServiceSupervisor).GetField("gateway", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(supervisor)!;
             var build = typeof(ApplianceServiceSupervisor).GetMethod("BuildCreateArgs", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
             var args = Assert.IsType<List<string>>(build.Invoke(supervisor, [service, release.Deployment.Images["gateway"], "sha256:" + Id]));
+            Assert.Equal(confineManagerPeers, args.Contains("label=type:" + ManagerSocketSelinux.ClientType, StringComparer.Ordinal));
             Assert.Contains("io.kautuka.role=appliance-gateway", args);
             Assert.Contains("io.kautuka.image-id=sha256:" + Id, args);
             Assert.Contains(args, item => item.Contains("kautuka-workload:ip=10.247.0.4", StringComparison.Ordinal));
