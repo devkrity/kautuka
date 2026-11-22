@@ -47,6 +47,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private long nextServiceRetryUtcTicks;
     private DateTimeOffset nextTelemetryProvisioningUtc;
     private volatile bool cohortReady;
+    private volatile bool recoveringNetwork;
     private volatile bool verificationPackageReady;
     private volatile bool verificationTelemetryReady;
 
@@ -83,8 +84,10 @@ internal sealed partial class ApplianceServiceSupervisor(
                 service.RuntimeImageId = imageIds[service.Role];
             while (!stoppingToken.IsCancellationRequested)
             {
-                if ((!verificationMode && KautukaMaintenanceMode.IsActive) || (superviseObservability && topology?.IsStartupGateOpen != true))
+                bool networkUnverified = superviseObservability && topology?.IsStartupGateOpen != true;
+                if ((!verificationMode && KautukaMaintenanceMode.IsActive) || networkUnverified)
                 {
+                    if (networkUnverified) recoveringNetwork = true;
                     await StopCohortAsync(stoppingToken, showRecoveryPage: true).ConfigureAwait(false);
                 }
                 else
@@ -159,6 +162,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         {
             if (recoveryPage is not null) await recoveryPage.StopAsync().ConfigureAwait(false);
             await TryReconcileAsync(webHost, FindContainer(webHost), token).ConfigureAwait(false);
+            if (webHost.Ready) recoveringNetwork = false;
         }
         else
             await StopActiveAsync(webHost, token).ConfigureAwait(false);
@@ -219,7 +223,9 @@ internal sealed partial class ApplianceServiceSupervisor(
         }
 
         long next = Interlocked.Read(ref nextServiceRetryUtcTicks);
-        return new("Kautuka’s web interface is unavailable.",
+        return new(recoveringNetwork
+                ? "Network protection is ready. Kautuka is restarting its web interface."
+                : "Kautuka’s web interface is unavailable.",
             next > DateTimeOffset.UtcNow.UtcTicks ? new DateTimeOffset(next, TimeSpan.Zero) : null);
     }
 

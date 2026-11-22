@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
 
 using Kautuka.Manager.Hosting;
 
@@ -29,6 +31,11 @@ public sealed class ApplianceRecoveryPageTests
             string html = await recovery.Content.ReadAsStringAsync(token);
             Assert.Contains("verify network protection", html, StringComparison.Ordinal);
             Assert.Contains("06:00:00 UTC", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("http-equiv=\"refresh\"", html, StringComparison.Ordinal);
+            string probe = html.Split("<script>", StringSplitOptions.None)[1].Split("</script>", StringSplitOptions.None)[0];
+            string hash = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(probe.ReplaceLineEndings("\n"))));
+            Assert.Contains($"script-src 'sha256-{hash}'; connect-src 'self'", recovery.Headers.GetValues("Content-Security-Policy").Single(),
+                StringComparison.Ordinal);
 
             status = status with { RetryUtc = null, NextStep = "Ask your appliance administrator to review the recovery status." };
             using var navigation = new HttpRequestMessage(HttpMethod.Get, "/workspace/my-helper");
@@ -39,6 +46,13 @@ public sealed class ApplianceRecoveryPageTests
             html = await manual.Content.ReadAsStringAsync(token);
             Assert.Contains("Ask your appliance administrator", html, StringComparison.Ordinal);
             Assert.DoesNotContain("will retry", html, StringComparison.Ordinal);
+
+            using var poll = new HttpRequestMessage(HttpMethod.Get, "/health");
+            poll.Headers.Accept.ParseAdd("application/json");
+            using HttpResponseMessage polled = await client.SendAsync(poll, token);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, polled.StatusCode);
+            Assert.Equal("application/json", polled.Content.Headers.ContentType?.MediaType);
+            Assert.Contains("Ask your appliance administrator", await polled.Content.ReadAsStringAsync(token), StringComparison.Ordinal);
 
             foreach (string endpoint in new[] { "/health", "/alive", "/api/setup" })
             {

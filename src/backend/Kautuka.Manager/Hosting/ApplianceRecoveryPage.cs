@@ -1,6 +1,9 @@
 using System.Globalization;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Encodings.Web;
+using System.Text.Json.Serialization;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
@@ -8,8 +11,47 @@ namespace Kautuka.Manager.Hosting;
 
 internal sealed record ApplianceRecoveryMessage(string Reason, DateTimeOffset? RetryUtc = null, string? NextStep = null);
 
+[JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(ApplianceRecoveryMessage))]
+internal sealed partial class ApplianceRecoveryJsonContext : JsonSerializerContext;
+
 internal sealed class ApplianceRecoveryPage(int port)
 {
+    private static readonly string healthProbe = """
+        async function checkWebHost() {
+            try {
+                const response = await fetch('/health', {
+                    headers: { Accept: 'application/json' },
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    redirect: 'error',
+                    referrerPolicy: 'no-referrer',
+                    signal: AbortSignal.timeout(3000)
+                });
+                if (response.headers.get('Content-Type')?.startsWith('application/json')) {
+                    const status = await response.json();
+                    if (response.status === 200 && status.status === 'ok') {
+                        location.replace('/');
+                        return;
+                    }
+                    if (response.status === 503 && typeof status.reason === 'string') {
+                        document.getElementById('reason').textContent = status.reason;
+                        document.getElementById('next').textContent = status.retryUtc
+                            ? 'Kautuka will retry at ' + new Date(status.retryUtc).toISOString().slice(11, 19) + ' UTC.'
+                            : (status.nextStep ?? '');
+                    }
+                }
+            } catch {
+                // Both listeners can be unavailable briefly during port handback.
+            }
+            setTimeout(checkWebHost, 5000);
+        }
+        setTimeout(checkWebHost, 5000);
+        """.ReplaceLineEndings("\n");
+
+    private static readonly string contentSecurityPolicy =
+        $"default-src 'none'; script-src 'sha256-{Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(healthProbe)))}'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'";
+
     private WebApplication? listener;
 
     internal async Task StartAsync(Func<ApplianceRecoveryMessage> readStatus, CancellationToken token)
@@ -71,6 +113,12 @@ internal sealed class ApplianceRecoveryPage(int port)
         }
 
         PathString path = context.Request.Path;
+        if (path == "/health" && !head && context.Request.Headers.Accept == "application/json")
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return context.Response.WriteAsJsonAsync(readStatus(), ApplianceRecoveryJsonContext.Default.ApplianceRecoveryMessage,
+                cancellationToken: context.RequestAborted);
+        }
         if (path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
             || path.StartsWithSegments("/health", StringComparison.OrdinalIgnoreCase)
             || path.StartsWithSegments("/alive", StringComparison.OrdinalIgnoreCase)
@@ -81,16 +129,17 @@ internal sealed class ApplianceRecoveryPage(int port)
         }
 
         context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-        context.Response.Headers.ContentSecurityPolicy = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'";
+        context.Response.Headers.ContentSecurityPolicy = contentSecurityPolicy;
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
         context.Response.ContentType = "text/html; charset=utf-8";
         if (head) return Task.CompletedTask;
 
         ApplianceRecoveryMessage status = readStatus();
         string next = status.RetryUtc is { } retry
-            ? $"<p>Kautuka will retry at <time datetime=\"{retry.ToString("O", CultureInfo.InvariantCulture)}\">{retry.ToString("HH:mm:ss 'UTC'", CultureInfo.InvariantCulture)}</time>.</p>"
-            : status.NextStep is { } step ? $"<p>{HtmlEncoder.Default.Encode(step)}</p>" : string.Empty;
+            ? $"Kautuka will retry at {retry.ToUniversalTime().ToString("HH:mm:ss 'UTC'", CultureInfo.InvariantCulture)}."
+            : HtmlEncoder.Default.Encode(status.NextStep ?? string.Empty);
         return context.Response.WriteAsync(
-            $"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><meta http-equiv=\"refresh\" content=\"5\"><title>Kautuka recovery</title></head><body><main><h1>Kautuka</h1><p>{HtmlEncoder.Default.Encode(status.Reason)}</p>{next}</main></body></html>",
+            $"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Kautuka recovery</title></head><body><main><h1>Kautuka</h1><p id=\"reason\">{HtmlEncoder.Default.Encode(status.Reason)}</p><p id=\"next\">{next}</p></main><script>{healthProbe}</script></body></html>",
             context.RequestAborted);
     }
 }
