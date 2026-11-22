@@ -634,4 +634,22 @@ fi
   wait_for_web_ui "$(id -un)" http://localhost:23084 2 true /opt/kautuka/manager/current/kautuka-manager true
 )
 
+(
+  source "$tmp/wsl-bootstrap.sh"
+  mkdir -p "$tmp/user.slice/user-997.slice"
+  id() { [[ "$1" == '-u' && "$2" == 'kautuka' ]] && printf '997\n'; }
+  getent() { return 2; }
+  systemctl() { return 3; }
+  usermod() {
+    [[ "$1" == '--uid' && "$2" -ge 20000 && "$2" -le 52767 && "$3" == 'kautuka' ]]
+    printf '%s\n' "$2" > "$tmp/assigned-uid"
+  }
+  printf 'populated 0\n' > "$tmp/user.slice/user-997.slice/cgroup.events"
+  avoid_wsl_service_uid_conflict kautuka "$tmp/user.slice"
+  [[ ! -e "$tmp/assigned-uid" ]]
+  printf 'populated 1\n' > "$tmp/user.slice/user-997.slice/cgroup.events"
+  avoid_wsl_service_uid_conflict kautuka "$tmp/user.slice"
+  [[ -s "$tmp/assigned-uid" ]]
+)
+
 echo 'Linux installer trust checks rejected tampering, unsigned manifests, digest mismatch, and candidate identity mismatches for both production-default and local-feed wrappers; neither wrapper mutated before authentication, and each valid path reached its mocked first persistent boundary.'

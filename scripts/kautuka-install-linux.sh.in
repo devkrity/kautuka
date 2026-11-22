@@ -762,6 +762,26 @@ ensure_service_account() {
     fi
 }
 
+avoid_wsl_service_uid_conflict() {
+    local user="$1" user_slice="$2"
+    local uid candidate attempt
+    uid="$(id -u "$user")"
+    # WSL distributions can see each other's systemd cgroups. Avoid starting
+    # a user manager under a UID that another distribution is already using.
+    if ! grep -Fxq 'populated 1' "$user_slice/user-${uid}.slice/cgroup.events" 2>/dev/null ||
+        systemctl is-active --quiet "user@${uid}.service"; then
+        return
+    fi
+    for ((attempt = 0; attempt < 32; attempt++)); do
+        candidate=$((20000 + RANDOM))
+        if [[ ! -e "$user_slice/user-${candidate}.slice" ]] && ! getent passwd "$candidate" >/dev/null; then
+            usermod --uid "$candidate" "$user"
+            return
+        fi
+    done
+    fail 'could not find an unused WSL service UID'
+}
+
 ensure_isolated_service_account() {
     local user="$1"
     local group="$2"
@@ -3029,6 +3049,9 @@ PY
     ensure_selinux_runtime_exec_policy "$appliance_image_payload"
 
     ensure_service_account "$service_user" "$service_group" "$internal_state_root"
+    if [[ "$appliance_image_payload" == 'true' && -n "${WSL_DISTRO_NAME:-}" && -n "$KAUTUKA_DEFAULT_RELEASE_TAG" ]]; then
+        avoid_wsl_service_uid_conflict "$service_user" /sys/fs/cgroup/user.slice
+    fi
     # Seed the installed release's channel only on a fresh install. Preserve any
     # channel the user has already chosen when reinstalling or upgrading.
     write_initial_update_runtime_policy "$internal_state_root" "$release_channel" "$service_user" "$service_group"
