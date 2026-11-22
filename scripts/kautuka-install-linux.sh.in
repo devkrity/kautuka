@@ -824,6 +824,7 @@ chown_tree_excluding() {
     local containers_root="$root/.local/share/containers"
     local credentials_root="$root/credentials"
     local credentials_state_root="$root/credentialsHost"
+    local manager_state_root="$root/manager"
 
     [[ -d "$root" ]] || return 0
     chown "$owner" "$root"
@@ -832,11 +833,13 @@ chown_tree_excluding() {
     # credentials/ and credentialsHost/ belong to kautuka-credentials. A 45
     # reinstall left credentialsHost/vault as kautuka:kautuka; CredentialsHost
     # then aborted on SetUnixFileMode with EPERM.
+    # Manager owns the exact permissions on its persistent mTLS and CONNECT inventory.
     find "$root" -mindepth 1 \
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -exec chown -h "$owner" {} +
 }
 
@@ -860,6 +863,7 @@ grant_shared_group_write_excluding() {
     local containers_root="$root/.local/share/containers"
     local credentials_root="$root/credentials"
     local credentials_state_root="$root/credentialsHost"
+    local manager_state_root="$root/manager"
 
     [[ -d "$root" ]] || return 0
     chgrp "$group" "$root"
@@ -868,13 +872,15 @@ grant_shared_group_write_excluding() {
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -exec chgrp -h "$group" {} +
     find "$root" -mindepth 1 \
         \( -path "$excluded_root" -o -path "$excluded_root/*" \
            -o -path "$containers_root" -o -path "$containers_root/*" \
            -o -path "$credentials_root" -o -path "$credentials_root/*" \
-           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \) -prune \
+           -o -path "$credentials_state_root" -o -path "$credentials_state_root/*" \
+           -o -path "$manager_state_root" \) -prune \
         -o -type d -exec chmod g+rwx {} + \
         -o -type f -exec chmod g+rw {} +
 }
