@@ -138,6 +138,7 @@ public sealed class ChannelProviderProvisioningTests
         fixture.Http.Enqueue(HttpStatusCode.OK, "{\"ok\":true,\"user_id\":\"U1\",\"bot_id\":\"B1\",\"team_id\":\"T1\"}");
         fixture.Http.Enqueue(HttpStatusCode.OK, "{\"ok\":true,\"bot\":{\"app_id\":\"A1\"}}");
         fixture.Http.Enqueue(HttpStatusCode.OK, "{\"ok\":true,\"url\":\"wss://wss-primary.slack.com/link\"}");
+        bool socketDisposed = false;
         TaskCompletionSource connected = new(TaskCreationOptions.RunContinuationsAsynchronously);
         using CancellationTokenSource cancellation = new(TimeSpan.FromSeconds(3));
         SlackSocketModeWorker worker = new(fixture.Attachments, fixture.RuntimeCredentials, fixture.Ingress, fixture.OutboundAssets, fixture.Http,
@@ -145,7 +146,7 @@ public sealed class ChannelProviderProvisioningTests
             socketConnector: (_, _) =>
             {
                 connected.TrySetResult();
-                return Task.FromResult<WebSocket>(new BlockingWebSocket());
+                return Task.FromResult<WebSocket>(new BlockingWebSocket(() => socketDisposed = true));
             },
             supervisorPollInterval: TimeSpan.FromMilliseconds(5),
             identitySyncRetryDelay: _ => TimeSpan.FromMilliseconds(20));
@@ -153,7 +154,16 @@ public sealed class ChannelProviderProvisioningTests
         Task run = worker.RunAsync(cancellation.Token);
         await connected.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         await cancellation.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        try
+        {
+            await run.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        }
+        catch (OperationCanceledException exception) when (exception.CancellationToken == cancellation.Token)
+        {
+            // Cancellation may interrupt the poll delay or be observed between polls.
+        }
+
+        Assert.True(socketDisposed);
 
         Assert.True(fixture.Http.Requests.Count(request => request.RequestUri?.AbsolutePath == "/api/auth.test") >= 2);
         Assert.Contains(fixture.Http.Requests, request => request.RequestUri?.AbsolutePath == "/api/apps.connections.open");
@@ -300,7 +310,7 @@ public sealed class ChannelProviderProvisioningTests
 
     private sealed record CapturedRequest(HttpMethod Method, Uri? RequestUri, string Body);
 
-    private sealed class BlockingWebSocket : WebSocket
+    private sealed class BlockingWebSocket(Action? onDispose = null) : WebSocket
     {
         public override WebSocketCloseStatus? CloseStatus => null;
         public override string? CloseStatusDescription => null;
@@ -309,7 +319,7 @@ public sealed class ChannelProviderProvisioningTests
         public override void Abort() { }
         public override Task CloseAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) => Task.CompletedTask;
         public override Task CloseOutputAsync(WebSocketCloseStatus closeStatus, string? statusDescription, CancellationToken cancellationToken) => Task.CompletedTask;
-        public override void Dispose() { }
+        public override void Dispose() => onDispose?.Invoke();
         public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken cancellationToken)
         {
             await Task.Delay(Timeout.Infinite, cancellationToken);
