@@ -6,6 +6,31 @@ namespace Kautuka.IntegrationTests.NetworkAccess;
 
 public sealed class NetworkAccessMatchingModelTests
 {
+    [Theory]
+    [InlineData("auth.kautuka.io")]
+    [InlineData("www.googleapis.com")]
+    [InlineData("login.microsoftonline.com")]
+    public void InitialSignInUsesOnlyTheSeededGatewayScopeAndPort(string host)
+    {
+        DirectoryInfo root = Directory.CreateTempSubdirectory("nac-initial-sign-in-");
+        try
+        {
+            using var store = new NetworkAccessPolicyStore(Path.Combine(root.FullName, "policy.json"));
+            var controller = new NetworkAccessController.NetworkAccessController(store, new WorkloadRegistry(),
+                isContainerAuthorizationGateOpen: static () => true);
+            var input = new OutboundCheckInput("system", "gateway", null, host, 443, "oidc-login", null);
+            Assert.True(controller.EvaluateGatewayConnect(input, publicOnly: true).Allowed);
+            Assert.False(controller.EvaluateGatewayConnect(input with { UserId = "alice" }, publicOnly: true).Allowed);
+            Assert.False(controller.EvaluateGatewayConnect(input with { AgentId = "channelhost" }, publicOnly: true).Allowed);
+            Assert.False(controller.EvaluateGatewayConnect(input with { Port = 8443 }, publicOnly: true).Allowed);
+
+            store.SetRule(new NetworkAccessActor("admin", IsAdmin: true),
+                new RuleWriteSpec("agent", "system", "gateway", null, host, "host", 443, false), store.Revision);
+            Assert.Equal("blocked", controller.EvaluateGatewayConnect(input, publicOnly: true).Reason);
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
     [Fact]
     public void SlackChannelSwitchCoversSubdomainsOnlyForChannelHost()
     {

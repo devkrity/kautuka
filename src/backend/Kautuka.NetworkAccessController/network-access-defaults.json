@@ -5,6 +5,36 @@
       "scopeKind": "agent",
       "userId": "system",
       "agentId": "gateway",
+      "destination": "auth.kautuka.io",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "www.googleapis.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
+      "destination": "login.microsoftonline.com",
+      "destKind": "host",
+      "port": 443,
+      "allowed": true,
+      "allowLan": false
+    },
+    {
+      "scopeKind": "agent",
+      "userId": "system",
+      "agentId": "gateway",
       "destination": "api.openai.com",
       "destKind": "host",
       "port": 443,
