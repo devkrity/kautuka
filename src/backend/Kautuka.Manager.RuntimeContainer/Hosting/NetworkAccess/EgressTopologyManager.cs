@@ -1823,20 +1823,29 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     private async Task<bool> IsEgressPodHealthyAsync(CancellationToken cancellationToken)
     {
+        long started = Stopwatch.GetTimestamp();
         PodmanCommandResult inspect = await podmanRunner
             .RunAsync(["pod", "inspect", EgressPodName, "--format", "json"], 10, cancellationToken)
             .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (inspect.ExitCode != 0 || !IsEgressPodHealthy(inspect.StdOut))
         {
+            logger.LogWarning("Egress pod inspection did not verify the expected state. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
+                inspect.ExitCode, inspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             return false;
         }
 
+        started = Stopwatch.GetTimestamp();
         PodmanCommandResult boundaryInspect = await podmanRunner
             .RunAsync(["inspect", "kautuka-egress-boundary", "--format", "json"], 10, cancellationToken)
             .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut)) return true;
 
-        return boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut);
+        logger.LogWarning("Egress boundary init inspection did not verify a successful exit. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
+            boundaryInspect.ExitCode, boundaryInspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        return false;
     }
 
     internal static bool IsSuccessfulBoundaryInit(string? inspectJson)

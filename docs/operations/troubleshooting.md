@@ -17,6 +17,8 @@
 
 ## Egress topology shutdown
 
+When Manager cannot verify the egress pod or its boundary initializer, it keeps admission closed during recovery. The warning identifies which inspection failed and records how it ended and how long it took.
+
 Manager's hosted-service stop and dependency-injection container disposal both dispose the same `EgressTopologyManager` singleton. Disposal is idempotent: concurrent callers share one cleanup task, which cancels and awaits the reconcile loop before releasing its cancellation source. A shutdown `ObjectDisposedException` from that source indicates a regression; verify the focused `V7_20_EgressTopologyManagerDisposalIsSafeWhenHostedServiceAndDiDisposeIt` test.
 
 ## Failed schema migration
