@@ -15,6 +15,7 @@ set -euo pipefail
 : "${KAUTUKA_DEFAULT_MANIFEST_PUBLIC_KEY_PEM:=}"
 : "${KAUTUKA_DEFAULT_VERSION:=}"
 : "${KAUTUKA_DEFAULT_RELEASE_CHANNEL:=}"
+: "${KAUTUKA_DEFAULT_RELEASE_TAG:=}"
 : "${KAUTUKA_DEFAULT_REPOSITORY_OWNER:=devkrity}"
 : "${KAUTUKA_DEFAULT_REPOSITORY_NAME:=kautuka}"
 
@@ -2819,7 +2820,15 @@ main() {
         manifest_url="$KAUTUKA_DEFAULT_MANIFEST_URL"
     fi
 
-    if [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]]; then
+    if [[ -n "$KAUTUKA_DEFAULT_RELEASE_TAG" ]]; then
+        release_tag="$KAUTUKA_DEFAULT_RELEASE_TAG"
+        [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-preview\.[0-9]+)?$ ]] || fail 'invalid embedded release tag'
+        [[ "$KAUTUKA_DEFAULT_REPOSITORY_OWNER" =~ ^[A-Za-z0-9_-]+$ && "$KAUTUKA_DEFAULT_REPOSITORY_NAME" =~ ^[A-Za-z0-9_-]+$ ]] ||
+            fail 'canonical repository owner and name contain invalid characters'
+        [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]] || fail 'an exact release installer cannot use another artifact or feed'
+        manifest_url="https://github.com/${KAUTUKA_DEFAULT_REPOSITORY_OWNER}/${KAUTUKA_DEFAULT_REPOSITORY_NAME}/releases/download/${release_tag}/kautuka-platform-release.json"
+        github_release_candidate='true'
+    elif [[ -z "$artifact" && -z "$artifact_url" && -z "$manifest_url" ]]; then
         require_command python3
         require_command curl
         local resolved_release
@@ -2973,6 +2982,9 @@ PY
         fi
         verify_linux_release "${verification_args[@]}"
         appliance_image_payload="$(python3 -c 'import json, sys; print("true" if "applianceDeployment" in json.load(sys.stdin) else "false")' < "$manifest_path")"
+        if [[ -n "$KAUTUKA_DEFAULT_RELEASE_TAG" && "$appliance_image_payload" != 'true' ]]; then
+            fail 'the exact release does not contain a container appliance deployment'
+        fi
         if [[ "$appliance_image_payload" == 'true' ]] &&
             [[ "${install_root%/}" != '/opt/kautuka/manager' || "${internal_state_root%/}" != '/var/lib/kautuka' ||
                 "${visible_root%/}" != '/var/lib/kautuka' || "$unit_name" != 'kautuka-manager.service' ]]; then

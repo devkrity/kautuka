@@ -1747,8 +1747,21 @@ if [[ "$linux_appliance_only" != 'true' ]]; then
     printf 'Reusing cached WSL base rootfs: %s\n' "$base_rootfs"
   fi
 
-  log_phase "Prewarming WSL appliance rootfs"
-  prewarm_rootfs "$base_rootfs" "$final_rootfs"
+  if [[ -n "$appliance_image_prefix" ]]; then
+    log_phase "Adding the shared Linux installer to the WSL base"
+    rootfs_dir="$work_dir/rootfs"
+    mkdir -p "$rootfs_dir"
+    sudo tar --numeric-owner --xattrs --acls -xzf "$base_rootfs" -C "$rootfs_dir"
+    bootstrap="$work_dir/bootstrap-wsl.sh"
+    bash "$source_root/scripts/generate-linux-installer.sh" \
+      --output "$bootstrap" --version "$version" --release-channel "$channel" \
+      --release-tag "$release_tag" --manifest-public-key "$manifest_public_key"
+    sudo install -D -o root -g root -m 0755 "$bootstrap" "$rootfs_dir/usr/local/lib/kautuka/bootstrap-wsl.sh"
+    sudo tar --numeric-owner --xattrs --acls -czf - -C "$rootfs_dir" . > "$final_rootfs"
+  else
+    log_phase "Prewarming WSL appliance rootfs"
+    prewarm_rootfs "$base_rootfs" "$final_rootfs"
+  fi
 fi
 
 if [[ "$prewarm_only" == 'true' ]]; then

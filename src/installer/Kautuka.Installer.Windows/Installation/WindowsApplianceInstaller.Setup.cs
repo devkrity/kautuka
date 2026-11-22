@@ -150,10 +150,17 @@ internal static partial class WindowsApplianceInstaller
         Func<string, Task> log,
         CancellationToken cancellationToken)
     {
-        await log("Starting imported distro and verifying the prewarmed appliance image...").ConfigureAwait(false);
+        await log("Starting the imported distro and installing the signed Kautuka appliance...").ConfigureAwait(false);
         await RunWslBashAsync(
             state.DistroName,
-            "set -euo pipefail; test -d /opt/kautuka/manager/current; systemctl is-system-running --wait >/dev/null 2>&1 || true",
+            """
+            set -euo pipefail
+            systemctl is-system-running --wait >/dev/null 2>&1 || true
+            test -x /usr/local/lib/kautuka/bootstrap-wsl.sh
+            if [[ ! -f /opt/kautuka/manager/current/kautuka-platform-release.json ]]; then
+                /usr/local/lib/kautuka/bootstrap-wsl.sh --yes
+            fi
+            """,
             cancellationToken).ConfigureAwait(false);
     }
 

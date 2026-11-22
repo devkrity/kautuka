@@ -16,6 +16,25 @@ bash "$script_dir/generate-linux-installer.sh" \
   --manifest-url 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/kautuka-platform-release.json' \
   --manifest-public-key "$tmp/public.pem"
 bash -n "$tmp/generated-kautuka-install-linux.sh"
+bash "$script_dir/generate-linux-installer.sh" \
+  --output "$tmp/wsl-bootstrap.sh" --version '0.1.20-preview.1' \
+  --release-channel preview --release-tag 'v0.1.20-preview.1' --manifest-public-key "$tmp/public.pem"
+(
+  source "$tmp/wsl-bootstrap.sh"
+  require_root() { :; }
+  require_command() { :; }
+  resolve_github_release_candidate() { fail 'WSL bootstrap must not discover the latest release'; }
+  curl() {
+    [[ "${!#}" == 'https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.1/kautuka-platform-release.json' ]] ||
+      fail 'WSL bootstrap requested an unexpected URL'
+    printf '%s\n' '{"releaseTag":"v0.1.20-preview.2","releaseId":"v0.1.20-preview.2","version":"0.1.20-preview.2","channel":"preview","sourceSha":"0123456789012345678901234567890123456789","signature":{"url":"https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.2/kautuka-platform-release.sig"},"artifacts":[{"name":"kautuka-linux-amd64.tar.gz","url":"https://github.com/devkrity/kautuka/releases/download/v0.1.20-preview.2/kautuka-linux-amd64.tar.gz"}]}' > "${@: -2:1}"
+  }
+  base_install_main --yes
+) > "$tmp/wsl-bootstrap.log" 2>&1 && {
+  echo 'error: WSL bootstrap accepted a different release.' >&2
+  exit 1
+}
+grep -q 'signed release manifest version does not match requested version' "$tmp/wsl-bootstrap.log"
 if sh "$tmp/generated-kautuka-install-linux.sh" --help >"$tmp/wrong-shell.stdout" 2>"$tmp/wrong-shell.stderr"; then
   echo 'error: generated Linux installer unexpectedly ran under sh.' >&2
   exit 1
