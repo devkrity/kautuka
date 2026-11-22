@@ -2,6 +2,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TabsContent } from '@/components/ui/tabs';
 import { HitlFunctionStat } from '@/features/approvals';
 import type { Skill, SkillAttachmentMode } from '@/features/skills';
+import { cn } from '@/lib/utils';
 import type { AgentSettingsEntry } from '../types/settingsTypes';
 import { SkillCard } from './shared/SkillCard';
 import { executionContextOptions } from './shared/executionContextOptions';
@@ -53,12 +54,7 @@ export function AgentSkillsEditor({
             No platform skills imported yet. Import them from the Skills page first.
           </p>
         ) : (
-          <div
-            className={[
-              'space-y-2',
-              !selectionEnabled ? 'pointer-events-none opacity-60' : '',
-            ].join(' ')}
-          >
+          <div className={cn('space-y-2', !selectionEnabled && 'pointer-events-none opacity-60')}>
             {skills.map((skill) => {
               const attachment = agent.skillAttachments.find((entry) => entry.skillId === skill.id);
               const selectedMode = attachment?.mode ?? 'disabled';
