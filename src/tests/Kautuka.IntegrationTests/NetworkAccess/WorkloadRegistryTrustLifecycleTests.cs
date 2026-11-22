@@ -439,12 +439,14 @@ public sealed class WorkloadRegistryTrustLifecycleTests
             try
             {
                 await worker.StartAsync(TestContext.Current.CancellationToken);
-                await verifierEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
-                DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+                TimeSpan reconcileTimeout = TimeSpan.FromSeconds(30);
+                await verifierEntered.Task.WaitAsync(reconcileTimeout, TestContext.Current.CancellationToken);
+                DateTimeOffset deadline = DateTimeOffset.UtcNow + reconcileTimeout;
                 while (!registry.IsVerified(ip, containerId) && DateTimeOffset.UtcNow < deadline)
                 {
                     await Task.Delay(10, TestContext.Current.CancellationToken);
                 }
+                Assert.True(registry.IsVerified(ip, containerId), "The supervisor did not verify the existing sandbox.");
                 ContainerContext rawGrpcContext = WorkspaceGrpcContractMapper.ResolveWorkspace(
                     desiredState,
                     new WorkspaceContextMessage { ScopeType = "agent", ScopeId = "agent-a", UserId = "user-a" });

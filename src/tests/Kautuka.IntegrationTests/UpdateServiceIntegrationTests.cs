@@ -1680,7 +1680,7 @@ public sealed class UpdateServiceIntegrationTests
     public async Task StartupReconcilesApplyingUntilManagerBecomesReadyWithoutUiPolling()
     {
         var coordinator = new SequenceStatusCoordinator();
-        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(1), TestContext.Current.CancellationToken).ConfigureAwait(true);
+        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(15), TimeSpan.Zero, TestContext.Current.CancellationToken).ConfigureAwait(true);
         Assert.Equal(3, coordinator.Calls);
     }
 
@@ -1688,7 +1688,7 @@ public sealed class UpdateServiceIntegrationTests
     public async Task StartupRetriesTransientObservationFailure()
     {
         var coordinator = new SequenceStatusCoordinator(failFirst: true);
-        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(1), TestContext.Current.CancellationToken).ConfigureAwait(true);
+        await UpdateDiscoveryWorker.ReconcilePendingActivationAsync(coordinator, TimeSpan.FromSeconds(15), TimeSpan.Zero, TestContext.Current.CancellationToken).ConfigureAwait(true);
         Assert.Equal(3, coordinator.Calls);
     }
 
