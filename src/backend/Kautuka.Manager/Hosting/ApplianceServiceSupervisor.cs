@@ -38,7 +38,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private const string UpdateRole = "updateservice";
     private static readonly TimeSpan reconcileDelay = TimeSpan.FromSeconds(5);
     private readonly Service credentials = new(CredentialsRole, "credentialsHost", superviseObservability);
-    private readonly Service channel = new(ChannelRole, "channelHost", superviseObservability);
+    private readonly Service channel = new(ChannelRole, "channelHost", networked: true);
     private readonly Service gateway = new(GatewayRole, "gateway", networked: true);
     private readonly Service webHost = new(WebHostRole, "webhost", networked: true);
     private readonly Service observability = new(ObservabilityRole, ApplianceTelemetry.StateName, networked: true);
@@ -445,6 +445,7 @@ internal sealed partial class ApplianceServiceSupervisor(
             args.AddRange([
                 "--secret", $"{ApplianceTelemetry.SecretName},type=env,target=ZO_ROOT_USER_PASSWORD",
                 "--env", $"ZO_ROOT_USER_EMAIL={KautukaTelemetryDefaults.DefaultOpenObserveRootUserEmail}",
+                "--env", "ZO_TELEMETRY=false",
                 "--env", "ZO_DATA_DIR=/data",
                 "--volume", $"{dataDirectory}:/data:Z",
                 image,
