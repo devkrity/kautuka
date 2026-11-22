@@ -1020,6 +1020,9 @@ chmod +x "$stage_dir/bin/kautuka-manager" \
 mkdir -p "$stage_dir/services/webhost/wwwroot"
 cp -a "$source_root/src/frontend/web/dist/." "$stage_dir/services/webhost/wwwroot/"
 
+# The packaged binaries and static assets must remain readable to the rootless run users.
+chmod -R a+rX,go-w "$stage_dir/bin" "$stage_dir/services"
+
 if [[ -n "$appliance_image_prefix" ]]; then
   log_phase "Building digest-pinned appliance service images"
   bash "$source_root/scripts/build-appliance-service-images.sh" \
