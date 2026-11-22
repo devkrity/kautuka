@@ -129,7 +129,9 @@ At startup, Manager retries the explicit package proxy health probe within a bou
 
 Manager debug logs report how long connector and sandbox artifact builds waited for the image build lock and how long workspace reconciliation took for each trigger.
 
-Workload reconciliation compares the Podman listing with the registry entries captured before that listing began. A package build keeps its pre-start registration until its own cleanup runs. If an egress inspection times out during reconciliation, Manager closes launch admission and verifies the full boundary on the next pass. If that retry finds the pod unhealthy or still cannot verify its health, Manager recreates it before reopening admission.
+A new connector's save-time discovery can continue after one concurrent catalog publication if the connector is still unpublished and the runtime settings are unchanged. Admission still verifies the exact revision used to start its container.
+
+Workload reconciliation compares the Podman listing with the registry entries captured before that listing began. A package build keeps its pre-start registration until its own cleanup runs. The registry removes that build's registration even if reconciliation has updated its container ID. If an egress inspection times out during reconciliation, Manager closes launch admission and verifies the full boundary on the next pass. If that retry finds the pod unhealthy or still cannot verify its health, Manager recreates it before reopening admission.
 
 In appliance mode, the package proxy wrapper builds from the locally imported, digest-pinned base image with networking and automatic pulls disabled. The build retains the scheduled Podman health check. Once running, the proxy fetches upstream packages through Envoy.
 

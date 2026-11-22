@@ -874,6 +874,7 @@ public sealed class WorkspaceContainerConnectorExecutionService(
                     throw new InvalidOperationException("The connector image changed. Test the connection and start a new run.");
                 connector = connector with { Image = imageDigest };
             }
+
             string runtimeKey = BuildRuntimeKey(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             string containerName = BuildContainerName(connector.ConnectorId, effectiveExecutionContext, workspaceContext);
             string? persistentContainerId = null;
@@ -928,6 +929,12 @@ public sealed class WorkspaceContainerConnectorExecutionService(
             }
             else
             {
+                if (isProbe && saveDiscovery && workspaceContext?.UserId is not null)
+                {
+                    authoritativeSnapshot = RefreshNewConnectorProbeSnapshot(
+                        connector.ConnectorId, authoritativeSnapshot, desiredStateStore.Snapshot);
+                }
+
                 persistentContainerId = await EnsureConnectorContainerRunningCoreAsync(
                     connector,
                     runtimeKey,
@@ -1570,6 +1577,30 @@ public sealed class WorkspaceContainerConnectorExecutionService(
         => expected.AcceptedVersion == current.AcceptedVersion
             && string.Equals(expected.PublisherEpoch, current.PublisherEpoch, StringComparison.Ordinal)
             && string.Equals(expected.ContentHash, current.ContentHash, StringComparison.Ordinal);
+
+    private static WorkspaceDesiredStateSnapshot RefreshNewConnectorProbeSnapshot(
+        string connectorId,
+        WorkspaceDesiredStateSnapshot expected,
+        WorkspaceDesiredStateSnapshot current)
+    {
+        // Another import can publish while this candidate's image is being built.
+        // Only consider one publication so we never skip an intervening change to this connector.
+        if (current.AcceptedVersion <= expected.AcceptedVersion
+            || current.AcceptedVersion - expected.AcceptedVersion != 1
+            || !string.Equals(expected.PublisherEpoch, current.PublisherEpoch, StringComparison.Ordinal)
+            || expected.DesiredContainerConnectors.Any(connector => string.Equals(connector.ConnectorId, connectorId, StringComparison.OrdinalIgnoreCase))
+            || current.DesiredContainerConnectors.Any(connector => string.Equals(connector.ConnectorId, connectorId, StringComparison.OrdinalIgnoreCase)))
+        {
+            return expected;
+        }
+
+        var settingsType = WorkspaceDesiredStateJsonContext.Default.ManagerRuntimeSettings;
+        return JsonElement.DeepEquals(
+            JsonSerializer.SerializeToElement(expected.RuntimeSettings, settingsType),
+            JsonSerializer.SerializeToElement(current.RuntimeSettings, settingsType))
+            ? current
+            : expected;
+    }
 
     private void RequireCurrentConnectorSnapshot(WorkspaceDesiredStateSnapshot expected)
     {

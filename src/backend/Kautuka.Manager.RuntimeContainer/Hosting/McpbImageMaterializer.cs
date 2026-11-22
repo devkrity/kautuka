@@ -697,12 +697,7 @@ public sealed class McpbImageMaterializer(
         }
         finally
         {
-            if (workloadRegistry?.FindByIp(allocatedIp) is { Kind: "builder" } current
-                && current.RegisteredUtc == registeredAt)
-            {
-                // Reconcile may have promoted the name to an immutable ID while the build ran.
-                workloadRegistry.Deregister(allocatedIp, current.ContainerId);
-            }
+            workloadRegistry?.DeregisterBuilder(allocatedIp, registeredAt);
 
             await TryRemoveContainerAsync(containerName).ConfigureAwait(false);
         }
