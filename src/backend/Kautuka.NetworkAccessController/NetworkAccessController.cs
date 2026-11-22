@@ -265,11 +265,13 @@ public sealed class NetworkAccessController
         if (entry.Ip == NetworkAddressClassifier.ApplianceChannelHostAddress)
         {
             if (entry.Purpose == "appliance-channelhost" && entry.UserId == "system" && entry.AgentId == "channelhost"
-                && isTls && destinationPort == 443 && destinationIp == NetworkAddressClassifier.SinkholeAddress
-                && (normalizedDestination is "api.telegram.org" or "slack.com"
-                    || normalizedDestination.EndsWith(".slack.com", StringComparison.Ordinal)))
-                return RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort,
-                    "channel_provider", ClusterDfpPublic, openInternetBadge: false);
+                && isTls && destinationIp == NetworkAddressClassifier.SinkholeAddress)
+            {
+                ScopeMatchOutcome channel = ResolveChannelProviderPermission(state, destKind, normalizedDestination, destinationPort);
+                return channel.Kind == ScopeMatchKind.Allowed
+                    ? RecordAllow(now, sourceIp, entry, normalizedDestination, destinationPort, channel.Reason, ClusterDfpPublic, openInternetBadge: false)
+                    : RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, channel.Reason);
+            }
 
             return RecordDeny(now, sourceIp, entry, normalizedDestination, destinationPort, "channel_provider_denied");
         }
@@ -449,22 +451,22 @@ public sealed class NetworkAccessController
         // System actor check (Gateway / ChannelHost system traffic, seeded providers & channels)
         if (string.Equals(userId, "system", StringComparison.Ordinal))
         {
+            if (agentId == "channelhost")
+            {
+                ScopeMatchOutcome channel = ResolveChannelProviderPermission(state, destKind, normalizedDestination, input.Port);
+                return channel.Kind == ScopeMatchKind.Allowed
+                    ? RecordOutboundAllow(now, userId, agentId, connectorId, normalizedDestination, input.Port, channel.Reason)
+                    : RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, channel.Reason);
+            }
+
             IReadOnlyList<NetworkAccessRule> platformRules = NetworkAccessRuleMatcher.FindApplicable(
                 state, null, null, null, destKind, normalizedDestination, input.Port);
             if (platformRules.Any(static rule => !rule.Allowed))
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-            bool slackChannel = agentId == "channelhost" && destKind == "host" && input.Port == 443
-                && (normalizedDestination == "slack.com" || normalizedDestination.EndsWith(".slack.com", StringComparison.Ordinal));
             NetworkAccessRule? explicitSystemRule = FindSystemExplicitRule(state.Rules, agentId, destKind, normalizedDestination, input.Port);
-            if (slackChannel && normalizedDestination != "slack.com")
-            {
-                NetworkAccessRule? channelRule = FindSystemExplicitRule(state.Rules, agentId, destKind, "slack.com", input.Port);
-                if (channelRule is { Allowed: false } || explicitSystemRule is null)
-                    explicitSystemRule = channelRule;
-            }
             if (explicitSystemRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
-            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, slackChannel ? "slack.com" : normalizedDestination, input.Port);
+            NetworkAccessRule? seedRule = FindSystemSeedRule(policyStore.SeedRules, agentId, destKind, normalizedDestination, input.Port);
             if (explicitSystemRule is null && seedRule is { Allowed: false })
                 return RecordOutboundDeny(now, userId, agentId, connectorId, normalizedDestination, input.Port, "blocked");
             if (destKind == "ip" && NetworkAddressClassifier.IsNonPublicV4(normalizedDestination)
@@ -591,6 +593,30 @@ public sealed class NetworkAccessController
         }
 
         return EvaluateOutboundCheck(input);
+    }
+
+    private ScopeMatchOutcome ResolveChannelProviderPermission(
+        NetworkAccessPolicyState state, string destKind, string destination, int port)
+    {
+        bool slack = destination == "slack.com" || destination.EndsWith(".slack.com", StringComparison.Ordinal);
+        if (destKind != "host" || port != 443 || (!slack && destination != "api.telegram.org"))
+            return new(ScopeMatchKind.NoMatch, "channel_provider_denied", false, false);
+
+        const string channelHost = "channelhost";
+        string provider = slack ? "slack.com" : destination;
+        NetworkAccessRule? exact = FindSystemExplicitRule(state.Rules, channelHost, destKind, destination, port);
+        NetworkAccessRule? providerSwitch = provider == destination ? exact
+            : FindSystemExplicitRule(state.Rules, channelHost, destKind, provider, port);
+        IReadOnlyList<NetworkAccessRule> platform = NetworkAccessRuleMatcher.FindApplicable(state, null, null, null, destKind, destination, port);
+        if (exact is { Allowed: false } || providerSwitch is { Allowed: false } || platform.Any(static rule => !rule.Allowed))
+            return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
+        if (exact is { Allowed: true } || providerSwitch is { Allowed: true })
+            return new(ScopeMatchKind.Allowed, "rule_system", false, false);
+
+        NetworkAccessRule? seed = FindSystemSeedRule(policyStore.SeedRules, channelHost, destKind, provider, port);
+        if (seed is { Allowed: true })
+            return new(ScopeMatchKind.Allowed, "seed", false, false);
+        return new(ScopeMatchKind.BlockedByRule, "blocked", false, false);
     }
 
     private static bool HasPackageServiceExplicitDeny(

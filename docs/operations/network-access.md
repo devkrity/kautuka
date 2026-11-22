@@ -28,7 +28,7 @@ Administrators can set the maximum pending network requests in Settings → Adva
 
 Administrators can also set an address that Slack and Telegram users can reach. Network-access errors and denied tool calls in those channels link to that address; if it is not set, the message asks users to contact an administrator rather than showing an unusable relative link. Tool-denial notices do not replace the agent's final response.
 
-Slack and Telegram start paused. Administrators can enable each channel in Settings → Advanced → Network access; this grants the channel service access to Telegram's API or Slack's domain and subdomains, without granting that access to agents or connectors. Pausing keeps saved account settings and blocks new access checks without disconnecting existing connections.
+Slack and Telegram start paused. Administrators can enable each channel in Settings → Advanced → Network access. The same channel permission controls ChannelHost's application checks and Envoy's admission of new connections to Telegram's API or Slack's domain and subdomains. It grants no permissions to agents or connectors. Pausing keeps saved account settings and blocks new connections. Existing connections can remain open.
 
 Approved tool calls resumed by the background dispatcher retain the approving run's user, agent, and connector identity for network access checks. This is covered by a focused continuation test.
 

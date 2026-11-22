@@ -391,6 +391,8 @@ public sealed class ApplianceServiceSupervisorTests
         string telemetryAuthorization = await ApplianceTelemetry.EnsureAuthorizationAsync(podman, runtime, token);
         var registry = new WorkloadRegistry();
         using var policy = new NetworkAccessPolicyStore(Path.Combine(networkState, "policy.json"));
+        policy.SetRule(new NetworkAccessActor("fixture-admin", true),
+            new RuleWriteSpec("agent", "system", "channelhost", null, "slack.com", "host", 443, true), policy.Revision);
         using var logs = LoggerFactory.Create(builder => builder.AddSimpleConsole());
         bool useEnvoySelinuxDomain = Environment.GetEnvironmentVariable("KAUTUKA_DEV_ENVOY_SELINUX") == "1";
         await using var topology = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(networkState, "ip.json")),
