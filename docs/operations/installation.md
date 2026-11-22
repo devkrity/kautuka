@@ -141,6 +141,8 @@ A new connector's save-time discovery can continue after one concurrent catalog 
 
 An MCPB probe gets a three-minute image-preparation budget in addition to the connector's discovery timeout. This accommodates a cold build waiting for another build to finish. Set `Kautuka__ConnectorImagePreparationSeconds` in the Manager service environment to change the preparation budget.
 
+In appliance mode, Manager gives the read-only Podman egress pod and boundary inspections a shared 30-second deadline. Cold connector builds can delay these inspections. Manager closes admission if the deadline expires and verifies the existing boundary before reopening it. Set `Kautuka__NetworkAccess__EgressInspectionTimeoutSeconds` in the Manager service environment to a value between 1 and 60 seconds to change the deadline.
+
 Workload reconciliation compares the Podman listing with the registry entries captured before that listing began. A package build keeps its pre-start registration until its own cleanup runs. The registry removes that build's registration even if reconciliation has updated its container ID. If an egress inspection times out during reconciliation, Manager closes launch admission and verifies the full boundary on the next pass. If that retry finds the pod unhealthy or still cannot verify its health, Manager recreates it before reopening admission.
 
 On restart, Manager removes package builders that have no active registration. If removal fails, Manager quarantines the builder and retries during reconciliation.

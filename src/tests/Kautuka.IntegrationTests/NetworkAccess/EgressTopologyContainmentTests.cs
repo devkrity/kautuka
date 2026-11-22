@@ -351,9 +351,11 @@ public sealed class EgressTopologyContainmentTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task EgressInspectionTimeoutReverifiesBeforeReopeningTheExistingPod(bool timeOutBoundaryInit)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task EgressInspectionTimeoutReverifiesBeforeReopeningTheExistingPod(bool timeOutBoundaryInit, bool expireSharedDeadline)
     {
         DirectoryInfo temp = Directory.CreateTempSubdirectory("nac-retry-inspect-");
         try
@@ -369,15 +371,30 @@ public sealed class EgressTopologyContainmentTests
             const string ipv6 = """{"nftables":[{"rule":{"comment":"ipv6_drop_pod","expr":[]}}]}""";
             bool injectedTimeout = false;
             int nftReads = 0;
+            int podReads = 0;
+            CancellationToken? podInspectionToken = null;
             var registry = new WorkloadRegistry();
-            var podman = new PodmanCommandRunner((args, _) =>
+            var podman = new PodmanCommandRunner(async (args, token) =>
             {
                 bool podInspection = args.SequenceEqual(["pod", "inspect", EgressTopologyManager.EgressPodName, "--format", "json"]);
                 bool boundaryInspection = args.SequenceEqual(["inspect", "kautuka-egress-boundary", "--format", "json"]);
+                if (podInspection)
+                {
+                    podReads++;
+                    if (token != TestContext.Current.CancellationToken)
+                        podInspectionToken = token;
+                }
+                if (boundaryInspection)
+                    Assert.Equal(podInspectionToken, token);
                 if (!injectedTimeout && (timeOutBoundaryInit ? boundaryInspection : podInspection))
                 {
                     injectedTimeout = true;
-                    return Task.FromResult(new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut));
+                    if (expireSharedDeadline)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), token);
+                        Assert.Fail("The shared egress inspection deadline did not cancel Podman.");
+                    }
+                    return new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut);
                 }
 
                 string output = args[0] switch
@@ -389,11 +406,11 @@ public sealed class EgressTopologyContainmentTests
                     "machine" when args[3].Contains("nft -j list table", StringComparison.Ordinal) => ++nftReads == 1 ? ipv4 : ipv6,
                     _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
                 };
-                return Task.FromResult(new PodmanCommandResult(0, output, ""));
+                return new PodmanCommandResult(0, output, "");
             });
             await using var manager = new EgressTopologyManager(podman, new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")),
                 new WorkloadPostStartVerifier(podman), registry, temp.FullName, windowsPodmanMachineName: "fixture",
-                windowsPodmanHookStateDirectory: "/fixture/nac");
+                windowsPodmanHookStateDirectory: "/fixture/nac", inspectionTimeoutSeconds: expireSharedDeadline ? 1 : 30);
             await PrepareSourceDriftAsync(manager, temp.FullName, introduceDrift: false);
             SetPrivateField(manager, "expectedBoundaryRulesetHash", EgressTopologyManager.ComputeBoundaryRulesetHash(ipv4, ipv6));
 
@@ -405,6 +422,7 @@ public sealed class EgressTopologyContainmentTests
             await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
             Assert.True(manager.IsStartupGateOpen);
             Assert.Equal(2, nftReads);
+            Assert.Equal(2, podReads);
         }
         finally { temp.Delete(recursive: true); }
     }

@@ -89,6 +89,8 @@ var podmanCommandRunner = new PodmanCommandRunner();
 string? gatewayConnectEnvoyDirectory = null;
 string? telemetryAuthorization = null;
 bool applianceEnabled = builder.Configuration.GetValue<bool>("Kautuka:Appliance:Enabled");
+int? egressInspectionTimeoutSeconds = builder.Configuration.GetValue<int?>("Kautuka:NetworkAccess:EgressInspectionTimeoutSeconds")
+    ?? (applianceEnabled ? 30 : null);
 const string approvalHoldSection = "Kautuka:NetworkAccess:ApprovalHold:";
 TimeSpan approvalHold = applianceEnabled
     ? builder.Configuration.GetValue(approvalHoldSection + "Duration",
@@ -243,7 +245,8 @@ builder.Services.AddSingleton(sp =>
         imageArchives: sp.GetRequiredService<PodmanImageArchiveStore>(),
         gatewayConnectEnvoyDirectory: gatewayConnectEnvoyDirectory,
         telemetryAuthorization: telemetryAuthorization,
-        approvalHold: approvalHold));
+        approvalHold: approvalHold,
+        inspectionTimeoutSeconds: egressInspectionTimeoutSeconds));
 AddApplianceVerificationService(sp => sp.GetRequiredService<EgressTopologyManager>());
 builder.Services.AddSingleton<IHostedService, DevelopmentNacStartupGuard>();
 builder.Services.AddSingleton<IWorkloadStartupState>(sp => sp.GetRequiredService<EgressTopologyManager>());

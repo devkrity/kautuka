@@ -2684,23 +2684,24 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         await using var manager = new EgressTopologyManager(
             podman, new WorkloadAddressAllocator(Path.Combine(tempDir, "v720-config-recreate-ip.json")),
             new WorkloadPostStartVerifier(podman), registry, tempDir);
-        System.Reflection.MethodInfo ensureConfig = typeof(EgressTopologyManager).GetMethod(
-            "EnsureExistingEgressPodUsesRenderedConfigAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("EnsureExistingEgressPodUsesRenderedConfigAsync method was not found.");
-
-        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken);
         Assert.Contains(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
 
         calls.Clear();
         await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), corefile, TestContext.Current.CancellationToken);
-        await ((Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!).ConfigureAwait(false);
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken);
         Assert.DoesNotContain(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
+
+        await manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, "synthetic-new-credential", false, TestContext.Current.CancellationToken);
+        Assert.Contains(calls, args => args.SequenceEqual(["pod", "rm", "-f", EgressTopologyManager.EgressPodName]));
 
         await File.WriteAllTextAsync(Path.Combine(nac, "dns", "Corefile"), "old loaded config again", TestContext.Current.CancellationToken);
         failRemoval = true;
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await (Task)ensureConfig.Invoke(manager, [boundary, envoy, corefile, false, TestContext.Current.CancellationToken])!);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => manager.EnsureExistingEgressPodUsesRenderedConfigAsync(
+            boundary, envoy, corefile, null, false, TestContext.Current.CancellationToken));
         Assert.False(manager.IsStartupGateOpen);
     }
 
