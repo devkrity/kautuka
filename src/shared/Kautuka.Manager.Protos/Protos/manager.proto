@@ -580,6 +580,7 @@ message NetworkAccessProviderPermissionRequest {
   int32 port = 4;
   bool allow_lan = 5;
   optional int64 confirmed_revision = 6;
+  bool check_only = 7;
 }
 
 message NetworkAccessProviderPermissionResponse {

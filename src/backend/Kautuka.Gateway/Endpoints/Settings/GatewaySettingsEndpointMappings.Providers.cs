@@ -11,7 +11,7 @@ using Grpc.Core;
 namespace Kautuka.Gateway.Endpoints.Settings;
 
 internal sealed record ProviderPermissionConfirmation(string Detail, string Destination, int Port, bool AllowLan, string Revision);
-internal sealed record ProviderSaveConflict(string Detail, string Code);
+internal sealed record ProviderSaveConflict(string Detail, string Code, string? ProviderId = null);
 
 internal static partial class GatewaySettingsEndpointMappings
 {
@@ -220,6 +220,7 @@ internal static partial class GatewaySettingsEndpointMappings
                 DestKind = destKind,
                 Port = providerTarget.Port,
                 AllowLan = allowLan,
+                CheckOnly = true,
             };
             if (bodyElement.TryGetProperty("networkPermission", out JsonElement confirmation) && confirmation.ValueKind == JsonValueKind.Object
                 && confirmation.GetStringProperty("destination", string.Empty) == permissionRequest.Destination
@@ -233,10 +234,11 @@ internal static partial class GatewaySettingsEndpointMappings
                 permissionRequest.ConfirmedRevision = revision;
             }
 
+            var manager = context.RequestServices.GetRequiredService<IManagerGrpcService>().Client;
             NetworkAccessProviderPermissionResponse permission;
             try
             {
-                permission = await context.RequestServices.GetRequiredService<IManagerGrpcService>().Client
+                permission = await manager
                     .EnsureProviderPermissionAsync(permissionRequest, cancellationToken: ct).ConfigureAwait(false);
             }
             catch (RpcException error) when (error.StatusCode == StatusCode.InvalidArgument)
@@ -245,7 +247,7 @@ internal static partial class GatewaySettingsEndpointMappings
             }
             catch (RpcException)
             {
-                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not apply its network permission."),
+                return Results.Json(new GatewayErrorResponse("Provider was not saved because Manager could not check its network permission."),
                     KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
             }
             if (permission.Status == "confirmation_required")
@@ -259,7 +261,7 @@ internal static partial class GatewaySettingsEndpointMappings
             if (permission.Status == "restricted")
                 return Results.Conflict(new GatewayErrorResponse(
                     "Network Access limits this provider destination. Review the existing rule in Network Access before saving."));
-            if (permission.Status != "allowed")
+            if (permission.Status is not ("allowed" or "confirmed"))
                 return Results.Json(new GatewayErrorResponse("Manager returned an unknown provider network decision."),
                     KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
 
@@ -276,7 +278,7 @@ internal static partial class GatewaySettingsEndpointMappings
                 }
                 catch (RpcException)
                 {
-                    return Results.Json(new GatewayErrorResponse("Provider settings were not saved because the credential store could not confirm the key. Check Network Access for any permission you approved."),
+                    return Results.Json(new GatewayErrorResponse("Provider settings were not saved because the credential store could not confirm the key."),
                         KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status503ServiceUnavailable);
                 }
             }
@@ -300,6 +302,27 @@ internal static partial class GatewaySettingsEndpointMappings
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            if (permission.Status == "confirmed")
+            {
+                // Apply the reviewed rule only after every required provider write succeeded.
+                permissionRequest.CheckOnly = false;
+                try
+                {
+                    NetworkAccessProviderPermissionResponse activation = await manager
+                        .EnsureProviderPermissionAsync(permissionRequest, cancellationToken: ct).ConfigureAwait(false);
+                    if (activation.Status != "allowed")
+                        return ProviderActivationFailure(saved.Id,
+                            "Provider settings were saved. Network Access changed. Review access for this provider and save again.",
+                            StatusCodes.Status409Conflict);
+                }
+                catch (RpcException)
+                {
+                    return ProviderActivationFailure(saved.Id,
+                        "Provider settings were saved. Manager could not confirm network access. Save this provider again to retry.",
+                        StatusCodes.Status503ServiceUnavailable);
+                }
+            }
+
             return Results.Json(
                 new GatewayProviderResponse(ToProviderListItem(saved, hasApiKey)),
                 KautukaJsonContext.Default.GatewayProviderResponse);
@@ -318,6 +341,10 @@ internal static partial class GatewaySettingsEndpointMappings
                 : Results.Json(new GatewayErrorResponse("Provider not found"), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status404NotFound);
         }).AddEndpointFilter(SerializeProviderWriteAsync);
     }
+
+    private static IResult ProviderActivationFailure(string providerId, string detail, int statusCode)
+        => Results.Json(new ProviderSaveConflict(detail, "provider_network_activation_incomplete", providerId),
+            KautukaJsonContext.Default.ProviderSaveConflict, statusCode: statusCode);
 
     private static Uri? ResolveProviderTarget(JsonElement body, IGatewayCatalogStore catalog, IProviderTypeCatalog types)
     {

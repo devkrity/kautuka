@@ -246,7 +246,7 @@ public sealed partial class WorkspaceGrpcService
         {
             (long revision, string status) = Nac.PolicyStore.EnsureProviderPermission(
                 ToActor(request.Actor), request.Destination, request.DestKind, request.Port, request.AllowLan,
-                request.HasConfirmedRevision ? request.ConfirmedRevision : null);
+                request.HasConfirmedRevision ? request.ConfirmedRevision : null, request.CheckOnly);
             return new NetworkAccessProviderPermissionResponse { Revision = revision, Status = status };
         });
     }

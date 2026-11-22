@@ -479,7 +479,7 @@ public sealed partial class NetworkAccessPolicyStore
     }
 
     public (long Revision, string Status) EnsureProviderPermission(
-        NetworkAccessActor actor, string destination, string destKind, int port, bool allowLan, long? confirmedRevision)
+        NetworkAccessActor actor, string destination, string destKind, int port, bool allowLan, long? confirmedRevision, bool checkOnly = false)
     {
         NetworkAccessPolicyAuthorizer.ValidateActor(actor);
         if (!actor.IsAdmin) throw new UnauthorizedAccessException("Only an administrator can set provider permissions.");
@@ -499,6 +499,8 @@ public sealed partial class NetworkAccessPolicyStore
                 return (current.Revision, "allowed");
             if (confirmedRevision != current.Revision)
                 return (current.Revision, "confirmation_required");
+            if (checkOnly)
+                return (current.Revision, "confirmed");
 
             // Keep the permission check and the existing rule writer under the same policy lock.
             (long revision, _) = SetRule(actor, new RuleWriteSpec("system", null, null, null, host, kind, targetPort, true, allowLan), current.Revision);
