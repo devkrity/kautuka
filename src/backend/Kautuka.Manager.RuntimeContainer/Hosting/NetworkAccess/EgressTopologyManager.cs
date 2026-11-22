@@ -1791,7 +1791,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             throw new InvalidOperationException($"Failed to start egress pod '{EgressPodName}' (rc {podStart.ExitCode}): {podStart.StdErr}");
         }
 
-        if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+        if (await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false) != EgressPodHealth.Healthy)
         {
             throw new InvalidOperationException($"Egress pod '{EgressPodName}' did not reach a healthy state.");
         }
@@ -1825,7 +1825,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         }
     }
 
-    private async Task<bool> IsEgressPodHealthyAsync(CancellationToken cancellationToken)
+    private enum EgressPodHealth
+    {
+        Healthy,
+        Unhealthy,
+        InspectionTimedOut,
+    }
+
+    private async Task<EgressPodHealth> InspectEgressPodHealthAsync(CancellationToken cancellationToken)
     {
         long started = Stopwatch.GetTimestamp();
         PodmanCommandResult inspect = await podmanRunner
@@ -1837,7 +1844,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         {
             logger.LogWarning("Egress pod inspection did not verify the expected state. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
                 inspect.ExitCode, inspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-            return false;
+            return inspect.TerminationReason == ProcessTerminationReason.TimedOut
+                ? EgressPodHealth.InspectionTimedOut : EgressPodHealth.Unhealthy;
         }
 
         started = Stopwatch.GetTimestamp();
@@ -1845,11 +1853,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             .RunAsync(["inspect", "kautuka-egress-boundary", "--format", "json"], 10, cancellationToken)
             .ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
-        if (boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut)) return true;
+        if (boundaryInspect.ExitCode == 0 && IsSuccessfulBoundaryInit(boundaryInspect.StdOut)) return EgressPodHealth.Healthy;
 
         logger.LogWarning("Egress boundary init inspection did not verify a successful exit. ExitCode={ExitCode} Termination={Termination} ElapsedMs={ElapsedMs}",
             boundaryInspect.ExitCode, boundaryInspect.TerminationReason, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-        return false;
+        return boundaryInspect.TerminationReason == ProcessTerminationReason.TimedOut
+            ? EgressPodHealth.InspectionTimedOut : EgressPodHealth.Unhealthy;
     }
 
     internal static bool IsSuccessfulBoundaryInit(string? inspectJson)
@@ -2941,10 +2950,10 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             }
         }
 
-        bool egressPodHealthy;
+        EgressPodHealth egressPodHealth;
         try
         {
-            egressPodHealthy = await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false);
+            egressPodHealth = await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -2957,7 +2966,14 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
             return;
         }
 
-        if (!egressPodHealthy)
+        if (egressPodHealth == EgressPodHealth.InspectionTimedOut)
+        {
+            logger.LogWarning("Egress inspection timed out; closing the startup gate and retrying verification before replacing the pod.");
+            CloseForQuarantineCleanupRetry();
+            return;
+        }
+
+        if (egressPodHealth != EgressPodHealth.Healthy)
         {
             logger.LogWarning("Egress pod health check failed during reconcile; recreating the egress pod with the startup gate closed.");
             await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);
@@ -3024,6 +3040,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
         // Only consider quarantines recorded before the snapshot. A workload may
         // be created and quarantined while Podman is producing the listing.
         IReadOnlyList<string> quarantineBeforeSnapshot = desiredStateStore?.QuarantinedWorkloadIds ?? [];
+        IReadOnlyList<RegistryEntry> registryBeforeSnapshot = registry.GetAll();
         // Compare running containers to registry using full immutable IDs.
         PodmanCommandResult psResult;
         try
@@ -3152,8 +3169,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
         bool packageProxyStopped = false;
         // Deregister dead containers (matching both canonical hex container IDs and pre-start registered names).
-        foreach (RegistryEntry entry in registry.GetAll())
+        foreach (RegistryEntry entry in registryBeforeSnapshot)
         {
+            if (registry.FindByIp(entry.Ip) != entry)
+            {
+                continue;
+            }
 
             bool hasDirectId = liveCids.Contains(entry.ContainerId);
             bool hasNameMatch = cidByName.TryGetValue(entry.ContainerId, out string? matchedCid);
@@ -3292,6 +3313,12 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 continue;
             }
 
+            if (entry.Kind == "builder" && !WorkloadPostStartVerifier.IsCanonicalContainerId(entry.ContainerId))
+            {
+                // The materializer registers the name before Podman creates the container and owns cleanup.
+                continue;
+            }
+
             logger.LogInformation("Reconcile: Deregistering terminated container '{ContainerId}' (IP: {Ip}).", entry.ContainerId, entry.Ip);
             transientWorkloadDenials.TryRemove(entry.Ip, out _);
             registry.Deregister(entry.Ip, entry.ContainerId);
@@ -3313,7 +3340,7 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
                 await LatchTopologyIncidentAndContainAsync(registry, "rendered egress configuration drift during snapshot retry", cancellationToken).ConfigureAwait(false);
                 return;
             }
-            if (!await IsEgressPodHealthyAsync(cancellationToken).ConfigureAwait(false))
+            if (await InspectEgressPodHealthAsync(cancellationToken).ConfigureAwait(false) != EgressPodHealth.Healthy)
             {
                 workloadSnapshotRetryPending = false;
                 await RecoverEgressTopologyAsync(registry, cancellationToken).ConfigureAwait(false);

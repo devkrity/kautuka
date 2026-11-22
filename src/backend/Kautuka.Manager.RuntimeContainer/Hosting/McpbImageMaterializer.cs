@@ -648,6 +648,15 @@ public sealed class McpbImageMaterializer(
         string allocatedIp = (addressAllocator ?? throw new InvalidOperationException("The Manager workload address allocator is unavailable."))
             .AllocateNextIp(workloadRegistry);
 
+        List<string> arguments = BuildLanguagePackageRunArguments(
+            containerName,
+            systemImage,
+            indexEnvironment,
+            installScript,
+            allocatedIp,
+            isBraked);
+
+        DateTimeOffset registeredAt = DateTimeOffset.UtcNow;
         if (workloadRegistry is not null)
         {
             workloadRegistry.Register(new Kautuka.NetworkAccessController.RegistryEntry(
@@ -661,16 +670,8 @@ public sealed class McpbImageMaterializer(
                 "proxy-only",
                 "none",
                 $"{NetworkAccess.ImageCompatibilityStore.WritableRootfs},{NetworkAccess.ImageCompatibilityStore.FileOwnershipCaps}",
-                DateTimeOffset.UtcNow));
+                registeredAt));
         }
-
-        List<string> arguments = BuildLanguagePackageRunArguments(
-            containerName,
-            systemImage,
-            indexEnvironment,
-            installScript,
-            allocatedIp,
-            isBraked);
 
         try
         {
@@ -696,7 +697,13 @@ public sealed class McpbImageMaterializer(
         }
         finally
         {
-            workloadRegistry?.Deregister(allocatedIp, containerName);
+            if (workloadRegistry?.FindByIp(allocatedIp) is { Kind: "builder" } current
+                && current.RegisteredUtc == registeredAt)
+            {
+                // Reconcile may have promoted the name to an immutable ID while the build ran.
+                workloadRegistry.Deregister(allocatedIp, current.ContainerId);
+            }
+
             await TryRemoveContainerAsync(containerName).ConfigureAwait(false);
         }
     }

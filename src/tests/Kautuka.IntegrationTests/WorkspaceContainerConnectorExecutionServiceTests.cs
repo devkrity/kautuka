@@ -1404,6 +1404,42 @@ public sealed class WorkspaceContainerConnectorExecutionServiceTests
     }
 
     [Fact]
+    public async Task PackageBuilderCleanupDeregistersItsPromotedContainerId()
+    {
+        DirectoryInfo temp = Directory.CreateTempSubdirectory("nac-package-build-");
+        try
+        {
+            var registry = new WorkloadRegistry();
+            var podman = new PodmanCommandRunner((args, _) =>
+            {
+                if (args[0] == "run")
+                {
+                    RegistryEntry builder = Assert.Single(registry.GetAll());
+                    Assert.True(registry.UpdateContainerId(builder.Ip, builder.ContainerId, new string('a', 64)));
+                }
+
+                if (args[0] == "rm")
+                {
+                    Assert.Empty(registry.GetAll());
+                }
+
+                return Task.FromResult(new PodmanCommandResult(0, "", ""));
+            });
+            var materializer = new McpbImageMaterializer(podman, NullLogger<McpbImageMaterializer>.Instance,
+                addressAllocator: new WorkloadAddressAllocator(Path.Combine(temp.FullName, "ip.json")), workloadRegistry: registry);
+            var connector = new WorkspaceMcpContainerConnectorDefinition("user::builder", "localhost/test:base", "server", [], true, false, null, "uv",
+                [new("PIP_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/"), new("UV_INDEX_URL", "http://kautuka-pkgs-proxy:20101/pypi/simple/")], 30, 600);
+            MethodInfo commit = typeof(McpbImageMaterializer).GetMethod("CommitLanguagePackagesAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            await (Task)commit.Invoke(materializer,
+                ["localhost/test:base", "localhost/test:installed", connector, "uv", false, false, TestContext.Current.CancellationToken])!;
+
+            Assert.Empty(registry.GetAll());
+        }
+        finally { temp.Delete(recursive: true); }
+    }
+
+    [Fact]
     public void V7_20_PackageBuilderPreservesBrakeState()
     {
         Assert.Throws<InvalidOperationException>(() => McpbImageMaterializer.BuildLanguagePackageRunArguments(

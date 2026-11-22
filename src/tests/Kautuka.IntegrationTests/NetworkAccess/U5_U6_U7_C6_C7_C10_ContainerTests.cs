@@ -2041,8 +2041,10 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
             .GetValue(manager)!);
     }
 
-    [Fact]
-    public async Task V7_54_ReconcileDoesNotLatchWhenPodInspectThrows_WithNegativeControl()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V7_54_ReconcileRetriesAReportedPodInspectionTimeoutBeforeRecreating(bool reportTimeout)
     {
         int healthInspectCount = 0;
         var calls = new List<string>();
@@ -2058,6 +2060,11 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
                 healthInspectCount++;
                 if (healthInspectCount == 1)
                 {
+                    if (reportTimeout)
+                    {
+                        return Task.FromResult(new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut));
+                    }
+
                     return Task.FromException<PodmanCommandResult>(new TimeoutException("transient pod inspect timeout"));
                 }
             }
@@ -2083,6 +2090,13 @@ public sealed class U5_U6_U7_C6_C7_C10_ContainerTests : IDisposable
         Assert.False((bool)typeof(EgressTopologyManager)
             .GetField("topologyIncidentLatched", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(manager)!);
+        if (reportTimeout)
+        {
+            Assert.DoesNotContain("pod rm -f kautuka-egress", calls);
+            await manager.ReconcileOnceAsync(registry, TestContext.Current.CancellationToken);
+            Assert.False(manager.IsStartupGateOpen);
+        }
+
         Assert.Contains("pod rm -f kautuka-egress", calls);
     }
 

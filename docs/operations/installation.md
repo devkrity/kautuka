@@ -129,6 +129,8 @@ At startup, Manager waits for Podman's initial health check to finish before run
 
 Manager debug logs report how long connector and sandbox artifact builds waited for the image build lock and how long workspace reconciliation took for each trigger.
 
+Workload reconciliation compares the Podman listing with the registry entries captured before that listing began. A package build keeps its pre-start registration until its own cleanup runs. If an egress inspection times out during reconciliation, Manager closes launch admission and verifies the full boundary on the next pass. If that retry finds the pod unhealthy or still cannot verify its health, Manager recreates it before reopening admission.
+
 In appliance mode, the package proxy wrapper builds from the locally imported, digest-pinned base image with networking and automatic pulls disabled. The build retains the scheduled Podman health check. Once running, the proxy fetches upstream packages through Envoy.
 
 Once the appliance services are ready, Manager inspects their containers in one Podman call per reconciliation. It keeps checking individual service health and live egress rules. If the batch fails, Manager inspects services individually to recover stopped or missing containers.
