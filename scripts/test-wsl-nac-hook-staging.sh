@@ -33,7 +33,10 @@ PY
     for service in manager updateservice gateway credentialshost channelhost; do
         printf 'd /run/kautuka/%s 0710 kautuka kautuka -\n' "$service"
     done
-    printf '%s\n' 'f /run/kautuka-db-writer.lock 0644 root root -' 'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -'
+    printf '%s\n' \
+        'f /run/kautuka-db-writer.lock 0644 root root -' \
+        'f /run/kautuka-helper-run.lock 0644 root root -' \
+        'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -'
 } > "$tmp/rootfs/usr/lib/tmpfiles.d/kautuka-sockets.conf"
 tar --owner=0 --group=0 -czf "$tmp/rootfs.tar.gz" -C "$tmp/rootfs" .
 assert_packed_appliance_network_seal "$tmp/rootfs.tar.gz" "" "$version"
