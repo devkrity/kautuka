@@ -536,6 +536,8 @@ internal sealed partial class ApplianceServiceSupervisor(
             args.AddRange([
                 "--env", $"ZO_ROOT_USER_EMAIL={KautukaTelemetryDefaults.DefaultOpenObserveRootUserEmail}",
                 "--env", "ZO_TELEMETRY=false",
+                "--env", "ZO_MMDB_DISABLE_DOWNLOAD=true",
+                "--env", "ZO_MODEL_PRICING_ENABLED=false",
                 "--env", "ZO_DATA_DIR=/data",
                 "--volume", $"{bootstrap}:{ApplianceTelemetry.CollectorConfigPath}:ro,Z",
                 "--volume", $"{dataDirectory}:/data:Z",

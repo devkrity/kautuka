@@ -450,6 +450,12 @@ public sealed class ApplianceServiceSupervisorTests
             }
             string collector = await gateway.EnsureRunningAsync("observability", token);
             Assert.Equal(collector, await gateway.EnsureRunningAsync("observability", token));
+            PodmanCommandResult collectorEnvironment = await podman.RunAsync(
+                ["inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", collector], 10, token);
+            Assert.Equal(0, collectorEnvironment.ExitCode);
+            string[] collectorSettings = collectorEnvironment.StdOut.Split('\n', StringSplitOptions.TrimEntries);
+            Assert.True(collectorSettings.Contains("ZO_MMDB_DISABLE_DOWNLOAD=true", StringComparer.Ordinal), "Collector GeoIP downloads should be disabled.");
+            Assert.True(collectorSettings.Contains("ZO_MODEL_PRICING_ENABLED=false", StringComparer.Ordinal), "Collector pricing sync should be disabled.");
             await WaitForCollectorAsync(podman, collector, token);
             if (telemetryAuthorization is null)
             {
