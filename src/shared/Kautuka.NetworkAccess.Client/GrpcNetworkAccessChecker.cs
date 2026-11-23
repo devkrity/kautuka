@@ -104,8 +104,7 @@ public sealed partial class GrpcNetworkAccessChecker(
                 return NetworkAccessCheckResult.CreatePaused(reason, response.RequestId);
             }
 
-            // Controller unavailable returned as reason
-            if (reason is "controller_unavailable" or "unavailable")
+            if (reason is "controller_unavailable" or "unavailable" or "topology_closed")
             {
                 return NetworkAccessCheckResult.CreateUnavailable(reason);
             }

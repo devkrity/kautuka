@@ -61,6 +61,22 @@ public sealed class NetworkAccessApprovalHoldTests
         Assert.True(client.Disposed);
     }
 
+    [Fact]
+    public async Task ClosedNetworkBoundaryStopsTheCallWithoutAskingForApproval()
+    {
+        var client = new ApprovalCheckClient();
+        client.Response.SetResult(new NetworkAccessCheckOutboundResponse { Reason = "topology_closed" });
+        var checker = new GrpcNetworkAccessChecker(client);
+        var target = new OutboundTarget("approved.example.test", 443, UserId: "user-a", AgentId: "agent-a");
+
+        NetworkAccessCheckResult result = await checker.CheckAsync(target, TestContext.Current.CancellationToken);
+
+        NetworkAccessDeniedException denied = Assert.Throws<NetworkAccessDeniedException>(() => result.ThrowIfDenied(target));
+        Assert.Equal(NetworkAccessDeniedException.CodeUnavailable, denied.NaradReason);
+        Assert.Null(denied.RequestId);
+        Assert.Equal("Kautuka paused this connection while checking network protection. Try again in a moment.", denied.Message);
+    }
+
     private sealed class ApprovalCheckClient : ManagerService.ManagerServiceClient
     {
         public TaskCompletionSource<Metadata> Headers { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

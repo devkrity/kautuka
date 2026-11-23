@@ -107,7 +107,7 @@ timeout 2 bash "$test_root/boot-fast-path"
 flock -u 8
 exec 8>&-
 # A versioned Bash helper is visible in /proc under the Manager release path.
-# A second executable under the same path must still prevent recovery.
+# A separate live process under the same path must still prevent recovery.
 process_root="$test_root/process-scan"
 version_dir="$process_root/manager/versions/1.0.0"
 mkdir -p "$version_dir"
@@ -118,13 +118,18 @@ mkdir -p "$version_dir"
     printf '%s\n' 'assert_database_writers_absent'
 } > "$version_dir/kautuka-apply-release"
 bash "$version_dir/kautuka-apply-release"
-install -m 0755 "$(command -v sleep)" "$version_dir/kautuka-manager"
-"$version_dir/kautuka-manager" 30 &
+mkfifo "$test_root/writer-ready" "$test_root/writer-hold"
+cat > "$version_dir/kautuka-manager" <<'WRITER'
+printf 'ready\n' > "$1"
+IFS= read -r _ < "$2"
+WRITER
+bash "$version_dir/kautuka-manager" "$test_root/writer-ready" "$test_root/writer-hold" &
 writer_pid=$!
 trap 'kill "$writer_pid" 2>/dev/null || true; rm -rf -- "$test_root"' EXIT
+[[ $(timeout 5 head -n 1 "$test_root/writer-ready") == ready ]]
 if bash "$version_dir/kautuka-apply-release" 2> "$test_root/writer.log"; then
     echo 'recovery accepted a running database writer' >&2
     exit 1
 fi
-grep -Fq "pid $writer_pid ($version_dir/kautuka-manager)" "$test_root/writer.log"
+grep -Fq "pid $writer_pid (" "$test_root/writer.log"
 echo 'Host tool publication survives interruption and stale selection redispatches.'

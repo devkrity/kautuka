@@ -78,7 +78,7 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
         string? purpose = null,
         string? customMessage = null,
         Exception? innerException = null)
-        : base(FormatMessage(kind, destination, port, userId, customMessage), innerException)
+        : base(FormatMessage(kind, reason, destination, port, userId, customMessage), innerException)
     {
         Destination = destination;
         Port = port;
@@ -104,6 +104,7 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
 
     private static string FormatMessage(
         NetworkAccessDenialKind kind,
+        string reason,
         string destination,
         int port,
         string? userId,
@@ -118,6 +119,8 @@ public sealed class NetworkAccessDeniedException : HttpRequestException
 
         return kind switch
         {
+            NetworkAccessDenialKind.Unavailable when reason == "topology_closed" =>
+                "Kautuka paused this connection while checking network protection. Try again in a moment.",
             NetworkAccessDenialKind.Unavailable =>
                 "Network access control isn't responding, so this connection was stopped. It isn't a permission problem.",
             NetworkAccessDenialKind.Paused =>
