@@ -97,7 +97,9 @@ describe('UsersTab external account editing', () => {
     expect(code).toHaveValue('example-invite-code');
     await user.click(within(dialog).getByRole('button', { name: 'Copy invitation' }));
     const invitation = await navigator.clipboard.readText();
-    expect(invitation).toContain('Join your team');
+    const joinLink = new URL(invitation.split('\n')[1]);
+    expect(joinLink.href).toBe(`${window.location.origin}/login?join=1`);
+    expect(invitation).toContain('On the computer running Kautuka');
     expect(invitation).toContain('example-invite-code');
     expect(invitation).toContain('Google or Microsoft using new.user@example.com');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));

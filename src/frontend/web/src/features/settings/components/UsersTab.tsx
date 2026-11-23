@@ -84,11 +84,14 @@ export function UsersTab() {
     if (!issuedInvite) return;
     const { hostname, origin } = window.location;
     const localAddress = hostname === 'localhost' || hostname === '[::1]' || hostname.startsWith('127.');
-    const openKautuka = localAddress ? 'Open Kautuka on this computer.' : `Open Kautuka at ${origin}.`;
+    const joinUrl = new URL('/login?join=1', origin);
+    const openKautuka = localAddress
+      ? 'On the computer running Kautuka, open this link to join your team:'
+      : 'Open this link to join your team:';
     try {
       await navigator.clipboard.writeText([
         openKautuka,
-        'Select Sign up to open Join your team.',
+        joinUrl.href,
         `Enter this one-time code: ${issuedInvite.code}`,
         `Then sign in with Google or Microsoft using ${issuedInvite.email}.`,
         'The invitation expires after seven days.',
