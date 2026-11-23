@@ -5,10 +5,10 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 test_root="$(mktemp -d /tmp/kautuka-preflight-test.XXXXXXXX)"
 trap 'rm -rf -- "$test_root"' EXIT
-mkdir -p "$test_root/recovery/backups" "$test_root/data" "$test_root/opt" "$test_root/input"
+mkdir -p "$test_root/recovery/backups" "$test_root/data/gateway/agents/.deleting" "$test_root/opt" "$test_root/input"
 printf 'fixture\n' > "$test_root/input/file"
 tar -czf "$test_root/archive.tar.gz" -C "$test_root/input" .
-printf 'assert __name__ != "__main__"\ndef inventory(*args):\n    return []\n' > "$test_root/kautuka-update-recovery"
+install -m 0755 "$script_dir/kautuka-update-recovery.py" "$test_root/kautuka-update-recovery"
 recovery_root="$test_root/recovery"
 backups_root="$recovery_root/backups"
 database_root="$test_root/data"

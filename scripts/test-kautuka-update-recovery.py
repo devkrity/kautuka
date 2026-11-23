@@ -127,9 +127,12 @@ class RecoverySnapshotTests(unittest.TestCase):
         gateway_root = self.root / "gateway"
         self._make_database(gateway_root / "kautuka.db", "registry", "gateway-source")
         self._make_database(gateway_root / "agents/a1/agent.db", "agent", "agent-source")
+        deletion_staging = gateway_root / "agents/.deleting"
+        deletion_staging.mkdir()
         (gateway_root / "gateway-auth.key").write_bytes(b"source-key")
         recovery.capture(args)
         recovery.verify(args)
+        self.assertFalse((self.backups / "state/gateway/agents/.deleting").exists())
         with self.assertRaisesRegex(RuntimeError, "layout does not match"):
             recovery.verify(self._args())
 
@@ -156,6 +159,16 @@ class RecoverySnapshotTests(unittest.TestCase):
         self.assertEqual(b"source-key", (gateway_root / "gateway-auth.key").read_bytes())
         self.assertFalse(introduced.exists())
         self.assertEqual("untouched", user_file.read_text(encoding="utf-8"))
+        self.assertTrue(deletion_staging.is_dir())
+
+    def test_appliance_refuses_to_skip_an_unfinished_helper_deletion(self):
+        pending_db = self.root / "gateway/agents/.deleting/a1-pending/agent.db"
+        self._make_database(pending_db, "agent", "pending-agent")
+
+        with self.assertRaisesRegex(RuntimeError, "unfinished agent deletion"):
+            recovery.capture(self._args(layout="appliance"))
+
+        self.assertTrue(pending_db.is_file())
 
     def test_existing_host_service_snapshot_without_layout_is_still_valid(self):
         args = self._args()

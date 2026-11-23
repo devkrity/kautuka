@@ -291,7 +291,15 @@ def inventory(data_root: Path, layout: str = HOST_SERVICE_LAYOUT) -> list[tuple[
         if agent_root.is_symlink() or not agent_root.is_dir():
             fail(f"unsupported agents state root: {agent_root}")
         for directory in sorted(agent_root.iterdir()):
-            if directory.is_symlink() or not directory.is_dir() or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", directory.name):
+            if directory.is_symlink() or not directory.is_dir():
+                fail(f"unsupported agent state directory: {directory}")
+            # Gateway keeps this directory after a completed helper deletion.
+            # A populated staging directory may still contain a helper's only copy.
+            if directory.name == ".deleting":
+                if next(directory.iterdir(), None) is not None:
+                    fail(f"unfinished agent deletion in application state: {directory}")
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", directory.name):
                 fail(f"unsupported agent state directory: {directory}")
             db = directory / "agent.db"
             if db.exists() or db.is_symlink():
