@@ -82,9 +82,9 @@ describe('LoginPage — first-run detection', () => {
     const code = screen.getByLabelText('Invitation code');
     expect(code).toHaveValue('');
     await user.type(code, 'fixture-code');
-    await user.click(screen.getByRole('button', { name: 'Sign in', exact: true }));
+    await user.click(screen.getByRole('button', { name: /^Sign in$/ }));
     expect(await screen.findByRole('heading', { name: 'Welcome to Kautuka', level: 1 })).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Sign up', exact: true }));
+    await user.click(screen.getByRole('button', { name: /^Sign up$/ }));
     expect(screen.getByLabelText('Invitation code')).toHaveValue('');
   });
 
