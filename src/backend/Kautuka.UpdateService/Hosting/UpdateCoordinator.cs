@@ -1,8 +1,8 @@
-using Kautuka.Hosting;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 
+using Kautuka.Hosting;
 using Kautuka.Telemetry.Security;
 using Kautuka.UpdateService.Abstractions;
 using Kautuka.UpdateService.Models;
@@ -591,6 +591,7 @@ internal sealed class UpdateCoordinator(
 
         if (TryFinalizeAppliedRelease(state, hostContext, out UpdateStateRecord? finalizedState))
         {
+            RemoveCommittedApplianceDownload(state, hostContext);
             await stateStore.SaveAsync(finalizedState, cancellationToken).ConfigureAwait(false);
             await operationStore.AppendAsync(new UpdateOperationRecord(
                 OperationType: state.PendingOperation ?? "apply",
@@ -855,6 +856,47 @@ internal sealed class UpdateCoordinator(
         };
 
         return true;
+    }
+
+    private void RemoveCommittedApplianceDownload(UpdateStateRecord state, UpdateServiceContext host)
+    {
+        if (options.ApplianceReleaseId is null
+            || state.PendingOperation != "apply"
+            || state.StagedRelease is not { } target
+            || state.CurrentRelease is not { } source
+            || state.PreparedArtifacts is not { ActivationRequestId.Length: 32 } prepared
+            || state.StateChangedAtUtc is not { } requestedAt
+            || host is not { ApplianceBootConfirmed: true, RecoveryPhase: "committed", ApplianceSnapshotPruneStatus: "succeeded" }
+            || host.ApplianceRecoveryUpdatedUnixMilliseconds < requestedAt.ToUnixTimeMilliseconds())
+            return;
+
+        string tag = target.ReleaseId;
+        if (tag != prepared.TargetReleaseId || tag != host.ManagerReleaseId || tag != host.RecoveryTargetRelease
+            || source.ReleaseId != host.RecoverySourceRelease
+            || !ReleaseChannelPolicy.TryParseTag(tag, target.Channel, target.Channel == "preview", out var version)
+            || tag != $"v{version.ToVersionString()}")
+            return;
+
+        // The committed host uses its installed role archives for offline repair.
+        // Only this exact UpdateService-owned transfer file is disposable.
+        try
+        {
+            var runtime = new DirectoryInfo(options.StateRootPath);
+            var updates = new DirectoryInfo(Path.Combine(runtime.FullName, "updates"));
+            var staging = new DirectoryInfo(Path.Combine(updates.FullName, "staging"));
+            var release = new DirectoryInfo(Path.Combine(staging.FullName, tag));
+            var package = new FileInfo(Path.Combine(release.FullName, "kautuka-linux-amd64.tar.gz"));
+            if (package.FullName != prepared.PlatformPackagePath || runtime.LinkTarget is not null
+                || updates.LinkTarget is not null || staging.LinkTarget is not null || release.LinkTarget is not null
+                || package.LinkTarget is not null)
+                return;
+
+            package.Delete();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Could not remove the completed download for appliance release {ReleaseId}.", tag);
+        }
     }
 
     private bool TryRecoverStuckApplyingState(

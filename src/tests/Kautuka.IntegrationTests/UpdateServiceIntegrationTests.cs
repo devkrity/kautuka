@@ -2060,6 +2060,75 @@ public sealed class UpdateServiceIntegrationTests
         }
     }
 
+    [Theory]
+    [InlineData("succeeded", true, true, true)]
+    [InlineData("pending", true, true, false)]
+    [InlineData("failed", true, true, false)]
+    [InlineData("succeeded", false, true, false)]
+    [InlineData("succeeded", true, false, false)]
+    public async Task ApplianceRemovesOnlyItsCurrentCommittedDownload(
+        string pruneStatus, bool recentJournal, bool canonicalPath, bool expectRemoval)
+    {
+        const string sourceTag = "v1.2.3-preview.1";
+        const string targetTag = "v1.2.4-preview.1";
+        const string packageName = "kautuka-linux-amd64.tar.gz";
+        string root = CreateTempDirectory();
+        try
+        {
+            string staging = Path.Combine(root, "updates", "staging");
+            string targetDirectory = Directory.CreateDirectory(Path.Combine(staging, targetTag)).FullName;
+            string recoveryDirectory = Directory.CreateDirectory(Path.Combine(staging, sourceTag)).FullName;
+            string targetPackage = Path.Combine(targetDirectory, packageName);
+            string recoveryPackage = Path.Combine(recoveryDirectory, packageName);
+            string manifest = Path.Combine(targetDirectory, "kautuka-platform-release.json");
+            CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+            await File.WriteAllTextAsync(targetPackage, "new transfer", cancellationToken);
+            await File.WriteAllTextAsync(recoveryPackage, "other transfer", cancellationToken);
+            await File.WriteAllTextAsync(manifest, "metadata", cancellationToken);
+
+            UpdateReleaseReference source = CreateRelease(sourceTag[1..], "preview") with { ReleaseId = sourceTag };
+            UpdateReleaseReference target = CreateRelease(targetTag[1..], "preview") with { ReleaseId = targetTag };
+            DateTimeOffset requestedAt = DateTimeOffset.UtcNow;
+            var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+            {
+                State = UpdateWorkflowState.Applying,
+                PendingOperation = "apply",
+                CurrentRelease = source,
+                LastKnownGoodRelease = source,
+                StagedRelease = target,
+                StateChangedAtUtc = requestedAt,
+                PreparedArtifacts = new(targetTag, canonicalPath ? targetPackage : recoveryPackage, "", new string('a', 32)),
+            });
+            var integration = new RecordingUpdateServiceIntegration(root, target.Version, targetTag,
+                recoveryPhase: "committed", recoverySource: sourceTag, recoveryTarget: targetTag,
+                applianceBootConfirmed: true, applianceRecoveryUpdated: requestedAt.AddSeconds(recentJournal ? 1 : -1).ToUnixTimeMilliseconds())
+            { SnapshotPruneStatus = pruneStatus };
+            var options = Options.Create(new UpdateOptions
+            {
+                StateRootPath = root,
+                ApplianceReleaseId = targetTag,
+                ApplianceReleaseVersion = target.Version,
+            });
+            var coordinator = new UpdateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()),
+                new TestUpdateHttpClientFactory(new Dictionary<string, byte[]>(), _ => { }),
+                integration, new UpdateOperationHistoryStore(options), options, NullLogger<UpdateCoordinator>.Instance);
+
+            UpdateStatusSnapshot status = await coordinator.GetStatusAsync(cancellationToken);
+
+            Assert.Equal(!expectRemoval, File.Exists(targetPackage));
+            Assert.True(File.Exists(recoveryPackage));
+            Assert.True(File.Exists(manifest));
+            if (expectRemoval)
+            {
+                Assert.Equal(UpdateWorkflowState.Current, status.State);
+                Assert.Null(status.LastError);
+                Assert.Equal(UpdateWorkflowState.Current, (await coordinator.GetStatusAsync(cancellationToken)).State);
+            }
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public async Task SuccessfulDiscoveryDoesNotEraseAnUpdateFailure()
     {
