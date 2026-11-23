@@ -1024,6 +1024,7 @@ stage_appliance_version() {
             echo 'error: the appliance version is already staged with different release metadata' >&2
             return 1
         }
+        rm -- "$verified_root/artifact.tar.gz" || return 1
     else
         install -d -o root -g root -m 0755 "$backups_root"
         [[ ! -L "$backups_root" && "$(stat -c '%u' "$backups_root")" == 0 &&
@@ -1032,7 +1033,9 @@ stage_appliance_version() {
         stage_extract_root="$(mktemp -d /var/tmp/kautuka-appliance-stage.XXXXXXXX)"
         (umask 022
          tar --no-same-owner --no-same-permissions --no-overwrite-dir \
-            -xzf "$verified_root/artifact.tar.gz" -C "$stage_extract_root")
+            -xzf "$verified_root/artifact.tar.gz" -C "$stage_extract_root") || return 1
+        # Extraction is complete. The original download remains with UpdateService.
+        rm -- "$verified_root/artifact.tar.gz" || return 1
         local payload="$stage_extract_root/bin"
         [[ -d "$payload" && ! -L "$payload" && -f "$payload/kautuka-manager" && ! -L "$payload/kautuka-manager" &&
             -x "$payload/kautuka-manager" && "$(head -c 4 -- "$payload/kautuka-manager")" == $'\x7fELF' &&
@@ -1058,7 +1061,8 @@ stage_appliance_version() {
                 archive="$stage_extract_root/service-images/$role.tar"
                 [[ -e "$archive" || -L "$archive" ]] || continue
                 [[ -f "$archive" && ! -L "$archive" && -s "$archive" ]] || return 1
-                install -m 0644 -- "$archive" "$appliance_stage_root/service-images/$role.tar"
+                mv -T -- "$archive" "$appliance_stage_root/service-images/$role.tar" || return 1
+                chmod 0644 -- "$appliance_stage_root/service-images/$role.tar" || return 1
             done
         fi
         install -T -m 0644 "$verified_root/manifest.json" "$appliance_stage_root/kautuka-platform-release.json"

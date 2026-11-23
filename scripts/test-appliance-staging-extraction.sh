@@ -36,7 +36,8 @@ appliance_user() {
     cmp "$test_root/source/service-images/gateway.tar" "$version/service-images/gateway.tar"
     cmp "$verified_root/manifest.json" "$version/kautuka-platform-release.json"
     cmp "$verified_root/signature.b64" "$version/kautuka-platform-release.sig"
-    [[ -s "$verified_root/artifact.tar.gz" ]]
+    [[ ! -e "$verified_root/artifact.tar.gz" ]]
+    [[ "$(stat -c '%a' "$version/service-images/gateway.tar")" == 644 ]]
     printf 'observed\n' > "$test_root/prepared"
 }
 # Substitute only the test fixture paths; all staging and cleanup logic is real.
