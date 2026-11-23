@@ -6,6 +6,7 @@ using System.Text.Json;
 using Kautuka.Hosting.Hosting;
 using Kautuka.Manager.Protos;
 using Kautuka.UpdateService.Abstractions;
+using Kautuka.UpdateService.Discovery;
 using Kautuka.UpdateService.Hosting;
 using Kautuka.UpdateService.Models;
 using Kautuka.UpdateService.State;
@@ -622,31 +623,37 @@ public sealed class UpdateServiceIntegrationTests
     [Theory]
     [InlineData(0, UpdateWorkflowState.Applying)]
     [InlineData(1, UpdateWorkflowState.Available)]
-    public async Task ApplianceApplyRechecksActiveExecutionsAfterVerifiedDownload(int activeAfterDownload, UpdateWorkflowState expected)
+    public async Task ApplianceDiscoversSignedPreviewAndRechecksActiveExecutionsAfterDownload(int activeAfterDownload, UpdateWorkflowState expected)
     {
         string root = CreateTempDirectory();
         try
         {
             using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             const string artifactName = "kautuka-linux-amd64.tar.gz";
-            const string releaseUrl = "https://github.com/devkrity/kautuka/releases/download/v1.2.4-preview.1/";
+            const string sourceTag = "v1.2.3-preview.1";
+            const string targetTag = "v1.2.4-preview.1";
+            const string releaseIndex = "https://api.github.com/repos/devkrity/kautuka/releases?per_page=100&page=1";
+            const string releaseUrl = "https://github.com/devkrity/kautuka/releases/download/" + targetTag + "/";
             byte[] archive = "signed fixture"u8.ToArray();
             UpdateReleaseReference candidate = CreateRelease("1.2.4-preview.1", "preview") with
             {
-                ReleaseId = "v1.2.4-preview.1",
-                Tag = "v1.2.4-preview.1",
+                ReleaseId = targetTag,
+                Tag = targetTag,
                 PlatformArtifactUrl = releaseUrl + artifactName,
-                PlatformReleaseAssetUrl = releaseUrl + "manifest.json",
-                PlatformReleaseSignatureAssetUrl = releaseUrl + "manifest.sig",
+                PlatformReleaseAssetUrl = releaseUrl + "kautuka-platform-release.json",
+                PlatformReleaseSignatureAssetUrl = releaseUrl + "kautuka-platform-release.sig",
             };
             byte[] manifest = JsonSerializer.SerializeToUtf8Bytes(new
             {
+                schemaVersion = 2,
                 releaseId = candidate.ReleaseId,
                 version = candidate.Version,
                 channel = candidate.Channel,
                 releaseTag = candidate.Tag,
-                signature = new { url = candidate.PlatformReleaseSignatureAssetUrl },
-                artifacts = new[] { new { name = artifactName, url = candidate.PlatformArtifactUrl, size = archive.Length,
+                sourceSha = new string('b', 40),
+                publishedAt = "2026-11-23T00:00:00Z",
+                signature = new { algorithm = "ecdsa-p256-sha256", path = "kautuka-platform-release.sig", url = candidate.PlatformReleaseSignatureAssetUrl, format = "base64" },
+                artifacts = new[] { new { name = artifactName, platform = "linux-x64", path = artifactName, url = candidate.PlatformArtifactUrl, size = archive.Length,
                     sha256 = Convert.ToHexString(SHA256.HashData(archive)) } },
                 applianceDeployment = new
                 {
@@ -657,35 +664,53 @@ public sealed class UpdateServiceIntegrationTests
                 },
             });
             string signature = Convert.ToBase64String(key.SignData(manifest, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence));
-            var integration = new RecordingUpdateServiceIntegration(root, "1.2.3-preview.1", "v1.2.3-preview.1",
+            var integration = new RecordingUpdateServiceIntegration(root, "1.2.3-preview.1", sourceTag,
                 applianceBootConfirmed: true);
+            var requests = new List<string>();
             var factory = new TestUpdateHttpClientFactory(new Dictionary<string, byte[]>
             {
+                [releaseIndex] = JsonSerializer.SerializeToUtf8Bytes(new[]
+                {
+                    new { tag_name = sourceTag, draft = false, prerelease = true, published_at = "2026-11-22T00:00:00Z" },
+                    new { tag_name = targetTag, draft = false, prerelease = true, published_at = "2026-11-23T00:00:00Z" },
+                }),
                 [candidate.PlatformReleaseAssetUrl!] = manifest,
                 [candidate.PlatformReleaseSignatureAssetUrl!] = Encoding.UTF8.GetBytes(signature),
                 [candidate.PlatformArtifactUrl!] = archive,
             }, url =>
             {
+                requests.Add(url);
                 if (url == candidate.PlatformArtifactUrl)
                     integration.ActiveExecutions = activeAfterDownload;
             });
             var options = Options.Create(new UpdateOptions
             {
                 StateRootPath = root,
-                ApplianceReleaseId = "v1.2.3-preview.1",
+                ApplianceReleaseId = sourceTag,
+                ApplianceReleaseVersion = "1.2.3-preview.1",
+                RepositoryOwner = "devkrity",
+                RepositoryName = "kautuka",
                 ManifestPublicKeyPem = key.ExportSubjectPublicKeyInfoPem(),
             });
             var state = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
             {
-                State = UpdateWorkflowState.Available,
-                AvailableRelease = candidate,
                 CurrentRelease = CreateRelease("1.2.3-preview.1", "preview"),
             });
+            var discovery = new ManifestUrlReleaseDiscoveryClient(factory, options, NullLogger<ManifestUrlReleaseDiscoveryClient>.Instance);
             var coordinator = new UpdateCoordinator(state, new InMemoryUpdateRuntimePolicyStore("preview"),
-                new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), factory, integration,
+                discovery, factory, integration,
                 new UpdateOperationHistoryStore(options), options, NullLogger<UpdateCoordinator>.Instance);
-            UpdateStatusSnapshot result = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken);
+            CancellationToken cancellationToken = TestContext.Current.CancellationToken;
+            await coordinator.RefreshDiscoveryAsync(cancellationToken);
+            UpdateStatusSnapshot available = await coordinator.GetStatusAsync(cancellationToken);
+            Assert.Equal(UpdateWorkflowState.Available, available.State);
+            Assert.Equal(targetTag, available.AvailableRelease?.Tag);
+            Assert.DoesNotContain(candidate.PlatformArtifactUrl!, requests);
 
+            UpdateStatusSnapshot result = await coordinator.ApplyPreparedReleaseAsync(cancellationToken);
+
+            Assert.Equal(releaseIndex, requests[0]);
+            Assert.Contains(candidate.PlatformArtifactUrl!, requests);
             Assert.Equal(expected, result.State);
             Assert.Equal(expected == UpdateWorkflowState.Applying ? candidate.ReleaseId : null, integration.ActivatedReleaseId);
             Assert.Equal(activeAfterDownload, result.ActiveExecCount);
