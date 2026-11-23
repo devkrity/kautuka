@@ -33,6 +33,23 @@ public sealed class PersonaSettingsEndpointsTests
     };
 
     [Fact]
+    public async Task HelperCanBeSavedWithoutCustomInstructions()
+    {
+        await using var fixture = await PersonaApiFixture.CreateAsync();
+        string accessToken = await fixture.LoginAsBootstrapAdminAsync();
+
+        using JsonDocument omitted = await fixture.SendJsonAsync(
+            HttpMethod.Put, "/api/settings/agents/default-instructions",
+            new { name = "Desk Assistant", modelId = "model-1" }, accessToken);
+        using JsonDocument unset = await fixture.SendJsonAsync(
+            HttpMethod.Put, "/api/settings/agents/default-instructions",
+            new { name = "Desk Assistant", modelId = "model-1", systemPrompt = (string?)null }, accessToken);
+
+        Assert.Equal(string.Empty, omitted.RootElement.GetProperty("agent").GetProperty("systemPrompt").GetString());
+        Assert.Equal(string.Empty, unset.RootElement.GetProperty("agent").GetProperty("systemPrompt").GetString());
+    }
+
+    [Fact]
     public async Task PersonaDefinitionsEndpointsRoundTripAndRejectInvalidPayloads()
     {
         await using var fixture = await PersonaApiFixture.CreateAsync();

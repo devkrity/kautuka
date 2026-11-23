@@ -852,6 +852,10 @@ run_build_container \
     command -v node >/dev/null
     command -v uv >/dev/null
     command -v mcpb >/dev/null
+    # MCPB records source file timestamps. Normalize the disposable snapshot so
+    # unchanged connectors retain their digest and discovered tools across releases.
+    export TZ=UTC
+    find mcps/kautuka-web-tools -type f -exec touch -t 200001010000 {} +
     bash scripts/stage-built-in-mcpb.sh --output /out/kautuka-web-tools.mcpb
   "
 

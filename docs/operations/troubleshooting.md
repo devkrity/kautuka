@@ -43,6 +43,7 @@ The local development launcher does not start the optional release-feed server o
 
 - If the appliance pauses helpers because it cannot verify network protection, reopen the usual local address. Manager’s read-only recovery page shows the reason and a scheduled retry or next step when available. Leave it open during an automatic retry. It returns to Kautuka once WebHost answers on that address.
 - If the recovery page asks you to contact Devkrity, include the message shown on the page. If an update cannot start because there is too little disk space, your current version keeps running. Free up space on the computer running Kautuka, then retry the update. Open **Update details** if you need the installer’s message.
+- Helper instructions are optional. You can create a helper with its suggested settings and customize how it responds later.
 - If a connector probe reports that network protection paused startup, retry after the appliance is ready. Manager canceled the launch while it verified the network boundary.
 - Verify `/api/auth/setup/status`, authenticated `/api/auth/me`, and `/api/narad/v1` discovery before debugging React state.
 - Agent routes must reference an agent returned by runtime discovery after synchronization.
