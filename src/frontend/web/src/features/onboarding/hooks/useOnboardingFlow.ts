@@ -1,3 +1,4 @@
+import { createSession } from '@/features/chat';
 import { useCurrentUser } from '@/features/auth';
 import {
     apiError,
@@ -13,7 +14,7 @@ import {
     type ProviderEntry,
 } from '@/features/settings';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
     getGeneratedModelId,
@@ -132,6 +133,8 @@ export function useOnboardingFlow() {
   const [providerValidation, setProviderValidation] = useState<ProviderTestResult | null>(null);
 
   const [saving, setSaving] = useState(false);
+  const [startingChat, setStartingChat] = useState(false);
+  const startingChatRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   // Existing-config detection — used at WelcomeScreen to offer edit vs create new
@@ -589,8 +592,22 @@ export function useOnboardingFlow() {
     navigate('/dashboard', { replace: true, state: createOnboardingHandoffState() });
   };
 
-  const chatWithHelper = () => {
-    navigate(`/workspace/${encodeURIComponent(agentForm.id)}`, { replace: true, state: createOnboardingHandoffState() });
+  const chatWithHelper = async () => {
+    if (startingChatRef.current) return;
+    startingChatRef.current = true;
+    setStartingChat(true);
+    setError(null);
+    try {
+      const session = await createSession('agent', agentForm.id);
+      navigate(`/workspace/${encodeURIComponent(agentForm.id)}?sessionId=${encodeURIComponent(session.id)}`, {
+        replace: true,
+        state: createOnboardingHandoffState(),
+      });
+    } catch (err) {
+      setError(apiError(err));
+      startingChatRef.current = false;
+      setStartingChat(false);
+    }
   };
 
   const configureManually = () => {
@@ -606,6 +623,7 @@ export function useOnboardingFlow() {
     goNext,
     onboardingHealth: onboardingStatus?.health,
     saving,
+    startingChat,
     error,
     checkingExisting,
     hasExistingSetup: Boolean(existingConfig?.agent),

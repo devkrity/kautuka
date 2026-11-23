@@ -202,6 +202,7 @@ export const OnboardingWizard: React.FC = () => {
     saveSetup,
     providerValidation,
     saving,
+    startingChat,
     error,
     modelForm,
     setModelForm,
@@ -488,6 +489,7 @@ export const OnboardingWizard: React.FC = () => {
             {stage === WIZARD_STAGES.success && (
               <SuccessMilestone
                 telegramConfigured={telegramConfiguredInWizard}
+                startingChat={startingChat}
                 onContinue={chatWithHelper}
                 onReviewAbilities={() => goNext(WIZARD_STAGES.recommendations)}
                 onOpenSettings={openSettings}

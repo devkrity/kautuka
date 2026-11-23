@@ -6,6 +6,7 @@ interface SuccessMilestoneProps {
   onReviewAbilities: () => void;
   onOpenSettings: () => void;
   telegramConfigured?: boolean;
+  startingChat?: boolean;
 }
 
 export function SuccessMilestone({
@@ -13,6 +14,7 @@ export function SuccessMilestone({
   onReviewAbilities,
   onOpenSettings,
   telegramConfigured = false,
+  startingChat = false,
 }: Readonly<SuccessMilestoneProps>) {
   return (
     <div className="flex flex-col items-center justify-center space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -40,14 +42,16 @@ export function SuccessMilestone({
         <Button
           size="lg"
           onClick={onContinue}
+          disabled={startingChat}
           className="flex-1 font-semibold whitespace-normal md:whitespace-nowrap"
         >
-          Chat with my helper
+          {startingChat ? 'Starting chat…' : 'Chat with my helper'}
         </Button>
         <Button
           size="lg"
           variant="secondary"
           onClick={onReviewAbilities}
+          disabled={startingChat}
           className="flex-1 whitespace-normal md:whitespace-nowrap"
         >
           Explore optional setup
@@ -56,6 +60,7 @@ export function SuccessMilestone({
           size="lg"
           variant="secondary"
           onClick={onOpenSettings}
+          disabled={startingChat}
           className="flex-1 whitespace-normal md:whitespace-nowrap"
         >
           Open settings

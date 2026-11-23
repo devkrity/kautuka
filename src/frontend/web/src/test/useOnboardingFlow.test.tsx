@@ -16,6 +16,7 @@ const {
   probeModelCandidateMock,
   saveModelMock,
   saveAgentMock,
+  createSessionMock,
 } = vi.hoisted(() => ({
   listProvidersMock: vi.fn(),
   listModelsMock: vi.fn(),
@@ -26,6 +27,7 @@ const {
   probeModelCandidateMock: vi.fn(),
   saveModelMock: vi.fn(),
   saveAgentMock: vi.fn(),
+  createSessionMock: vi.fn(),
 }));
 
 const { checkRuleMock } = vi.hoisted(() => ({
@@ -45,6 +47,8 @@ vi.mock('@/features/network-access/networkAccess', () => ({
   },
   checkProviderSystemwideRule: checkRuleMock,
 }));
+
+vi.mock('@/features/chat', () => ({ createSession: createSessionMock }));
 
 vi.mock('@/features/auth', () => ({
   useCurrentUser: () => ({
@@ -97,9 +101,11 @@ vi.mock('@/features/settings', async () => ({
 }));
 
 import { useOnboardingFlow } from '@/features/onboarding/hooks/useOnboardingFlow';
+import { isActiveOnboardingHandoff } from '@/features/onboarding/utils/onboardingHandoff';
 
 describe('useOnboardingFlow existing setup detection', () => {
   let currentRoute = '';
+  let currentState: unknown;
 
   afterEach(() => vi.restoreAllMocks());
 
@@ -160,11 +166,14 @@ describe('useOnboardingFlow existing setup detection', () => {
     saveModelMock.mockResolvedValue({ data: {} });
     saveAgentMock.mockResolvedValue({ data: {} });
     currentRoute = '';
+    currentState = null;
+    createSessionMock.mockReset().mockResolvedValue({ id: 'session / 1' });
   });
 
   function LocationCapture() {
     const location = useLocation();
     currentRoute = `${location.pathname}${location.search}`;
+    currentState = location.state;
     return null;
   }
 
@@ -354,8 +363,32 @@ describe('useOnboardingFlow existing setup detection', () => {
     await waitFor(() => expect(saveModelMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(saveAgentMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(result.current.stage).toBe('success'));
-    act(() => result.current.chatWithHelper());
-    expect(currentRoute).toBe(`/workspace/${result.current.agentForm.id}`);
+    await act(async () => { await result.current.chatWithHelper(); });
+    expect(createSessionMock).toHaveBeenCalledWith('agent', result.current.agentForm.id);
+    expect(currentRoute).toBe(`/workspace/${encodeURIComponent(result.current.agentForm.id)}?sessionId=session%20%2F%201`);
+    expect(isActiveOnboardingHandoff(currentState)).toBe(true);
+  });
+
+  it('creates only one chat during rapid clicks and retries after an error', async () => {
+    listAgentsMock.mockResolvedValue({ data: { agents: [] } });
+    let rejectSession!: (error: Error) => void;
+    createSessionMock.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectSession = reject; }));
+    const { result } = renderHook(() => useOnboardingFlow(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.checkingExisting).toBe(false));
+    let first!: Promise<void>;
+    act(() => {
+      first = result.current.chatWithHelper();
+      void result.current.chatWithHelper();
+    });
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    expect(result.current.startingChat).toBe(true);
+    await act(async () => { rejectSession(new Error('Could not create conversation')); await first; });
+    expect(result.current.error).toBe('Could not create conversation');
+    expect(result.current.startingChat).toBe(false);
+    expect(currentRoute).toBe('/');
+    await act(async () => { await result.current.chatWithHelper(); });
+    expect(createSessionMock).toHaveBeenCalledTimes(2);
+    expect(currentRoute).toContain('?sessionId=session%20%2F%201');
   });
 
   it('asks for the exact provider permission before creating the helper', async () => {

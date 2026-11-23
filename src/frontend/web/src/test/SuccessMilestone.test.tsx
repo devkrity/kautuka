@@ -21,6 +21,15 @@ describe('SuccessMilestone', () => {
     expect(screen.getByRole('button', { name: 'Open settings' })).toBeInTheDocument();
   });
 
+  it('disables the actions and shows progress while creating the chat', () => {
+    render(
+      <SuccessMilestone startingChat onContinue={vi.fn()} onReviewAbilities={vi.fn()} onOpenSettings={vi.fn()} />
+    );
+    expect(screen.getByRole('button', { name: 'Starting chat…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Explore optional setup' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Open settings' })).toBeDisabled();
+  });
+
   it('shows the Telegram test hint when Telegram was configured in onboarding', () => {
     render(
       <SuccessMilestone

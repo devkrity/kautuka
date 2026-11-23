@@ -4,6 +4,9 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 const flowState = vi.hoisted(() => ({
   stage: 'welcome',
+  startingChat: false,
+  error: null as string | null,
+  chatWithHelper: vi.fn(),
   canManageServiceNetworkAccess: false,
   selectedAgentPresetId: 'general-helper',
   selectedBrainPresetId: 'gemini-flash',
@@ -40,6 +43,8 @@ vi.mock('@/features/onboarding/hooks/useOnboardingFlow', () => ({
     stage: flowState.stage,
     goNext: flowState.goNext,
     skipToDashboard: vi.fn(),
+    chatWithHelper: flowState.chatWithHelper,
+    startingChat: flowState.startingChat,
     configureManually: flowState.configureManually,
     checkingExisting: false,
     hasExistingSetup: false,
@@ -59,7 +64,7 @@ vi.mock('@/features/onboarding/hooks/useOnboardingFlow', () => ({
     saveSetup: flowState.saveSetup,
     providerValidation: null,
     saving: false,
-    error: null,
+    error: flowState.error,
     modelForm: { id: '', providerId: '', modelName: 'gemini-3.5-flash-lite', custom_output_text: '' },
     agentForm: { id: 'agent-1', name: 'My Assistant', modelId: '', systemPrompt: '', mcpBindings: [], skillAttachments: [], sandbox: { enabled: true, allowedLanguages: [], maxMemory: '2g', maxTimeout: 120 }, session: { historyEnabled: true, maxHistoryRuns: 50, summariesEnabled: true, memoryFactExtractionEnabled: true }, superExecMode: 'disabled', toolExposure: { exposedAsTool: false, description: '', invocationTimeoutSeconds: 120 }, persona: { temperature: 0.7, style: 'professional', tone: 'neutral', verbosity: 'concise' }, ownerUserId: '' },
     setAgentForm: vi.fn(),
@@ -80,6 +85,8 @@ import { OnboardingWizard } from '@/features/onboarding/routes/OnboardingWizard'
 describe('OnboardingWizard welcome step', () => {
   beforeEach(() => {
     flowState.stage = 'welcome';
+    flowState.startingChat = false;
+    flowState.error = null;
     flowState.canManageServiceNetworkAccess = false;
     api.get.mockReset();
     flowState.providerForm = {
@@ -96,6 +103,15 @@ describe('OnboardingWizard welcome step', () => {
     flowState.setSelectedBrainPresetId.mockReset();
     flowState.saveSetup.mockReset();
     flowState.configureManually.mockReset();
+  });
+
+  it('shows a session creation failure and busy state on the success route', () => {
+    flowState.stage = 'success';
+    flowState.startingChat = true;
+    flowState.error = 'Could not create conversation';
+    render(<OnboardingWizard />);
+    expect(screen.getByText('Could not create conversation')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Starting chat…' })).toBeDisabled();
   });
 
   it('starts on a welcome screen focused on creating a helper', () => {
