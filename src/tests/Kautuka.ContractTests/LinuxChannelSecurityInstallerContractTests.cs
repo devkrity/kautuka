@@ -93,7 +93,8 @@ public sealed class LinuxChannelSecurityInstallerContractTests
         Assert.Contains("chown \"kautuka-gateway:kautuka\" \"$database_sidecar\"", source, StringComparison.Ordinal);
         Assert.Contains("chmod 0600 \"$database_sidecar\"", source, StringComparison.Ordinal);
         Assert.Contains("""
-                if [[ "$appliance" != 'true' ]]; then
+                    chmod 1771 "$state_root"
+                else
                     normalize_sidecar_data_permissions "$state_root"
                 fi
             """, source, StringComparison.Ordinal);
