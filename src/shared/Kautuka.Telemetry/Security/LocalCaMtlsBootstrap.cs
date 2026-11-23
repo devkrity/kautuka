@@ -59,14 +59,7 @@ public static class LocalCaMtlsBootstrap
         string caKeyPath = Path.Combine(dataRoot, caKeyFile);
         string caCertPath = Path.Combine(dataRoot, caCertFile);
         X509Certificate2 caCert = EnsureCa(caKeyPath, caCertPath, serviceName);
-        X509Certificate2 serverCert = IssueCert(caCert, $"{serviceName} Server", serverAuthOid,
-            san =>
-            {
-                san.AddDnsName(serviceName);
-                san.AddDnsName("localhost");
-                san.AddDnsName("host.containers.internal");
-                san.AddIpAddress(IPAddress.Loopback);
-            });
+        X509Certificate2 serverCert = IssueServerCertificate(caCert, serviceName);
 
         var seenFiles = new HashSet<string>(StringComparer.Ordinal);
         var seenSubjects = new HashSet<string>(StringComparer.Ordinal);
@@ -217,18 +210,41 @@ public static class LocalCaMtlsBootstrap
         {
             SetOwnerOnly(caKeyPath);
             SetOwnerOnly(caCertPath);
-            byte[] keyBytes = File.ReadAllBytes(caKeyPath);
-            byte[] certBytes = File.ReadAllBytes(caCertPath);
-
-            using var ecdsa = ECDsa.Create();
-            ecdsa.ImportECPrivateKey(keyBytes, out _);
-
-            using var cert = X509CertificateLoader.LoadCertificate(certBytes);
-            return cert.CopyWithPrivateKey(ecdsa);
+            return LoadCertificateAuthority(caKeyPath, caCertPath);
         }
 
         return GenerateCa(caKeyPath, caCertPath, serviceName);
     }
+
+    internal static X509Certificate2 LoadCertificateAuthority(string keyPath, string certificatePath)
+    {
+        byte[] keyBytes = File.ReadAllBytes(keyPath);
+        try
+        {
+            using var key = ECDsa.Create();
+            key.ImportECPrivateKey(keyBytes, out _);
+            using X509Certificate2 certificate = X509CertificateLoader.LoadCertificateFromFile(certificatePath);
+            return certificate.CopyWithPrivateKey(key);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyBytes);
+        }
+    }
+
+    internal static X509Certificate2 IssueServerCertificate(
+        X509Certificate2 ca, string serviceName, DateTimeOffset? issuanceTime = null)
+        => IssueCert(ca, $"{serviceName} Server", serverAuthOid, san =>
+        {
+            san.AddDnsName(serviceName);
+            san.AddDnsName("localhost");
+            san.AddDnsName("host.containers.internal");
+            san.AddIpAddress(IPAddress.Loopback);
+        }, issuanceTime: issuanceTime);
+
+    internal static X509Certificate2 IssueClientCertificate(
+        X509Certificate2 ca, string subject, Uri identity, DateTimeOffset issuanceTime)
+        => IssueCert(ca, subject, clientAuthOid, san => san.AddUri(identity), issuanceTime: issuanceTime);
 
     private static X509Certificate2 GenerateCa(string caKeyPath, string caCertPath, string serviceName)
     {

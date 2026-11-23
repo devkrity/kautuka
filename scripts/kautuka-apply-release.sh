@@ -14,6 +14,7 @@ Usage:
   kautuka-apply-release --consume-appliance-request
   kautuka-apply-release --recover
   kautuka-apply-release --boot-recover
+  kautuka-apply-release --renew-channel-certificates
   kautuka-apply-release --commit --version <version>
   kautuka-apply-release --complete-recovery --version <source-version>
   kautuka-apply-release --capabilities
@@ -30,6 +31,7 @@ artifact=''
 version=''
 recover='false'
 boot_recover='false'
+renew_channel_certificates='false'
 commit='false'
 complete_recovery='false'
 capabilities='false'
@@ -119,6 +121,10 @@ while [[ $# -gt 0 ]]; do
             boot_recover='true'
             shift
             ;;
+        --renew-channel-certificates)
+            renew_channel_certificates='true'
+            shift
+            ;;
         --commit)
             commit='true'
             shift
@@ -143,7 +149,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$activate_appliance" == 'true' && "$stage_appliance" == 'true' ]] ||
+if [[ "$renew_channel_certificates" == 'true' && ( $# != 0 || -n "$artifact" || -n "$version" ||
+       "$activate_appliance" == 'true' || "$stage_appliance" == 'true' || "$consume_appliance_request" == 'true' ||
+       "$recover" == 'true' || "$boot_recover" == 'true' || "$commit" == 'true' ||
+       "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]] ||
+    [[ "$activate_appliance" == 'true' && "$stage_appliance" == 'true' ]] ||
     [[ "$consume_appliance_request" == 'true' && ( -n "$artifact" || -n "$version" ||
        "$activate_appliance" == 'true' || "$stage_appliance" == 'true' || "$recover" == 'true' ||
        "$boot_recover" == 'true' || "$commit" == 'true' || "$complete_recovery" == 'true' || "$capabilities" == 'true' ) ]] ||
@@ -1721,6 +1731,72 @@ appliance_systemctl() {
     appliance_user systemctl --user "$@"
 }
 
+channel_certificate_status() {
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    [[ -x "$manager" && "$(stat -c '%u:%a' "$database_root")" == '0:1771' &&
+        "$(realpath -e "$database_root/security/channel")" == "$database_root/security/channel" &&
+        "$(stat -c '%u:%a' "$database_root/security")" == '0:711' &&
+        "$(stat -c '%u:%a' "$database_root/security/channel")" == '0:711' ]] || return 1
+    "$manager" --maintain-channel-certificates check
+}
+
+renew_appliance_channel_certificates() {
+    local boot_only="$1" status=0
+    local manager=/opt/kautuka/manager/current/kautuka-manager
+    local security="$database_root/security"
+    local current="$security/channel" candidate="$security/.channel-renewal"
+    local restart="$security/.channel-renewal-restart" role material selected_release
+    [[ "$(realpath -e "$security")" == "$security" && "$(stat -c '%u:%a' "$security")" == '0:711' &&
+        "$(realpath -e "$current")" == "$current" && "$(stat -c '%u:%a' "$current")" == '0:711' &&
+        "$(realpath -e "$current/offline-authority")" == "$current/offline-authority" &&
+        "$(stat -c '%u:%a' "$current/offline-authority")" == '0:700' ]] || return 1
+    channel_certificate_status || status=$?
+    if [[ "$status" == 10 ]]; then
+        if [[ -e "$candidate" || -L "$candidate" ]]; then
+            [[ ! -L "$candidate" && "$(stat -c '%u' "$candidate")" == 0 ]] || return 1
+            rm -rf -- "$candidate" || return 1
+        fi
+        install -d -o root -g root -m 0700 "$candidate" "$candidate/offline-authority" || return 1
+        for material in channel-ca.key channel-ca.cer; do
+            [[ -f "$current/offline-authority/$material" && ! -L "$current/offline-authority/$material" &&
+                "$(stat -c '%u:%a' "$current/offline-authority/$material")" == '0:600' ]] || return 1
+            ln -- "$current/offline-authority/$material" "$candidate/offline-authority/$material" || return 1
+        done
+        "$manager" --maintain-channel-certificates stage || return 1
+        for role in gateway-private gateway-trust channel-private channel-trust; do
+            find "$candidate/$role" -maxdepth 1 -type f -exec chmod 0600 {} + || return 1
+            chown -R -- "$service_user:$(id -gn "$service_user")" "$candidate/$role" || return 1
+        done
+        sync -f "$candidate" || return 1
+        if [[ "$boot_only" != 'true' ]]; then
+            if [[ ! -e "$restart" ]]; then
+                (umask 077; set -o noclobber; : > "$restart") || return 1
+                sync -f "$security" || return 1
+            fi
+            stop_database_writers || return 1
+        fi
+        chmod 0711 "$candidate" || return 1
+        "$manager" --maintain-channel-certificates publish || return 1
+        chmod 0700 "$candidate" || return 1
+        sync -f "$security" || return 1
+        echo 'Renewed the ChannelHost server and Gateway client and delegation certificates.'
+    elif [[ "$status" != 0 ]]; then
+        return 1
+    fi
+    if [[ "$boot_only" != 'true' && -f "$restart" ]]; then
+        selected_release="$(readlink -f /opt/kautuka/manager/current)" || return 1
+        start_appliance_manager normal && wait_for_appliance_release "${selected_release##*/}" normal || return 1
+    fi
+    if [[ -e "$candidate" || -L "$candidate" ]]; then
+        [[ ! -L "$candidate" && "$(stat -c '%u' "$candidate")" == 0 ]] || return 1
+        rm -rf -- "$candidate" || return 1
+    fi
+    if [[ -f "$restart" ]]; then
+        rm -- "$restart" || return 1
+        sync -f "$security" || return 1
+    fi
+}
+
 start_appliance_manager() {
     if [[ "$1" == verifying ]]; then
         appliance_systemctl set-environment KAUTUKA_APPLIANCE_VERIFY=1 || return 1
@@ -1946,25 +2022,65 @@ PY
 
 # Installing or starting the early-boot recovery unit during a first-time or
 # bootstrap install is a no-op when no recovery decision exists. Avoid taking
-# the update lock in that case: the installer may already hold it while systemd
-# orders a just-created user@ unit behind this no-op recovery service.
+# the update lock if certificates are current: the installer may already hold
+# it while systemd orders a just-created user@ unit behind this recovery service.
 if [[ "$boot_recover" == 'true' \
     && ! -e "$journal_path" && ! -L "$journal_path" \
     && ! -e "$maintenance_path" && ! -L "$maintenance_path" ]]; then
     assert_no_legacy_recovery_markers || exit 1
-    exit 0
+    if ! configure_appliance_layout; then
+        # A fresh or legacy install has no appliance payload to renew.
+        [[ ! -d /opt/kautuka/manager/current/service-images ]] || exit 1
+        exit 0
+    fi
+    if [[ ! -x /opt/kautuka/manager/current/kautuka-manager ]]; then
+        [[ -f /var/lib/kautuka-recovery/first-install.pending &&
+            ! -e /opt/kautuka/manager/current && ! -L /opt/kautuka/manager/current ]] || exit 1
+        exit 0
+    fi
+    certificate_status=0
+    channel_certificate_status || certificate_status=$?
+    if [[ "$certificate_status" == 0 ]]; then
+        exit 0
+    fi
+    [[ "$certificate_status" == 10 ]] || exit 1
+    exec 9>"$lock_path"
+    flock 9
+    renew_appliance_channel_certificates true
+    exit $?
 fi
 
 exec 9>"$lock_path"
 if [[ "$consume_appliance_request" == 'true' ]]; then
     flock 9
 elif ! flock -n 9; then
+    if [[ "$renew_channel_certificates" == 'true' ]]; then
+        echo 'Deferred Channel certificate maintenance until the next timer run because an update is active.'
+        exit 0
+    fi
     echo "error: another apply-release is already running." >&2
     exit 1
 fi
 
 if [[ "$consume_appliance_request" == 'true' ]]; then
     activate_appliance='true'
+fi
+
+if [[ "$renew_channel_certificates" == 'true' ]]; then
+    configure_appliance_layout || exit 1
+    if [[ -e "$maintenance_path" || -L "$maintenance_path" ]]; then
+        echo 'Deferred Channel certificate maintenance while release recovery is pending.'
+        exit 0
+    fi
+    if [[ -e "$journal_path" || -L "$journal_path" ]]; then
+        [[ -f "$journal_path" && ! -L "$journal_path" ]] || exit 1
+        case "$(read_journal_field phase)" in
+            committed|completed|aborted) ;;
+            *) echo 'Deferred Channel certificate maintenance while a release decision is pending.'; exit 0 ;;
+        esac
+    fi
+    renew_appliance_channel_certificates false
+    exit $?
 fi
 
 if [[ "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ]]; then
@@ -1975,8 +2091,12 @@ if [[ "$stage_appliance" == 'true' || "$activate_appliance" == 'true' ]]; then
 elif [[ "$recover" == 'true' || "$boot_recover" == 'true' ]]; then
     if configure_appliance_layout; then
         assert_no_legacy_recovery_markers
-        recover_appliance_operation "$boot_recover"
-        exit $?
+        recover_appliance_operation "$boot_recover" || exit $?
+        if [[ "$boot_recover" == 'true' ]]; then
+            renew_appliance_channel_certificates true
+            exit $?
+        fi
+        exit 0
     fi
 fi
 

@@ -33,6 +33,7 @@ internal sealed partial class ApplianceServiceSupervisor(
 {
     private const string ManagedLabel = "io.kautuka.appliance.service";
     private const string ReleaseLabel = "io.kautuka.appliance.release";
+    private const string channelCertificateLabel = "io.kautuka.appliance.channel-certificate";
     private const string CredentialsRole = "credentialshost";
     private const string ChannelRole = "channelhost";
     private const string GatewayRole = "gateway";
@@ -52,6 +53,7 @@ internal sealed partial class ApplianceServiceSupervisor(
     private volatile bool recoveringNetwork;
     private volatile bool verificationPackageReady;
     private volatile bool verificationTelemetryReady;
+    private string? channelCertificateGeneration;
 
     internal bool IsReady => cohortReady && topology?.IsStartupGateOpen == true
         && (!verificationMode || (verificationTelemetryReady && verificationPackageReady && topology.IsPackageProxyReady));
@@ -433,6 +435,7 @@ internal sealed partial class ApplianceServiceSupervisor(
 
         JsonElement host = container.GetProperty("HostConfig");
         if (!HasLabel(labels, ReleaseLabel, release.ReleaseId)
+            || (service.Role is GatewayRole or ChannelRole && !HasLabel(labels, channelCertificateLabel, GetChannelCertificateGeneration()))
             || container.GetProperty("ImageName").GetString() != image
             || (GetSelinuxPeerType(service) is { } expectedType
                 && (!container.TryGetProperty("ProcessLabel", out JsonElement processLabel)
@@ -480,6 +483,12 @@ internal sealed partial class ApplianceServiceSupervisor(
         return id;
     }
 
+    // Host maintenance publishes all three leaves as a unit while Manager is stopped.
+    private string GetChannelCertificateGeneration()
+        => channelCertificateGeneration ??= Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(RequireMountSource(
+            Path.Combine(stateRoot, "security", "channel", "channel-trust", ChannelSecurityMaterialProvisioner.GatewayClientCertificate),
+            directory: false))));
+
     private List<string> BuildCreateArgs(Service service, string image, string? runtimeImage)
     {
         List<string> args =
@@ -490,6 +499,8 @@ internal sealed partial class ApplianceServiceSupervisor(
             "--security-opt=no-new-privileges", "--userns=keep-id:uid=65532,gid=65532", "--user=65532:65532",
             "--env", "Kautuka__Mode=prod", "--env", "Kautuka__Transport=unix",
         ];
+        if (service.Role is GatewayRole or ChannelRole)
+            args.AddRange(["--label", $"{channelCertificateLabel}={GetChannelCertificateGeneration()}"]);
         if (GetSelinuxPeerType(service) is { } peerType)
             args.AddRange(["--security-opt", $"label=type:{peerType}"]);
 

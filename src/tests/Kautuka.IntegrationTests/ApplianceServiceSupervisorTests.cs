@@ -182,11 +182,13 @@ public sealed class ApplianceServiceSupervisorTests
         foreach (string path in new[] { Path.Combine(state, "gateway"), Path.Combine(state, "workspaces"), Path.Combine(state, "manager"),
             Path.Combine(state, "credentialsHost", "transport"), Path.Combine(state, "security", "channel", "gateway-private"),
             Path.Combine(state, "security", "channel", "gateway-trust"), Path.Combine(state, "security", "channel", "channel-private"),
+            Path.Combine(state, "security", "channel", "channel-trust"),
             Path.Combine(state, "security", "channel", "offline-authority"), Path.Combine(sockets, "gateway"),
             Path.Combine(sockets, "manager"), Path.Combine(sockets, "credentialshost"), Path.Combine(sockets, "channelhost"), connect })
             Directory.CreateDirectory(path);
         foreach (string file in new[] { "manager/.ca.cer", "manager/" + ManagerClientIdentities.GatewayCertificateFileName,
-            "credentialsHost/transport/.ca.cer", "credentialsHost/transport/.credentials-client.pfx" })
+            "credentialsHost/transport/.ca.cer", "credentialsHost/transport/.credentials-client.pfx",
+            "security/channel/channel-trust/" + ChannelSecurityMaterialProvisioner.GatewayClientCertificate })
             File.WriteAllText(Path.Combine(state, file), "fixture");
         var podman = new PodmanCommandRunner((_, _) => throw new InvalidOperationException("Unexpected Podman call."));
         var release = new VerifiedApplianceRelease("v1", "1", new ApplianceDeploymentDescriptor(1, 1,
@@ -201,6 +203,7 @@ public sealed class ApplianceServiceSupervisorTests
             Assert.Equal(confineManagerPeers, args.Contains("label=type:" + ManagerSocketSelinux.ClientType, StringComparer.Ordinal));
             Assert.Contains("io.kautuka.role=appliance-gateway", args);
             Assert.Contains("io.kautuka.image-id=sha256:" + Id, args);
+            Assert.Contains(args, arg => arg.StartsWith("io.kautuka.appliance.channel-certificate=", StringComparison.Ordinal));
             Assert.Contains(args, item => item.Contains("kautuka-workload:ip=10.247.0.4", StringComparison.Ordinal));
             Assert.Contains(args, item => item.StartsWith(connect + ":/run/kautuka-gateway-connect:ro", StringComparison.Ordinal));
             Assert.Contains(args, item => item.StartsWith(Path.Combine(state, "security", "channel", "gateway-private") + ":", StringComparison.Ordinal));

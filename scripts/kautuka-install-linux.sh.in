@@ -915,7 +915,10 @@ prepare_install_state_permissions() {
         grant_shared_group_write_excluding "$state_root" "$service_group" "$channel_security_root"
     fi
     prepare_isolated_service_ancestors "$state_root" "$visible_root" "$service_group"
-    if [[ "$appliance" != 'true' ]]; then
+    if [[ "$appliance" == 'true' ]]; then
+        # Keep shared state writable without letting the service user replace root-owned paths.
+        chmod 1771 "$state_root"
+    else
         normalize_sidecar_data_permissions "$state_root"
     fi
 }
@@ -1451,7 +1454,29 @@ Type=oneshot
 Environment=KAUTUKA_APPLY_DETACHED=1
 ExecStart=/usr/local/lib/kautuka/apply-release --consume-appliance-request
 EOF
-    chmod 0644 /etc/systemd/system/kautuka-appliance-update.{path,service}
+    cat > /etc/systemd/system/kautuka-channel-certificates.service <<'EOF'
+[Unit]
+Description=Renew Kautuka local Channel certificates
+Requires=kautuka-update-recovery.service
+After=kautuka-update-recovery.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kautuka/apply-release --renew-channel-certificates
+EOF
+    cat > /etc/systemd/system/kautuka-channel-certificates.timer <<'EOF'
+[Unit]
+Description=Check Kautuka local Channel certificate expiry
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 0644 /etc/systemd/system/kautuka-appliance-update.{path,service} \
+        /etc/systemd/system/kautuka-channel-certificates.{service,timer}
 }
 
 validate_exact_material_inventory() {
@@ -2318,8 +2343,12 @@ uninstall_release() {
     local preserved_state_root=''
 
     best_effort_systemctl disable --now kautuka-appliance-update.path
+    best_effort_systemctl disable --now kautuka-channel-certificates.timer
+    best_effort_systemctl stop kautuka-channel-certificates.service
     best_effort_systemctl stop kautuka-appliance-update.service
     best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.path
+    best_effort_remove_file /etc/systemd/system/kautuka-channel-certificates.timer
+    best_effort_remove_file /etc/systemd/system/kautuka-channel-certificates.service
     best_effort_remove_file /etc/systemd/system/kautuka-appliance-update.service
 
     local service_units=(
@@ -3112,6 +3141,13 @@ PY
     fi
     web_port="${web_port:-$(resolve_web_ui_port)}"
 
+    # On resume the user manager may already depend on boot recovery. Complete
+    # that root unit before taking the lock it uses to renew expired leaves.
+    if [[ "$appliance_image_payload" == 'true' && -f /var/lib/kautuka-recovery/first-install.pending &&
+        -f /etc/systemd/system/kautuka-update-recovery.service ]]; then
+        systemctl start kautuka-update-recovery.service
+    fi
+
     # Share the updater's lock before changing any installed files. An update
     # already being applied must finish before an installer can replace them.
     require_command flock
@@ -3406,7 +3442,7 @@ PY
 
     systemctl enable kautuka-update-recovery.service
     if [[ "$appliance_image_payload" == 'true' ]]; then
-        systemctl enable --now kautuka-appliance-update.path
+        systemctl enable --now kautuka-appliance-update.path kautuka-channel-certificates.timer
     fi
 
     if [[ "$appliance_image_payload" == 'true' ]]; then
