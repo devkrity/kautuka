@@ -1,6 +1,7 @@
 using Grpc.Core;
 
 using Kautuka.Gateway.Domain.Stores;
+using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Gateway.Infrastructure.Updates;
 using Kautuka.UpdateService.Protos;
 
@@ -8,7 +9,8 @@ namespace Kautuka.Gateway.Infrastructure.Catalog;
 
 internal sealed class UpdateServiceHostedCatalogProvider(
     IUpdateServiceGrpcService updateServiceGrpcService,
-    IGatewayCatalogStore catalogStore) : IGatewayHostedCatalogProvider
+    IGatewayCatalogStore catalogStore,
+    ConnectorUserEnablement? connectorEnablement = null) : IGatewayHostedCatalogProvider
 {
     public async Task<GatewayHostedCatalogSnapshot> ListRecommendedItemsAsync(GatewayUser user, CancellationToken cancellationToken = default)
     {
@@ -58,7 +60,7 @@ internal sealed class UpdateServiceHostedCatalogProvider(
             bool isAvailable = catalogStore.TryGetMcpServer(entry.Id, out GatewayMcpServer? server)
                 && server is not null
                 && GatewayOwnershipAccess.CanAccessConnector(user, server);
-            bool enabled = isAvailable && server!.Enabled;
+            bool enabled = isAvailable && (connectorEnablement?.IsEnabled(user.Id, server!.Id, server.Enabled) ?? server!.Enabled);
             bool canInstall = !isAvailable && !string.IsNullOrWhiteSpace(entry.ArtifactUrl);
 
             return new GatewayHostedCatalogItem(

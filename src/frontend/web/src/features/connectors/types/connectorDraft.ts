@@ -94,6 +94,7 @@ export function blankDraft(): ConnectorDraft {
 export function entryToDraft(c: Connector): ConnectorDraft {
   return {
     ...c,
+    enabled: c.defaultEnabled ?? c.enabled,
     presetId: c.presetId ?? null,
     httpUrl: c.httpUrl ?? '',
     localCommand: c.containerCommand ?? '',

@@ -6,6 +6,7 @@ const { settingsAdmin } = vi.hoisted(() => ({
   settingsAdmin: {
     listUsers: vi.fn(),
     listAgents: vi.fn(),
+    inviteUser: vi.fn(),
     setUserRole: vi.fn(),
     setUserActive: vi.fn(),
     setUserImportPermissions: vi.fn(),
@@ -80,5 +81,32 @@ describe('UsersTab external account editing', () => {
     const dialog = await screen.findByRole('dialog');
     const channelSync = within(dialog).getByTitle('telegram channel sync mode') as HTMLSelectElement;
     expect(channelSync.value).toBe('mirror');
+  });
+
+  it('keeps the new invitation code in the dialog until the administrator closes it', async () => {
+    settingsAdmin.inviteUser.mockResolvedValue({ data: { inviteCode: 'example-invite-code' } });
+    render(<UsersTab />);
+    await screen.findByText('google.user');
+    fireEvent.click(screen.getByRole('button', { name: 'Invite user' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Email'), { target: { value: 'new.user@example.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Invite' }));
+    const code = await within(dialog).findByRole('textbox', { name: 'One-time invitation code' });
+    expect(code).toHaveValue('example-invite-code');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByDisplayValue('example-invite-code')).not.toBeInTheDocument();
+  });
+
+  it('keeps the password-only success message after refreshing the directory', async () => {
+    settingsAdmin.inviteUser.mockResolvedValue({ data: { inviteCode: null } });
+    render(<UsersTab />);
+    await screen.findByText('google.user');
+    fireEvent.click(screen.getByRole('button', { name: 'Invite user' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Password, optional'), { target: { value: 'example-password' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Invite' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(await screen.findByRole('alert')).toHaveTextContent('User created. They can sign in with their username and password.');
   });
 });

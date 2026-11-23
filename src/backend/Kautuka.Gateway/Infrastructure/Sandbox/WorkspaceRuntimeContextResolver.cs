@@ -4,6 +4,7 @@ using System.Text;
 using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
+using Kautuka.Gateway.Infrastructure.Connectors;
 using Kautuka.Manager.Protos;
 
 using Microsoft.Data.Sqlite;
@@ -13,7 +14,8 @@ namespace Kautuka.Gateway.Infrastructure.Sandbox;
 internal sealed class WorkspaceRuntimeContextResolver(
     IPlatformConfigurationProvider configurationProvider,
     IConfiguration configuration,
-    KautukaDatabase database)
+    KautukaDatabase database,
+    ConnectorUserEnablement? connectorEnablement = null)
 {
     private static readonly EffectiveSkillManifestResolver skillResolver = new();
     private const string managerProxyModeKey = "ManagerProxy:Mode";
@@ -96,15 +98,17 @@ internal sealed class WorkspaceRuntimeContextResolver(
                 StringComparer.Ordinal);
 
         WorkspaceMcpContainerConnectorPayload[] containerConnectors = [.. platformConfiguration.McpServers
-            .Where(server => server.Transport == McpTransport.Container && (server.Enabled || server.IsInternalSystemConnector))
-            .SelectMany(server => ResolveConnectorScopeUserIds(server, activeUserIds).Select(userId =>
+            .Where(server => server.Transport == McpTransport.Container)
+            .SelectMany(server => ResolveConnectorScopeUserIds(server, activeUserIds)
+                .Where(userId => server.IsInternalSystemConnector || IsConnectorEnabled(server, userId))
+                .Select(userId =>
                 new WorkspaceMcpContainerConnectorPayload(
                     WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(userId, server.Id),
                     server.Id,
                     ReleasedSandboxImage.Select(ReleasedSandboxImage.Current, server.ContainerImage, server.ServerType),
                     server.ContainerCommand ?? string.Empty,
                     server.ContainerArgs,
-                    server.Enabled,
+                    IsConnectorEnabled(server, userId),
                     server.IsInternalSystemConnector,
                     server.BundlePath,
                     server.ServerType,
@@ -137,7 +141,10 @@ internal sealed class WorkspaceRuntimeContextResolver(
         }
     }
 
-    private static WorkspaceSandboxConnectorBindingsPayload ResolveSandboxConnectorBindings(
+    private bool IsConnectorEnabled(McpServerDefinition server, string? userId)
+        => connectorEnablement?.IsEnabled(userId, server.Id, server.Enabled) ?? server.Enabled;
+
+    private WorkspaceSandboxConnectorBindingsPayload ResolveSandboxConnectorBindings(
         PlatformConfiguration configuration,
         AgentDefinition agent,
         WorkspaceRuntimeContext workspace,
@@ -165,6 +172,7 @@ internal sealed class WorkspaceRuntimeContextResolver(
                 }
 
                 return ResolveConnectorScopeUserIds(server, activeUserIds)
+                    .Where(userId => IsConnectorEnabled(server, userId))
                     .Select(userId => WorkspaceMcpConnectorIdentity.BuildScopedConnectorId(userId, server.Id));
             })
             .Distinct(StringComparer.Ordinal)

@@ -377,6 +377,7 @@ internal sealed partial class GatewayCatalogStore
         bool removed = state.McpServers.Remove(serverId);
         if (removed)
         {
+            connectorEnablement?.ForgetConnector(serverId);
             await desiredStatePublisher.TryPublishCurrentAsync("connector-delete", cancellationToken).ConfigureAwait(false);
         }
 

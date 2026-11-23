@@ -261,11 +261,51 @@ public sealed class SlackSocketModeDispatchTests
             => Task.FromResult(paused ? NetworkAccessCheckResult.CreatePaused("blocked") : NetworkAccessCheckResult.CreateAllowed("rule_system"));
     }
 
+    [Fact]
+    public async Task ReplacingAppTokenClosesPreviousConnectionAndStartsWithNewToken()
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var replacementStarted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = new DispatchFixture(paired: true, supervisorPollDelay: TimeSpan.FromMilliseconds(20),
+            connectionLoopRunner: async (_, _, token, cancellationToken) =>
+            {
+                if (token == "xapp-test")
+                {
+                    firstStarted.TrySetResult();
+                    try { await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
+                    finally { firstStopped.TrySetResult(); }
+                }
+                else
+                {
+                    replacementStarted.TrySetResult(token);
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                }
+            });
+        Task run = fixture.Worker.RunAsync(timeout.Token);
+        try
+        {
+            await firstStarted.Task.WaitAsync(timeout.Token);
+            fixture.ReplaceAppToken("xapp-replacement");
+            Assert.Equal("xapp-replacement", await replacementStarted.Task.WaitAsync(timeout.Token));
+            Assert.True(firstStopped.Task.IsCompletedSuccessfully);
+        }
+        finally
+        {
+            await timeout.CancelAsync();
+            try { await run; }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }
+        }
+    }
+
     private sealed class DispatchFixture : IDisposable
     {
         private readonly string root = Path.Combine(Path.GetTempPath(), "kautuka-slack-dispatch-" + Guid.NewGuid().ToString("N"));
         private readonly ChannelHostDatabase database;
         private readonly SlackSocketModeWorker worker;
+        private readonly ChannelRuntimeCredentialStore credentials = new();
         private readonly string attachmentId;
         private readonly string ownerId = "user-1";
 
@@ -284,7 +324,6 @@ public sealed class SlackSocketModeDispatchTests
             }).Build();
             database = new ChannelHostDatabase(configuration);
             database.EnsureReady();
-            ChannelRuntimeCredentialStore credentials = new();
             ChannelAttachmentStore attachments = new(database, credentials);
             JsonObject settings = new()
             {
@@ -297,7 +336,7 @@ public sealed class SlackSocketModeDispatchTests
             UpsertAttachmentRequest upsert = new() { AttachmentId = this.attachmentId, ProviderKey = "slack", ExpectedSchemaVersion = "slack/v1" };
             upsert.Settings.AddRange(ChannelAttachmentStore.ToSettingValues(settings));
             _ = attachments.UpsertAttachment(upsert);
-            credentials.Replace(this.attachmentId, [new RuntimeCredentialValue { FieldKey = "bot_token", SecretValue = "xoxb-test" }, new RuntimeCredentialValue { FieldKey = "app_token", SecretValue = "xapp-test" }]);
+            ReplaceAppToken("xapp-test");
             Ingress = new ChannelIngressStore(database);
             Sequence = [];
             Http = new RecordingHttpFactory(Sequence);
@@ -314,6 +353,9 @@ public sealed class SlackSocketModeDispatchTests
         }
 
         public string AttachmentId => attachmentId;
+        public void ReplaceAppToken(string token)
+            => credentials.Replace(attachmentId, [new RuntimeCredentialValue { FieldKey = "bot_token", SecretValue = "xoxb-test" }, new RuntimeCredentialValue { FieldKey = "app_token", SecretValue = token }]);
+
         public Task WorkerRunConnectionLoopAsync(CancellationToken cancellationToken)
             => worker.RunConnectionLoopSafeAsync(attachmentId, ownerId, "xapp-test", cancellationToken);
 

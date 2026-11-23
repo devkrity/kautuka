@@ -48,6 +48,15 @@ describe('ConnectorFormModal container validation credentials', () => {
     mutateSpy.mockReset();
   });
 
+  it('offers testing and Done for a shared definition without personal changes', () => {
+    render(<ConnectorFormModal draft={createDraft()} isNew={false} saving={false}
+      readOnlyDefinition onSave={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Test connection' })).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: 'Environment key 1' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument();
+  });
+
   it('shows save progress only while the connector is being saved', () => {
     const props = {
       draft: createDraft(),

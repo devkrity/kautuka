@@ -33,6 +33,52 @@ namespace Kautuka.IntegrationTests;
 [Collection(ProcessEnvironmentTestGroup.Name)]
 public sealed class ConnectorValidationEndpointTests
 {
+    [Theory]
+    [InlineData("http")]
+    [InlineData("container")]
+    public async Task RegularUserTogglesSharedConnectorWithoutChangingOtherUsersOrDefinition(string transport)
+    {
+        var manager = new FakeManagerGrpcService(containerProbeResponse: new WorkspaceMcpProbeResponse
+        { Ok = false, Message = "Approval needed", NetworkApprovalRequired = true });
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument created = await fixture.SendJsonAsync(HttpMethod.Post, "/api/connectors/user-toggle", new
+        {
+            name = "Shared test connector",
+            scope = "system",
+            transport,
+            httpUrl = transport == "http" ? "https://example.com/mcp" : null,
+            containerImage = transport == "container" ? "example/image@sha256:" + new string('a', 64) : null,
+            containerCommand = transport == "container" ? "server" : null,
+            enabled = false,
+        }, admin);
+        using JsonDocument invited = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new
+        { username = "toggle-user", password = "Testing1", role = "user" }, admin);
+        string member = await fixture.LoginAsAsync("toggle-user", "Testing1");
+        manager.ProbeResponse = new WorkspaceMcpProbeResponse
+        {
+            Ok = true,
+            ToolCount = 1,
+            Tools = { new WorkspaceMcpToolMessage { Name = "fetch", JsonSchema = "{\"type\":\"object\"}" } },
+        };
+
+        using var enable = new HttpRequestMessage(HttpMethod.Put, "/api/connectors/user-toggle/enabled")
+        {
+            Content = JsonContent.Create(new { enabled = true, name = "Must not change" }),
+        };
+        enable.Headers.Authorization = new AuthenticationHeaderValue("Bearer", member);
+        using HttpResponseMessage response = await fixture.Client.SendAsync(enable, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        using JsonDocument memberView = await fixture.SendJsonAsync(HttpMethod.Get, "/api/connectors/user-toggle", null, member);
+        using JsonDocument adminView = await fixture.SendJsonAsync(HttpMethod.Get, "/api/connectors/user-toggle", null, admin);
+        Assert.True(memberView.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.False(adminView.RootElement.GetProperty("enabled").GetBoolean());
+        Assert.Equal("Shared test connector", memberView.RootElement.GetProperty("name").GetString());
+        Assert.False(fixture.ReadStoredConnector("user-toggle").Enabled);
+        if (transport == "container") Assert.Equal("fetch", Assert.Single(fixture.ReadStoredConnector("user-toggle").LocalToolDefinitions!).Name);
+    }
+
     [Fact]
     public void ConnectorTestRequestDoesNotDeserializeClientUserIdentity()
     {

@@ -1,6 +1,7 @@
 import { PageState } from '@/components/layout/PageState';
 import { StatusPanels } from '@/components/layout/StatusPanels';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import React from 'react';
 import { useUsersTab } from '../hooks/useUsersTab';
 import { Banner } from './SettingsShared';
@@ -68,6 +69,12 @@ export function UsersTab() {
     });
   };
   const [inviteDialogOpen, setInviteDialogOpen] = React.useState(false);
+  const [inviteCode, setInviteCode] = React.useState<string | null>(null);
+
+  const setInviteDialog = (open: boolean) => {
+    if (!open) setInviteCode(null);
+    setInviteDialogOpen(open);
+  };
 
   const renderUserCard = (user: (typeof pagedUsers)[number], editing: boolean) => (
     <UserAccessCard
@@ -131,29 +138,49 @@ export function UsersTab() {
           type="button"
           onClick={() => {
             setResult(null);
-            setInviteDialogOpen(true);
+            setInviteDialog(true);
           }}
         >
           <Plus className="mr-2 h-4 w-4" /> Invite user
         </Button>
       </div>
 
-      <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialogOpen}>
+      <Dialog open={inviteDialogOpen} onOpenChange={setInviteDialog}>
         <DialogContent className="max-h-[90vh] overflow-y-auto p-4 sm:max-w-2xl sm:p-6">
           <DialogTitle className="sr-only">Invite a user</DialogTitle>
           <DialogDescription className="sr-only">
             Create access for a new Kautuka user.
           </DialogDescription>
-          {result && <Banner success={result.success} message={result.message} />}
-          <UsersInviteCard
-            invite={invite}
-            onInviteChange={setInvite}
-            onInvite={() => {
-              void inviteUser().then((success) => {
-                if (success) setInviteDialogOpen(false);
-              });
-            }}
-          />
+          {inviteCode ? (
+            <div className="space-y-3">
+              <label className="block text-sm">
+                <span className="mb-1 block">One-time invitation code</span>
+                <Input readOnly value={inviteCode} onFocus={(event) => event.currentTarget.select()} />
+              </label>
+              <p className="text-sm text-muted-foreground">
+                Copy this code before closing. The invite expires after seven days.
+              </p>
+              <div className="flex justify-end">
+                <Button type="button" onClick={() => setInviteDialog(false)}>Done</Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {result && <Banner success={result.success} message={result.message} />}
+              <UsersInviteCard
+                invite={invite}
+                onInviteChange={setInvite}
+                onInvite={() => {
+                  void inviteUser().then((invitation) => {
+                    if (invitation?.code) {
+                      setInviteCode(invitation.code);
+                      setInviteDialog(true);
+                    } else if (invitation) setInviteDialog(false);
+                  });
+                }}
+              />
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

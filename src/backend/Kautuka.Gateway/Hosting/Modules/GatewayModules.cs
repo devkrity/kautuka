@@ -139,6 +139,7 @@ internal static class GatewayCatalogModule
     {
         services.AddSingleton<IGatewaySettingsStore, GatewaySettingsStore>();
         services.AddSingleton<IGatewayCatalogStore, GatewayCatalogStore>();
+        services.AddSingleton<ConnectorUserEnablement>();
         services.AddSingleton<IGatewayHostedCatalogProvider, UpdateServiceHostedCatalogProvider>();
         services.AddSingleton<IGatewayHostedCatalogInstaller, GatewayHostedCatalogInstaller>();
         services.AddHostedService<BuiltInMcpPackageBootstrapService>();

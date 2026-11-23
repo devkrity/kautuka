@@ -254,6 +254,16 @@ internal static class SqliteGatewaySchemaBootstrapper
         SqliteGatewaySchemaSeeder.EnsureBuiltinProviderCatalogRows(connection, transaction: null);
         Domain.Stores.ExternalLoginSchemaCompat.EnsureIdentityColumns(connection);
         EnsureExternalLoginTables(connection);
+        EnsureObject(connection, "table", "connector_user_enablement", """
+            CREATE TABLE connector_user_enablement (
+                user_id TEXT NOT NULL REFERENCES runtime_users(user_id) ON DELETE CASCADE,
+                connector_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+                enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                PRIMARY KEY (user_id, connector_id)
+            )
+            """);
+        EnsureObject(connection, "index", "idx_connector_user_enablement_connector",
+            "CREATE INDEX idx_connector_user_enablement_connector ON connector_user_enablement(connector_id)");
         Domain.Stores.ExternalLoginSchemaCompat.EnsureInviteColumns(connection);
         string? schemaId = ReadGatewaySchemaId(connection);
         if (!string.Equals(schemaId, SchemaId, StringComparison.Ordinal)

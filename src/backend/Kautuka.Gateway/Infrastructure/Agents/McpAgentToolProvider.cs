@@ -24,11 +24,18 @@ internal sealed partial class McpAgentToolProvider(
     IConversationAssetIngestionService? documentIngestion = null,
     GatewayState? gatewayState = null,
     MailImageHandoff? mailImages = null,
-    RemoteMcpCredentialRevisionTracker? credentialRevisions = null) : IAgentToolSurfaceContributor
+    RemoteMcpCredentialRevisionTracker? credentialRevisions = null,
+    ConnectorUserEnablement? connectorEnablement = null) : IAgentToolSurfaceContributor
 {
     private readonly RemoteMcpCredentialRevisionTracker credentialRevisions = credentialRevisions ?? new();
 
     public string SurfaceSource => AgentToolSurfaceSources.Mcp;
+
+    private bool IsConnectorEnabled(McpServerDefinition server, string? userId)
+    {
+        bool defaultEnabled = server.Enabled || server.IsInternalSystemConnector;
+        return connectorEnablement?.IsEnabled(userId, server.Id, defaultEnabled) ?? defaultEnabled;
+    }
 
     public async ValueTask<IEnumerable<AIFunction>> BuildToolsAsync(AgentToolContext context, CancellationToken ct)
     {

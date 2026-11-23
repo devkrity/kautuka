@@ -75,9 +75,12 @@ describe('connector sign-in migration state', () => {
     expect(await screen.findByText('Allow this connector to reach auth.kautuka.io?')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     expect(await screen.findByText('Allow this connector to reach gmail.googleapis.com?')).toBeTruthy();
+    expect(screen.getByText('Signed in. Checking mailbox network access…')).toBeTruthy();
+    expect(network.refetch).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Allow' }));
     await waitFor(() => expect(network.post).toHaveBeenCalledWith('/network-access/requests/mail/decision',
       { allow: true, scope: 'connector', expectedRevision: 7 }, expect.any(Object)));
+    await waitFor(() => expect(network.refetch).toHaveBeenCalledOnce());
     expect(network.post).toHaveBeenCalledWith('/network-access/requests/auth/decision',
       { allow: true, scope: 'connector', expectedRevision: 7 }, expect.any(Object));
   });

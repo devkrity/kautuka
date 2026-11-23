@@ -14,6 +14,7 @@ import {
     fetchConnectorOAuth,
     fetchConnectors,
     saveConnector,
+    setConnectorEnabled,
   saveConnectorDiscovery,
     saveConnectorCredentials,
     testConnector,
@@ -42,6 +43,14 @@ export function useSaveConnector() {
     mutationFn: ({ connectorId, data }: { connectorId: string; data: ConnectorSavePayload }) =>
       saveConnector(connectorId, data),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() }),
+  });
+}
+
+export function useSetConnectorEnabled() {
+  return useMutation({
+    mutationFn: ({ connectorId, enabled }: { connectorId: string; enabled: boolean }) =>
+      setConnectorEnabled(connectorId, enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['connectors'] }),
   });
 }
 

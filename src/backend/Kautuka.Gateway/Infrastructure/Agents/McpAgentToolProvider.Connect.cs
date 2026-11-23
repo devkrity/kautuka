@@ -226,7 +226,7 @@ internal sealed partial class McpAgentToolProvider
             AgentDefinition? agent = current.Agents.FirstOrDefault(candidate => string.Equals(candidate.Id, toolContext.AgentId, StringComparison.Ordinal));
             McpServerDefinition? stored = current.McpServers.FirstOrDefault(candidate => string.Equals(candidate.Id, serverDef.Id, StringComparison.Ordinal));
             if (agent is null || !agent.Enabled || !GatewayOwnershipAccess.CallerCanUse(userId, agent.Scope, agent.OwnerUserId)
-                || stored is null || !(stored.Enabled || stored.IsInternalSystemConnector)
+                || stored is null || !IsConnectorEnabled(stored, userId)
                 || !GatewayOwnershipAccess.CallerCanUse(userId, stored.Scope, stored.OwnerUserId)
                 || AllowsPrivateRuntimeDestination(stored.Scope, personalDestination, IsAdminUser(userId ?? string.Empty)) != allowPrivateDestination
                 || (gatewayState is not null && !string.IsNullOrEmpty(userId) && !gatewayState.Users.Values.Any(user => user.IsActive && string.Equals(user.Id, userId, StringComparison.Ordinal)))
@@ -357,10 +357,15 @@ internal sealed partial class McpAgentToolProvider
             McpServerDefinition? server = config.McpServers.FirstOrDefault(candidate =>
                 string.Equals(candidate.Id, binding.ConnectorId, StringComparison.Ordinal));
             if (server is null
-                || server.Transport != McpTransport.Http
-                || !(server.Enabled || server.IsInternalSystemConnector)
+                || !IsConnectorEnabled(server, context.UserId)
                 || !GatewayOwnershipAccess.CallerCanUse(context.UserId, server.Scope, server.OwnerUserId))
             {
+                continue;
+            }
+
+            if (server.Transport != McpTransport.Http)
+            {
+                endpoints.Add((server.Id, string.Empty));
                 continue;
             }
 

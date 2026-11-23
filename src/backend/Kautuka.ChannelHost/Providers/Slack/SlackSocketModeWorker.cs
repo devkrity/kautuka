@@ -382,7 +382,8 @@ internal sealed class SlackSocketModeWorker(
                 var socketPermissions = new Dictionary<string, bool>(StringComparer.Ordinal);
                 foreach ((string attachmentId, ActiveSlackConnection connection) in activeConnections.ToArray())
                 {
-                    if (currentIds.Contains(attachmentId) && connection.Task is { IsCompleted: false })
+                    if (currentIds.Contains(attachmentId) && connection.Task is { IsCompleted: false }
+                        && connection.UsesAppToken(runtimeCredentials.Get(attachmentId, "app_token")))
                     {
                         Uri? endpoint = connection.Endpoint;
                         if (endpoint is null || webSocketChecker is null)
@@ -462,7 +463,7 @@ internal sealed class SlackSocketModeWorker(
                     CancellationTokenSource? linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                     try
                     {
-                        ActiveSlackConnection connection = new(linkedCts);
+                        ActiveSlackConnection connection = new(linkedCts, appToken);
                         if (activeConnections.TryAdd(attachment.AttachmentId, connection))
                         {
                             CancellationTokenSource connectionCts = linkedCts;
@@ -630,6 +631,12 @@ internal sealed class SlackSocketModeWorker(
                 ? typeElement.GetString() ?? string.Empty
                 : string.Empty;
 
+            if (string.Equals(envelopeType, "hello", StringComparison.Ordinal))
+            {
+                LogSocketHello(attachmentId, root);
+                return;
+            }
+
             if (string.Equals(envelopeType, "disconnect", StringComparison.OrdinalIgnoreCase))
             {
                 await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server disconnect", cancellationToken).ConfigureAwait(false);
@@ -656,6 +663,7 @@ internal sealed class SlackSocketModeWorker(
             JsonElement? attachmentSettings = attachmentStore.TryGetActiveAttachment(attachmentId, out ChannelAttachmentRecord? activeAttachment)
                 ? activeAttachment?.Settings
                 : null;
+            bool awaitingPairing = !string.IsNullOrWhiteSpace(GetStringSetting(attachmentSettings, "slack_pairing_code_hash"));
 
             ChannelInboundEventMessage? inboundMessage = string.Equals(envelopeType, eventsApiEnvelopeType, StringComparison.Ordinal)
                 ? TryCreateEventsApiMessage(attachmentId, ownerUserId, payloadElement, attachmentSettings)
@@ -665,6 +673,7 @@ internal sealed class SlackSocketModeWorker(
 
             if (inboundMessage is null)
             {
+                if (awaitingPairing) SlackSocketModeWorkerLog.PairingEvent(logger, attachmentId, "filtered_before_pairing");
                 await AcknowledgeEnvelopeAsync(webSocket, envelopeId, cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -685,6 +694,7 @@ internal sealed class SlackSocketModeWorker(
                     || pairingText.Length != 6
                     || pairingText.Any(static character => !char.IsAsciiDigit(character)))
                 {
+                    if (awaitingPairing) SlackSocketModeWorkerLog.PairingEvent(logger, attachmentId, "not_a_plain_dm_code");
                     await AcknowledgeEnvelopeAsync(webSocket, envelopeId, cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -732,6 +742,7 @@ internal sealed class SlackSocketModeWorker(
             await EnrichSlackInboundContextAsync(attachmentId, inboundMessage, cancellationToken).ConfigureAwait(false);
             resourceGovernor?.EnforceProviderIngress(ProviderKey, attachmentId);
             _ = ingressStore.Enqueue(inboundMessage, inboundMessage.EventId);
+            if (awaitingPairing) SlackSocketModeWorkerLog.PairingEvent(logger, attachmentId, "queued_for_gateway");
 
             // Slack must not observe the envelope acknowledgement before a normalized
             // inbound event is durably committed.
@@ -753,6 +764,22 @@ internal sealed class SlackSocketModeWorker(
                     SlackSocketModeWorkerLog.MessageProcessingError(logger, ackException, attachmentId);
             }
         }
+    }
+
+    private void LogSocketHello(string attachmentId, JsonElement envelope)
+    {
+        string expectedApp = attachmentStore.TryGetActiveAttachment(attachmentId, out ChannelAttachmentRecord? attachment)
+            ? GetStringSetting(attachment?.Settings, "app_id")
+            : string.Empty;
+        string app = envelope.TryGetProperty("connection_info", out JsonElement connection) && connection.ValueKind == JsonValueKind.Object
+            ? GetStringSetting(connection, "app_id")
+            : string.Empty;
+        bool? appMatches = string.IsNullOrWhiteSpace(expectedApp) || string.IsNullOrWhiteSpace(app)
+            ? null
+            : string.Equals(expectedApp, app, StringComparison.Ordinal);
+        int? connectionCount = envelope.TryGetProperty("num_connections", out JsonElement count)
+            && count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out int value) ? value : null;
+        SlackSocketModeWorkerLog.SocketHello(logger, attachmentId, appMatches, connectionCount);
     }
 
     private static Func<Uri, CancellationToken, Task<WebSocket>> CreateSocketConnector(
@@ -1649,12 +1676,13 @@ internal sealed class SlackSocketModeWorker(
     private static string TokenFingerprint(string token)
         => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(token)));
 
-    private sealed class ActiveSlackConnection(CancellationTokenSource cancellation)
+    private sealed class ActiveSlackConnection(CancellationTokenSource cancellation, string appToken)
     {
         private Uri? endpoint;
 
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public Task? Task { get; set; }
+        public bool UsesAppToken(string currentToken) => string.Equals(appToken, currentToken, StringComparison.Ordinal);
         public Uri? Endpoint
         {
             get => Volatile.Read(ref endpoint);

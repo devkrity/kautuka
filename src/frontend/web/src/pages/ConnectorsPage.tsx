@@ -17,6 +17,7 @@ import {
   useConnectors,
   useDeleteConnector,
   useSaveConnector,
+  useSetConnectorEnabled,
   useSaveConnectorCredentials,
   useSaveConnectorDiscovery,
   type Connector,
@@ -61,6 +62,7 @@ export const ConnectorsPage: React.FC = () => {
   const { data: currentUser } = useCurrentUser();
   const { data: connectors = [], isLoading, error } = useConnectors();
   const saveMutation = useSaveConnector();
+  const enableMutation = useSetConnectorEnabled();
   const discoveryMutation = useSaveConnectorDiscovery();
   const credsMutation = useSaveConnectorCredentials();
   const deleteMutation = useDeleteConnector();
@@ -139,16 +141,9 @@ export const ConnectorsPage: React.FC = () => {
   const handleToggle = async (id: string, enabled: boolean) => {
     const current = connectors.find((c) => c.id === id);
     if (!current) return;
-    if (!canManageConnector(current)) {
-      toast.error('Only admins can change system connector settings.');
-      return;
-    }
     setPendingToggle((previous) => new Map(previous).set(id, enabled));
     try {
-      await saveMutation.mutateAsync({
-        connectorId: id,
-        data: buildSavePayload({ ...entryToDraft(current), enabled }),
-      });
+      await enableMutation.mutateAsync({ connectorId: id, enabled });
     } catch (error) {
       toast.error(getErrorMessage(error) ?? 'Could not change connector state.');
     } finally {
@@ -170,9 +165,7 @@ export const ConnectorsPage: React.FC = () => {
 
     if (current && !canManageConnector(current)) {
       if (Object.keys(nonEmpty).length === 0 && !httpUrlOverride) {
-        toast.error(
-          'Only admins can change system connector settings. Add credentials or a personal HTTP URL to save personal access.'
-        );
+        setModalTarget(null);
         return;
       }
 
@@ -298,13 +291,9 @@ export const ConnectorsPage: React.FC = () => {
               ? 'Saving connector credentials…'
               : 'Saving the connector. Kautuka may build its image and check its tools, which can take a few minutes.'
           }
-          saveLabel={
-            modalTarget !== 'new' && modalTarget != null && !canManageConnector(modalTarget)
-              ? 'Save Credentials'
-              : undefined
-          }
+          readOnlyDefinition={modalTarget !== 'new' && modalTarget != null && !canManageConnector(modalTarget)}
           onToolCountSaved={
-            modalTarget != null && modalTarget !== 'new'
+            modalTarget != null && modalTarget !== 'new' && canManageConnector(modalTarget)
               ? (count, names) => handleToolCountSaved(modalTarget.id, count, names)
               : undefined
           }

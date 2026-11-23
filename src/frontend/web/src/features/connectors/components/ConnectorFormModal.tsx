@@ -16,6 +16,7 @@ interface ConnectorFormModalProps {
   saving: boolean;
   saveStatus?: string;
   saveLabel?: string;
+  readOnlyDefinition?: boolean;
   onToolCountSaved?: (toolCount: number, toolNames: string[] | null) => void;
 }
 
@@ -34,6 +35,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
   saving,
   saveStatus,
   saveLabel,
+  readOnlyDefinition = false,
   onToolCountSaved,
 }) => {
   const [draft, setDraft] = useState<ConnectorDraft>({ ...initial });
@@ -290,6 +292,9 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
     if (saveLabel) {
       return saveLabel;
     }
+    if (readOnlyDefinition) {
+      return Object.values(credValues).some((value) => value.trim()) ? 'Save credentials' : 'Done';
+    }
     return isNew ? 'Add connector' : 'Save changes';
   })();
 
@@ -324,6 +329,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
 
         {/* body */}
         <div className="max-h-[65vh] space-y-4 overflow-y-auto p-4 sm:p-5">
+          <fieldset className="min-w-0 space-y-4" disabled={readOnlyDefinition}>
           {isNew && (
             <>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -632,6 +638,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
             </>
           )}
 
+          </fieldset>
           <section className="space-y-3 border-t border-border pt-4">
             <div>
               <h3 className="text-sm font-semibold">Environment credentials</h3>
@@ -656,6 +663,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
                   <input
                     className="mt-1 w-full rounded border border-border bg-background px-3 py-1.5 text-sm font-mono"
                     value={row.name}
+                    disabled={readOnlyDefinition}
                     onChange={(event) => {
                       const nextName = event.target.value;
                       clearValues(row.name.trim(), nextName.trim());
@@ -687,6 +695,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
                   variant="outline"
                   size="sm"
                   aria-label={`Remove environment key ${index + 1}`}
+                  disabled={readOnlyDefinition}
                   onClick={() => {
                     clearValues(row.name.trim());
                     syncRows(rows.filter((item) => item.id !== row.id));
@@ -705,6 +714,7 @@ export const ConnectorFormModal: React.FC<ConnectorFormModalProps> = ({
               type="button"
               variant="outline"
               size="sm"
+              disabled={readOnlyDefinition}
               onClick={() => syncRows([...rows, { id: nextRowId.current++, name: '' }])}
             >
               + Add key

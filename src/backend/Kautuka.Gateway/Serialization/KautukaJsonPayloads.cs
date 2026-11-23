@@ -878,7 +878,8 @@ internal sealed record GatewayConnectorListItem(
     string? McpProtocolVersion = null,
     RemoteMcpCredential[]? Credentials = null,
     RemoteMcpHeader[]? HttpHeaders = null,
-    bool RequiresCredentialReentry = false);
+    bool RequiresCredentialReentry = false,
+    bool? DefaultEnabled = null);
 
 internal sealed record GatewayConnectorsResponse(GatewayConnectorListItem[] Connectors);
 
