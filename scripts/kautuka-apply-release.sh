@@ -38,6 +38,7 @@ capabilities='false'
 stage_appliance='false'
 activate_appliance='false'
 consume_appliance_request='false'
+appliance_request_id=''
 recovery_layout=host-service
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -231,6 +232,43 @@ assert_safe_artifact() {
 # UpdateService runs as an unprivileged account and its staging directory is
 # writable by that account. Copy the inputs into a root-only directory, then
 # verify the signature and copied archive independently before extracting it.
+# Only the privileged helper records this specific pre-journal failure.
+record_appliance_preflight_space_failure() {
+    [[ "$consume_appliance_request" == true && -n "$appliance_request_id" && -n "${source_pointers[manager]:-}" ]] || return 0
+    python3 - "$recovery_root" "$appliance_request_id" "${source_pointers[manager]}" "$version" <<'PY'
+import json, os, sys, tempfile
+root, request, source, target = sys.argv[1:]
+fd, name = tempfile.mkstemp(prefix='.activation-preflight-', dir=root)
+try:
+    os.fchmod(fd, 0o644)
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump({'requestId': request, 'sourceVersion': source, 'targetVersion': target, 'code': 'insufficient_space'}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(name, os.path.join(root, 'activation-preflight.json'))
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try: os.fsync(directory)
+    finally: os.close(directory)
+finally:
+    if os.path.exists(name): os.unlink(name)
+PY
+}
+
+check_verified_archive_space() {
+    local test_free_bytes=''
+    if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
+    python3 - "$1" "$test_free_bytes" <<'PY' || { local status=$?; [[ "$status" != 73 ]] || record_appliance_preflight_space_failure; return "$status"; }
+import os, sys
+archive_size = os.stat(sys.argv[1]).st_size
+fs = os.statvfs('/var/tmp')
+available = int(sys.argv[2]) if sys.argv[2] else fs.f_bavail * fs.f_frsize
+required = archive_size + 256 * 1024 * 1024
+if available < required:
+    print(f'error: insufficient free space for the private verified archive: need {required} bytes, have {available} bytes', file=sys.stderr)
+    raise SystemExit(73)
+PY
+}
+
 verify_staged_artifact() {
     local source="$1"
     local target_version="$2"
@@ -263,15 +301,7 @@ verify_staged_artifact() {
         return 1
     }
 
-    python3 - "$source" <<'PY'
-import os, sys
-archive_size = os.stat(sys.argv[1]).st_size
-fs = os.statvfs('/var/tmp')
-available = fs.f_bavail * fs.f_frsize
-required = archive_size + 256 * 1024 * 1024
-if available < required:
-    raise SystemExit(f'error: insufficient free space for the private verified archive: need {required} bytes, have {available} bytes')
-PY
+    check_verified_archive_space "$source" || return $?
     verified_root="$(mktemp -d /var/tmp/kautuka-verified-XXXXXX)"
     cp -- "$manifest" "$verified_root/manifest.json"
     cp -- "$signature" "$verified_root/signature.b64"
@@ -1059,7 +1089,7 @@ stage_appliance_version() {
 check_staging_space() {
     local test_free_bytes=''
     if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
-    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "${2:-host-service}" <<'PY'
+    python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "${2:-host-service}" <<'PY' || { local status=$?; [[ "$status" != 73 ]] || record_appliance_preflight_space_failure; return "$status"; }
 import importlib.util, os, sys, tarfile
 from pathlib import Path
 archive, data_root, backup_root, recovery_path, test_free_bytes, layout = sys.argv[1:]
@@ -1085,7 +1115,8 @@ for path, required in needs.values():
     fs = os.statvfs(path)
     available = int(test_free_bytes) if test_free_bytes else fs.f_bavail * fs.f_frsize
     if available < required:
-        raise SystemExit(f'error: insufficient free space for safe update staging at {path}: need {required} bytes, have {available} bytes')
+        print(f'error: insufficient free space for safe update staging at {path}: need {required} bytes, have {available} bytes', file=sys.stderr)
+        raise SystemExit(73)
 PY
 }
 
@@ -2164,15 +2195,17 @@ with ExitStack() as stack:
     stack.callback(os.close, request)
     os.unlink(name, dir_fd=directory)
     metadata = os.fstat(request)
-    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 128:
+    if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= 162:
         raise SystemExit('error: invalid appliance update request file')
-    value = os.read(request, 129)
-    if not re.fullmatch(rb'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\n', value):
-        raise SystemExit('error: invalid appliance update version')
+    value = os.read(request, 163)
+    if not re.fullmatch(rb'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\n[0-9a-f]{32}\n', value):
+        raise SystemExit('error: invalid appliance update request')
     print(value[:-1].decode('ascii'))
 PY
 )"
     [[ -n "$version" ]] || exit 0
+    appliance_request_id="${version#*$'\n'}"
+    version="${version%%$'\n'*}"
     artifact="/var/lib/kautuka/updateService/updates/staging/v${version}/kautuka-linux-amd64.tar.gz"
 fi
 

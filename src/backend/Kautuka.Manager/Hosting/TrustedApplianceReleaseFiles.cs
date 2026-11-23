@@ -78,6 +78,32 @@ internal static class TrustedApplianceReleaseFiles
         };
     }
 
+    // A malformed optional receipt is ignored; it must never alter recovery fencing.
+    internal static AppliancePreflightStatus? ReadPreflightStatus(string recoveryDirectory)
+    {
+        try
+        {
+            using SafeFileHandle recovery = OpenAbsoluteDirectory(recoveryDirectory);
+            byte[]? bytes = ReadOptionalFile(recovery, "activation-preflight.json");
+            if (bytes is null) return null;
+            using JsonDocument document = JsonDocument.Parse(bytes);
+            JsonElement root = document.RootElement;
+            string? request = root.GetProperty("requestId").GetString();
+            string? source = root.GetProperty("sourceVersion").GetString();
+            string? target = root.GetProperty("targetVersion").GetString();
+            string? code = root.GetProperty("code").GetString();
+            if (request is not { Length: 32 } || request.Any(static c => !char.IsAsciiDigit(c) && c is not (>= 'a' and <= 'f'))
+                || source is null || !IsVersionDirectoryName(source) || target is null || !IsVersionDirectoryName(target)
+                || code != "insufficient_space") return null;
+            return new() { RequestId = request, SourceVersion = source, TargetVersion = target, Code = code };
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
+            or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            return null;
+        }
+    }
+
     private static byte[]? ReadOptionalFile(SafeFileHandle directory, string name)
     {
         try { return ReadFile(directory, name, 16 * 1024); }

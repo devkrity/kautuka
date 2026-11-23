@@ -124,6 +124,8 @@ public sealed partial class WorkspaceGrpcService(
             ApplianceReleaseId = appliance?.ReleaseId ?? string.Empty,
             ApplianceVerificationMode = appliance?.VerificationMode ?? false,
             ApplianceRecovery = recoveryStatus,
+            AppliancePreflight = appliance is not null && OperatingSystem.IsLinux()
+                ? TrustedApplianceReleaseFiles.ReadPreflightStatus(Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!) : null,
             AgentsPending = agentsPending,
             AgentsReady = agentsReady,
             Lifecycle = lifecycle,

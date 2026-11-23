@@ -196,6 +196,9 @@ internal sealed class UpdateCoordinator(
                 }
             }
 
+            if (appliance)
+                preparedArtifacts = preparedArtifacts with { ActivationRequestId = Guid.NewGuid().ToString("N") };
+
             UpdateStateRecord nextState = state with
             {
                 AvailableRelease = state.AvailableRelease is not null
@@ -529,6 +532,7 @@ internal sealed class UpdateCoordinator(
         => error?.StartsWith("The update apply for release ", StringComparison.Ordinal) == true
             || error?.StartsWith("The update failed. Kautuka restored the previous version", StringComparison.Ordinal) == true
             || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true
+            || error?.StartsWith("Update preflight checks failed:", StringComparison.Ordinal) == true
             || error == snapshotPruneFailure;
 
     private static bool IsDiscoveryConfigured(UpdateOptions options)
@@ -867,6 +871,31 @@ internal sealed class UpdateCoordinator(
         {
             recoveredState = state;
             return false;
+        }
+
+        // The optional root-owned preflight receipt applies only to this exact
+        // request and a healthy unchanged source. Recovery fencing remains authoritative.
+        if (state.PendingOperation == "apply" && !hostContext.RecoveryRequired
+            && hostContext.HostStatusObserved && hostContext.IsReady && hostContext.RuntimeConverged
+            && state.CurrentRelease is not null
+            && string.Equals(state.CurrentRelease.Version, hostContext.ManagerVersion, StringComparison.Ordinal)
+            && string.Equals(state.PreparedArtifacts?.ActivationRequestId, hostContext.PreflightRequestId, StringComparison.Ordinal)
+            && !string.IsNullOrEmpty(hostContext.PreflightRequestId)
+            && string.Equals(state.CurrentRelease.Version, hostContext.PreflightSourceVersion, StringComparison.Ordinal)
+            && string.Equals(state.StagedRelease.Version, hostContext.PreflightTargetVersion, StringComparison.Ordinal)
+            && hostContext.PreflightCode == "insufficient_space")
+        {
+            recoveredState = state with
+            {
+                State = UpdateWorkflowState.Available,
+                StateChangedAtUtc = DateTimeOffset.UtcNow,
+                AvailableRelease = state.AvailableRelease ?? state.StagedRelease,
+                StagedRelease = null,
+                PreparedArtifacts = null,
+                PendingOperation = null,
+                LastError = "Update preflight checks failed: insufficient free space for safe update staging.",
+            };
+            return true;
         }
 
         // A completed durable recovery journal is stronger evidence than a

@@ -19,7 +19,11 @@ public sealed record UpdateServiceContext(
     string? RecoverySnapshot = null,
     bool? ApplianceBootConfirmed = null,
     long ApplianceRecoveryUpdatedUnixMilliseconds = 0,
-    string? ApplianceSnapshotPruneStatus = null)
+    string? ApplianceSnapshotPruneStatus = null,
+    string? PreflightRequestId = null,
+    string? PreflightSourceVersion = null,
+    string? PreflightTargetVersion = null,
+    string? PreflightCode = null)
 {
     internal bool RuntimeConverged => ApplianceBootConfirmed
         ?? (RuntimeUnitsActive && CurrentPointersConsistent && UpdateServiceRunningCurrent);

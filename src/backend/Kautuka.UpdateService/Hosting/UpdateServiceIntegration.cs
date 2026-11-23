@@ -57,6 +57,7 @@ public sealed class UpdateServiceIntegration(
         bool isReady = false;
         bool hostStatusObserved = false;
         Kautuka.Manager.Protos.ApplianceRecoveryStatus? applianceRecovery = null;
+        Kautuka.Manager.Protos.AppliancePreflightStatus? appliancePreflight = null;
 
         try
         {
@@ -69,6 +70,7 @@ public sealed class UpdateServiceIntegration(
                 isReady = status.CoreReady;
                 activeExecCount = status.ActiveExecCount;
                 applianceRecovery = status.ApplianceRecovery;
+                appliancePreflight = status.AppliancePreflight;
             }
         }
         catch (RpcException)
@@ -90,7 +92,11 @@ public sealed class UpdateServiceIntegration(
                 ApplianceBootConfirmed: isReady && !KautukaMaintenanceMode.IsApplianceVerification
                     && applianceRecovery is { RecoveryRequired: false },
                 ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecovery?.UpdatedUnixMilliseconds ?? 0,
-                ApplianceSnapshotPruneStatus: applianceRecovery?.SnapshotPruneStatus);
+                ApplianceSnapshotPruneStatus: applianceRecovery?.SnapshotPruneStatus,
+                PreflightRequestId: appliancePreflight?.RequestId,
+                PreflightSourceVersion: appliancePreflight?.SourceVersion,
+                PreflightTargetVersion: appliancePreflight?.TargetVersion,
+                PreflightCode: appliancePreflight?.Code);
 
         string managerInstallRoot = ResolveManagerInstallRoot(AppContext.BaseDirectory);
         string managerVersion = ResolveManagerVersion(managerInstallRoot);
@@ -518,11 +524,15 @@ public sealed class UpdateServiceIntegration(
             throw new InvalidOperationException("Prepared appliance update is outside its release staging directory.");
         }
 
+        if (prepared.ActivationRequestId is not { Length: 32 } requestId
+            || requestId.Any(static c => !char.IsAsciiDigit(c) && c is not (>= 'a' and <= 'f')))
+            throw new InvalidOperationException("Prepared appliance update has an invalid activation request identity.");
+
         string target = Path.Combine(updates, applianceActivationRequestName);
         string temporary = Path.Combine(updates, $".{applianceActivationRequestName}-{Guid.NewGuid():N}");
         try
         {
-            await File.WriteAllTextAsync(temporary, version.ToVersionString() + "\n", cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(temporary, version.ToVersionString() + "\n" + requestId + "\n", cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, target, overwrite: false);
         }

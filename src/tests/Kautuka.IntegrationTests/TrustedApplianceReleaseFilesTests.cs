@@ -26,6 +26,29 @@ public sealed class TrustedApplianceReleaseFilesTests
     }
 
     [Fact]
+    public void OptionalPreflightReceiptIgnoresMalformedAndUnsafeFilesWithoutChangingFence()
+    {
+        if (!OperatingSystem.IsLinux() || Environment.UserName != "root") return;
+        string directory = Path.Combine("/root", "kautuka-preflight-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string receipt = Path.Combine(directory, "activation-preflight.json");
+        string marker = Path.Combine(directory, "maintenance.json");
+        try
+        {
+            File.WriteAllText(marker, "{}");
+            File.WriteAllText(receipt, "not json");
+            Assert.Null(TrustedApplianceReleaseFiles.ReadPreflightStatus(directory));
+            Assert.True(TrustedApplianceReleaseFiles.ReadRecoveryStatusOrRequireRecovery(directory).RecoveryRequired);
+            File.WriteAllText(receipt, """{"requestId":"0123456789abcdef0123456789abcdef","sourceVersion":"1.2.3","targetVersion":"1.2.4","code":"insufficient_space"}""");
+            Assert.Equal("insufficient_space", TrustedApplianceReleaseFiles.ReadPreflightStatus(directory)?.Code);
+            File.SetUnixFileMode(receipt, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupWrite);
+            Assert.Null(TrustedApplianceReleaseFiles.ReadPreflightStatus(directory));
+            Assert.True(TrustedApplianceReleaseFiles.ReadRecoveryStatusOrRequireRecovery(directory).RecoveryRequired);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void ReadsOnlyProtectedVersionedFilesAndKey()
     {
         if (!OperatingSystem.IsLinux() || Environment.UserName != "root") return;

@@ -556,6 +556,12 @@ public sealed class UpdateServiceIntegrationTests
             UpdateStatusSnapshot applying = await coordinator.ApplyPreparedReleaseAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
             Assert.True(applying.State == UpdateWorkflowState.Applying, $"Expected Applying, got {applying.State}. {applying.LastError}");
             Assert.Equal(releaseId, hostIntegration.ActivatedReleaseId);
+            UpdateStateRecord persistedAttempt = await stateStore.GetAsync(TestContext.Current.CancellationToken);
+            if (appliance)
+            {
+                Assert.Matches("^[0-9a-f]{32}$", persistedAttempt.PreparedArtifacts!.ActivationRequestId!);
+                Assert.Equal(persistedAttempt.PreparedArtifacts.ActivationRequestId, hostIntegration.ActivatedRequestId);
+            }
             Assert.True(File.Exists(hostIntegration.ActivatedPlatformPackagePath));
             Assert.Equal(string.Empty, hostIntegration.ActivatedPlatformExtractedPath);
         }
@@ -594,17 +600,17 @@ public sealed class UpdateServiceIntegrationTests
             string artifact = Path.Combine(stagedRelease, "kautuka-linux-amd64.tar.gz");
             await File.WriteAllTextAsync(artifact, "fixture", token);
             string request = Path.Combine(updates, "activate-appliance");
-            var prepared = new UpdatePreparedArtifacts(tag, artifact, string.Empty);
+            var prepared = new UpdatePreparedArtifacts(tag, artifact, string.Empty, "0123456789abcdef0123456789abcdef");
 
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
                 integration.ActivatePreparedUpdateAsync(prepared with { TargetReleaseId = "v1.2.3-preview.3" }, token).AsTask());
             Assert.False(File.Exists(request));
 
             await integration.ActivatePreparedUpdateAsync(prepared, token);
-            Assert.Equal("1.2.3-preview.2\n", await File.ReadAllTextAsync(request, token));
+            Assert.Equal("1.2.3-preview.2\n0123456789abcdef0123456789abcdef\n", await File.ReadAllTextAsync(request, token));
 
             await Assert.ThrowsAsync<IOException>(() => integration.ActivatePreparedUpdateAsync(prepared, token).AsTask());
-            Assert.Equal("1.2.3-preview.2\n", await File.ReadAllTextAsync(request, token));
+            Assert.Equal("1.2.3-preview.2\n0123456789abcdef0123456789abcdef\n", await File.ReadAllTextAsync(request, token));
             Assert.Equal(request, Assert.Single(Directory.GetFiles(updates)));
         }
         finally
@@ -1904,6 +1910,44 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Theory]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0.1.0", false, UpdateWorkflowState.Available)]
+    [InlineData("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "0.1.0", false, UpdateWorkflowState.Applying)]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0.0.9", false, UpdateWorkflowState.Applying)]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0.1.0", true, UpdateWorkflowState.Applying)]
+    public async Task PreflightReceiptMatchesExactAttemptAndNeverOverridesRecovery(
+        string receiptId, string receiptSource, bool fenced, UpdateWorkflowState expected)
+    {
+        UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
+        UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
+        var store = new InMemoryUpdateStateStore(UpdateStateRecord.CreateDefault() with
+        {
+            State = UpdateWorkflowState.Applying,
+            PendingOperation = "apply",
+            CurrentRelease = source,
+            StagedRelease = target,
+            StateChangedAtUtc = DateTimeOffset.UtcNow,
+            PreparedArtifacts = new(target.ReleaseId, "/tmp/package", "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        });
+        var integration = new RecordingUpdateServiceIntegration("/tmp", managerVersion: source.Version, recoveryRequired: fenced)
+        {
+            PreflightRequestId = receiptId,
+            PreflightSource = receiptSource,
+            PreflightTarget = target.Version,
+            PreflightCode = "insufficient_space",
+        };
+        var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
+            new StubReleaseDiscoveryClient(_ => ReleaseDiscoveryResult.NoRelease()), source.Version, integration: integration);
+        UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(expected, status.State);
+        if (expected == UpdateWorkflowState.Available)
+        {
+            Assert.Contains("insufficient free space", status.LastError, StringComparison.OrdinalIgnoreCase);
+            UpdateStatusSnapshot next = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(status.LastError, next.LastError);
+        }
+    }
+
+    [Theory]
     [InlineData("0.1.0", "release-0.2.0", null, 0, UpdateWorkflowState.Available)]
     [InlineData("0.1.0", "release-0.3.0", null, 0, UpdateWorkflowState.Applying)]
     [InlineData("0.3.0", "release-0.2.0", null, 0, UpdateWorkflowState.Applying)]
@@ -2407,13 +2451,18 @@ public sealed class UpdateServiceIntegrationTests
         long applianceRecoveryUpdated = 0) : IUpdateServiceIntegration
     {
         public string? ActivatedReleaseId { get; private set; }
+        public string? ActivatedRequestId { get; private set; }
         public string ActivatedPlatformPackagePath { get; private set; } = string.Empty;
         public string ActivatedPlatformExtractedPath { get; private set; } = string.Empty;
         public int ActiveExecutions { get; set; }
         public string? SnapshotPruneStatus { get; set; }
+        public string? PreflightRequestId { get; set; }
+        public string? PreflightSource { get; set; }
+        public string? PreflightTarget { get; set; }
+        public string? PreflightCode { get; set; }
 
         public ValueTask<UpdateServiceContext> GetHostContextAsync(CancellationToken cancellationToken)
-            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, ActiveExecutions, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated, ApplianceSnapshotPruneStatus: SnapshotPruneStatus));
+            => ValueTask.FromResult(new UpdateServiceContext(runtimeRoot, runtimeRoot, managerReleaseId ?? managerVersion, managerVersion, true, ActiveExecutions, hostStatusObserved, CurrentPointersConsistent: pointersConsistent, UpdateServiceRunningCurrent: updaterRunningCurrent, RecoveryRequired: recoveryRequired, RecoveryPhase: recoveryPhase, RecoverySourceRelease: recoverySource, RecoveryTargetRelease: recoveryTarget, ApplianceBootConfirmed: applianceBootConfirmed, ApplianceRecoveryUpdatedUnixMilliseconds: applianceRecoveryUpdated, ApplianceSnapshotPruneStatus: SnapshotPruneStatus, PreflightRequestId: PreflightRequestId, PreflightSourceVersion: PreflightSource, PreflightTargetVersion: PreflightTarget, PreflightCode: PreflightCode));
 
         public ValueTask ActivatePreparedUpdateAsync(UpdatePreparedArtifacts preparedArtifacts, CancellationToken cancellationToken)
         {
@@ -2423,6 +2472,7 @@ public sealed class UpdateServiceIntegrationTests
             }
 
             ActivatedReleaseId = preparedArtifacts.TargetReleaseId;
+            ActivatedRequestId = preparedArtifacts.ActivationRequestId;
             ActivatedPlatformPackagePath = preparedArtifacts.PlatformPackagePath;
             ActivatedPlatformExtractedPath = preparedArtifacts.PlatformExtractedPath;
             return ValueTask.CompletedTask;
