@@ -527,9 +527,20 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       });
     });
 
-    it('non-admin still cannot decide another user request marked as waiting for admin', async () => {
-      mockViewer.id = 'user-ravi';
-      mockViewer.displayName = 'Ravi';
+    it.each([
+      {
+        viewerId: 'user-alice',
+        viewerName: 'Alice',
+        notice: /Ask an administrator to approve this request or grant that permission/,
+      },
+      {
+        viewerId: 'user-ravi',
+        viewerName: 'Ravi',
+        notice: /Waiting for an administrator to approve/i,
+      },
+    ])('shows the next step for $viewerName without offering approval controls', async ({ viewerId, viewerName, notice }) => {
+      mockViewer.id = viewerId;
+      mockViewer.displayName = viewerName;
       mockViewer.role = 'user';
 
       const requestsData = createDefaultRequests([
@@ -558,7 +569,7 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
       renderComponent(<NetworkAccessPage />);
 
       const card = await screen.findByTestId('request-card-req-owner-needs-admin');
-      expect(within(card).getByText(/Waiting for an administrator to approve/i)).toBeVisible();
+      expect(within(card).getByText(notice)).toBeVisible();
       expect(within(card).queryByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ })).not.toBeInTheDocument();
       expect(within(card).queryByRole('button', { name: /Keep blocked/i })).not.toBeInTheDocument();
     });

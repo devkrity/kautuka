@@ -183,7 +183,9 @@ export function PendingApprovalCard({
 
       {showWaitingNotice ? (
         <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
-          Waiting for an administrator to approve
+          {isOwner
+            ? 'You need permission to manage your own network access. Ask an administrator to approve this request or grant that permission to your account.'
+            : 'Waiting for an administrator to approve'}
         </p>
       ) : canApproveOwn ? (
         <div className="space-y-3 pt-1">
