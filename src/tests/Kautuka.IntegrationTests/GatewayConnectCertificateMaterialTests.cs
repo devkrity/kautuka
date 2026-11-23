@@ -22,7 +22,7 @@ public sealed class GatewayConnectCertificateMaterialTests
     [Theory]
     [InlineData(0)]
     [InlineData(31)]
-    public void RenewalPublishesBothInventoriesAndRetainsThePreviousPair(int daysAfterRenewal)
+    public void RenewalIgnoresUnpublishedMaterialAndRetainsThePreviousPair(int daysAfterRenewal)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -41,13 +41,25 @@ public sealed class GatewayConnectCertificateMaterialTests
         {
             string installPath = Path.Combine(root.FullName, "installation");
             GatewayConnectCertificateMaterial original = GatewayConnectCertificateMaterial.Ensure(installPath);
+            var renewal = new FixedClock(original.RenewAfterUtc.AddDays(daysAfterRenewal));
+            string selector = Path.Combine(installPath, "current");
+
+            // Model a process exit after staging both inventories but before the selector rename.
+            string abandonedGeneration = Guid.NewGuid().ToString("N");
+            string abandonedDirectory = Path.Combine(installPath, abandonedGeneration);
+            _ = GatewayConnectCertificateMaterial.Ensure(abandonedDirectory, renewal);
+            string abandonedSelector = selector + "." + abandonedGeneration;
+            File.WriteAllText(abandonedSelector, abandonedGeneration);
+            File.SetUnixFileMode(abandonedSelector, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
             var beforeRenewal = new FixedClock(original.RenewAfterUtc.AddMinutes(-1));
             Assert.Equal(original.GatewayDirectory, GatewayConnectCertificateMaterial.Ensure(installPath, beforeRenewal).GatewayDirectory);
+            Assert.False(File.Exists(selector));
 
-            var renewal = new FixedClock(original.RenewAfterUtc.AddDays(daysAfterRenewal));
             GatewayConnectCertificateMaterial renewed = GatewayConnectCertificateMaterial.Ensure(installPath, renewal);
             Assert.NotEqual(original.GatewayDirectory, renewed.GatewayDirectory);
             Assert.NotEqual(original.EnvoyDirectory, renewed.EnvoyDirectory);
+            Assert.NotEqual(abandonedGeneration, File.ReadAllText(selector));
             GatewayConnectCertificateMaterial loaded = GatewayConnectCertificateMaterial.Ensure(installPath, renewal);
             Assert.Equal(renewed.GatewayDirectory, loaded.GatewayDirectory);
             Assert.Equal(renewed.EnvoyDirectory, loaded.EnvoyDirectory);
@@ -61,7 +73,6 @@ public sealed class GatewayConnectCertificateMaterialTests
             Assert.True(LocalCaMtlsBootstrap.ValidateExactClientCert(client, renewedCa, "Kautuka Gateway CONNECT Client", clientIdentity, renewal.GetUtcNow()));
             Assert.False(LocalCaMtlsBootstrap.ValidateExactClientCert(client, originalCa, "Kautuka Gateway CONNECT Client", clientIdentity, renewal.GetUtcNow()));
 
-            string selector = Path.Combine(installPath, "current");
             File.Delete(selector);
             File.CreateSymbolicLink(selector, Path.Combine(root.FullName, "missing-generation"));
             Assert.Throws<IOException>(() => GatewayConnectCertificateMaterial.Ensure(installPath, renewal));
