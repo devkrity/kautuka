@@ -326,6 +326,7 @@ system_units=(kautuka-credentialshost.service kautuka-channelhost.service kautuk
 service_user='kautuka'
 database_root='/var/lib/kautuka'
 database_writer_lock='/run/kautuka-db-writer.lock'
+helper_run_lock='/run/kautuka-helper-run.lock'
 database_writer_lease_active='false'
 
 write_durable_record() {
@@ -2081,22 +2082,26 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
     fi
     # The inode is stable and mounted read-only into Gateway. Writing one byte
     # never replaces it; an admitted shared holder may finish nested work.
+    [[ -f "$helper_run_lock" && ! -L "$helper_run_lock" && "$(stat -c '%u:%a' "$helper_run_lock")" == '0:644' ]] || {
+        echo 'error: root-owned Kautuka helper run lock is missing or unsafe' >&2
+        exit 1
+    }
     certificate_status=0
     channel_certificate_status || certificate_status=$?
     case "$certificate_status" in
         0)
             if [[ ! -f "$database_root/security/.channel-renewal-restart" ]]; then
-                printf 0 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none || exit 1
+                printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
                 exit 0
             fi ;;
         10|11|12) ;;
         *) exit 1 ;;
     esac
     if [[ "$certificate_status" == 11 || "$certificate_status" == 12 ]]; then
-        printf 1 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none || exit 1
+        printf 1 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none || exit 1
     fi
     (
-        exec 7</run/kautuka-helper-run.lock || exit 1
+        exec 7<"$helper_run_lock" || exit 1
         if [[ "$certificate_status" == 12 ]]; then
             # Expired/invalid identities require recovery even if a run is stuck.
             echo 'Channel identities expired or invalid; recovery may interrupt active helpers.'
@@ -2105,7 +2110,7 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
             exit 0
         fi
         renew_appliance_channel_certificates false || exit $?
-        printf 0 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none
+        printf 0 | dd of="$helper_run_lock" bs=1 count=1 conv=notrunc status=none
     )
     exit $?
 fi

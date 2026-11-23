@@ -17,7 +17,9 @@ public sealed class KautukaDatabaseWriterLease : IDisposable
     public const string HelperRunLockPath = "/run/kautuka-helper-run.lock";
     private const int LockShared = 1;
     private const int LockExclusive = 2;
+    private const int LockNonBlocking = 4;
     private const int LockUnlock = 8;
+    private const int TryAgain = 11;
     private readonly SafeFileHandle handle;
     private bool disposed;
 
@@ -45,14 +47,14 @@ public sealed class KautukaDatabaseWriterLease : IDisposable
         SafeFileHandle handle = File.OpenHandle(HelperRunLockPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         try
         {
-            if (flock(handle.DangerousGetHandle().ToInt32(), LockShared | 4) != 0)
+            if (flock(handle.DangerousGetHandle().ToInt32(), LockShared | LockNonBlocking) != 0)
             {
                 int error = Marshal.GetLastPInvokeError();
-                if (error != 11) throw new Win32Exception(error, "Could not acquire the Kautuka helper run lease.");
+                if (error != TryAgain) throw new Win32Exception(error, "Could not acquire the Kautuka helper run lease.");
                 handle.Dispose();
                 return false;
             }
-            byte[] flag = new byte[1];
+            Span<byte> flag = stackalloc byte[1];
             if (RandomAccess.Read(handle, flag, 0) != 0 && flag[0] != (byte)'0')
             {
                 _ = flock(handle.DangerousGetHandle().ToInt32(), LockUnlock);
