@@ -1,5 +1,5 @@
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
-using Kautuka.Gateway.Infrastructure.Connectors;
 
 namespace Kautuka.Gateway.Domain.Workflows;
 
@@ -11,7 +11,7 @@ internal static class WorkflowFirstStepConnectorPolicy
         => WorkflowSchemaSubset.DeclaresProperty(definition.InputSchema, "receivedAfter");
 
     public static bool FirstStepHasMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog,
-        string? userId = null, ConnectorUserEnablement? enablement = null)
+        string? userId = null, IConnectorUserEnablement? enablement = null)
     {
         if (definition.Nodes.Length == 0
             || !catalog.TryGetAgent(definition.Nodes[0].AgentId, out GatewayAgent? agent)
@@ -40,7 +40,7 @@ internal static class WorkflowFirstStepConnectorPolicy
     }
 
     public static bool ValidateMailConnector(GatewayWorkflowDefinition definition, IGatewayCatalogStore catalog, out string? error,
-        string? userId = null, ConnectorUserEnablement? enablement = null)
+        string? userId = null, IConnectorUserEnablement? enablement = null)
     {
         error = RequiresMailConnector(definition) && !FirstStepHasMailConnector(definition, catalog, userId, enablement)
             ? MailConnectorRequiredMessage

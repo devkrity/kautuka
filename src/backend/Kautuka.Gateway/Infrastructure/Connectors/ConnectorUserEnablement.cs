@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 
+using Kautuka.Gateway.Domain.Connectors;
+
 using Microsoft.Data.Sqlite;
 
 namespace Kautuka.Gateway.Infrastructure.Connectors;
 
-internal sealed class ConnectorUserEnablement(KautukaDatabase database)
+internal sealed class ConnectorUserEnablement(KautukaDatabase database) : IConnectorUserEnablement
 {
     private readonly object writeLock = new();
     private readonly Lazy<ConcurrentDictionary<(string UserId, string ConnectorId), bool>> overrides = new(() => Load(database));

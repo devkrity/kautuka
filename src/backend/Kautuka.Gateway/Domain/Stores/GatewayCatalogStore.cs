@@ -2,11 +2,10 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.Assets;
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Execution;
 using Kautuka.Gateway.Domain.Sandbox;
 using Kautuka.Gateway.Domain.Skills;
-using Kautuka.Gateway.Domain.Connectors;
-using Kautuka.Gateway.Infrastructure.Connectors;
 
 namespace Kautuka.Gateway.Domain.Stores;
 
@@ -24,7 +23,7 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
     private readonly IProviderTypeCatalog? providerTypeCatalog;
     private readonly IRuntimeEventLifecycle? runtimeEventLifecycle;
     private readonly RemoteMcpCredentialRevisionTracker? remoteRevisions;
-    private readonly ConnectorUserEnablement? connectorEnablement;
+    private readonly IConnectorUserEnablement? connectorEnablement;
 
     public GatewayCatalogStore(
         GatewayState state,
@@ -63,7 +62,7 @@ internal sealed partial class GatewayCatalogStore : IGatewayCatalogStore
         IProviderTypeCatalog? providerTypeCatalog = null,
         IRuntimeEventLifecycle? runtimeEventLifecycle = null,
         RemoteMcpCredentialRevisionTracker? remoteRevisions = null,
-        ConnectorUserEnablement? connectorEnablement = null)
+        IConnectorUserEnablement? connectorEnablement = null)
     {
         this.state = state;
         this.agentDefinitionStore = agentDefinitionStore;

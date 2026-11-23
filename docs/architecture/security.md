@@ -14,6 +14,8 @@ Connector scope determines who can see a connector. Each signed-in user, includi
 
 Settings shows a new one-time invitation code in the invitation dialog. The administrator can copy it before closing the dialog. The invitation keeps its seven-day expiry and email binding.
 
+Gateway stores per-user connector choices separately from shared connector definitions. Catalog lookups and workflow admission read the same choices.
+
 When a release replaces the bundled Kautuka Web Tools artifact, signed-in users who enabled it can refresh its discovered tools automatically. Gateway uses the stored launch definition and saves the discovery only with an immutable image and bundle digest. A regular user's test with a custom environment cannot update the shared tool catalog.
 
 ## Internal service transport

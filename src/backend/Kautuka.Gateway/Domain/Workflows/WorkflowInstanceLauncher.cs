@@ -3,8 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using Kautuka.Gateway.Domain.AgentFiles;
+using Kautuka.Gateway.Domain.Connectors;
 using Kautuka.Gateway.Domain.Stores;
-using Kautuka.Gateway.Infrastructure.Connectors;
 
 using Microsoft.Data.Sqlite;
 
@@ -25,7 +25,7 @@ internal sealed class WorkflowInstanceLauncher(
     IGatewayCatalogStore catalog,
     IGatewayUserStore users,
     ILogger<WorkflowInstanceLauncher> logger,
-    ConnectorUserEnablement? enablement = null)
+    IConnectorUserEnablement? enablement = null)
 {
     public WorkflowInstanceStartResult Start(
         GatewayWorkflowDefinition definition,
