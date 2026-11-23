@@ -194,9 +194,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      - name: Run Integration Tests
+      - name: Run Network Access and Podman Integration Tests
         run: |
-          dotnet test src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -c Release --no-build
+          # Dotnet Quality runs the full solution. This runner provides the real Podman environment.
+          dotnet test --project src/tests/Kautuka.IntegrationTests/Kautuka.IntegrationTests.csproj -c Release --no-build -- \
+            --filter-class 'Kautuka.IntegrationTests.NetworkAccess.*' \
+            --filter-class 'Kautuka.IntegrationTests.ApplianceServiceSupervisorTests' \
+            --filter-class 'Kautuka.IntegrationTests.PodmanContainerToolTests' \
+            --filter-class 'Kautuka.IntegrationTests.SkillAgentToolProviderTests'
 
   nac-acceptance:
     # Main's ruleset requires this exact check name.

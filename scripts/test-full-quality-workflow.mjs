@@ -11,6 +11,10 @@ assert.match(nacWorkflow, /^  push:\r?\n    branches:\r?\n      - main\r?\n  pul
   'NAC should run once on a feature PR and again only after a push to main');
 assert.match(nacWorkflow, /^    name: NAC Acceptance Suite \(Linux\)\s*$/m,
   'NAC must preserve the required aggregate check name');
+assert.match(nacWorkflow, /--filter-class 'Kautuka\.IntegrationTests\.NetworkAccess\.\*'/,
+  'the Linux network acceptance runner must select the network integration suite');
+assert.match(workflow, /dotnet test --solution src\/Kautuka\.slnx --no-build/,
+  'the quality workflow must own the full backend test suite');
 
 for (const [name, source] of [['quality', workflow], ['secret scan', secretWorkflow]]) {
   assert.match(source, /^permissions:\s*\r?\n  contents: read\s*\r?\n(?=\S)/m, `${name} must use only read-only contents permissions`);
