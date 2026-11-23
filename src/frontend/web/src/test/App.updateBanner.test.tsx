@@ -410,6 +410,40 @@ describe('App update banner', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
+  it('shows a new discovery failure after a successful update and reopens it on retry', async () => {
+    const installedStatus = {
+      ok: true,
+      message: 'update-status',
+      state: 'Current',
+      effectiveReleaseChannel: 'preview',
+      eligibilityState: 'None',
+      eligibilityReason: 'AlreadyCurrent',
+      currentRelease: { releaseId: 'v1.2.0-preview.2', version: '1.2.0-preview.2' },
+      lastKnownGoodRelease: { releaseId: 'v1.2.0-preview.1', version: '1.2.0-preview.1' },
+      managerVersion: '1.2.0-preview.2',
+      lastError: null,
+    };
+    fetchUpdateStatusMock.mockResolvedValue(installedStatus);
+    refreshUpdateDiscoveryMock.mockResolvedValue({
+      ...installedStatus,
+      message: 'update-refresh',
+      lastError: 'GitHub release discovery request failed.',
+    });
+
+    renderApp();
+    await screen.findByText('Update applied: 1.2.0-preview.2');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    await screen.findByText('Update check needs attention');
+    expect(screen.getByText('GitHub release discovery request failed.')).toBeInTheDocument();
+    expect(screen.queryByText('You’re up to date')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Dismiss update notice'));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('GitHub release discovery request failed.');
+  });
+
   it('shows updater operation failures even when the status payload is not ok', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: false,

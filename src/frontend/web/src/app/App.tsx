@@ -57,7 +57,7 @@ function AppShell() {
   const [updateActionPending, setUpdateActionPending] = React.useState<
     'refresh' | 'apply' | null
   >(null);
-  const [updateCheckFeedback, setUpdateCheckFeedback] = React.useState<string | null>(null);
+  const [updateCheckFeedback, setUpdateCheckFeedback] = React.useState<'current' | 'error' | null>(null);
   const [dismissedUpdateBannerKey, setDismissedUpdateBannerKey] = React.useState<string | null>(
     () => {
       try {
@@ -195,13 +195,17 @@ function AppShell() {
             : await applyUpdate();
         applyObservedUpdateStatus(nextStatus);
 
+        if (action === 'refresh' && nextStatus.lastError) {
+          setDismissedUpdateBannerKey(null);
+        }
+
         if (
           action === 'refresh' &&
           nextStatus.ok === true &&
           nextStatus.state.toLowerCase() === 'current' &&
           nextStatus.eligibilityState?.toLowerCase() !== 'blocked'
         ) {
-          setUpdateCheckFeedback('You’re up to date');
+          setUpdateCheckFeedback(nextStatus.lastError ? 'error' : 'current');
         }
 
       } catch {
@@ -214,7 +218,7 @@ function AppShell() {
   );
 
   React.useEffect(() => {
-    if (!updateCheckFeedback) {
+    if (updateCheckFeedback !== 'current') {
       return undefined;
     }
 
@@ -229,7 +233,8 @@ function AppShell() {
   const hasUpdateStatusFailure = updateStatus?.ok === false;
   const hasUpdateError =
     Boolean(updateStatus?.lastError) &&
-    !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease);
+    (updateCheckFeedback === 'error' ||
+      !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease));
   const hasPreflightFailure =
     updateState === 'available' &&
     (updateStatus?.lastError?.toLowerCase().startsWith('update preflight checks failed:') ?? false);
@@ -407,6 +412,9 @@ function AppShell() {
       case 'unsupported':
         return 'Release found but cannot be applied automatically';
       case 'current':
+        if (updateCheckFeedback === 'error' && hasUpdateError) {
+          return 'Update check needs attention';
+        }
         return hasPreviousRelease
           ? `Update applied: ${updateStatus?.currentRelease?.version ?? updateStatus?.managerVersion}`
           : 'Manager update status';
@@ -483,11 +491,11 @@ function AppShell() {
   const sidebarUpdateTitle =
     updateStatus && isAdmin && !shouldShowUpdateBanner
       ? updateState === 'current' && !hasPreviousRelease && updateEligibilityState !== 'blocked'
-        ? updateCheckFeedback
+        ? updateCheckFeedback === 'current' ? 'You’re up to date' : undefined
         : updateBannerTitle
       : undefined;
   const sidebarUpdateDescription =
-    sidebarUpdateTitle === updateCheckFeedback
+    sidebarUpdateTitle === 'You’re up to date'
       ? `Checked just now. Version ${currentVersion} is current. Kautuka services restart when an update is applied.`
       : updateBannerDescription;
 
