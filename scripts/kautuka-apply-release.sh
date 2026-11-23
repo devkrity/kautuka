@@ -939,9 +939,16 @@ stage_extract_root=''
 stage_version_in_progress=''
 appliance_stage_root=''
 
+cleanup_stage_extract() {
+    if [[ -n "$stage_extract_root" ]]; then
+        rm -rf -- "$stage_extract_root" || return 1
+        stage_extract_root=''
+    fi
+}
+
 cleanup_staging() {
     [[ -z "$appliance_stage_root" ]] || rm -rf -- "$appliance_stage_root"
-    [[ -z "$stage_extract_root" ]] || rm -rf -- "$stage_extract_root"
+    cleanup_stage_extract || true
     if [[ -n "$stage_version_in_progress" ]]; then
         local service current
         # Never remove a release that any current pointer has reached.
@@ -1036,6 +1043,9 @@ stage_appliance_version() {
         [[ ! -d "$appliance_stage_root" ]] || return 1
         appliance_stage_root=''
         stage_version_in_progress="$target"
+        # The promoted root-owned release contains its own image archives.
+        # Drop only this transaction's private extraction before Podman imports them.
+        cleanup_stage_extract || return 1
         sync -f "$versions"
     fi
     if [[ -n "$selinux_state" && "$selinux_state" != 'Disabled' ]]; then
