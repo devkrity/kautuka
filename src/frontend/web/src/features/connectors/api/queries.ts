@@ -22,10 +22,11 @@ import {
 } from './connectors';
 import { connectorsQueryKeys } from './queryKeys';
 
-export function useConnectors() {
+export function useConnectors(options: { staleTime?: number } = {}) {
   return useQuery({
     queryKey: connectorsQueryKeys.list(),
     queryFn: fetchConnectors,
+    ...options,
   });
 }
 
