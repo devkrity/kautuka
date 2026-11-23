@@ -589,7 +589,7 @@ describe('App update banner', () => {
 
   it('explains a low-space update failure and keeps the installer error in details', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
-      ok: true,
+      ok: false,
       message: 'update-status',
       state: 'Available',
       effectiveReleaseChannel: 'preview',
@@ -634,7 +634,7 @@ describe('App update banner', () => {
     renderApp();
 
     await waitFor(() => {
-      expect(screen.getByText('Update preflight checks failed')).toBeInTheDocument();
+      expect(screen.getByText('Update needs more space')).toBeInTheDocument();
     });
 
     expect(

@@ -237,6 +237,7 @@ function AppShell() {
       !(updateStatus?.ok === true && updateState === 'current' && hasPreviousRelease));
   const hasPreflightFailure =
     updateState === 'available' &&
+    updateStatus?.hostReady === true &&
     (updateStatus?.lastError?.toLowerCase().startsWith('update preflight checks failed:') ?? false);
   const hasDiskSpaceFailure =
     hasPreflightFailure &&
@@ -367,6 +368,10 @@ function AppShell() {
       return 'Update requires attention';
     }
 
+    if (hasPreflightFailure) {
+      return hasDiskSpaceFailure ? 'Update needs more space' : 'Update requires attention';
+    }
+
     if (hasUpdateStatusFailure) {
       switch (updateStatus?.message) {
         case 'update-apply-failed':
@@ -380,10 +385,6 @@ function AppShell() {
         default:
           return 'Manager update status';
       }
-    }
-
-    if (hasPreflightFailure) {
-      return 'Update preflight checks failed';
     }
 
     if (hasUpdateError && (updateState === 'applying' || updateState === 'available')) {
@@ -431,14 +432,14 @@ function AppShell() {
       return '';
     }
 
-    if (hasUpdateStatusFailure) {
-      return updateStatus.lastError ?? updateStatus.message;
-    }
-
     if (hasPreflightFailure) {
       return hasDiskSpaceFailure
         ? 'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
         : 'Your current version is still running. Email hello@devkrity.com for help and include the update details below.';
+    }
+
+    if (hasUpdateStatusFailure) {
+      return updateStatus.lastError ?? updateStatus.message;
     }
 
     if (hasUpdateError && updateState === 'available') {
@@ -554,7 +555,7 @@ function AppShell() {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {hasDiskSpaceFailure && updateStatus.ok && updateStatus.hostReady && updateStatus.availableRelease ? (
+                  {hasDiskSpaceFailure && updateStatus.availableRelease ? (
                     <Button
                       type="button"
                       size="sm"
