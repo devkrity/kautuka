@@ -396,6 +396,14 @@ public sealed class ChannelHostTrustBoundaryTests : IDisposable
         var staged = At("staged");
         ChannelSecurityMaterialProvisioner.Provision(current);
         DateTimeOffset now = DateTimeOffset.UtcNow;
+        using X509Certificate2 server = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.ChannelPrivateRoot, ChannelSecurityMaterialProvisioner.ServerPfx), null);
+        using X509Certificate2 client = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayClientPfx), null);
+        using X509Certificate2 delegation = X509CertificateLoader.LoadPkcs12FromFile(Path.Combine(current.GatewayPrivateRoot, ChannelSecurityMaterialProvisioner.GatewayDelegationPfx), null);
+        DateTimeOffset earliest = new[] { server, client, delegation }.Min(c => new DateTimeOffset(c.NotAfter.ToUniversalTime()));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Healthy, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddDays(-8)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Routine, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddDays(-2)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.FinalDay, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest.AddHours(-12)));
+        Assert.Equal(ChannelSecurityMaterialProvisioner.ApplianceRenewalState.ExpiredOrInvalid, ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(current, earliest));
         Assert.False(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(current, now));
         Assert.True(ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(current, now.AddDays(24)));
         DateTimeOffset expired = now.AddDays(31);

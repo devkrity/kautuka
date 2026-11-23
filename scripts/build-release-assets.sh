@@ -136,6 +136,11 @@ assert_packed_appliance_network_seal() {
     exit 1
   }
 
+  printf '%s\n' "$sockets_conf" | grep -Fqx 'f /run/kautuka-helper-run.lock 0644 root root -' || {
+    echo 'error: packed kautuka-sockets.conf is missing the root-owned helper run lease' >&2
+    exit 1
+  }
+
   printf '%s\n' "$sockets_conf" | grep -Fqx 'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -' || {
     echo 'error: packed appliance is missing the Manager-owned Envoy authorization socket directory' >&2
     return 1
@@ -1358,6 +1363,7 @@ Environment=Kautuka__ChannelGateway__ProductionMaterial__GatewayTrustRoot=/var/l
         '# is what lets the socket itself be 0660 rather than world-writable.' \
         'd /run/kautuka 0755 root root -' \
         'f /run/kautuka-db-writer.lock 0644 root root -' \
+        'f /run/kautuka-helper-run.lock 0644 root root -' \
         'd /run/kautuka/networkaccess-envoy 0710 kautuka kautuka -'
 
       # service_key:owner:traversal_group

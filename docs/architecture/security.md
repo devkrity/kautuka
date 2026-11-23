@@ -102,3 +102,6 @@ WebHost binds loopback HTTP by default. A configured non-loopback listener fails
 ## Active security work
 
 The exact unresolved boundaries and acceptance criteria are in [Core trust-boundary hardening](../plans/trust-boundary-hardening.md). They are intentionally visible here so developers do not infer guarantees that current code does not provide.
+
+
+Routine Channel certificate maintenance uses a root-owned helper-run lock. Gateway holds a shared lease for admitted helper work, including queued work through its checkpoint and nested work. From seven days until 24 hours before the earliest leaf expires, renewal defers immediately if a helper is active. In the final 24 hours, the host sets a drain flag on the same stable inode, waits up to 30 seconds per attempt, and retries about every ten minutes; new root work waits while admitted nested work can finish. At actual expiry or invalidity the host prioritizes certificate recovery and may interrupt a stuck helper. Early-boot recovery renews before services start. The lock and its SELinux label are provisioned by the installer; this forward-only release requires a fresh installation at this floor, with ordinary updates and rollback within that floor.

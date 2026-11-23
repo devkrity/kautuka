@@ -237,12 +237,14 @@ public sealed class ApplianceServiceSupervisorTests
         ChannelSecurityMaterialDirectories securityRoots = ProvisionTrust(runtime, manager);
         string writerLock = Path.Combine(runtime, "writer.lock");
         await File.WriteAllTextAsync(writerLock, string.Empty, TestContext.Current.CancellationToken);
+        string helperLock = Path.Combine(runtime, "helper.lock");
+        await File.WriteAllTextAsync(helperLock, string.Empty, TestContext.Current.CancellationToken);
         if (File.Exists("/sys/fs/selinux/enforce"))
         {
             using Process label = Process.Start(new ProcessStartInfo("chcon")
             {
                 UseShellExecute = false,
-                ArgumentList = { "--type=container_file_t", "--range=s0", writerLock },
+                ArgumentList = { "--type=container_file_t", "--range=s0", writerLock, helperLock },
             }) ?? throw new InvalidOperationException("Could not label the fixture writer lock.");
             await label.WaitForExitAsync(TestContext.Current.CancellationToken);
             Assert.Equal(0, label.ExitCode);
@@ -291,11 +293,12 @@ public sealed class ApplianceServiceSupervisorTests
             PodmanCommandResult result = await engine.RunAsync(
                 [.. isolatedStore, .. hookOptions, .. args.Select((arg, index) => arg == "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro"
                     ? $"{writerLock}:/run/kautuka-db-writer.lock:ro"
+                    : arg == "/run/kautuka-helper-run.lock:/run/kautuka-helper-run.lock:ro" ? $"{helperLock}:/run/kautuka-helper-run.lock:ro"
                     : fixtureHooks is not null && index > 0 && args[index - 1] == "--hooks-dir" ? fixtureHooks
                     : webHostEnabled && arg == "127.0.0.1:20229:20229" ? "127.0.0.1::20229" : arg)], 30, token, standardInput: standardInput);
             if (result.ExitCode == 0 && fixtureHooks is not null && args.Count >= 3 && args[0] == "container" && args[1] == "inspect"
                 && args[2].StartsWith("kautuka-appliance-", StringComparison.Ordinal))
-                return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, runtime) };
+                return result with { StdOut = NormalizeFixtureCreateCommand(result.StdOut, isolatedStore, fixtureHooks, writerLock, helperLock, runtime) };
             return result;
         });
         CancellationToken cancellation = TestContext.Current.CancellationToken;
@@ -751,7 +754,7 @@ public sealed class ApplianceServiceSupervisorTests
         }
         return roots;
     }
-    private static string NormalizeFixtureCreateCommand(string json, string[] prefix, string fixtureHooks, string writerLock, string runtime)
+    private static string NormalizeFixtureCreateCommand(string json, string[] prefix, string fixtureHooks, string writerLock, string helperLock, string runtime)
     {
         var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsArray();
         foreach (System.Text.Json.Nodes.JsonNode? container in root)
@@ -769,6 +772,8 @@ public sealed class ApplianceServiceSupervisorTests
                 else if (value == "127.0.0.1::20229") command[i] = "127.0.0.1:20229:20229";
                 else if (value == $"{writerLock}:/run/kautuka-db-writer.lock:ro")
                     command[i] = "/run/kautuka-db-writer.lock:/run/kautuka-db-writer.lock:ro";
+                else if (value == $"{helperLock}:/run/kautuka-helper-run.lock:ro")
+                    command[i] = "/run/kautuka-helper-run.lock:/run/kautuka-helper-run.lock:ro";
             }
         }
         return root.ToJsonString();

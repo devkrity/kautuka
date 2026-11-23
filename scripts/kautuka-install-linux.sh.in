@@ -328,11 +328,13 @@ ensure_selinux_runtime_exec_policy() {
         semanage fcontext -m -t bin_t "$rule" >/dev/null 2>&1 || fail "could not register SELinux executable labeling rule for Kautuka; install policycoreutils-python-utils and check SELinux policy permissions"
     fi
     if [[ "$appliance_image_payload" == 'true' ]]; then
-        local writer_lock_rule='/run/kautuka-db-writer\.lock'
-        if ! semanage fcontext -a -t container_file_t "$writer_lock_rule" >/dev/null 2>&1; then
-            semanage fcontext -m -t container_file_t "$writer_lock_rule" >/dev/null 2>&1 \
-                || fail 'could not register the SELinux label for the shared database writer lock'
-        fi
+        local writer_lock_rule
+        for writer_lock_rule in '/run/kautuka-db-writer\.lock' '/run/kautuka-helper-run\.lock'; do
+            if ! semanage fcontext -a -t container_file_t "$writer_lock_rule" >/dev/null 2>&1; then
+                semanage fcontext -m -t container_file_t "$writer_lock_rule" >/dev/null 2>&1 \
+                    || fail 'could not register the SELinux label for a shared Kautuka lock'
+            fi
+        done
     fi
 }
 
@@ -1336,10 +1338,11 @@ install_socket_runtime_dirs() {
             '# makes bind() give the socket that client group instead of the service own' \
             '# group, which is what lets the socket itself be 0660 rather than world-writable.' \
             'd /run/kautuka 0755 root root -' \
-            'f /run/kautuka-db-writer.lock 0644 root root -'
+            'f /run/kautuka-db-writer.lock 0644 root root -' \
+            'f /run/kautuka-helper-run.lock 0644 root root -'
         if [[ "$appliance_image_payload" == 'true' ]]; then
             # Apply the installed file context to the shared root-owned inode.
-            printf '%s\n' 'z /run/kautuka-db-writer.lock - - - -'
+            printf '%s\n' 'z /run/kautuka-db-writer.lock - - - -' 'z /run/kautuka-helper-run.lock - - - -'
         fi
         printf 'd /run/kautuka/networkaccess-envoy 0710 %s %s -\n' "$service_user" "$service_group"
 

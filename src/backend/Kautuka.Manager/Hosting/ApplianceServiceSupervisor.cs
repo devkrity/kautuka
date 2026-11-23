@@ -585,6 +585,7 @@ internal sealed partial class ApplianceServiceSupervisor(
         if (isGateway)
         {
             args.AddRange([
+                "--volume", $"{KautukaDatabaseWriterLease.HelperRunLockPath}:{KautukaDatabaseWriterLease.HelperRunLockPath}:ro",
                 "--dns", WorkloadRulesetRenderer.EgressPodIp,
                 "--env", $"Kautuka__NetworkAccess__ApprovalHold__Duration={approvalHold.ToString("c", System.Globalization.CultureInfo.InvariantCulture)}",
                 "--env", "Kautuka__ConnectorImagePreparationSeconds",

@@ -1751,7 +1751,7 @@ renew_appliance_channel_certificates() {
         "$(realpath -e "$current/offline-authority")" == "$current/offline-authority" &&
         "$(stat -c '%u:%a' "$current/offline-authority")" == '0:700' ]] || return 1
     channel_certificate_status || status=$?
-    if [[ "$status" == 10 ]]; then
+    if [[ "$status" == 10 || "$status" == 11 || "$status" == 12 ]]; then
         if [[ -e "$candidate" || -L "$candidate" ]]; then
             [[ ! -L "$candidate" && "$(stat -c '%u' "$candidate")" == 0 ]] || return 1
             rm -rf -- "$candidate" || return 1
@@ -2043,7 +2043,7 @@ if [[ "$boot_recover" == 'true' \
     if [[ "$certificate_status" == 0 ]]; then
         exit 0
     fi
-    [[ "$certificate_status" == 10 ]] || exit 1
+    [[ "$certificate_status" == 10 || "$certificate_status" == 11 || "$certificate_status" == 12 ]] || exit 1
     exec 9>"$lock_path"
     flock 9
     renew_appliance_channel_certificates true
@@ -2079,7 +2079,34 @@ if [[ "$renew_channel_certificates" == 'true' ]]; then
             *) echo 'Deferred Channel certificate maintenance while a release decision is pending.'; exit 0 ;;
         esac
     fi
-    renew_appliance_channel_certificates false
+    # The inode is stable and mounted read-only into Gateway. Writing one byte
+    # never replaces it; an admitted shared holder may finish nested work.
+    certificate_status=0
+    channel_certificate_status || certificate_status=$?
+    case "$certificate_status" in
+        0)
+            if [[ ! -f "$database_root/security/.channel-renewal-restart" ]]; then
+                printf 0 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none || exit 1
+                exit 0
+            fi ;;
+        10|11|12) ;;
+        *) exit 1 ;;
+    esac
+    if [[ "$certificate_status" == 11 || "$certificate_status" == 12 ]]; then
+        printf 1 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none || exit 1
+    fi
+    (
+        exec 7</run/kautuka-helper-run.lock || exit 1
+        if [[ "$certificate_status" == 12 ]]; then
+            # Expired/invalid identities require recovery even if a run is stuck.
+            echo 'Channel identities expired or invalid; recovery may interrupt active helpers.'
+        elif ! flock -x -w "$([[ "$certificate_status" == 11 ]] && printf 30 || printf 0)" 7; then
+            echo 'Deferred Channel certificate maintenance while a helper is active.'
+            exit 0
+        fi
+        renew_appliance_channel_certificates false || exit $?
+        printf 0 | dd of=/run/kautuka-helper-run.lock bs=1 count=1 conv=notrunc status=none
+    )
     exit $?
 fi
 

@@ -28,7 +28,13 @@ internal static class ApplianceChannelCertificateMaintenance
             switch (action)
             {
                 case "check":
-                    return ChannelSecurityMaterialProvisioner.ApplianceLeavesNeedRenewal(RuntimeDirectories(currentRoot), now) ? renewalDue : 0;
+                    return ChannelSecurityMaterialProvisioner.GetApplianceRenewalState(RuntimeDirectories(currentRoot), now) switch
+                    {
+                        ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Healthy => 0,
+                        ChannelSecurityMaterialProvisioner.ApplianceRenewalState.Routine => renewalDue,
+                        ChannelSecurityMaterialProvisioner.ApplianceRenewalState.FinalDay => 11,
+                        _ => 12,
+                    };
                 case "stage":
                     ChannelSecurityMaterialProvisioner.StageApplianceLeaves(
                         Path.Combine(currentRoot, "offline-authority"), RuntimeDirectories(candidateRoot), now);

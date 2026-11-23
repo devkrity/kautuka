@@ -25,19 +25,29 @@ public static class ChannelSecurityMaterialProvisioner
     public static readonly TimeSpan MaximumRotationOverlap = TimeSpan.FromHours(24);
     private static readonly Uri delegationIdentity = new("spiffe://kautuka.local/delegation/gateway/channel");
 
+    public enum ApplianceRenewalState { Healthy, Routine, FinalDay, ExpiredOrInvalid }
+
     public static bool ApplianceLeavesNeedRenewal(ChannelSecurityMaterialDirectories directories, DateTimeOffset now)
+        => GetApplianceRenewalState(directories, now) != ApplianceRenewalState.Healthy;
+
+    public static ApplianceRenewalState GetApplianceRenewalState(ChannelSecurityMaterialDirectories directories, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(directories);
-        return NeedsRenewal(Path.Combine(directories.ChannelPrivateRoot, ServerPfx))
-            || NeedsRenewal(Path.Combine(directories.GatewayPrivateRoot, GatewayClientPfx))
-            || NeedsRenewal(Path.Combine(directories.GatewayPrivateRoot, GatewayDelegationPfx));
-
-        bool NeedsRenewal(string path)
+        DateTime earliest = DateTime.MaxValue;
+        foreach (string path in new[] {
+            Path.Combine(directories.ChannelPrivateRoot, ServerPfx),
+            Path.Combine(directories.GatewayPrivateRoot, GatewayClientPfx),
+            Path.Combine(directories.GatewayPrivateRoot, GatewayDelegationPfx) })
         {
             using X509Certificate2 certificate = X509CertificateLoader.LoadPkcs12FromFile(path, null, X509KeyStorageFlags.EphemeralKeySet);
-            return !certificate.HasPrivateKey || certificate.NotBefore.ToUniversalTime() > now.UtcDateTime
-                || certificate.NotAfter.ToUniversalTime() <= now.UtcDateTime.AddDays(7);
+            if (!certificate.HasPrivateKey || certificate.NotBefore.ToUniversalTime() > now.UtcDateTime)
+                return ApplianceRenewalState.ExpiredOrInvalid;
+            earliest = DateTime.Compare(earliest, certificate.NotAfter.ToUniversalTime()) < 0 ? earliest : certificate.NotAfter.ToUniversalTime();
         }
+        if (earliest <= now.UtcDateTime) return ApplianceRenewalState.ExpiredOrInvalid;
+        if (earliest <= now.UtcDateTime.AddDays(1)) return ApplianceRenewalState.FinalDay;
+        if (earliest <= now.UtcDateTime.AddDays(7)) return ApplianceRenewalState.Routine;
+        return ApplianceRenewalState.Healthy;
     }
 
     public static void StageApplianceLeaves(
