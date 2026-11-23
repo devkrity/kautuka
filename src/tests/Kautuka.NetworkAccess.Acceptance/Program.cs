@@ -2039,13 +2039,11 @@ public static class Program
             }
 
             var admin = new NetworkAccessActor("admin-1", IsAdmin: true);
-            string dnsProbeHostName = $"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io";
-            NetworkAccessRule dnsProbeRule = policyStore.SetRule(
-                admin,
-                new RuleWriteSpec("agent", "u1", "a1", null, dnsProbeHostName, "host", 8443, Allowed: true, AllowLan: true),
-                expectedRevision: policyStore.Revision).Rule.Rule
-                ?? throw new InvalidOperationException("The unique DNS probe policy rule was not created.");
-
+            string dnsProbeHostName = string.Empty;
+            string conntrackDnsClearSummary = string.Empty;
+            string dnsProbeCountersBefore = string.Empty;
+            string dnsProbeCountersAfter = string.Empty;
+            long dnsProbeDelta = 0;
             string[] dnsProbeUpstreamAddresses = corefile
                 .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Where(static line => line.StartsWith("forward . ", StringComparison.Ordinal))
@@ -2059,40 +2057,68 @@ public static class Program
                 throw new InvalidOperationException("The production CoreDNS forwarder had no IPv4 upstream addresses for the unique DNS probe.");
             }
 
-            var conntrackDnsClearResults = new List<string>(dnsProbeUpstreamAddresses.Length);
-            foreach (string upstreamAddress in dnsProbeUpstreamAddresses)
+            // A reused resolver connection may become established between conntrack
+            // deletion and the counter snapshot. Retry only that observed case, with
+            // a new hostname and its own temporary approval, never a failed route.
+            for (int dnsAttempt = 1; dnsAttempt <= 2; dnsAttempt++)
             {
-                var (conntrackClearRc, conntrackClearOut, conntrackClearErr) = await ExecAsync(
-                    "podman",
-                    ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "conntrack", "-D", "-p", "udp", "--dst", upstreamAddress, "--dport", "53"])
-                    .ConfigureAwait(false);
-                if (!TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr, out long removedFlowCount))
+                dnsProbeHostName = $"dns-proof-{Guid.NewGuid():N}.{lanHostAddress}.nip.io";
+                NetworkAccessRule dnsProbeRule = policyStore.SetRule(
+                    admin,
+                    new RuleWriteSpec("agent", "u1", "a1", null, dnsProbeHostName, "host", 8443, Allowed: true, AllowLan: true),
+                    expectedRevision: policyStore.Revision).Rule.Rule
+                    ?? throw new InvalidOperationException("The unique DNS probe policy rule was not created.");
+                try
                 {
-                    throw new InvalidOperationException($"Could not clear DNS conntrack state for configured upstream {upstreamAddress} (rc={conntrackClearRc}; out={conntrackClearOut}; err={conntrackClearErr}).");
+                    var conntrackDnsClearResults = new List<string>(dnsProbeUpstreamAddresses.Length * 2);
+                    foreach (string upstreamAddress in dnsProbeUpstreamAddresses)
+                    {
+                        foreach (string protocol in new[] { "udp", "tcp" })
+                        {
+                            var (conntrackClearRc, conntrackClearOut, conntrackClearErr) = await ExecAsync(
+                                "podman",
+                                ["unshare", "nsenter", "-t", egressPid.ToString(CultureInfo.InvariantCulture), "-n", "conntrack", "-D", "-p", protocol, "--dst", upstreamAddress, "--dport", "53"])
+                                .ConfigureAwait(false);
+                            if (!TryParseConntrackDeleteResult(conntrackClearRc, conntrackClearOut, conntrackClearErr, out long removedFlowCount))
+                            {
+                                throw new InvalidOperationException($"Could not clear {protocol} DNS conntrack state for configured upstream {upstreamAddress} (rc={conntrackClearRc}; out={conntrackClearOut}; err={conntrackClearErr}).");
+                            }
+
+                            // Zero is valid: it means no established conntrack flow existed
+                            // for this protocol and upstream. A counted lookup is still required.
+                            conntrackDnsClearResults.Add($"{upstreamAddress}/{protocol}:removed={removedFlowCount}");
+                        }
+                    }
+
+                    conntrackDnsClearSummary = string.Join(",", conntrackDnsClearResults);
+                    dnsProbeCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                    long dnsProbePacketsBefore = ExtractNftCommentCounterPackets(dnsProbeCountersBefore, "dns_upstream");
+                    var (dnsProbeRc, dnsProbeBody, dnsProbeErr) = await ExecAsync(
+                        "podman",
+                        ["exec", wlName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + dnsProbeHostName + ":8443/"])
+                        .ConfigureAwait(false);
+                    dnsProbeCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
+                    long dnsProbePacketsAfter = ExtractNftCommentCounterPackets(dnsProbeCountersAfter, "dns_upstream");
+                    dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore;
+                    bool dnsProbeBodyReceived = dnsProbeRc == 0 && string.Equals(dnsProbeBody, "NAC LAN fixture ok", StringComparison.Ordinal);
+                    Console.WriteLine($"[PROD_STAGE] unique approved DNS attempt={dnsAttempt}; host={dnsProbeHostName}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}");
+                    if (!dnsProbeBodyReceived || dnsProbeDelta < 0 || (dnsProbeDelta == 0 && dnsAttempt == 2))
+                    {
+                        throw new InvalidOperationException($"The unique approved DNS probe did not exercise a counted upstream lookup (attempt={dnsAttempt}; host={dnsProbeHostName}; upstreams={string.Join(",", dnsProbeUpstreamAddresses)}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}; countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}).");
+                    }
+                    if (dnsProbeDelta > 0)
+                    {
+                        Console.WriteLine($"[PROD_STAGE] unique approved DNS lookup reached LAN fixture; host={dnsProbeHostName}; delta={dnsProbeDelta}; conntrack={conntrackDnsClearSummary}");
+                        break;
+                    }
+                    Console.WriteLine("[PROD_STAGE] approved DNS lookup returned the expected body without a counted upstream packet; retrying once with a fresh hostname.");
                 }
-
-                // Zero is valid: it means no established conntrack flow existed for this
-                // resolver. The unique-name lookup below must still hit the nft rule.
-                conntrackDnsClearResults.Add($"{upstreamAddress}:removed={removedFlowCount}");
+                finally
+                {
+                    long revision = policyStore.DeleteRule(admin, dnsProbeRule.Id, expectedRevision: policyStore.Revision);
+                    Console.WriteLine($"[PROD_STAGE] removed temporary DNS probe rule; attempt={dnsAttempt}; host={dnsProbeHostName}; revision={revision}");
+                }
             }
-
-            string conntrackDnsClearSummary = string.Join(",", conntrackDnsClearResults);
-            string dnsProbeCountersBefore = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            long dnsProbePacketsBefore = ExtractNftCommentCounterPackets(dnsProbeCountersBefore, "dns_upstream");
-            var (dnsProbeRc, dnsProbeBody, dnsProbeErr) = await ExecAsync(
-                "podman",
-                ["exec", wlName, "curl", "--insecure", "--silent", "--show-error", "--max-time", "8", "https://" + dnsProbeHostName + ":8443/"])
-                .ConfigureAwait(false);
-            string dnsProbeCountersAfter = await RunPodNftListEgressAsync("kautuka-egress-envoy").ConfigureAwait(false);
-            long dnsProbePacketsAfter = ExtractNftCommentCounterPackets(dnsProbeCountersAfter, "dns_upstream");
-            long dnsProbeDelta = dnsProbePacketsAfter - dnsProbePacketsBefore;
-            bool dnsProbeBodyReceived = dnsProbeRc == 0 && dnsProbeBody.Contains("NAC LAN fixture ok", StringComparison.Ordinal);
-            if (!dnsProbeBodyReceived || dnsProbeDelta <= 0)
-            {
-                throw new InvalidOperationException($"The unique approved DNS probe did not exercise a counted upstream lookup (host={dnsProbeHostName}; upstreams={string.Join(",", dnsProbeUpstreamAddresses)}; conntrack={conntrackDnsClearSummary}; rc={dnsProbeRc}; body={dnsProbeBody}; err={dnsProbeErr}; dnsDelta={dnsProbeDelta}; countersBefore:\n{dnsProbeCountersBefore}\ncountersAfter:\n{dnsProbeCountersAfter}).");
-            }
-            Console.WriteLine($"[PROD_STAGE] unique approved DNS lookup reached LAN fixture; host={dnsProbeHostName}; delta={dnsProbeDelta}; conntrack={conntrackDnsClearSummary}");
-            _ = policyStore.DeleteRule(admin, dnsProbeRule.Id, expectedRevision: policyStore.Revision);
 
             AcceptanceObservation parserAcceptance;
             var connectorService = new WorkspaceContainerConnectorExecutionService(
