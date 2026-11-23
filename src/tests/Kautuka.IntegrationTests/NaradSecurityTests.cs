@@ -132,7 +132,8 @@ public sealed class NaradSecurityTests
             .ConfigureAwait(true);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        List<SseFrame> frames = await ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 4, timeout.Token).ConfigureAwait(true);
+        // The stream sends its capabilities followed by the single seeded event.
+        List<SseFrame> frames = await ReadSseFramesAsync(await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(true), 2, timeout.Token).ConfigureAwait(true);
         Assert.Contains(frames, frame => frame.Data.Contains("\"eventId\":\"evt-1\"", StringComparison.Ordinal));
     }
 
