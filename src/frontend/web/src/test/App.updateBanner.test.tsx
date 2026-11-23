@@ -644,7 +644,8 @@ describe('App update banner', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Update details')).toBeVisible();
     expect(screen.getByText(/insufficient free space for safe update staging/i)).not.toBeVisible();
-    expect(screen.queryByRole('button', { name: 'Apply update' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try update again' }));
+    await waitFor(() => expect(applyUpdateMock).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();
   });
 

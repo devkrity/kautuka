@@ -238,6 +238,9 @@ function AppShell() {
   const hasPreflightFailure =
     updateState === 'available' &&
     (updateStatus?.lastError?.toLowerCase().startsWith('update preflight checks failed:') ?? false);
+  const hasDiskSpaceFailure =
+    hasPreflightFailure &&
+    /insufficient (free |disk )?space|no space left on device/i.test(updateStatus?.lastError ?? '');
   const updateBannerKey = React.useMemo(() => {
     if (!updateStatus) {
       return null;
@@ -433,8 +436,7 @@ function AppShell() {
     }
 
     if (hasPreflightFailure) {
-      const needsSpace = /insufficient (free |disk )?space|no space left on device/i.test(updateStatus.lastError ?? '');
-      return needsSpace
+      return hasDiskSpaceFailure
         ? 'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
         : 'Your current version is still running. Email hello@devkrity.com for help and include the update details below.';
     }
@@ -552,6 +554,16 @@ function AppShell() {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  {hasDiskSpaceFailure && updateStatus.ok && updateStatus.hostReady && updateStatus.availableRelease ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void runUpdateAction('apply')}
+                      disabled={updateActionPending !== null}
+                    >
+                      Try update again
+                    </Button>
+                  ) : null}
                   {canDismissBanner ? (
                     <Button
                       type="button"
