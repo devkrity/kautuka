@@ -6,7 +6,7 @@
 
   <ItemGroup>
     <PackageVersion Include="coverlet.collector" Version="10.1.0" />
-    <PackageVersion Include="Dapper" Version="2.1.89" />
+    <PackageVersion Include="Dapper" Version="2.1.100" />
     <PackageVersion Include="Dapper.AOT" Version="1.1.0" />
     <PackageVersion Include="Google.GenAI" Version="1.26.1" />
     <PackageVersion Include="Google.Protobuf" Version="3.36.2" />
