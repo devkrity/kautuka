@@ -1607,6 +1607,8 @@ public sealed class EgressTopologyManager : IHostedService, IAsyncDisposable, IW
 
     public bool IsPackageProxyReady => GetPackageProxyAdmission().Ready;
 
+    internal int? InspectionTimeoutSeconds => inspectionTimeoutSeconds;
+
     public PackageProxyAdmission GetPackageProxyAdmission()
     {
         lock (infraAllowlistLock)

@@ -17,6 +17,48 @@ namespace Kautuka.IntegrationTests;
 
 public sealed class WorkspaceSidecarSupervisorReadinessTests
 {
+    [Theory]
+    [InlineData(true, 27)]
+    [InlineData(false, 10)]
+    public async Task PackageProxyInspectionUsesTheApplianceBudgetAndClosesOnTimeout(bool applianceMode, int expectedTimeout)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "kautuka-package-inspection-" + Guid.NewGuid().ToString("N"));
+        var inspected = new List<string>();
+        var podman = new PodmanCommandRunner((args, timeout, _, _) =>
+        {
+            Assert.Equal(expectedTimeout, timeout);
+            inspected.Add(args[0]);
+            return Task.FromResult(args[0] switch
+            {
+                "inspect" => new PodmanCommandResult(0, """[{"Id":"proxy","HostConfig":{},"Config":{},"State":{"Status":"running","Health":{"Status":"healthy"}}}]""", ""),
+                "image" => new PodmanCommandResult(124, "", "", ProcessTerminationReason.TimedOut),
+                _ => throw new InvalidOperationException("Unexpected Podman command: " + string.Join(' ', args)),
+            });
+        });
+        var registry = new WorkloadRegistry();
+        await using var egress = new EgressTopologyManager(
+            podman, new WorkloadAddressAllocator(Path.Combine(root, "ip.json")), new WorkloadPostStartVerifier(podman),
+            registry, root, inspectionTimeoutSeconds: 27);
+        var sidecar = new WorkspaceSidecarDefinition(
+            "kautuka-pkgs-proxy", "localhost/kautuka-pkgs-proxy:local", [], new Dictionary<string, string>(), [],
+            null, null, null, ManagerInfrastructure: true);
+        WorkspaceSidecarSupervisor supervisor = CreateSupervisor(sidecar, podman, egress, applianceMode);
+
+        try
+        {
+            egress.RegisterVerifiedPackageProxyContainer("proxy");
+            egress.SetPackageProxyReady(true);
+            Assert.True(egress.IsPackageProxyReady);
+            Assert.False(await supervisor.EnsureReadyAsync(CreateRuntimeSettings(), TestContext.Current.CancellationToken));
+            Assert.Equal(["inspect", "image"], inspected);
+            Assert.False(egress.IsPackageProxyReady);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public void PackageProxyRunsOnWorkloadNetworkWithFixedIdentityAndAddress()
     {

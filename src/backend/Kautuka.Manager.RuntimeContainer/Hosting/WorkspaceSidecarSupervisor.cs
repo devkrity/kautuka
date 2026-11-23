@@ -262,7 +262,10 @@ public sealed class WorkspaceSidecarSupervisor(
             return false;
         }
 
-        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken).ConfigureAwait(false);
+        int inspectionTimeout = isPackageProxy && applianceMode
+            ? egressTopologyManager?.InspectionTimeoutSeconds ?? PodmanContainerInspector.DefaultTimeoutSeconds
+            : PodmanContainerInspector.DefaultTimeoutSeconds;
+        ContainerState state = await InspectStateAsync(sidecar.Name, cancellationToken, inspectionTimeout).ConfigureAwait(false);
         bool hasScheduledPackageHealth = isPackageProxy && sidecar.HealthCheck is null
             && string.Equals(state.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
         if (isPackageProxy && egressTopologyManager is not null
@@ -274,7 +277,7 @@ public sealed class WorkspaceSidecarSupervisor(
 
         if (state.IsRunning && (hasScheduledPackageHealth || await IsHealthyAsync(sidecar, cancellationToken).ConfigureAwait(false)))
         {
-            (string? drift, string imageId) = await DescribeDriftAsync(sidecar, state.InspectJson!, cancellationToken).ConfigureAwait(false);
+            (string? drift, string imageId) = await DescribeDriftAsync(sidecar, state.InspectJson!, inspectionTimeout, cancellationToken).ConfigureAwait(false);
             if (drift is null)
             {
                 if (IsPackageProxy(sidecar)
@@ -387,11 +390,12 @@ public sealed class WorkspaceSidecarSupervisor(
         return ready;
     }
 
-    private async Task<(string? Drift, string ImageId)> DescribeDriftAsync(WorkspaceSidecarDefinition sidecar, string inspectJson, CancellationToken cancellationToken)
+    private async Task<(string? Drift, string ImageId)> DescribeDriftAsync(
+        WorkspaceSidecarDefinition sidecar, string inspectJson, int inspectionTimeout, CancellationToken cancellationToken)
     {
         PodmanCommandResult image = await this.podmanCommandRunner.RunAsync(
             ["image", "inspect", "--format", "{{.Id}}", sidecar.Image],
-            10,
+            inspectionTimeout,
             cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (image.ExitCode != 0 || string.IsNullOrWhiteSpace(image.StdOut))
@@ -1217,9 +1221,10 @@ public sealed class WorkspaceSidecarSupervisor(
     private static bool PathExists(string path)
         => Directory.Exists(path) || File.Exists(path);
 
-    private async Task<ContainerState> InspectStateAsync(string containerName, CancellationToken cancellationToken)
+    private async Task<ContainerState> InspectStateAsync(
+        string containerName, CancellationToken cancellationToken, int timeoutSeconds = PodmanContainerInspector.DefaultTimeoutSeconds)
     {
-        string? inspectJson = await PodmanContainerInspector.ReadAsync(this.podmanCommandRunner, containerName, cancellationToken).ConfigureAwait(false);
+        string? inspectJson = await PodmanContainerInspector.ReadAsync(this.podmanCommandRunner, containerName, cancellationToken, timeoutSeconds).ConfigureAwait(false);
         if (inspectJson is null)
         {
             return new ContainerState(false, false, null);
