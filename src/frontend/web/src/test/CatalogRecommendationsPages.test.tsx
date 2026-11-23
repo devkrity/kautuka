@@ -53,6 +53,7 @@ vi.mock('@/features/connectors', () => ({
   useConnectors: () => ({ data: [], isLoading: false, error: null }),
   useDeleteConnector: () => ({ isPending: false, mutate: vi.fn() }),
   useSaveConnector: () => ({ isPending: false, mutate: vi.fn() }),
+  useSetConnectorEnabled: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useSaveConnectorCredentials: () => ({ isPending: false, mutate: vi.fn() }),
   useSaveConnectorDiscovery: () => ({ isPending: false, mutate: vi.fn() }),
 }));
