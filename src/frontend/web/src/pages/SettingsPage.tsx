@@ -191,7 +191,7 @@ export const SettingsPage: React.FC = () => {
               <OrganizationTab />
             </TabsContent>
             <TabsContent value="advanced" className="mt-0">
-              <AdvancedTab />
+              <AdvancedTab initialSection={searchParams.get('section') === 'network-access' ? 'network-access' : 'workspace'} />
             </TabsContent>
           </section>
         </div>

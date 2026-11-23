@@ -436,6 +436,10 @@ describe('App update banner', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
     await screen.findByText('Update check needs attention');
     expect(screen.getByText('GitHub release discovery request failed.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Review update permissions' })).toHaveAttribute(
+      'href',
+      '/settings?tab=advanced&section=network-access'
+    );
     expect(screen.queryByText('You’re up to date')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByTitle('Dismiss update notice'));

@@ -17,7 +17,7 @@ import { useOnboardingGuard } from '@/features/onboarding';
 import { ROLE_ADMIN } from '@/features/settings';
 import { AlertTriangle, Loader2, X } from 'lucide-react';
 import React from 'react';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, Link } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { captureLoginCallbackHash } from '@/pages/loginCallbackHash';
 import { AppRoutes } from './AppRoutes';
@@ -242,6 +242,7 @@ function AppShell() {
   const hasDiskSpaceFailure =
     hasPreflightFailure &&
     /insufficient (free |disk )?space|no space left on device/i.test(updateStatus?.lastError ?? '');
+  const hasReleaseCheckFailure = updateStatus?.lastError === 'GitHub release discovery request failed.';
   const updateBannerKey = React.useMemo(() => {
     if (!updateStatus) {
       return null;
@@ -438,6 +439,10 @@ function AppShell() {
         : 'Your current version is still running. Email hello@devkrity.com for help and include the update details below.';
     }
 
+    if (hasReleaseCheckFailure) {
+      return 'Kautuka couldn’t check for updates. If in-app updates are paused, you can turn them on in the network settings.';
+    }
+
     if (hasUpdateStatusFailure) {
       return updateStatus.lastError ?? updateStatus.message;
     }
@@ -545,7 +550,7 @@ function AppShell() {
                     <AlertTitle>{updateBannerTitle}</AlertTitle>
                     <AlertDescription>
                       <p>{updateBannerDescription}</p>
-                      {hasPreflightFailure && updateStatus?.lastError && (
+                      {(hasPreflightFailure || hasReleaseCheckFailure) && updateStatus.lastError && (
                         <details className="mt-2">
                           <summary className="cursor-pointer">Update details</summary>
                           <p className="mt-1 break-words">{updateStatus.lastError}</p>
@@ -555,6 +560,13 @@ function AppShell() {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  {hasReleaseCheckFailure ? (
+                    <Button asChild variant="outline" size="sm">
+                      <Link to="/settings?tab=advanced&section=network-access">
+                        Review update permissions
+                      </Link>
+                    </Button>
+                  ) : null}
                   {hasDiskSpaceFailure && updateStatus.availableRelease ? (
                     <Button
                       type="button"
