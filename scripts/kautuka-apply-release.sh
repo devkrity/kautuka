@@ -1158,17 +1158,15 @@ check_staging_space() {
     local test_free_bytes=''
     if is_disposable_test; then test_free_bytes="${KAUTUKA_TEST_FREE_BYTES:-}"; fi
     python3 - "$1" "$database_root" "$backups_root" "$recovery_tool" "$test_free_bytes" "${2:-host-service}" <<'PY' || { local status=$?; [[ "$status" != 73 ]] || record_appliance_preflight_space_failure; return "$status"; }
-import importlib.util, os, sys, tarfile
+import os, runpy, sys, tarfile
 from pathlib import Path
 archive, data_root, backup_root, recovery_path, test_free_bytes, layout = sys.argv[1:]
 with tarfile.open(archive, 'r:gz') as bundle:
     payload = sum(item.size for item in bundle if item.isfile())
 if payload <= 0:
     raise SystemExit('error: signed update archive contains no files')
-spec = importlib.util.spec_from_file_location('kautuka_recovery', recovery_path)
-recovery = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(recovery)
-database_paths = [os.path.join(data_root, name) for name, kind in recovery.inventory(Path(data_root), layout) if kind == "database"]
+inventory = runpy.run_path(recovery_path)['inventory']
+database_paths = [os.path.join(data_root, name) for name, kind in inventory(Path(data_root), layout) if kind == "database"]
 databases = []
 for path in database_paths:
     for suffix in ('', '-wal', '-shm'):

@@ -8,11 +8,11 @@ trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/recovery/backups" "$test_root/data" "$test_root/opt" "$test_root/input"
 printf 'fixture\n' > "$test_root/input/file"
 tar -czf "$test_root/archive.tar.gz" -C "$test_root/input" .
-printf 'def inventory(*args):\n    return []\n' > "$test_root/recovery.py"
+printf 'assert __name__ != "__main__"\ndef inventory(*args):\n    return []\n' > "$test_root/kautuka-update-recovery"
 recovery_root="$test_root/recovery"
 backups_root="$recovery_root/backups"
 database_root="$test_root/data"
-recovery_tool="$test_root/recovery.py"
+recovery_tool="$test_root/kautuka-update-recovery"
 consume_appliance_request=true
 appliance_request_id=0123456789abcdef0123456789abcdef
 version=1.2.4
@@ -37,6 +37,9 @@ assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
 assert os.stat(path).st_uid == os.geteuid()
 PY
 done
+rm -f "$recovery_root/activation-preflight.json"
+KAUTUKA_TEST_FREE_BYTES=1000000000 check_staging_space "$test_root/archive.tar.gz" appliance
+[[ ! -e "$recovery_root/activation-preflight.json" && ! -e "$test_root/__pycache__" ]]
 # Exercise the exact request parser against strict identity and newline rules.
 mkdir -p "$test_root/kautuka/updateService/updates"
 request="$test_root/kautuka/updateService/updates/activate-appliance"
