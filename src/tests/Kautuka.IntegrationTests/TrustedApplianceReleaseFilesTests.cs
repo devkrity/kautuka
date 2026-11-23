@@ -13,7 +13,7 @@ public sealed class TrustedApplianceReleaseFilesTests
         string marker = Path.Combine(directory, "maintenance.json");
         try
         {
-            Assert.Throws<IOException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
+            Assert.Throws<FileNotFoundException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
             File.WriteAllText(marker, """{"phase":"committed","targetRelease":"1.2.3"}""");
             Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.RequireVerificationTarget("1.2.3", directory));
             File.WriteAllText(marker, """{"phase":"verifying","targetRelease":"1.2.3"}""");
@@ -100,7 +100,7 @@ public sealed class TrustedApplianceReleaseFilesTests
             Assert.Throws<InvalidDataException>(() => TrustedApplianceReleaseFiles.Read(manager, keys));
             File.WriteAllText(manifest, "{}");
             File.Delete(Path.Combine(keys, "manifest-public-key.pem"));
-            Assert.Throws<IOException>(() => TrustedApplianceReleaseFiles.Read(manager, keys));
+            Assert.Throws<FileNotFoundException>(() => TrustedApplianceReleaseFiles.Read(manager, keys));
         }
         finally { Directory.Delete(root, true); }
     }
