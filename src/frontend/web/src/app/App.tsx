@@ -88,7 +88,7 @@ function AppShell() {
 
   const isAdmin = currentUser?.role?.toLowerCase() === ROLE_ADMIN.toLowerCase();
 
-  useBuiltInToolRefresh(authenticated && isAdmin);
+  useBuiltInToolRefresh(authenticated, isAdmin);
 
   // System Setup Guard
   useOnboardingGuard(authenticated, isAdmin);

@@ -14,6 +14,8 @@ Connector scope determines who can see a connector. Each signed-in user, includi
 
 Settings shows a new one-time invitation code in the invitation dialog. The administrator can copy it before closing the dialog. The invitation keeps its seven-day expiry and email binding.
 
+When a release replaces the bundled Kautuka Web Tools artifact, signed-in users who enabled it can refresh its discovered tools automatically. Gateway uses the stored launch definition and saves the discovery only with an immutable image and bundle digest. A regular user's test with a custom environment cannot update the shared tool catalog.
+
 ## Internal service transport
 
 Gateway calls Manager, CredentialsHost, ChannelHost, and UpdateService over HTTPS HTTP/2 with locally issued client certificates. CredentialsHost additionally binds the active Gateway client thumbprint/subject and performs capability checks for runtime resolution, own-user, cross-user, and system administration.

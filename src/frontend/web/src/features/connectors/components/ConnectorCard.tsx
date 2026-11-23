@@ -6,8 +6,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { StatePill } from '@/components/ui/state-pill';
 import { apiError } from '@/features/settings';
-import { queryClient } from '@/lib/queryClient';
-import { connectorsQueryKeys } from '../api/queryKeys';
 import { useConnectorCredentialStatus, useConnectorOAuth, useTestConnector } from '../api/queries';
 import type { Connector } from '../schemas/connectorSchema';
 import { ConnectorSignInPanel, matchesConnectorOAuth } from './MailSignInPanel';
@@ -36,10 +34,7 @@ function RefreshManagedTools({ connector }: { connector: Connector }) {
           readinessTimeoutSeconds: null, jitCooldownSeconds: null, healthcheckUrl: null,
           healthcheckIntervalMilliseconds: null, mcpProtocolVersion: null, envKeys: [], testEnv: {},
         }, {
-          onSuccess: (result) => {
-            setMessage(result.message);
-            if (result.success) void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
-          },
+          onSuccess: (result) => setMessage(result.message),
           onError: (error) => setMessage(apiError(error)),
         });
       }}>{test.isPending ? 'Refreshing tools…' : 'Refresh tools'}</Button>

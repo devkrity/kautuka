@@ -7,7 +7,7 @@ import { connectorsQueryKeys } from './queryKeys';
 
 const builtInIds = new Set(['kautuka-web-tools', 'kautuka-google-mail', 'kautuka-m365-mail']);
 
-export function useBuiltInToolRefresh(enabled: boolean): void {
+export function useBuiltInToolRefresh(enabled: boolean, isAdmin: boolean): void {
   useEffect(() => {
     if (!enabled) return undefined;
     let active = true;
@@ -17,7 +17,7 @@ export function useBuiltInToolRefresh(enabled: boolean): void {
       if (busy) return;
       busy = true;
       try {
-        const changed = await refreshBuiltInTools(attempted, () => active);
+        const changed = await refreshBuiltInTools(attempted, () => active, isAdmin);
         if (active && changed) await queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
       } catch { /* Retry when Gateway is available. */ }
       finally { busy = false; }
@@ -25,16 +25,18 @@ export function useBuiltInToolRefresh(enabled: boolean): void {
     void refresh();
     const timer = window.setInterval(() => void refresh(), 30000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [enabled]);
+  }, [enabled, isAdmin]);
 }
 
 /** Refresh only enabled shipped connectors whose saved tool definitions are missing. */
-export async function refreshBuiltInTools(attempted: Map<string, number>, active: () => boolean): Promise<boolean> {
+export async function refreshBuiltInTools(attempted: Map<string, number>, active: () => boolean, isAdmin: boolean): Promise<boolean> {
   const connectors = await fetchConnectors();
   let refreshed = false;
   for (const connector of connectors) {
     if (!active()) return refreshed;
     if (!builtInIds.has(connector.id) || connector.scope !== 'system' || !connector.enabled || connector.toolCount !== null) continue;
+    if (!isAdmin && (connector.id !== 'kautuka-web-tools' || connector.transport !== 'container'
+      || !connector.bundlePath || connector.envKeys?.length)) continue;
     const key = `${connector.id}:${connector.updatedAt}`;
     const attempts = attempted.get(key) ?? 0;
     if (attempts >= 2) continue;

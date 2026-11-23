@@ -8,9 +8,9 @@ vi.mock('sonner', () => ({ toast: { warning: mocks.warning } }));
 
 describe('bundled connector refresh', () => {
   beforeEach(() => { mocks.fetch.mockReset(); mocks.test.mockReset(); mocks.warning.mockReset(); });
-  it('does no background work until enabled for an administrator', async () => {
+  it('does no background work until the account has signed in', async () => {
     mocks.fetch.mockResolvedValue([]);
-    const { rerender } = renderHook(({ enabled }) => useBuiltInToolRefresh(enabled), { initialProps: { enabled: false } });
+    const { rerender } = renderHook(({ enabled }) => useBuiltInToolRefresh(enabled, false), { initialProps: { enabled: false } });
     expect(mocks.fetch).not.toHaveBeenCalled();
     rerender({ enabled: true });
     await waitFor(() => expect(mocks.fetch).toHaveBeenCalledTimes(1));
@@ -22,21 +22,30 @@ describe('bundled connector refresh', () => {
       { ...connector, id: 'other-connector' }, { ...connector, id: 'kautuka-web-tools', toolCount: 3 }]);
     mocks.test.mockResolvedValue({ success: true });
     const attempted = new Map<string, number>();
-    expect(await refreshBuiltInTools(attempted, () => true)).toBe(true);
+    expect(await refreshBuiltInTools(attempted, () => true, true)).toBe(true);
     expect(mocks.test).toHaveBeenCalledTimes(1);
     expect(mocks.test).toHaveBeenCalledWith(expect.objectContaining({ id: connector.id, testEnv: {} }));
-    expect(await refreshBuiltInTools(attempted, () => true)).toBe(false);
+    expect(await refreshBuiltInTools(attempted, () => true, true)).toBe(false);
     expect(mocks.test).toHaveBeenCalledTimes(1);
+  });
+  it('refreshes only the enabled credential-free Web Tools for regular users', async () => {
+    const web = { id: 'kautuka-web-tools', name: 'Web Tools', scope: 'system', enabled: true,
+      toolCount: null, updatedAt: 'v2', transport: 'container', bundlePath: '/test/web-tools.mcpb', containerArgs: [], envKeys: [] };
+    mocks.fetch.mockResolvedValue([web, { ...web, id: 'kautuka-google-mail' }]);
+    mocks.test.mockResolvedValue({ success: true });
+    expect(await refreshBuiltInTools(new Map(), () => true, false)).toBe(true);
+    expect(mocks.test).toHaveBeenCalledTimes(1);
+    expect(mocks.test).toHaveBeenCalledWith(expect.objectContaining({ id: web.id, testEnv: {} }));
   });
   it('retries a failed refresh once and tells the admin if it still fails', async () => {
     mocks.fetch.mockResolvedValue([{ id: 'kautuka-web-tools', name: 'Web Tools', scope: 'system', enabled: true,
       toolCount: null, updatedAt: 'v2', transport: 'container', containerArgs: [], envKeys: [] }]);
     mocks.test.mockResolvedValue({ success: false });
     const attempted = new Map<string, number>();
-    await refreshBuiltInTools(attempted, () => true);
+    await refreshBuiltInTools(attempted, () => true, true);
     expect(mocks.warning).not.toHaveBeenCalled();
-    await refreshBuiltInTools(attempted, () => true);
-    await refreshBuiltInTools(attempted, () => true);
+    await refreshBuiltInTools(attempted, () => true, true);
+    await refreshBuiltInTools(attempted, () => true, true);
     expect(mocks.test).toHaveBeenCalledTimes(2);
     expect(mocks.warning).toHaveBeenCalledTimes(1);
   });

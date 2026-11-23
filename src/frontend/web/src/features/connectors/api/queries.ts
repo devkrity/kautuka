@@ -84,6 +84,9 @@ export function useSaveConnectorDiscovery() {
 export function useTestConnector() {
   return useMutation({
     mutationFn: (data: ConnectorTestPayload) => testConnector(data),
+    onSuccess: (result) => {
+      if (result.success) void queryClient.invalidateQueries({ queryKey: connectorsQueryKeys.list() });
+    },
   });
 }
 

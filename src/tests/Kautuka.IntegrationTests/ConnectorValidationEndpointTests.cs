@@ -141,6 +141,59 @@ public sealed class ConnectorValidationEndpointTests
     }
 
     [Fact]
+    public async Task RegularUserRefreshesShippedWebToolsAfterBundleChanges()
+    {
+        const string connectorId = "kautuka-web-tools";
+        const string testPath = "/api/connectors/test";
+        string bundleDigest = new('a', 64);
+        string newBundleDigest = new('b', 64);
+        string image = "example/image@sha256:" + new string('c', 64);
+        var manager = new FakeManagerGrpcService();
+        await using var fixture = await ConnectorApiFixture.CreateAsync(captureConnectorTests: false, managerGrpcService: manager);
+        string admin = await fixture.LoginAsBootstrapAdminAsync();
+        using JsonDocument invited = await fixture.SendJsonAsync(HttpMethod.Post, "/api/settings/users/invite", new
+        { username = "web-tools-user", password = "Testing1", role = "user" }, admin);
+        string user = await fixture.LoginAsAsync("web-tools-user", "Testing1");
+
+        await fixture.ReplayInternalConnectorSave(connectorId, image, bundleDigest: bundleDigest);
+        manager.ProbeResponse = Probe(bundleDigest, "old_fetch");
+        using JsonDocument beforeUpdate = await fixture.SendJsonAsync(HttpMethod.Post, testPath, new { id = connectorId }, user);
+        Assert.Equal("old_fetch", Assert.Single(fixture.ReadStoredConnector(connectorId).LocalToolDefinitions!).Name);
+
+        await fixture.ReplayInternalConnectorSave(connectorId, image, bundleDigest: newBundleDigest);
+        Assert.Null(fixture.ReadStoredConnector(connectorId).LocalToolDefinitions);
+        manager.ProbeResponse = Probe(bundleDigest, "old_fetch");
+        using var staleProbe = new HttpRequestMessage(HttpMethod.Post, testPath)
+        {
+            Content = JsonContent.Create(new { id = connectorId, transport = "container" }),
+        };
+        staleProbe.Headers.Authorization = new AuthenticationHeaderValue("Bearer", user);
+        using HttpResponseMessage rejected = await fixture.Client.SendAsync(staleProbe, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
+        Assert.Null(fixture.ReadStoredConnector(connectorId).LocalToolDefinitions);
+
+        manager.ProbeResponse = Probe(newBundleDigest, "new_fetch");
+        using JsonDocument customTest = await fixture.SendJsonAsync(HttpMethod.Post, testPath, new
+        { id = connectorId, testEnv = new Dictionary<string, string> { ["CUSTOM"] = "value" } }, user);
+        Assert.Null(fixture.ReadStoredConnector(connectorId).LocalToolDefinitions);
+
+        using JsonDocument afterUpdate = await fixture.SendJsonAsync(HttpMethod.Post, testPath, new { id = connectorId }, user);
+        McpServerDefinition connector = fixture.ReadStoredConnector(connectorId);
+        Assert.True(connector.Enabled);
+        Assert.Equal(newBundleDigest, connector.LocalArtifactDigest);
+        Assert.Equal("new_fetch", Assert.Single(connector.LocalToolDefinitions!).Name);
+        Assert.True(manager.ContainerProbeRequests.Last().SaveDiscovery);
+
+        static WorkspaceMcpProbeResponse Probe(string digest, string tool) => new()
+        {
+            Ok = true,
+            SourceDigest = digest,
+            ToolCount = 1,
+            Tools = { new WorkspaceMcpToolMessage { Name = tool, JsonSchema = "{\"type\":\"object\"}" } },
+        };
+    }
+
+    [Fact]
     public async Task TestingExistingLocalConnectorPersistsCompleteDefinitions()
     {
         string digest = "sha256:" + new string('a', 64);
@@ -2001,9 +2054,18 @@ public sealed class ConnectorValidationEndpointTests
         public McpServerDefinition ReadStoredConnector(string id)
             => app.Services.GetRequiredService<IPlatformConfigurationProvider>().GetCurrent().McpServers.Single(server => server.Id == id);
 
-        public async Task ReplayInternalConnectorSave(string id, string image, bool enabled = true)
+        public async Task ReplayInternalConnectorSave(string id, string image, bool enabled = true, string? bundleDigest = null)
             => _ = await app.Services.GetRequiredService<IGatewayCatalogStore>().SaveSystemMcpServerAsync(id,
-                new GatewayConnectorUpsertRequest { Name = "Schema test", Transport = "container", ContainerImage = image, ContainerCommand = "server", Enabled = enabled }, TestContext.Current.CancellationToken);
+                new GatewayConnectorUpsertRequest
+                {
+                    Name = "Schema test",
+                    Transport = "container",
+                    ContainerImage = image,
+                    ContainerCommand = "server",
+                    Enabled = enabled,
+                    BundlePath = bundleDigest is null ? null : "/test/shipped.mcpb",
+                    RuntimeArtifactSourceDigest = bundleDigest,
+                }, TestContext.Current.CancellationToken);
 
         public (string Scope, string? OwnerUserId) ReadStoredConnectorOwnership(string connectorId)
         {

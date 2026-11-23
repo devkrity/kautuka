@@ -132,7 +132,16 @@ internal static class GatewayConnectorEndpointMappings
             }
 
             request.UserId ??= user.Id;
-            bool maySaveDiscovery = saved is not null && GatewayOwnershipAccess.CanManageConnector(user, saved) && !hasCallerEnvironment;
+            bool mayManage = saved is not null && GatewayOwnershipAccess.CanManageConnector(user, saved);
+            bool mayRefreshWebTools = !mayManage && saved is not null
+                && saved.Id == "kautuka-web-tools"
+                && saved.Scope == GatewayOwnershipScopes.System
+                && saved.Transport == "container"
+                && !string.IsNullOrWhiteSpace(saved.BundlePath)
+                && saved.EnvKeys is not { Count: > 0 }
+                && request.TestEnv is not { Count: > 0 }
+                && !HasCurrentLocalTools(saved);
+            bool maySaveDiscovery = !hasCallerEnvironment && (mayManage || mayRefreshWebTools);
             request.SaveDiscovery = maySaveDiscovery && !string.Equals(request.Transport, "http", StringComparison.OrdinalIgnoreCase);
             McpConnectorTestResult result = await testService.TestAsync(request, ct).ConfigureAwait(false);
             if (maySaveDiscovery && result.Success && result.ToolDefinitions is not null && saved is not null
@@ -141,6 +150,8 @@ internal static class GatewayConnectorEndpointMappings
                 string? digest = string.IsNullOrWhiteSpace(saved.BundlePath) ? null : result.SourceDigest;
                 if (!IsCanonicalImageDigest(result.ImageDigest) || (!string.IsNullOrWhiteSpace(saved.BundlePath) && !IsCanonicalSourceDigest(digest)))
                     return Results.Json(new GatewayErrorResponse("Connector tools could not be saved without an immutable artifact digest."), KautukaJsonContext.Default.GatewayErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+                if (mayRefreshWebTools && !string.Equals(digest, saved.RuntimeArtifactSourceDigest, StringComparison.OrdinalIgnoreCase))
+                    return ConnectorEnablementConflict("The Web Tools bundle changed during discovery. Test it again.");
                 try
                 {
                     await catalog.SaveVerifiedLocalToolsAsync(saved.Id, saved.UpdatedAt, result.ToolDefinitions, digest, result.ImageDigest!, ct).ConfigureAwait(false);
