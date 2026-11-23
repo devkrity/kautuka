@@ -140,6 +140,7 @@ jobs:
         run: |
           sudo bash ./scripts/test-appliance-staging-extraction.sh
           sudo bash ./scripts/test-appliance-preflight-receipt.sh
+          sudo bash ./scripts/test-appliance-host-tools.sh
           bash ./scripts/test-built-in-mcpb-determinism.sh
 
       - name: Test actual release runtime image inventory
