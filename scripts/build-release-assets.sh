@@ -1013,9 +1013,11 @@ if [[ -n "$manifest_url" ]]; then
 fi
 
 cp "$source_root/scripts/kautuka-apply-release.sh" "$stage_dir/bin/kautuka-apply-release"
+cp "$source_root/scripts/kautuka-apply-release-dispatch.sh" "$stage_dir/bin/kautuka-apply-release-dispatch"
 cp "$source_root/scripts/kautuka-update-recovery.py" "$stage_dir/bin/kautuka-update-recovery"
 chmod +x "$stage_dir/bin/kautuka-manager" \
   "$stage_dir/bin/kautuka-apply-release" \
+  "$stage_dir/bin/kautuka-apply-release-dispatch" \
   "$stage_dir/bin/kautuka-update-recovery" \
   "$stage_dir/services/gateway/kautuka-gateway" \
   "$stage_dir/services/credentialshost/kautuka-credentialshost" \

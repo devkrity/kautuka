@@ -13,6 +13,8 @@ mkdir -p "$test_root/kautuka/manager/versions" "$test_root/source/bin/scripts" \
 printf '\177ELFfake' > "$test_root/source/bin/kautuka-manager"
 printf '\177ELFfake' > "$test_root/source/bin/scripts/kautuka-oci-hook"
 chmod 0755 "$test_root/source/bin/kautuka-manager" "$test_root/source/bin/scripts/kautuka-oci-hook"
+install -m 0755 "$script_dir/kautuka-apply-release.sh" "$test_root/source/bin/kautuka-apply-release"
+install -m 0755 "$script_dir/kautuka-update-recovery.py" "$test_root/source/bin/kautuka-update-recovery"
 printf 'role image bytes\n' > "$test_root/source/service-images/gateway.tar"
 printf 'manifest\n' > "$test_root/verified/manifest.json"
 printf 'signature\n' > "$test_root/verified/signature.b64"
@@ -41,7 +43,7 @@ appliance_user() {
     printf 'observed\n' > "$test_root/prepared"
 }
 # Substitute only the test fixture paths; all staging and cleanup logic is real.
-source <(sed -n '/^cleanup_stage_extract() {/,/^}/p; /^same_file_contents() {/,/^}/p; /^stage_appliance_version() {/,/^}/p' "$script_dir/kautuka-apply-release.sh" | \
+source <(sed -n '/^cleanup_stage_extract() {/,/^}/p; /^same_file_contents() {/,/^}/p; /^validate_appliance_host_tools() {/,/^}/p; /^stage_appliance_version() {/,/^}/p' "$script_dir/kautuka-apply-release.sh" | \
     sed -e 's@manager_root=/opt/kautuka/manager@manager_root="$test_root/kautuka/manager"@' \
         -e 's@for directory in /opt /opt/kautuka@for directory in "$test_root" "$test_root/kautuka"@' \
         -e 's@/var/tmp/kautuka-appliance-stage\.XXXXXXXX@'"$test_root"'/extract.XXXXXXXX@')

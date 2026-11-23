@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Kautuka-Apply-Protocol: 6
+# Kautuka-Host-Tools-Generation: 1
 set -euo pipefail
+original_args=("$@")
 
 # Root helper invoked by UpdateService. It deploys or retargets one release.
 # UpdateService never extracts or flips current itself.
@@ -27,6 +29,13 @@ maintenance_path="$recovery_root/maintenance.json"
 journal_path="$recovery_root/operation.json"
 backups_root="$recovery_root/backups"
 recovery_tool='/usr/local/lib/kautuka/update-recovery.py'
+host_tools_selector='/usr/local/lib/kautuka/host-tools-current'
+host_tools_directory=''
+helper_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+if [[ "$helper_path" =~ ^(/opt/kautuka/manager/versions/[A-Za-z0-9][A-Za-z0-9._-]{0,127})/kautuka-apply-release$ ]]; then
+    host_tools_directory="${BASH_REMATCH[1]}"
+    recovery_tool="$host_tools_directory/kautuka-update-recovery"
+fi
 artifact=''
 version=''
 recover='false'
@@ -1004,6 +1013,57 @@ except OSError:
 ' "$1" "$2"
 }
 
+validate_appliance_host_tools() {
+    local generation="$1" tool
+    [[ -d "$generation" && ! -L "$generation" && "$(stat -c %u -- "$generation")" == 0 &&
+        -z "$(find "$generation" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    for tool in kautuka-apply-release kautuka-update-recovery; do
+        [[ -f "$generation/$tool" && ! -L "$generation/$tool" && -x "$generation/$tool" &&
+            "$(stat -c %u -- "$generation/$tool")" == 0 &&
+            -z "$(find "$generation/$tool" -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    done
+    [[ "$(sed -n '2p' "$generation/kautuka-apply-release")" == '# Kautuka-Apply-Protocol: 6' ]] || return 1
+    grep -Fxq '# Kautuka-Host-Tools-Generation: 1' "$generation/kautuka-apply-release" || return 1
+    grep -Fq 'safe-state-recovery-v6' "$generation/kautuka-apply-release" || return 1
+    python3 - "$generation/kautuka-update-recovery" <<'PY'
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_bytes()
+compile(source, sys.argv[1], 'exec')
+if b'def prune_appliance_snapshots(' not in source or b'def verify(' not in source:
+    raise SystemExit(1)
+PY
+}
+
+publish_appliance_host_tools() {
+    local release="$1" generation="/opt/kautuka/manager/versions/$1" temporary_dir
+    [[ "$release" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || return 1
+    validate_appliance_host_tools "$generation" || return 1
+    [[ -d /usr/local/lib/kautuka && ! -L /usr/local/lib/kautuka &&
+        "$(stat -c %u /usr/local/lib/kautuka)" == 0 &&
+        -z "$(find /usr/local/lib/kautuka -maxdepth 0 -perm /022 -print -quit)" ]] || return 1
+    # A killed publisher can leave this directory behind; a random private
+    # name lets boot recovery retry without PID reuse blocking publication.
+    temporary_dir="$(mktemp -d /usr/local/lib/kautuka/.host-tools-stage.XXXXXXXX)" || return 1
+    ln -s -- "$generation" "$temporary_dir/current" || { rmdir -- "$temporary_dir"; return 1; }
+    mv -Tf -- "$temporary_dir/current" "$host_tools_selector" || {
+        rm -f -- "$temporary_dir/current"; rmdir -- "$temporary_dir"; return 1;
+    }
+    rmdir -- "$temporary_dir" || return 1
+    sync -f /usr/local/lib/kautuka
+}
+
+# Selection precedes lock acquisition, so another committed update may have
+# changed it while this process waited. Redispatch only before any mutation.
+recheck_host_tools_after_lock() {
+    [[ -n "$host_tools_directory" ]] || return 0
+    if [[ ! -L "$host_tools_selector" || "$(stat -c %u -- "$host_tools_selector")" != 0 ||
+          "$(readlink -- "$host_tools_selector")" != "$host_tools_directory" ]]; then
+        flock -u 9
+        exec 9>&-
+        exec /usr/local/lib/kautuka/apply-release "${original_args[@]}"
+    fi
+}
+
 stage_appliance_version() {
     local target="$1" manager_root=/opt/kautuka/manager
     local versions="$manager_root/versions" directory role archive selinux_state
@@ -1082,6 +1142,10 @@ stage_appliance_version() {
         cleanup_stage_extract || return 1
         sync -f "$versions"
     fi
+    validate_appliance_host_tools "$destination" || {
+        echo 'error: signed appliance release has invalid or incompatible host tools' >&2
+        return 1
+    }
     if [[ -n "$selinux_state" && "$selinux_state" != 'Disabled' ]]; then
         restorecon -RF "$destination" || return 1
     fi
@@ -1899,6 +1963,10 @@ recover_appliance_operation() {
         expected="$(read_journal_field sourceRelease)" || return 1
     fi
     [[ "$(readlink -f /opt/kautuka/manager/current)" == "/opt/kautuka/manager/versions/$expected" ]] || return 1
+    if [[ "$phase" == committed ]]; then
+        publish_appliance_host_tools "$expected" || return 1
+        test_crash_at host-tools-published
+    fi
     if [[ "$phase" == recovered ]]; then
         retain_appliance_snapshot || return 1
         set_operation_phase completed || return 1
@@ -2092,6 +2160,7 @@ if [[ "$boot_recover" == 'true' \
     [[ "$certificate_status" == 10 || "$certificate_status" == 11 || "$certificate_status" == 12 ]] || exit 1
     exec 9>"$lock_path"
     flock 9
+    recheck_host_tools_after_lock
     renew_appliance_channel_certificates true
     exit $?
 fi
@@ -2107,6 +2176,8 @@ elif ! flock -n 9; then
     echo "error: another apply-release is already running." >&2
     exit 1
 fi
+
+recheck_host_tools_after_lock
 
 if [[ "$consume_appliance_request" == 'true' ]]; then
     activate_appliance='true'

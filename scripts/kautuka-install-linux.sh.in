@@ -1382,15 +1382,41 @@ install_socket_runtime_dirs() {
 install_apply_release_helper() {
     local extracted_root="$1"
     local appliance_image_payload="${2:-false}"
+    local appliance_version="${3:-}"
     mkdir -p /usr/local/lib/kautuka
-    if [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
+    if [[ "$appliance_image_payload" == 'true' ]]; then
+        local generation="/opt/kautuka/manager/versions/$appliance_version"
+        [[ "$appliance_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ && -d "$generation" && ! -L "$generation" &&
+            -f "$generation/kautuka-apply-release" && ! -L "$generation/kautuka-apply-release" &&
+            -f "$generation/kautuka-update-recovery" && ! -L "$generation/kautuka-update-recovery" &&
+            -f "$extracted_root/bin/kautuka-apply-release-dispatch" && ! -L "$extracted_root/bin/kautuka-apply-release-dispatch" ]] \
+            || fail 'signed appliance release lacks the host recovery tools or dispatcher'
+        [[ "$(sed -n '2p' "$generation/kautuka-apply-release")" == '# Kautuka-Apply-Protocol: 6' ]] &&
+            grep -Fxq '# Kautuka-Host-Tools-Generation: 1' "$generation/kautuka-apply-release" &&
+            grep -Fq 'safe-state-recovery-v6' "$generation/kautuka-apply-release" &&
+            grep -Fq 'def prune_appliance_snapshots(' "$generation/kautuka-update-recovery" &&
+            python3 -c 'import pathlib, sys; compile(pathlib.Path(sys.argv[1]).read_bytes(), sys.argv[1], "exec")' "$generation/kautuka-update-recovery" \
+            || fail 'signed appliance host recovery tools are incompatible'
+        local selector_stage
+        selector_stage="$(mktemp -d /usr/local/lib/kautuka/.host-tools-stage.XXXXXXXX)"
+        ln -s -- "$generation" "$selector_stage/current"
+        mv -Tf -- "$selector_stage/current" /usr/local/lib/kautuka/host-tools-current
+        rmdir -- "$selector_stage"
+        sync -f /usr/local/lib/kautuka
+        local dispatch_tmp
+        dispatch_tmp="$(mktemp /usr/local/lib/kautuka/.apply-dispatch.XXXXXXXX)"
+        install -o root -g root -m 0755 "$extracted_root/bin/kautuka-apply-release-dispatch" "$dispatch_tmp"
+        sync -f "$dispatch_tmp"
+        mv -Tf -- "$dispatch_tmp" /usr/local/lib/kautuka/apply-release
+        sync -f /usr/local/lib/kautuka
+    elif [[ -f "$extracted_root/bin/kautuka-apply-release" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-apply-release" /usr/local/lib/kautuka/apply-release
         sed -i 's/\r$//' /usr/local/lib/kautuka/apply-release
     fi
     if [[ -f "$extracted_root/bin/kautuka-update-recovery" ]]; then
         install -m 0755 "$extracted_root/bin/kautuka-update-recovery" /usr/local/lib/kautuka/update-recovery.py
     fi
-    [[ -x /usr/local/lib/kautuka/apply-release && -x /usr/local/lib/kautuka/update-recovery.py ]] \
+    [[ -x /usr/local/lib/kautuka/apply-release && ( "$appliance_image_payload" == 'true' || -x /usr/local/lib/kautuka/update-recovery.py ) ]] \
         || fail 'this signed Linux package lacks safe update recovery support; refusing to install an update-capable appliance'
     cat > /etc/systemd/system/kautuka-update-recovery.service <<'EOF'
 [Unit]
@@ -3327,7 +3353,7 @@ PY
     if [[ "$resuming_first_install" != 'true' ]]; then
         clear_generated_agent_workspace_state "$visible_root"
     fi
-    install_apply_release_helper "$tmp_root/extracted" "$appliance_image_payload"
+    install_apply_release_helper "$tmp_root/extracted" "$appliance_image_payload" "$version"
     if [[ "$appliance_image_payload" == 'true' ]]; then
         install_appliance_update_path
     fi
