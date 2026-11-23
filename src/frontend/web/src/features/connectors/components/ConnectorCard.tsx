@@ -211,9 +211,8 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           </span>
           <StatePill
             active={connector.enabled}
-            disabled={toggling || disabled || !canManage}
+            disabled={toggling || disabled}
             onClick={() => onToggle(connector.id, !connector.enabled)}
-            title={canManage ? undefined : 'Only admins can change system connector settings'}
           >
             {toggling ? (
               <>

@@ -44,12 +44,20 @@ const mail = {
 } as Connector;
 
 describe('ConnectorCard managed sign-in connector', () => {
-  it('shows a busy toggle while enabling a connector and then shows Enabled', () => {
-    const connector = connectorSchema.parse({ id: 'kautuka-web-tools', name: 'Kautuka Web Tools', transport: 'container', enabled: false });
+  it('lets a regular user enable and disable a shared connector without granting deletion', () => {
+    const connector = connectorSchema.parse({
+      id: 'kautuka-web-tools',
+      name: 'Kautuka Web Tools',
+      transport: 'container',
+      scope: 'system',
+      enabled: false,
+    });
     const onToggle = vi.fn();
-    const props = { canManage: true, onToggle, onEdit: vi.fn(), onDelete: vi.fn() };
+    const props = { canManage: false, onToggle, onEdit: vi.fn(), onDelete: vi.fn() };
     const { rerender } = render(<ConnectorCard {...props} connector={connector} toggling={false} />);
 
+    expect(screen.getByTitle('Only admins can delete system connectors')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Disabled' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Disabled' }));
     expect(onToggle).toHaveBeenCalledWith(connector.id, true);
 
@@ -58,7 +66,10 @@ describe('ConnectorCard managed sign-in connector', () => {
     expect(screen.queryByRole('button', { name: 'Disabled' })).not.toBeInTheDocument();
 
     rerender(<ConnectorCard {...props} connector={{ ...connector, enabled: true }} toggling={false} />);
-    expect(screen.getByRole('button', { name: 'Enabled' })).toBeEnabled();
+    const enabled = screen.getByRole('button', { name: 'Enabled' });
+    expect(enabled).toBeEnabled();
+    fireEvent.click(enabled);
+    expect(onToggle).toHaveBeenLastCalledWith(connector.id, false);
   });
 
   it('offers to refresh the saved mail connector and displays its discovered tools', () => {
