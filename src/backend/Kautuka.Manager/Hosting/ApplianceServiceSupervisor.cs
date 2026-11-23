@@ -209,17 +209,17 @@ internal sealed partial class ApplianceServiceSupervisor(
 
     private ApplianceRecoveryMessage ReadRecoveryMessage()
     {
-        const string administrator = "Ask your appliance administrator to review the recovery status.";
+        const string recoveryHelp = "Email hello@devkrity.com for help and include the message above.";
         if (verificationMode || KautukaMaintenanceMode.IsActive)
             return new("Kautuka is completing or recovering an update. Your helpers are paused.");
         if (TrustedApplianceReleaseFiles.ReadRecoveryStatusOrRequireRecovery(
             Path.GetDirectoryName(KautukaMaintenanceMode.MarkerPath)!).RecoveryRequired)
-            return new("Kautuka needs to check its recovery state before your helpers can resume.", NextStep: administrator);
+            return new("Kautuka couldn’t recover from an update. Your helpers are paused.", NextStep: recoveryHelp);
         if (topology?.IsStartupGateOpen != true)
         {
             const string reason = "Your helpers are paused because Kautuka couldn’t verify network protection.";
             if (topology?.RequiresOperatorRecovery == true)
-                return new(reason, NextStep: administrator);
+                return new(reason, NextStep: recoveryHelp);
             if (topology?.IsRecoveryWaitingForNetworkResume == true)
                 return new("Your helpers are paused because network access has been turned off.",
                     NextStep: "Contact Kautuka support for help resuming network access.");

@@ -179,7 +179,7 @@ export function useUsersTab() {
     setEditingUserId(null);
   };
 
-  const inviteUser = async (): Promise<{ code: string | null } | null> => {
+  const inviteUser = async (): Promise<{ code: string | null; email: string } | null> => {
     const email = invite.email.trim();
     const username = invite.username.trim();
     const secret = invite.secret;
@@ -219,7 +219,7 @@ export function useUsersTab() {
         success: true,
         message: code ? 'Invitation created.' : 'User created. They can sign in with their username and password.',
       });
-      return { code };
+      return { code, email };
     } catch (err) {
       setResult({ success: false, message: apiError(err) });
       return null;

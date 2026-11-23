@@ -57,17 +57,18 @@ describe('ConnectorCard managed sign-in connector', () => {
     const { rerender } = render(<ConnectorCard {...props} connector={connector} toggling={false} />);
 
     expect(screen.getByTitle('Only admins can delete system connectors')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Disabled' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Disabled' }));
+    expect(screen.getByRole('button', { name: 'Disabled for me' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Disabled for me' }));
     expect(onToggle).toHaveBeenCalledWith(connector.id, true);
 
     rerender(<ConnectorCard {...props} connector={connector} toggling />);
     expect(screen.getByRole('button', { name: 'Enabling…' })).toBeDisabled();
-    expect(screen.queryByRole('button', { name: 'Disabled' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Disabled for me' })).not.toBeInTheDocument();
 
     rerender(<ConnectorCard {...props} connector={{ ...connector, enabled: true }} toggling={false} />);
-    const enabled = screen.getByRole('button', { name: 'Enabled' });
+    const enabled = screen.getByRole('button', { name: 'Enabled for me' });
     expect(enabled).toBeEnabled();
+    expect(screen.getByText(/open that helper in Workspace/)).toBeVisible();
     fireEvent.click(enabled);
     expect(onToggle).toHaveBeenLastCalledWith(connector.id, false);
   });
@@ -98,7 +99,7 @@ describe('ConnectorCard managed sign-in connector', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'Enabled' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Enabled for me' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Disconnect' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();

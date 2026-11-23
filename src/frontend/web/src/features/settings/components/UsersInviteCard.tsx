@@ -29,10 +29,8 @@ export function UsersInviteCard({
       <CardHeader>
         <CardTitle>Invite someone</CardTitle>
         <CardDescription>
-          The invite expires after seven days and can be redeemed only when the provider email
-          matches this address. Google requires its verified-email claim; Microsoft matches the
-          email claim in its signed ID token. Add a password only if they should also sign in with a
-          username.
+          Enter the email they use to sign in with Google or Microsoft. You’ll get a one-time code
+          to send them. Add a password if they also need to sign in with a username.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

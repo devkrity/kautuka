@@ -61,7 +61,7 @@ export function PendingApprovalCard({
   const defaultScope = request.userId === 'system' ? 'system' : request.agentId ? 'agent' : request.connectorId ? 'connector' : 'user';
   const [allowLan, setAllowLan] = React.useState(false);
   const [includeSubdomains, setIncludeSubdomains] = React.useState(false);
-  const [confirmedAllScope, setConfirmedAllScope] = React.useState(false);
+  const [confirmedAllScope, setConfirmedAllScope] = React.useState<string>();
   const [submitting, setSubmitting] = React.useState(false);
 
   const isProbe = request.purpose === 'probe';
@@ -116,7 +116,7 @@ export function PendingApprovalCard({
   };
 
   const handleAllowAllAgents = async () => {
-    setConfirmedAllScope(true);
+    setConfirmedAllScope(undefined);
     setSubmitting(true);
     try {
       await onDecide({
@@ -126,6 +126,7 @@ export function PendingApprovalCard({
         allowLan: isAdmin && allowLan ? true : undefined,
         expectedRevision,
       });
+      setConfirmedAllScope(includeSubdomains && baseDomain ? `${baseDomain} and its subdomains` : destFormatted);
     } catch {
       // Handled by parent error state
     } finally {
@@ -259,9 +260,9 @@ export function PendingApprovalCard({
                   : `Allow this site for everything ${userLabel} uses`}
               </button>
               {confirmedAllScope && (
-                <p className="text-xs text-muted-foreground mt-1">
+                <p role="status" className="text-xs text-muted-foreground mt-1">
                   {isOwner ? 'All your activity' : `All of ${userLabel}'s activity`} can now reach{' '}
-                  {includeSubdomains && baseDomain ? `${baseDomain} and its subdomains` : destFormatted}.
+                  {confirmedAllScope}.
                 </p>
               )}
             </div>

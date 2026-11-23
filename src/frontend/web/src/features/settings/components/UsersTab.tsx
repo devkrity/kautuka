@@ -69,11 +69,34 @@ export function UsersTab() {
     });
   };
   const [inviteDialogOpen, setInviteDialogOpen] = React.useState(false);
-  const [inviteCode, setInviteCode] = React.useState<string | null>(null);
+  const [issuedInvite, setIssuedInvite] = React.useState<{ code: string; email: string } | null>(null);
+  const [copyStatus, setCopyStatus] = React.useState<string>();
 
   const setInviteDialog = (open: boolean) => {
-    if (!open) setInviteCode(null);
+    if (!open) {
+      setIssuedInvite(null);
+      setCopyStatus(undefined);
+    }
     setInviteDialogOpen(open);
+  };
+
+  const copyInvitation = async () => {
+    if (!issuedInvite) return;
+    const { hostname, origin } = window.location;
+    const localAddress = hostname === 'localhost' || hostname === '[::1]' || hostname.startsWith('127.');
+    const openKautuka = localAddress ? 'Open Kautuka on this computer.' : `Open Kautuka at ${origin}.`;
+    try {
+      await navigator.clipboard.writeText([
+        openKautuka,
+        'Select Sign up to open Join your team.',
+        `Enter this one-time code: ${issuedInvite.code}`,
+        `Then sign in with Google or Microsoft using ${issuedInvite.email}.`,
+        'The invitation expires after seven days.',
+      ].join('\n'));
+      setCopyStatus('Invitation copied. Send it to the person you invited.');
+    } catch {
+      setCopyStatus('Couldn’t copy the invitation. Select the code and copy it manually.');
+    }
   };
 
   const renderUserCard = (user: (typeof pagedUsers)[number], editing: boolean) => (
@@ -151,16 +174,20 @@ export function UsersTab() {
           <DialogDescription className="sr-only">
             Create access for a new Kautuka user.
           </DialogDescription>
-          {inviteCode ? (
+          {issuedInvite ? (
             <div className="space-y-3">
               <label className="block text-sm">
                 <span className="mb-1 block">One-time invitation code</span>
-                <Input readOnly value={inviteCode} onFocus={(event) => event.currentTarget.select()} />
+                <Input readOnly value={issuedInvite.code} onFocus={(event) => event.currentTarget.select()} />
               </label>
               <p className="text-sm text-muted-foreground">
-                Copy this code before closing. The invite expires after seven days.
+                Send this invitation to {issuedInvite.email}. In Kautuka, they select Sign up,
+                enter the code on Join your team, and sign in with Google or Microsoft using that email.
+                The code expires after seven days.
               </p>
-              <div className="flex justify-end">
+              {copyStatus && <p role="status" className="text-sm">{copyStatus}</p>}
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => void copyInvitation()}>Copy invitation</Button>
                 <Button type="button" onClick={() => setInviteDialog(false)}>Done</Button>
               </div>
             </div>
@@ -173,7 +200,7 @@ export function UsersTab() {
                 onInvite={() => {
                   void inviteUser().then((invitation) => {
                     if (invitation?.code) {
-                      setInviteCode(invitation.code);
+                      setIssuedInvite({ code: invitation.code, email: invitation.email });
                       setInviteDialog(true);
                     } else if (invitation) setInviteDialog(false);
                   });

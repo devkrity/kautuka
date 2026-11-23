@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { CompactSetupScreen } from '@/features/onboarding/components/CompactSetupScreen';
 
@@ -22,7 +23,7 @@ const brainPresets = [
 ];
 
 describe('CompactSetupScreen', () => {
-  it('shows agent controls before AI brain presets and supporting notes', () => {
+  it('keeps optional helper settings collapsed while showing the connection settings', async () => {
     render(
       <CompactSetupScreen
         helperName="Desk Assistant"
@@ -75,9 +76,11 @@ describe('CompactSetupScreen', () => {
     expect(screen.getByRole('button', { name: /Ollama \+ Gemma4/i })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open Gemini API key page' })).toBeInTheDocument();
     expect(screen.getByDisplayValue('Desk Assistant')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('Review documents')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Review documents')).not.toBeVisible();
     expect(screen.getByText('You can change the brain later, and one provider can serve more than one agent.')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Paste your provider key')).toBeInTheDocument();
+    await userEvent.click(screen.getByText('Customize helper'));
+    expect(screen.getByDisplayValue('Review documents')).toBeVisible();
   });
 
   it('shows manual brain controls when manual mode is enabled', () => {

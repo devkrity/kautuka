@@ -37,14 +37,14 @@ public sealed class ApplianceRecoveryPageTests
             Assert.Contains($"script-src 'sha256-{hash}'; connect-src 'self'", recovery.Headers.GetValues("Content-Security-Policy").Single(),
                 StringComparison.Ordinal);
 
-            status = status with { RetryUtc = null, NextStep = "Ask your appliance administrator to review the recovery status." };
+            status = status with { RetryUtc = null, NextStep = "Email hello@devkrity.com for help and include the message above." };
             using var navigation = new HttpRequestMessage(HttpMethod.Get, "/workspace/my-helper");
             navigation.Headers.Accept.ParseAdd("text/html");
             navigation.Headers.Host = $"localhost:{port}";
             using HttpResponseMessage manual = await client.SendAsync(navigation, token);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, manual.StatusCode);
             html = await manual.Content.ReadAsStringAsync(token);
-            Assert.Contains("Ask your appliance administrator", html, StringComparison.Ordinal);
+            Assert.Contains("Email hello@devkrity.com", html, StringComparison.Ordinal);
             Assert.DoesNotContain("<p id=\"next\">Kautuka will retry", html, StringComparison.Ordinal);
 
             using var poll = new HttpRequestMessage(HttpMethod.Get, "/health");
@@ -52,7 +52,7 @@ public sealed class ApplianceRecoveryPageTests
             using HttpResponseMessage polled = await client.SendAsync(poll, token);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, polled.StatusCode);
             Assert.Equal("application/json", polled.Content.Headers.ContentType?.MediaType);
-            Assert.Contains("Ask your appliance administrator", await polled.Content.ReadAsStringAsync(token), StringComparison.Ordinal);
+            Assert.Contains("Email hello@devkrity.com", await polled.Content.ReadAsStringAsync(token), StringComparison.Ordinal);
 
             foreach (string endpoint in new[] { "/health", "/alive", "/api/setup" })
             {

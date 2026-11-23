@@ -587,7 +587,7 @@ describe('App update banner', () => {
     ).toBeInTheDocument();
   });
 
-  it('shows preflight failure messaging when activation checks fail and the release remains available', async () => {
+  it('explains a low-space update failure and keeps the installer error in details', async () => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: true,
       message: 'update-status',
@@ -628,7 +628,7 @@ describe('App update banner', () => {
       hostReady: true,
       activeExecCount: 0,
       lastError:
-        "Update preflight checks failed: Provisioned configuration destination '/etc/kautuka/update-source.json' is not writable.",
+        'Update preflight checks failed: insufficient free space for safe update staging.',
     });
 
     renderApp();
@@ -639,9 +639,11 @@ describe('App update banner', () => {
 
     expect(
       screen.getByText(
-        "Update preflight checks failed: Provisioned configuration destination '/etc/kautuka/update-source.json' is not writable. Fix the reported preflight issue and retry the update."
+        'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
       )
     ).toBeInTheDocument();
+    expect(screen.getByText('Update details')).toBeVisible();
+    expect(screen.getByText(/insufficient free space for safe update staging/i)).not.toBeVisible();
     expect(screen.queryByRole('button', { name: 'Apply update' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();
   });

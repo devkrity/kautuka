@@ -605,12 +605,14 @@ describe('Network Access UI & UX Specification Tests (UX1-UX11, CP4-CP5)', () =>
 
       renderComponent(<NetworkAccessPage />);
 
-      const allowBtn = await screen.findByRole('button', { name: /^Allow (?:.+ to access this site|access)$/ });
+      const allowBtn = await screen.findByRole('button', { name: 'Allow this site for everything I use' });
       await user.click(allowBtn);
 
       expect(
         await screen.findByText(/The policy changed while you were editing\. The latest policy has been loaded; review it and try again\./)
       ).toBeVisible();
+      expect(screen.queryByText(/can now reach/)).not.toBeInTheDocument();
+      expect(allowBtn).toBeEnabled();
     });
   });
 

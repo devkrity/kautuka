@@ -1,5 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { vi, beforeEach, describe, expect, it } from 'vitest';
 
 const { settingsAdmin } = vi.hoisted(() => ({
@@ -84,6 +85,7 @@ describe('UsersTab external account editing', () => {
   });
 
   it('keeps the new invitation code in the dialog until the administrator closes it', async () => {
+    const user = userEvent.setup();
     settingsAdmin.inviteUser.mockResolvedValue({ data: { inviteCode: 'example-invite-code' } });
     render(<UsersTab />);
     await screen.findByText('google.user');
@@ -93,6 +95,11 @@ describe('UsersTab external account editing', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Invite' }));
     const code = await within(dialog).findByRole('textbox', { name: 'One-time invitation code' });
     expect(code).toHaveValue('example-invite-code');
+    await user.click(within(dialog).getByRole('button', { name: 'Copy invitation' }));
+    const invitation = await navigator.clipboard.readText();
+    expect(invitation).toContain('Join your team');
+    expect(invitation).toContain('example-invite-code');
+    expect(invitation).toContain('Google or Microsoft using new.user@example.com');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.queryByDisplayValue('example-invite-code')).not.toBeInTheDocument();

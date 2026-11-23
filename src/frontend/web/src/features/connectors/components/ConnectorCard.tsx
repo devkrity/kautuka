@@ -56,7 +56,8 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
   const managed = (oauth.data ?? []).some((status) => matchesConnectorOAuth(connector.id, status));
   const isHttp = connector.transport === 'http';
   const badge = isHttp ? 'HTTP' : 'Container';
-  const scopeBadge = connector.scope === 'system' ? 'System' : 'User';
+  const isShared = connector.scope === 'system';
+  const scopeBadge = isShared ? 'Shared' : 'User';
   const commandSummary = managed
     ? ''
     : isHttp
@@ -141,6 +142,9 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
           {connector.requiresCredentialReentry ? (
             <Badge variant="attention">Key needs to be entered again</Badge>
           ) : null}
+          {isShared && !managed && !connector.requiresCredentialReentry && connector.enabled && (
+            <p className="mt-1 text-sm text-muted-foreground">To use it with a helper, open that helper in Workspace and add it under Tools.</p>
+          )}
           {credBadge}
         </>
       }
@@ -216,11 +220,11 @@ export const ConnectorCard: React.FC<ConnectorCardProps> = ({
               </>
             ) : connector.enabled ? (
               <>
-                <CheckCircle2 className="h-3.5 w-3.5" /> Enabled
+                <CheckCircle2 className="h-3.5 w-3.5" /> {isShared ? 'Enabled for me' : 'Enabled'}
               </>
             ) : (
               <>
-                <Circle className="h-3.5 w-3.5" /> Disabled
+                <Circle className="h-3.5 w-3.5" /> {isShared ? 'Disabled for me' : 'Disabled'}
               </>
             )}
           </StatePill>

@@ -433,7 +433,10 @@ function AppShell() {
     }
 
     if (hasPreflightFailure) {
-      return `${updateStatus.lastError} Fix the reported preflight issue and retry the update.`;
+      const needsSpace = /insufficient (free |disk )?space|no space left on device/i.test(updateStatus.lastError ?? '');
+      return needsSpace
+        ? 'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
+        : 'Your current version is still running. Email hello@devkrity.com for help and include the update details below.';
     }
 
     if (hasUpdateError && updateState === 'available') {
@@ -539,6 +542,12 @@ function AppShell() {
                     <AlertTitle>{updateBannerTitle}</AlertTitle>
                     <AlertDescription>
                       <p>{updateBannerDescription}</p>
+                      {hasPreflightFailure && updateStatus?.lastError && (
+                        <details className="mt-2">
+                          <summary className="cursor-pointer">Update details</summary>
+                          <p className="mt-1 break-words">{updateStatus.lastError}</p>
+                        </details>
+                      )}
                     </AlertDescription>
                   </div>
                 </div>
