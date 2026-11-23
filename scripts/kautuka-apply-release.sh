@@ -905,13 +905,16 @@ release_database_writer_exclusion() {
 # --boot-recover flag or a systemctl/mock result when deciding whether it is
 # safe to replace SQLite files: inspect the actual process table instead.
 assert_database_writers_absent() {
-    python3 - <<'PY'
+    # The dispatcher execs this helper from the Manager release directory.
+    # Exempt its own Bash processes by PID so actual runtime writers still match.
+    python3 - "$$" "$BASHPID" <<'PY'
 import os, sys
 services = ('manager', 'gateway', 'channelhost', 'credentialshost')
 prefix = '/opt/kautuka/'
+updater_pids = set(sys.argv[1:])
 found = []
 for entry in os.scandir('/proc'):
-    if not entry.name.isdigit():
+    if not entry.name.isdigit() or entry.name in updater_pids:
         continue
     pid = entry.name
     try:

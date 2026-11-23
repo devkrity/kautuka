@@ -1948,14 +1948,18 @@ public sealed class UpdateServiceIntegrationTests
     }
 
     [Theory]
-    [InlineData("0.1.0", "release-0.2.0", null, 0, UpdateWorkflowState.Available)]
-    [InlineData("0.1.0", "release-0.3.0", null, 0, UpdateWorkflowState.Applying)]
-    [InlineData("0.3.0", "release-0.2.0", null, 0, UpdateWorkflowState.Applying)]
-    [InlineData("0.1.0", "release-0.2.0", true, -1, UpdateWorkflowState.Applying)]
-    [InlineData("0.1.0", "release-0.2.0", false, 1, UpdateWorkflowState.Applying)]
-    [InlineData("0.1.0", "release-0.2.0", true, 1, UpdateWorkflowState.Available)]
-    public async Task CompletedRecoveryOnlyClearsTheMatchingApplyingOperation(
-        string journalSource, string journalTarget, bool? applianceBootConfirmed, int journalSeconds, UpdateWorkflowState expected)
+    [InlineData("completed", "0.1.0", "release-0.2.0", null, 0, UpdateWorkflowState.Available)]
+    [InlineData("completed", "0.1.0", "release-0.3.0", null, 0, UpdateWorkflowState.Applying)]
+    [InlineData("completed", "0.3.0", "release-0.2.0", null, 0, UpdateWorkflowState.Applying)]
+    [InlineData("completed", "0.1.0", "release-0.2.0", true, -1, UpdateWorkflowState.Applying)]
+    [InlineData("completed", "0.1.0", "release-0.2.0", false, 1, UpdateWorkflowState.Applying)]
+    [InlineData("completed", "0.1.0", "release-0.2.0", true, 1, UpdateWorkflowState.Available)]
+    [InlineData("aborted", "0.1.0", "release-0.2.0", true, 1, UpdateWorkflowState.Available)]
+    [InlineData("aborted", "0.1.0", "release-0.2.0", true, -1, UpdateWorkflowState.Applying)]
+    [InlineData("aborted", "0.1.0", "release-0.3.0", true, 1, UpdateWorkflowState.Applying)]
+    [InlineData("aborted", "0.1.0", "release-0.2.0", false, 1, UpdateWorkflowState.Applying)]
+    public async Task TerminalRecoveryOnlyClearsTheMatchingApplyingOperation(
+        string journalPhase, string journalSource, string journalTarget, bool? applianceBootConfirmed, int journalSeconds, UpdateWorkflowState expected)
     {
         UpdateReleaseReference source = CreateRelease("0.1.0", "preview");
         UpdateReleaseReference target = CreateRelease("0.2.0", "preview");
@@ -1970,7 +1974,7 @@ public sealed class UpdateServiceIntegrationTests
             StateChangedAtUtc = requestedAt,
         });
         var integration = new RecordingUpdateServiceIntegration(CreateTempDirectory(), source.Version,
-            recoveryPhase: "completed", recoverySource: journalSource, recoveryTarget: journalTarget,
+            recoveryPhase: journalPhase, recoverySource: journalSource, recoveryTarget: journalTarget,
             applianceBootConfirmed: applianceBootConfirmed,
             applianceRecoveryUpdated: requestedAt.AddSeconds(journalSeconds).ToUnixTimeMilliseconds());
         var coordinator = CreateCoordinator(store, new InMemoryUpdateRuntimePolicyStore("preview"),
@@ -1978,6 +1982,12 @@ public sealed class UpdateServiceIntegrationTests
 
         UpdateStatusSnapshot status = await coordinator.GetStatusAsync(TestContext.Current.CancellationToken).ConfigureAwait(true);
         Assert.Equal(expected, status.State);
+        if (expected == UpdateWorkflowState.Available && journalPhase == "aborted")
+        {
+            Assert.Equal(source, status.CurrentRelease);
+            Assert.Equal(target, status.AvailableRelease);
+            Assert.Contains("Your current version is still running.", status.LastError, StringComparison.Ordinal);
+        }
     }
 
     [Theory]

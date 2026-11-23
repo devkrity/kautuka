@@ -163,6 +163,8 @@ Manager can start a selected signed release for pre-commit verification when the
 
 If backup pruning fails after activation commits, the update helper reports a failure and leaves the active release and retained recovery point in place. Recovery can retry pruning without restoring older data.
 
+If an update stops before switching releases, Kautuka confirms the original release is healthy and shows **Update stopped** with **Try update again** in the browser. The current version keeps running during the retry preparation.
+
 Manager's authenticated host status reports its selected signed release ID and whether it booted in verification mode. Appliance UpdateService uses that status only when both values match its own release and mode.
 
 Candidate readiness also requires a healthy package proxy with verified egress rules. Manager reconciles the proxy during the fenced boot without starting the workspace supervisor.

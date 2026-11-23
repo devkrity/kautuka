@@ -591,7 +591,21 @@ describe('App update banner', () => {
     ).toBeInTheDocument();
   });
 
-  it('explains a low-space update failure and keeps the installer error in details', async () => {
+  it.each([
+    {
+      title: 'Update needs more space',
+      explanation:
+        'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.',
+      lastError: 'Update preflight checks failed: insufficient free space for safe update staging.',
+    },
+    {
+      title: 'Update stopped',
+      explanation:
+        'The update stopped before switching versions. Your current version is still running. Try the update again.',
+      lastError:
+        'The update stopped before switching versions. Your current version is still running. Try the update again.',
+    },
+  ])('explains $title and offers a direct retry', async ({ title, explanation, lastError }) => {
     fetchUpdateStatusMock.mockResolvedValue({
       ok: false,
       message: 'update-status',
@@ -631,23 +645,20 @@ describe('App update banner', () => {
       managerVersion: '0.1.1-preview.20260529004354',
       hostReady: true,
       activeExecCount: 0,
-      lastError:
-        'Update preflight checks failed: insufficient free space for safe update staging.',
+      lastError,
     });
 
     renderApp();
 
     await waitFor(() => {
-      expect(screen.getByText('Update needs more space')).toBeInTheDocument();
+      expect(screen.getByText(title)).toBeInTheDocument();
     });
 
-    expect(
-      screen.getByText(
-        'Your current version is still running. Free up space on the computer running Kautuka, then try the update again.'
-      )
-    ).toBeInTheDocument();
-    expect(screen.getByText('Update details')).toBeVisible();
-    expect(screen.getByText(/insufficient free space for safe update staging/i)).not.toBeVisible();
+    expect(screen.getByText(explanation)).toBeVisible();
+    if (explanation !== lastError) {
+      expect(screen.getByText('Update details')).toBeVisible();
+      expect(screen.getByText(lastError)).not.toBeVisible();
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Try update again' }));
     await waitFor(() => expect(applyUpdateMock).toHaveBeenCalledOnce());
     expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument();

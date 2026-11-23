@@ -242,6 +242,10 @@ function AppShell() {
   const hasDiskSpaceFailure =
     hasPreflightFailure &&
     /insufficient (free |disk )?space|no space left on device/i.test(updateStatus?.lastError ?? '');
+  const hasAbortedUpdate =
+    updateState === 'available' &&
+    updateStatus?.hostReady === true &&
+    (updateStatus?.lastError?.startsWith('The update stopped before switching versions.') ?? false);
   const hasReleaseCheckFailure = updateStatus?.lastError === 'GitHub release discovery request failed.';
   const updateBannerKey = React.useMemo(() => {
     if (!updateStatus) {
@@ -371,6 +375,9 @@ function AppShell() {
 
     if (hasPreflightFailure) {
       return hasDiskSpaceFailure ? 'Update needs more space' : 'Update requires attention';
+    }
+    if (hasAbortedUpdate) {
+      return 'Update stopped';
     }
 
     if (hasUpdateStatusFailure) {
@@ -567,7 +574,7 @@ function AppShell() {
                       </Link>
                     </Button>
                   ) : null}
-                  {hasDiskSpaceFailure && updateStatus.availableRelease ? (
+                  {(hasDiskSpaceFailure || hasAbortedUpdate) && updateStatus.availableRelease ? (
                     <Button
                       type="button"
                       size="sm"

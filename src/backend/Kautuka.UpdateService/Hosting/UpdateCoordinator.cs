@@ -531,6 +531,7 @@ internal sealed class UpdateCoordinator(
     private static bool IsActivationFailure(string? error)
         => error?.StartsWith("The update apply for release ", StringComparison.Ordinal) == true
             || error?.StartsWith("The update failed. Kautuka restored the previous version", StringComparison.Ordinal) == true
+            || error?.StartsWith("The update stopped before switching versions.", StringComparison.Ordinal) == true
             || error?.StartsWith("Update activation did not complete;", StringComparison.Ordinal) == true
             || error?.StartsWith("Update preflight checks failed:", StringComparison.Ordinal) == true
             || error == snapshotPruneFailure;
@@ -898,17 +899,19 @@ internal sealed class UpdateCoordinator(
             return true;
         }
 
-        // A completed durable recovery journal is stronger evidence than a
+        // A terminal durable recovery journal is stronger evidence than a
         // timeout. Match both ends of this operation before clearing Applying;
         // an unrelated older journal must never finalize a newer operation.
-        bool completedRecovery = !hostContext.RecoveryRequired
-            && string.Equals(hostContext.RecoveryPhase, "completed", StringComparison.Ordinal)
+        bool matchesRecoveryJournal = !hostContext.RecoveryRequired
             && string.Equals(hostContext.RecoverySourceRelease, hostContext.ManagerReleaseId, StringComparison.OrdinalIgnoreCase)
             && string.Equals(hostContext.RecoveryTargetRelease, state.StagedRelease.ReleaseId, StringComparison.OrdinalIgnoreCase)
             && (!hostContext.ApplianceBootConfirmed.HasValue || (state.StateChangedAtUtc is { } requestedAt
                 && hostContext.ApplianceRecoveryUpdatedUnixMilliseconds >= requestedAt.ToUnixTimeMilliseconds()));
+        bool completedRecovery = matchesRecoveryJournal && hostContext.RecoveryPhase == "completed";
+        bool abortedApply = matchesRecoveryJournal && hostContext.ApplianceBootConfirmed == true
+            && state.PendingOperation == "apply" && hostContext.RecoveryPhase == "aborted";
         DateTimeOffset? applyingSinceUtc = state.StateChangedAtUtc;
-        if (!completedRecovery && applyingSinceUtc is not null
+        if (!completedRecovery && !abortedApply && applyingSinceUtc is not null
             && DateTimeOffset.UtcNow - applyingSinceUtc <= GetApplyingRecoveryThreshold())
         {
             recoveredState = state;
@@ -927,9 +930,11 @@ internal sealed class UpdateCoordinator(
 
         bool rollback = string.Equals(state.PendingOperation, "rollback", StringComparison.Ordinal);
         string operation = rollback ? "rollback" : "update apply";
-        string message = completedRecovery && !rollback
-            ? "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release."
-            : $"The {operation} for release {state.StagedRelease.Version} did not complete. The current release is still active, so the operation was reset and can be retried.";
+        string message = abortedApply
+            ? "The update stopped before switching versions. Your current version is still running. Try the update again."
+            : completedRecovery && !rollback
+                ? "The update failed. Kautuka restored the previous version and its databases. You can retry or install a newer release."
+                : $"The {operation} for release {state.StagedRelease.Version} did not complete. The current release is still active, so the operation was reset and can be retried.";
 
         logger.LogWarning(
             "Recovering stuck {Operation} state for target release {ReleaseId} while manager version remains {ManagerVersion}.",
